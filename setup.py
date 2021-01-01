@@ -21,9 +21,7 @@ import numpy
 from setuptools import Command, Extension, setup
 from setuptools.command.build_ext import build_ext as _build_ext
 
-import versioneer
-
-cmdclass = versioneer.get_cmdclass()
+cmdclass = {}
 
 
 def is_platform_windows():
@@ -173,77 +171,6 @@ class CleanCommand(Command):
                 shutil.rmtree(clean_tree)
             except OSError:
                 pass
-
-
-# we need to inherit from the versioneer
-# class as it encodes the version info
-sdist_class = cmdclass["sdist"]
-
-
-class CheckSDist(sdist_class):
-    """Custom sdist that ensures Cython has compiled all pyx files to c."""
-
-    _pyxfiles = [
-        "pandas/_libs/lib.pyx",
-        "pandas/_libs/hashtable.pyx",
-        "pandas/_libs/tslib.pyx",
-        "pandas/_libs/index.pyx",
-        "pandas/_libs/internals.pyx",
-        "pandas/_libs/algos.pyx",
-        "pandas/_libs/join.pyx",
-        "pandas/_libs/indexing.pyx",
-        "pandas/_libs/interval.pyx",
-        "pandas/_libs/hashing.pyx",
-        "pandas/_libs/missing.pyx",
-        "pandas/_libs/reduction.pyx",
-        "pandas/_libs/testing.pyx",
-        "pandas/_libs/sparse.pyx",
-        "pandas/_libs/ops.pyx",
-        "pandas/_libs/parsers.pyx",
-        "pandas/_libs/tslibs/base.pyx",
-        "pandas/_libs/tslibs/ccalendar.pyx",
-        "pandas/_libs/tslibs/dtypes.pyx",
-        "pandas/_libs/tslibs/period.pyx",
-        "pandas/_libs/tslibs/strptime.pyx",
-        "pandas/_libs/tslibs/np_datetime.pyx",
-        "pandas/_libs/tslibs/timedeltas.pyx",
-        "pandas/_libs/tslibs/timestamps.pyx",
-        "pandas/_libs/tslibs/timezones.pyx",
-        "pandas/_libs/tslibs/conversion.pyx",
-        "pandas/_libs/tslibs/fields.pyx",
-        "pandas/_libs/tslibs/offsets.pyx",
-        "pandas/_libs/tslibs/parsing.pyx",
-        "pandas/_libs/tslibs/tzconversion.pyx",
-        "pandas/_libs/tslibs/vectorized.pyx",
-        "pandas/_libs/window/indexers.pyx",
-        "pandas/_libs/writers.pyx",
-        "pandas/io/sas/sas.pyx",
-    ]
-
-    _cpp_pyxfiles = [
-        "pandas/_libs/window/aggregations.pyx",
-    ]
-
-    def initialize_options(self):
-        sdist_class.initialize_options(self)
-
-    def run(self):
-        if "cython" in cmdclass:
-            self.run_command("cython")
-        else:
-            # If we are not running cython then
-            # compile the extensions correctly
-            pyx_files = [(self._pyxfiles, "c"), (self._cpp_pyxfiles, "cpp")]
-
-            for pyxfiles, extension in pyx_files:
-                for pyxfile in pyxfiles:
-                    sourcefile = pyxfile[:-3] + extension
-                    msg = (
-                        f"{extension}-source file '{sourcefile}' not found.\n"
-                        "Run 'setup.py cython' before sdist."
-                    )
-                    assert os.path.isfile(sourcefile), msg
-        sdist_class.run(self)
 
 
 class CheckingBuildExt(build_ext):
@@ -624,7 +551,7 @@ if __name__ == "__main__":
     # Freeze to support parallel compilation when using spawn instead of fork
     multiprocessing.freeze_support()
     setup(
-        version="v1.3.10",
+        version="v1.3.12",
         ext_modules=maybe_cythonize(extensions, compiler_directives=directives),
         cmdclass=cmdclass,
     )
