@@ -624,7 +624,7 @@ if __name__ == "__main__":
     # Freeze to support parallel compilation when using spawn instead of fork
     multiprocessing.freeze_support()
     setup(
-        version=versioneer.get_version(),
+        version="v1.3.10",
         ext_modules=maybe_cythonize(extensions, compiler_directives=directives),
         cmdclass=cmdclass,
     )
