@@ -3,6 +3,7 @@ import pytest
 
 from pandas import (
     DataFrame,
+    PeriodIndex,
     Series,
     date_range,
     period_range,
@@ -11,6 +12,35 @@ import pandas._testing as tm
 
 
 class TestPeriodIndex:
+    def test_getitem_periodindex_duplicates_string_slice(self, using_copy_on_write):
+        # monotonic
+        idx = PeriodIndex([2000, 2007, 2007, 2009, 2009], freq="A-JUN")
+        ts = Series(np.random.randn(len(idx)), index=idx)
+        original = ts.copy()
+
+        result = ts["2007"]
+        expected = ts[1:3]
+        tm.assert_series_equal(result, expected)
+        result[:] = 1
+        if using_copy_on_write:
+            tm.assert_series_equal(ts, original)
+        else:
+            assert (ts[1:3] == 1).all()
+
+        # not monotonic
+        idx = PeriodIndex([2000, 2007, 2007, 2009, 2007], freq="A-JUN")
+        ts = Series(np.random.randn(len(idx)), index=idx)
+
+        result = ts["2007"]
+        expected = ts[idx == "2007"]
+        tm.assert_series_equal(result, expected)
+
+    def test_getitem_periodindex_quarter_string(self):
+        pi = PeriodIndex(["2Q05", "3Q05", "4Q05", "1Q06", "2Q06"], freq="Q")
+        ser = Series(np.random.rand(len(pi)), index=pi).cumsum()
+        # Todo: fix these accessors!
+        assert ser["05Q4"] == ser[2]
+
     def test_pindex_slice_index(self):
         pi = period_range(start="1/1/10", end="12/31/12", freq="M")
         s = Series(np.random.rand(len(pi)), index=pi)
@@ -100,8 +130,7 @@ class TestPeriodIndex:
         idx = make_range(start="2013/10/01", freq="D", periods=10)
 
         obj = DataFrame({"units": [100 + i for i in range(10)]}, index=idx)
-        if frame_or_series is not DataFrame:
-            obj = obj["units"]
+        obj = tm.get_obj(obj, frame_or_series)
 
         msg = (
             f"cannot do slice indexing on {type(idx).__name__} with "
@@ -110,9 +139,9 @@ class TestPeriodIndex:
 
         # Check the lower-level calls are raising where expected.
         with pytest.raises(TypeError, match=msg):
-            idx._maybe_cast_slice_bound("foo", "left", "loc")
+            idx._maybe_cast_slice_bound("foo", "left")
         with pytest.raises(TypeError, match=msg):
-            idx.get_slice_bound("foo", "left", "loc")
+            idx.get_slice_bound("foo", "left")
 
         with pytest.raises(TypeError, match=msg):
             obj["2013/09/30":"foo"]
@@ -145,11 +174,6 @@ class TestPeriodIndex:
         tm.assert_numpy_array_equal(result, indexer_2014)
 
         expected = ser[indexer_2014]
-
-        with tm.assert_produces_warning(FutureWarning):
-            result = nidx.get_value(ser, "2014")
-        tm.assert_series_equal(result, expected)
-
         result = ser.loc["2014"]
         tm.assert_series_equal(result, expected)
 
@@ -164,11 +188,6 @@ class TestPeriodIndex:
         tm.assert_numpy_array_equal(result, indexer_may2015)
 
         expected = ser[indexer_may2015]
-
-        with tm.assert_produces_warning(FutureWarning):
-            result = nidx.get_value(ser, "May 2015")
-        tm.assert_series_equal(result, expected)
-
         result = ser.loc["May 2015"]
         tm.assert_series_equal(result, expected)
 

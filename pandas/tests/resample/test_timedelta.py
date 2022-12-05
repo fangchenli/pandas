@@ -77,7 +77,7 @@ def test_resample_timedelta_idempotency():
     index = timedelta_range("0", periods=9, freq="10L")
     series = Series(range(9), index=index)
     result = series.resample("10L").mean()
-    expected = series
+    expected = series.astype(float)
     tm.assert_series_equal(result, expected)
 
 
@@ -153,18 +153,24 @@ def test_resample_timedelta_edge_case(start, end, freq, resample_freq):
     assert not np.isnan(result[-1])
 
 
-def test_resample_with_timedelta_yields_no_empty_groups():
+@pytest.mark.parametrize("duplicates", [True, False])
+def test_resample_with_timedelta_yields_no_empty_groups(duplicates):
     # GH 10603
     df = DataFrame(
         np.random.normal(size=(10000, 4)),
         index=timedelta_range(start="0s", periods=10000, freq="3906250n"),
     )
+    if duplicates:
+        # case with non-unique columns
+        df.columns = ["A", "B", "A", "C"]
+
     result = df.loc["1s":, :].resample("3s").apply(lambda x: len(x))
 
     expected = DataFrame(
-        [[768.0] * 4] * 12 + [[528.0] * 4],
+        [[768] * 4] * 12 + [[528] * 4],
         index=timedelta_range(start="1s", periods=13, freq="3s"),
     )
+    expected.columns = df.columns
     tm.assert_frame_equal(result, expected)
 
 
@@ -185,3 +191,17 @@ def test_resample_quantile_timedelta():
         index=pd.date_range("20200101", periods=2, tz="UTC", freq="2D"),
     )
     tm.assert_frame_equal(result, expected)
+
+
+def test_resample_closed_right():
+    # GH#45414
+    idx = pd.Index([pd.Timedelta(seconds=120 + i * 30) for i in range(10)])
+    ser = Series(range(10), index=idx)
+    result = ser.resample("T", closed="right", label="right").sum()
+    expected = Series(
+        [0, 3, 7, 11, 15, 9],
+        index=pd.TimedeltaIndex(
+            [pd.Timedelta(seconds=120 + i * 60) for i in range(6)], freq="T"
+        ),
+    )
+    tm.assert_series_equal(result, expected)

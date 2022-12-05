@@ -6,9 +6,9 @@ from pandas import (
     CategoricalDtype,
     CategoricalIndex,
     DataFrame,
-    Index,
     IntervalIndex,
     MultiIndex,
+    RangeIndex,
     Series,
     Timestamp,
 )
@@ -25,7 +25,7 @@ class TestDataFrameSortIndex:
             ),
         )
         assert df.index._is_lexsorted()
-        assert not df.index.is_monotonic
+        assert not df.index.is_monotonic_increasing
 
         # sort it
         expected = DataFrame(
@@ -35,23 +35,24 @@ class TestDataFrameSortIndex:
             ),
         )
         result = df.sort_index()
-        assert result.index.is_monotonic
-
+        assert result.index.is_monotonic_increasing
         tm.assert_frame_equal(result, expected)
 
         # reconstruct
         result = df.sort_index().copy()
         result.index = result.index._sort_levels_monotonic()
-        assert result.index.is_monotonic
-
+        assert result.index.is_monotonic_increasing
         tm.assert_frame_equal(result, expected)
 
+    # FIXME: the FutureWarning is issued on a setitem-with-expansion
+    #  which will *not* change behavior, so should not get a warning.
+    @pytest.mark.filterwarnings("ignore:.*will attempt to set.*:FutureWarning")
     def test_sort_index_non_existent_label_multiindex(self):
         # GH#12261
         df = DataFrame(0, columns=[], index=MultiIndex.from_product([[], []]))
         df.loc["b", "2"] = 1
         df.loc["a", "3"] = 1
-        result = df.sort_index().index.is_monotonic
+        result = df.sort_index().index.is_monotonic_increasing
         assert result is True
 
     def test_sort_index_reorder_on_ops(self):
@@ -223,13 +224,15 @@ class TestDataFrameSortIndex:
 
         # axis=0
         unordered = frame.loc[[3, 2, 4, 1]]
-        a_id = id(unordered["A"])
+        a_values = unordered["A"]
         df = unordered.copy()
         return_value = df.sort_index(inplace=True)
         assert return_value is None
         expected = frame
         tm.assert_frame_equal(df, expected)
-        assert a_id != id(df["A"])
+        # GH 44153 related
+        # Used to be a_id != id(df["A"]), but flaky in the CI
+        assert a_values is not df["A"]
 
         df = unordered.copy()
         return_value = df.sort_index(ascending=False, inplace=True)
@@ -419,6 +422,24 @@ class TestDataFrameSortIndex:
         tm.assert_frame_equal(df, DataFrame(original_dict, index=original_index))
 
     @pytest.mark.parametrize("inplace", [True, False])
+    @pytest.mark.parametrize("ignore_index", [True, False])
+    def test_respect_ignore_index(self, inplace, ignore_index):
+        # GH 43591
+        df = DataFrame({"a": [1, 2, 3]}, index=RangeIndex(4, -1, -2))
+        result = df.sort_index(
+            ascending=False, ignore_index=ignore_index, inplace=inplace
+        )
+
+        if inplace:
+            result = df
+        if ignore_index:
+            expected = DataFrame({"a": [1, 2, 3]})
+        else:
+            expected = DataFrame({"a": [1, 2, 3]}, index=RangeIndex(4, -1, -2))
+
+        tm.assert_frame_equal(result, expected)
+
+    @pytest.mark.parametrize("inplace", [True, False])
     @pytest.mark.parametrize(
         "original_dict, sorted_dict, ascending, ignore_index, output_index",
         [
@@ -441,14 +462,14 @@ class TestDataFrameSortIndex:
                 {"M1": [1, 2], "M2": [3, 4]},
                 True,
                 False,
-                MultiIndex.from_tuples([[2, 1], [3, 4]], names=list("AB")),
+                MultiIndex.from_tuples([(2, 1), (3, 4)], names=list("AB")),
             ),
             (
                 {"M1": [1, 2], "M2": [3, 4]},
                 {"M1": [2, 1], "M2": [4, 3]},
                 False,
                 False,
-                MultiIndex.from_tuples([[3, 4], [2, 1]], names=list("AB")),
+                MultiIndex.from_tuples([(3, 4), (2, 1)], names=list("AB")),
             ),
         ],
     )
@@ -456,7 +477,7 @@ class TestDataFrameSortIndex:
         self, inplace, original_dict, sorted_dict, ascending, ignore_index, output_index
     ):
         # GH 30114, this is to test ignore_index on MulitIndex of index
-        mi = MultiIndex.from_tuples([[2, 1], [3, 4]], names=list("AB"))
+        mi = MultiIndex.from_tuples([(2, 1), (3, 4)], names=list("AB"))
         df = DataFrame(original_dict, index=mi)
         expected_df = DataFrame(sorted_dict, index=output_index)
 
@@ -529,7 +550,7 @@ class TestDataFrameSortIndex:
             index=MultiIndex.from_product([[0.5, 0.8], list("ab")]),
         )
         result = result.sort_index()
-        assert result.index.is_monotonic
+        assert result.index.is_monotonic_increasing
 
         tm.assert_frame_equal(result, expected)
 
@@ -547,7 +568,7 @@ class TestDataFrameSortIndex:
         concatted = pd.concat([df, df], keys=[0.8, 0.5])
         result = concatted.sort_index()
 
-        assert result.index.is_monotonic
+        assert result.index.is_monotonic_increasing
 
         tm.assert_frame_equal(result, expected)
 
@@ -563,24 +584,15 @@ class TestDataFrameSortIndex:
         df.columns = df.columns.set_levels(
             pd.to_datetime(df.columns.levels[1]), level=1
         )
-        assert not df.columns.is_monotonic
+        assert not df.columns.is_monotonic_increasing
         result = df.sort_index(axis=1)
-        assert result.columns.is_monotonic
+        assert result.columns.is_monotonic_increasing
         result = df.sort_index(axis=1, level=1)
-        assert result.columns.is_monotonic
+        assert result.columns.is_monotonic_increasing
 
     # TODO: better name, de-duplicate with test_sort_index_level above
-    def test_sort_index_level2(self):
-        mi = MultiIndex(
-            levels=[["foo", "bar", "baz", "qux"], ["one", "two", "three"]],
-            codes=[[0, 0, 0, 1, 1, 2, 2, 3, 3, 3], [0, 1, 2, 0, 1, 1, 2, 0, 1, 2]],
-            names=["first", "second"],
-        )
-        frame = DataFrame(
-            np.random.randn(10, 3),
-            index=mi,
-            columns=Index(["A", "B", "C"], name="exp"),
-        )
+    def test_sort_index_level2(self, multiindex_dataframe_random_data):
+        frame = multiindex_dataframe_random_data
 
         df = frame.copy()
         df.index = np.arange(len(df))
@@ -603,7 +615,7 @@ class TestDataFrameSortIndex:
 
         # GH#2684 (int64)
         index = MultiIndex.from_arrays([np.arange(4000)] * 3)
-        df = DataFrame(np.random.randn(4000), index=index, dtype=np.int64)
+        df = DataFrame(np.random.randn(4000).astype("int64"), index=index)
 
         # it works!
         result = df.sort_index(level=0)
@@ -611,41 +623,23 @@ class TestDataFrameSortIndex:
 
         # GH#2684 (int32)
         index = MultiIndex.from_arrays([np.arange(4000)] * 3)
-        df = DataFrame(np.random.randn(4000), index=index, dtype=np.int32)
+        df = DataFrame(np.random.randn(4000).astype("int32"), index=index)
 
         # it works!
         result = df.sort_index(level=0)
         assert (result.dtypes.values == df.dtypes.values).all()
         assert result.index._lexsort_depth == 3
 
-    def test_sort_index_level_by_name(self):
-        mi = MultiIndex(
-            levels=[["foo", "bar", "baz", "qux"], ["one", "two", "three"]],
-            codes=[[0, 0, 0, 1, 1, 2, 2, 3, 3, 3], [0, 1, 2, 0, 1, 1, 2, 0, 1, 2]],
-            names=["first", "second"],
-        )
-        frame = DataFrame(
-            np.random.randn(10, 3),
-            index=mi,
-            columns=Index(["A", "B", "C"], name="exp"),
-        )
+    def test_sort_index_level_by_name(self, multiindex_dataframe_random_data):
+        frame = multiindex_dataframe_random_data
 
         frame.index.names = ["first", "second"]
         result = frame.sort_index(level="second")
         expected = frame.sort_index(level=1)
         tm.assert_frame_equal(result, expected)
 
-    def test_sort_index_level_mixed(self):
-        mi = MultiIndex(
-            levels=[["foo", "bar", "baz", "qux"], ["one", "two", "three"]],
-            codes=[[0, 0, 0, 1, 1, 2, 2, 3, 3, 3], [0, 1, 2, 0, 1, 1, 2, 0, 1, 2]],
-            names=["first", "second"],
-        )
-        frame = DataFrame(
-            np.random.randn(10, 3),
-            index=mi,
-            columns=Index(["A", "B", "C"], name="exp"),
-        )
+    def test_sort_index_level_mixed(self, multiindex_dataframe_random_data):
+        frame = multiindex_dataframe_random_data
 
         sorted_before = frame.sort_index(level=1)
 
@@ -774,6 +768,58 @@ class TestDataFrameSortIndex:
         match = 'For argument "ascending" expected type bool'
         with pytest.raises(ValueError, match=match):
             df.sort_index(axis=0, ascending=ascending, na_position="first")
+
+    def test_sort_index_use_inf_as_na(self):
+        # GH 29687
+        expected = DataFrame(
+            {"col1": [1, 2, 3], "col2": [3, 4, 5]},
+            index=pd.date_range("2020", periods=3),
+        )
+        with pd.option_context("mode.use_inf_as_na", True):
+            result = expected.sort_index()
+        tm.assert_frame_equal(result, expected)
+
+    @pytest.mark.parametrize(
+        "ascending",
+        [(True, False), [True, False]],
+    )
+    def test_sort_index_ascending_tuple(self, ascending):
+        df = DataFrame(
+            {
+                "legs": [4, 2, 4, 2, 2],
+            },
+            index=MultiIndex.from_tuples(
+                [
+                    ("mammal", "dog"),
+                    ("bird", "duck"),
+                    ("mammal", "horse"),
+                    ("bird", "penguin"),
+                    ("mammal", "kangaroo"),
+                ],
+                names=["class", "animal"],
+            ),
+        )
+
+        # parameter `ascending`` is a tuple
+        result = df.sort_index(level=(0, 1), ascending=ascending)
+
+        expected = DataFrame(
+            {
+                "legs": [2, 2, 2, 4, 4],
+            },
+            index=MultiIndex.from_tuples(
+                [
+                    ("bird", "penguin"),
+                    ("bird", "duck"),
+                    ("mammal", "kangaroo"),
+                    ("mammal", "horse"),
+                    ("mammal", "dog"),
+                ],
+                names=["class", "animal"],
+            ),
+        )
+
+        tm.assert_frame_equal(result, expected)
 
 
 class TestDataFrameSortIndexKey:

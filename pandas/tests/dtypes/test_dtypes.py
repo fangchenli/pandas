@@ -4,10 +4,11 @@ import numpy as np
 import pytest
 import pytz
 
-from pandas.core.dtypes.base import registry
+from pandas._libs.tslibs.dtypes import NpyDatetimeUnit
+
+from pandas.core.dtypes.base import _registry as registry
 from pandas.core.dtypes.common import (
     is_bool_dtype,
-    is_categorical,
     is_categorical_dtype,
     is_datetime64_any_dtype,
     is_datetime64_dtype,
@@ -66,7 +67,7 @@ class Base:
 
         # clear the cache
         type(dtype).reset_cache()
-        assert not len(dtype._cache)
+        assert not len(dtype._cache_dtypes)
 
         # force back to the cache
         result = tm.round_trip_pickle(dtype)
@@ -74,7 +75,7 @@ class Base:
             # Because PeriodDtype has a cython class as a base class,
             #  it has different pickle semantics, and its cache is re-populated
             #  on un-pickling.
-            assert not len(dtype._cache)
+            assert not len(dtype._cache_dtypes)
         assert result == dtype
 
 
@@ -177,13 +178,6 @@ class TestCategoricalDtype(Base):
         assert is_categorical_dtype(s)
         assert not is_categorical_dtype(np.dtype("float64"))
 
-        with tm.assert_produces_warning(FutureWarning):
-            # GH#33385 deprecated
-            assert is_categorical(s.dtype)
-            assert is_categorical(s)
-            assert not is_categorical(np.dtype("float64"))
-            assert not is_categorical(1.0)
-
     def test_tuple_categories(self):
         categories = [(1, "a"), (2, "b"), (3, "c")]
         result = CategoricalDtype(categories)
@@ -263,10 +257,17 @@ class TestDatetimeTZDtype(Base):
         assert dtype2 != dtype4
         assert hash(dtype2) != hash(dtype4)
 
-    def test_construction(self):
-        msg = "DatetimeTZDtype only supports ns units"
+    def test_construction_non_nanosecond(self):
+        res = DatetimeTZDtype("ms", "US/Eastern")
+        assert res.unit == "ms"
+        assert res._creso == NpyDatetimeUnit.NPY_FR_ms.value
+        assert res.str == "|M8[ms]"
+        assert str(res) == "datetime64[ms, US/Eastern]"
+
+    def test_day_not_supported(self):
+        msg = "DatetimeTZDtype only supports s, ms, us, ns units"
         with pytest.raises(ValueError, match=msg):
-            DatetimeTZDtype("ms", "US/Eastern")
+            DatetimeTZDtype("D", "US/Eastern")
 
     def test_subclass(self):
         a = DatetimeTZDtype.construct_from_string("datetime64[ns, US/Eastern]")
@@ -791,14 +792,14 @@ class TestIntervalDtype(Base):
     def test_caching(self):
         IntervalDtype.reset_cache()
         dtype = IntervalDtype("int64", "right")
-        assert len(IntervalDtype._cache) == 1
+        assert len(IntervalDtype._cache_dtypes) == 1
 
         IntervalDtype("interval")
-        assert len(IntervalDtype._cache) == 2
+        assert len(IntervalDtype._cache_dtypes) == 2
 
         IntervalDtype.reset_cache()
         tm.round_trip_pickle(dtype)
-        assert len(IntervalDtype._cache) == 0
+        assert len(IntervalDtype._cache_dtypes) == 0
 
     def test_not_string(self):
         # GH30568: though IntervalDtype has object kind, it cannot be string
@@ -848,7 +849,7 @@ class TestCategoricalDtypeParametrized:
         tm.assert_index_equal(result.categories, pd.Index(["a", "b", "c"]))
         assert result.ordered is False
 
-    def test_equal_but_different(self, ordered):
+    def test_equal_but_different(self):
         c1 = CategoricalDtype([1, 2, 3])
         c2 = CategoricalDtype([1.0, 2.0, 3.0])
         assert c1 is not c2
@@ -1095,3 +1096,27 @@ def test_period_dtype_compare_to_string():
     dtype = PeriodDtype(freq="M")
     assert (dtype == "period[M]") is True
     assert (dtype != "period[M]") is False
+
+
+def test_compare_complex_dtypes():
+    # GH 28050
+    df = pd.DataFrame(np.arange(5).astype(np.complex128))
+    msg = "'<' not supported between instances of 'complex' and 'complex'"
+
+    with pytest.raises(TypeError, match=msg):
+        df < df.astype(object)
+
+    with pytest.raises(TypeError, match=msg):
+        df.lt(df.astype(object))
+
+
+def test_multi_column_dtype_assignment():
+    # GH #27583
+    df = pd.DataFrame({"a": [0.0], "b": 0.0})
+    expected = pd.DataFrame({"a": [0], "b": 0})
+
+    df[["a", "b"]] = 0
+    tm.assert_frame_equal(df, expected)
+
+    df["b"] = 0
+    tm.assert_frame_equal(df, expected)

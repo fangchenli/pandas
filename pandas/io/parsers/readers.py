@@ -1,35 +1,48 @@
 """
 Module contains tools for processing files into DataFrames or other objects
+
+GH#48849 provides a convenient way of deprecating keyword arguments
 """
+from __future__ import annotations
+
 from collections import abc
 import csv
 import sys
 from textwrap import fill
+from types import TracebackType
 from typing import (
+    IO,
     Any,
-    Dict,
-    List,
-    Optional,
-    Set,
-    Type,
+    Callable,
+    Hashable,
+    Literal,
+    NamedTuple,
+    Sequence,
+    overload,
 )
 import warnings
 
 import numpy as np
 
-import pandas._libs.lib as lib
+from pandas._config import get_option
+
+from pandas._libs import lib
 from pandas._libs.parsers import STR_NA_VALUES
 from pandas._typing import (
+    CompressionOptions,
+    CSVEngine,
     DtypeArg,
-    FilePathOrBuffer,
+    FilePath,
+    IndexLabel,
+    ReadCsvBuffer,
     StorageOptions,
-    Union,
 )
 from pandas.errors import (
     AbstractMethodError,
     ParserWarning,
 )
 from pandas.util._decorators import Appender
+from pandas.util._exceptions import find_stack_level
 
 from pandas.core.dtypes.common import (
     is_file_like,
@@ -38,11 +51,17 @@ from pandas.core.dtypes.common import (
     is_list_like,
 )
 
-from pandas.core import generic
 from pandas.core.frame import DataFrame
 from pandas.core.indexes.api import RangeIndex
+from pandas.core.shared_docs import _shared_docs
 
-from pandas.io.common import validate_header_arg
+from pandas.io.common import (
+    IOHandles,
+    get_handle,
+    stringify_path,
+    validate_header_arg,
+)
+from pandas.io.parsers.arrow_parser_wrapper import ArrowParserWrapper
 from pandas.io.parsers.base_parser import (
     ParserBase,
     is_index_col,
@@ -85,7 +104,7 @@ sep : str, default {_default_sep}
     delimiters are prone to ignoring quoted data. Regex example: ``'\r\t'``.
 delimiter : str, default ``None``
     Alias for sep.
-header : int, list of int, default 'infer'
+header : int, list of int, None, default 'infer'
     Row number(s) to use as the column names, and the start of the
     data.  Default behavior is to infer the column names: if no names
     are passed the behavior is identical to ``header=0`` and column
@@ -103,7 +122,7 @@ names : array-like, optional
     List of column names to use. If the file contains a header row,
     then you should explicitly pass ``header=0`` to override the column names.
     Duplicates in this list are not allowed.
-index_col : int, str, sequence of int / str, or False, default ``None``
+index_col : int, str, sequence of int / str, or False, optional, default ``None``
   Column(s) to use as the row labels of the ``DataFrame``, either given as
   string name or column index. If a sequence of int / str is given, a
   MultiIndex is used.
@@ -115,7 +134,8 @@ usecols : list-like or callable, optional
     Return a subset of the columns. If list-like, all elements must either
     be positional (i.e. integer indices into the document columns) or strings
     that correspond to column names provided either by the user in `names` or
-    inferred from the document header row(s). For example, a valid list-like
+    inferred from the document header row(s). If ``names`` are given, the document
+    header row(s) are not taken into account. For example, a valid list-like
     `usecols` parameter would be ``[0, 1, 2]`` or ``['foo', 'bar', 'baz']``.
     Element order is ignored, so ``usecols=[0, 1]`` is the same as ``[1, 0]``.
     To instantiate a DataFrame from ``data`` with element order preserved use
@@ -129,14 +149,6 @@ usecols : list-like or callable, optional
     example of a valid callable argument would be ``lambda x: x.upper() in
     ['AAA', 'BBB', 'DDD']``. Using this parameter results in much faster
     parsing time and lower memory usage.
-squeeze : bool, default False
-    If the parsed data only contains one column then return a Series.
-prefix : str, optional
-    Prefix to add to column numbers when no header, e.g. 'X' for X0, X1, ...
-mangle_dupe_cols : bool, default True
-    Duplicate columns will be specified as 'X', 'X.1', ...'X.N', rather than
-    'X'...'X'. Passing in False will cause data to be overwritten if there
-    are duplicate names in the columns.
 dtype : Type name or dict of column -> type, optional
     Data type for data or columns. E.g. {{'a': np.float64, 'b': np.int32,
     'c': 'Int64'}}
@@ -144,16 +156,28 @@ dtype : Type name or dict of column -> type, optional
     to preserve and not interpret dtype.
     If converters are specified, they will be applied INSTEAD
     of dtype conversion.
-engine : {{'c', 'python'}}, optional
-    Parser engine to use. The C engine is faster while the python engine is
-    currently more feature-complete.
+
+    .. versionadded:: 1.5.0
+
+        Support for defaultdict was added. Specify a defaultdict as input where
+        the default determines the dtype of the columns which are not explicitly
+        listed.
+engine : {{'c', 'python', 'pyarrow'}}, optional
+    Parser engine to use. The C and pyarrow engines are faster, while the python engine
+    is currently more feature-complete. Multithreading is currently only supported by
+    the pyarrow engine.
+
+    .. versionadded:: 1.4.0
+
+        The "pyarrow" engine was added as an *experimental* engine, and some features
+        are unsupported, or may not work correctly, with this engine.
 converters : dict, optional
     Dict of functions for converting values in certain columns. Keys can either
     be integers or column labels.
 true_values : list, optional
-    Values to consider as True.
+    Values to consider as True in addition to case-insensitive variants of "True".
 false_values : list, optional
-    Values to consider as False.
+    Values to consider as False in addition to case-insensitive variants of "False".
 skipinitialspace : bool, default False
     Skip spaces after delimiter.
 skiprows : list-like, int or callable, optional
@@ -243,7 +267,6 @@ cache_dates : bool, default True
     conversion. May produce significant speed-up when parsing duplicate
     date strings, especially ones with timezone offsets.
 
-    .. versionadded:: 0.25.0
 iterator : bool, default False
     Return TextFileReader object for iteration or getting chunks with
     ``get_chunk()``.
@@ -260,12 +283,10 @@ chunksize : int, optional
     .. versionchanged:: 1.2
 
        ``TextFileReader`` is a context manager.
-compression : {{'infer', 'gzip', 'bz2', 'zip', 'xz', None}}, default 'infer'
-    For on-the-fly decompression of on-disk data. If 'infer' and
-    `filepath_or_buffer` is path-like, then detect compression from the
-    following extensions: '.gz', '.bz2', '.zip', or '.xz' (otherwise no
-    decompression). If using 'zip', the ZIP file must contain only one data
-    file to be read in. Set to None for no decompression.
+{decompression_options}
+
+    .. versionchanged:: 1.4.0 Zstandard support.
+
 thousands : str, optional
     Thousands separator.
 decimal : str, default '.'
@@ -296,25 +317,50 @@ encoding : str, optional
     Encoding to use for UTF when reading/writing (ex. 'utf-8'). `List of Python
     standard encodings
     <https://docs.python.org/3/library/codecs.html#standard-encodings>`_ .
+
     .. versionchanged:: 1.2
 
        When ``encoding`` is ``None``, ``errors="replace"`` is passed to
        ``open()``. Otherwise, ``errors="strict"`` is passed to ``open()``.
        This behavior was previously only the case for ``engine="python"``.
+
+    .. versionchanged:: 1.3.0
+
+       ``encoding_errors`` is a new argument. ``encoding`` has no longer an
+       influence on how encoding errors are handled.
+
+encoding_errors : str, optional, default "strict"
+    How encoding errors are treated. `List of possible values
+    <https://docs.python.org/3/library/codecs.html#error-handlers>`_ .
+
+    .. versionadded:: 1.3.0
+
 dialect : str or csv.Dialect, optional
     If provided, this parameter will override values (default or not) for the
     following parameters: `delimiter`, `doublequote`, `escapechar`,
     `skipinitialspace`, `quotechar`, and `quoting`. If it is necessary to
     override values, a ParserWarning will be issued. See csv.Dialect
     documentation for more details.
-error_bad_lines : bool, default True
-    Lines with too many fields (e.g. a csv line with too many commas) will by
-    default cause an exception to be raised, and no DataFrame will be returned.
-    If False, then these "bad lines" will be dropped from the DataFrame that is
-    returned.
-warn_bad_lines : bool, default True
-    If error_bad_lines is False, and warn_bad_lines is True, a warning for each
-    "bad line" will be output.
+on_bad_lines : {{'error', 'warn', 'skip'}} or callable, default 'error'
+    Specifies what to do upon encountering a bad line (a line with too many fields).
+    Allowed values are :
+
+        - 'error', raise an Exception when a bad line is encountered.
+        - 'warn', raise a warning when a bad line is encountered and skip that line.
+        - 'skip', skip bad lines without raising or warning when they are encountered.
+
+    .. versionadded:: 1.3.0
+
+    .. versionadded:: 1.4.0
+
+        - callable, function with signature
+          ``(bad_line: list[str]) -> list[str] | None`` that will process a single
+          bad line. ``bad_line`` is a list of strings split by the ``sep``.
+          If the function returns ``None``, the bad line will be ignored.
+          If the function returns a new list of strings with more elements than
+          expected, a ``ParserWarning`` will be emitted while dropping extra elements.
+          Only supported when ``engine="python"``
+
 delim_whitespace : bool, default False
     Specifies whether or not whitespace (e.g. ``' '`` or ``'\t'``) will be
     used as the sep. Equivalent to setting ``sep='\\s+'``. If this option
@@ -343,9 +389,21 @@ float_precision : str, optional
 
     .. versionadded:: 1.2
 
+use_nullable_dtypes : bool = False
+    Whether or not to use nullable dtypes as default when reading data. If
+    set to True, nullable dtypes are used for all dtypes that have a nullable
+    implementation, even if no nulls are present.
+
+    The nullable dtype implementation can be configured by setting the global
+    ``io.nullable_backend`` configuration option to ``"pandas"`` to use
+    numpy-backed nullable dtypes or ``"pyarrow"`` to use pyarrow-backed
+    nullable dtypes (using ``pd.ArrowDtype``).
+
+    .. versionadded:: 2.0
+
 Returns
 -------
-DataFrame or TextParser
+DataFrame or TextFileReader
     A comma-separated values (csv) file is returned as two-dimensional
     data structure with labeled axes.
 
@@ -367,8 +425,6 @@ _c_parser_defaults = {
     "na_filter": True,
     "low_memory": True,
     "memory_map": False,
-    "error_bad_lines": True,
-    "warn_bad_lines": True,
     "float_precision": None,
 }
 
@@ -376,12 +432,51 @@ _fwf_defaults = {"colspecs": "infer", "infer_nrows": 100, "widths": None}
 
 _c_unsupported = {"skipfooter"}
 _python_unsupported = {"low_memory", "float_precision"}
+_pyarrow_unsupported = {
+    "skipfooter",
+    "float_precision",
+    "chunksize",
+    "comment",
+    "nrows",
+    "thousands",
+    "memory_map",
+    "dialect",
+    "on_bad_lines",
+    "delim_whitespace",
+    "quoting",
+    "lineterminator",
+    "converters",
+    "decimal",
+    "iterator",
+    "dayfirst",
+    "infer_datetime_format",
+    "verbose",
+    "skipinitialspace",
+    "low_memory",
+}
 
-_deprecated_defaults: Dict[str, Any] = {}
-_deprecated_args: Set[str] = set()
+
+class _DeprecationConfig(NamedTuple):
+    default_value: Any
+    msg: str | None
 
 
-def validate_integer(name, val, min_val=0):
+@overload
+def validate_integer(name, val: None, min_val: int = ...) -> None:
+    ...
+
+
+@overload
+def validate_integer(name, val: float, min_val: int = ...) -> int:
+    ...
+
+
+@overload
+def validate_integer(name, val: int | None, min_val: int = ...) -> int | None:
+    ...
+
+
+def validate_integer(name, val: int | float | None, min_val: int = 0) -> int | None:
     """
     Checks whether the 'name' parameter for parsing is either
     an integer OR float that can SAFELY be cast to an integer
@@ -390,27 +485,28 @@ def validate_integer(name, val, min_val=0):
 
     Parameters
     ----------
-    name : string
+    name : str
         Parameter name (used for error reporting)
     val : int or float
         The value to check
     min_val : int
         Minimum allowed value (val < min_val will result in a ValueError)
     """
+    if val is None:
+        return val
+
     msg = f"'{name:s}' must be an integer >={min_val:d}"
-
-    if val is not None:
-        if is_float(val):
-            if int(val) != val:
-                raise ValueError(msg)
-            val = int(val)
-        elif not (is_integer(val) and val >= min_val):
+    if is_float(val):
+        if int(val) != val:
             raise ValueError(msg)
+        val = int(val)
+    elif not (is_integer(val) and val >= min_val):
+        raise ValueError(msg)
 
-    return val
+    return int(val)
 
 
-def _validate_names(names):
+def _validate_names(names: Sequence[Hashable] | None) -> None:
     """
     Raise ValueError if the `names` parameter contains duplicates or has an
     invalid data type.
@@ -434,15 +530,42 @@ def _validate_names(names):
             raise ValueError("Names should be an ordered collection.")
 
 
-def _read(filepath_or_buffer: FilePathOrBuffer, kwds):
+def _read(
+    filepath_or_buffer: FilePath | ReadCsvBuffer[bytes] | ReadCsvBuffer[str], kwds
+) -> DataFrame | TextFileReader:
     """Generic reader of line files."""
-    if kwds.get("date_parser", None) is not None:
-        if isinstance(kwds["parse_dates"], bool):
+    # if we pass a date_parser and parse_dates=False, we should not parse the
+    # dates GH#44366
+    if kwds.get("parse_dates", None) is None:
+        if kwds.get("date_parser", None) is None:
+            kwds["parse_dates"] = False
+        else:
             kwds["parse_dates"] = True
 
     # Extract some of the arguments (pass chunksize on).
     iterator = kwds.get("iterator", False)
-    chunksize = validate_integer("chunksize", kwds.get("chunksize", None), 1)
+    chunksize = kwds.get("chunksize", None)
+    if kwds.get("engine") == "pyarrow":
+        if iterator:
+            raise ValueError(
+                "The 'iterator' option is not supported with the 'pyarrow' engine"
+            )
+
+        if chunksize is not None:
+            raise ValueError(
+                "The 'chunksize' option is not supported with the 'pyarrow' engine"
+            )
+    elif (
+        kwds.get("use_nullable_dtypes", False)
+        and get_option("io.nullable_backend") == "pyarrow"
+    ):
+        raise NotImplementedError(
+            f"use_nullable_dtypes=True and engine={kwds['engine']} with "
+            "io.nullable_backend set to 'pyarrow' is not implemented."
+        )
+    else:
+        chunksize = validate_integer("chunksize", chunksize, 1)
+
     nrows = kwds.get("nrows", None)
 
     # Check for duplicates in names.
@@ -458,84 +581,541 @@ def _read(filepath_or_buffer: FilePathOrBuffer, kwds):
         return parser.read(nrows)
 
 
+# iterator=True -> TextFileReader
+@overload
+def read_csv(
+    filepath_or_buffer: FilePath | ReadCsvBuffer[bytes] | ReadCsvBuffer[str],
+    *,
+    sep: str | None | lib.NoDefault = ...,
+    delimiter: str | None | lib.NoDefault = ...,
+    header: int | Sequence[int] | None | Literal["infer"] = ...,
+    names: Sequence[Hashable] | None | lib.NoDefault = ...,
+    index_col: IndexLabel | Literal[False] | None = ...,
+    usecols=...,
+    dtype: DtypeArg | None = ...,
+    engine: CSVEngine | None = ...,
+    converters=...,
+    true_values=...,
+    false_values=...,
+    skipinitialspace: bool = ...,
+    skiprows=...,
+    skipfooter: int = ...,
+    nrows: int | None = ...,
+    na_values=...,
+    keep_default_na: bool = ...,
+    na_filter: bool = ...,
+    verbose: bool = ...,
+    skip_blank_lines: bool = ...,
+    parse_dates: bool | Sequence[Hashable] | None = ...,
+    infer_datetime_format: bool = ...,
+    keep_date_col: bool = ...,
+    date_parser=...,
+    dayfirst: bool = ...,
+    cache_dates: bool = ...,
+    iterator: Literal[True],
+    chunksize: int | None = ...,
+    compression: CompressionOptions = ...,
+    thousands: str | None = ...,
+    decimal: str = ...,
+    lineterminator: str | None = ...,
+    quotechar: str = ...,
+    quoting: int = ...,
+    doublequote: bool = ...,
+    escapechar: str | None = ...,
+    comment: str | None = ...,
+    encoding: str | None = ...,
+    encoding_errors: str | None = ...,
+    dialect: str | csv.Dialect | None = ...,
+    on_bad_lines=...,
+    delim_whitespace: bool = ...,
+    low_memory=...,
+    memory_map: bool = ...,
+    float_precision: Literal["high", "legacy"] | None = ...,
+    storage_options: StorageOptions = ...,
+    use_nullable_dtypes: bool = ...,
+) -> TextFileReader:
+    ...
+
+
+# chunksize=int -> TextFileReader
+@overload
+def read_csv(
+    filepath_or_buffer: FilePath | ReadCsvBuffer[bytes] | ReadCsvBuffer[str],
+    *,
+    sep: str | None | lib.NoDefault = ...,
+    delimiter: str | None | lib.NoDefault = ...,
+    header: int | Sequence[int] | None | Literal["infer"] = ...,
+    names: Sequence[Hashable] | None | lib.NoDefault = ...,
+    index_col: IndexLabel | Literal[False] | None = ...,
+    usecols=...,
+    dtype: DtypeArg | None = ...,
+    engine: CSVEngine | None = ...,
+    converters=...,
+    true_values=...,
+    false_values=...,
+    skipinitialspace: bool = ...,
+    skiprows=...,
+    skipfooter: int = ...,
+    nrows: int | None = ...,
+    na_values=...,
+    keep_default_na: bool = ...,
+    na_filter: bool = ...,
+    verbose: bool = ...,
+    skip_blank_lines: bool = ...,
+    parse_dates: bool | Sequence[Hashable] | None = ...,
+    infer_datetime_format: bool = ...,
+    keep_date_col: bool = ...,
+    date_parser=...,
+    dayfirst: bool = ...,
+    cache_dates: bool = ...,
+    iterator: bool = ...,
+    chunksize: int,
+    compression: CompressionOptions = ...,
+    thousands: str | None = ...,
+    decimal: str = ...,
+    lineterminator: str | None = ...,
+    quotechar: str = ...,
+    quoting: int = ...,
+    doublequote: bool = ...,
+    escapechar: str | None = ...,
+    comment: str | None = ...,
+    encoding: str | None = ...,
+    encoding_errors: str | None = ...,
+    dialect: str | csv.Dialect | None = ...,
+    on_bad_lines=...,
+    delim_whitespace: bool = ...,
+    low_memory=...,
+    memory_map: bool = ...,
+    float_precision: Literal["high", "legacy"] | None = ...,
+    storage_options: StorageOptions = ...,
+    use_nullable_dtypes: bool = ...,
+) -> TextFileReader:
+    ...
+
+
+# default case -> DataFrame
+@overload
+def read_csv(
+    filepath_or_buffer: FilePath | ReadCsvBuffer[bytes] | ReadCsvBuffer[str],
+    *,
+    sep: str | None | lib.NoDefault = ...,
+    delimiter: str | None | lib.NoDefault = ...,
+    header: int | Sequence[int] | None | Literal["infer"] = ...,
+    names: Sequence[Hashable] | None | lib.NoDefault = ...,
+    index_col: IndexLabel | Literal[False] | None = ...,
+    usecols=...,
+    dtype: DtypeArg | None = ...,
+    engine: CSVEngine | None = ...,
+    converters=...,
+    true_values=...,
+    false_values=...,
+    skipinitialspace: bool = ...,
+    skiprows=...,
+    skipfooter: int = ...,
+    nrows: int | None = ...,
+    na_values=...,
+    keep_default_na: bool = ...,
+    na_filter: bool = ...,
+    verbose: bool = ...,
+    skip_blank_lines: bool = ...,
+    parse_dates: bool | Sequence[Hashable] | None = ...,
+    infer_datetime_format: bool = ...,
+    keep_date_col: bool = ...,
+    date_parser=...,
+    dayfirst: bool = ...,
+    cache_dates: bool = ...,
+    iterator: Literal[False] = ...,
+    chunksize: None = ...,
+    compression: CompressionOptions = ...,
+    thousands: str | None = ...,
+    decimal: str = ...,
+    lineterminator: str | None = ...,
+    quotechar: str = ...,
+    quoting: int = ...,
+    doublequote: bool = ...,
+    escapechar: str | None = ...,
+    comment: str | None = ...,
+    encoding: str | None = ...,
+    encoding_errors: str | None = ...,
+    dialect: str | csv.Dialect | None = ...,
+    on_bad_lines=...,
+    delim_whitespace: bool = ...,
+    low_memory=...,
+    memory_map: bool = ...,
+    float_precision: Literal["high", "legacy"] | None = ...,
+    storage_options: StorageOptions = ...,
+    use_nullable_dtypes: bool = ...,
+) -> DataFrame:
+    ...
+
+
+# Unions -> DataFrame | TextFileReader
+@overload
+def read_csv(
+    filepath_or_buffer: FilePath | ReadCsvBuffer[bytes] | ReadCsvBuffer[str],
+    *,
+    sep: str | None | lib.NoDefault = ...,
+    delimiter: str | None | lib.NoDefault = ...,
+    header: int | Sequence[int] | None | Literal["infer"] = ...,
+    names: Sequence[Hashable] | None | lib.NoDefault = ...,
+    index_col: IndexLabel | Literal[False] | None = ...,
+    usecols=...,
+    dtype: DtypeArg | None = ...,
+    engine: CSVEngine | None = ...,
+    converters=...,
+    true_values=...,
+    false_values=...,
+    skipinitialspace: bool = ...,
+    skiprows=...,
+    skipfooter: int = ...,
+    nrows: int | None = ...,
+    na_values=...,
+    keep_default_na: bool = ...,
+    na_filter: bool = ...,
+    verbose: bool = ...,
+    skip_blank_lines: bool = ...,
+    parse_dates: bool | Sequence[Hashable] | None = ...,
+    infer_datetime_format: bool = ...,
+    keep_date_col: bool = ...,
+    date_parser=...,
+    dayfirst: bool = ...,
+    cache_dates: bool = ...,
+    iterator: bool = ...,
+    chunksize: int | None = ...,
+    compression: CompressionOptions = ...,
+    thousands: str | None = ...,
+    decimal: str = ...,
+    lineterminator: str | None = ...,
+    quotechar: str = ...,
+    quoting: int = ...,
+    doublequote: bool = ...,
+    escapechar: str | None = ...,
+    comment: str | None = ...,
+    encoding: str | None = ...,
+    encoding_errors: str | None = ...,
+    dialect: str | csv.Dialect | None = ...,
+    on_bad_lines=...,
+    delim_whitespace: bool = ...,
+    low_memory=...,
+    memory_map: bool = ...,
+    float_precision: Literal["high", "legacy"] | None = ...,
+    storage_options: StorageOptions = ...,
+    use_nullable_dtypes: bool = ...,
+) -> DataFrame | TextFileReader:
+    ...
+
+
 @Appender(
     _doc_read_csv_and_table.format(
         func_name="read_csv",
         summary="Read a comma-separated values (csv) file into DataFrame.",
         _default_sep="','",
-        storage_options=generic._shared_docs["storage_options"],
+        storage_options=_shared_docs["storage_options"],
+        decompression_options=_shared_docs["decompression_options"]
+        % "filepath_or_buffer",
     )
 )
 def read_csv(
-    filepath_or_buffer: FilePathOrBuffer,
-    sep=lib.no_default,
-    delimiter=None,
+    filepath_or_buffer: FilePath | ReadCsvBuffer[bytes] | ReadCsvBuffer[str],
+    *,
+    sep: str | None | lib.NoDefault = lib.no_default,
+    delimiter: str | None | lib.NoDefault = None,
     # Column and Index Locations and Names
-    header="infer",
-    names=None,
-    index_col=None,
+    header: int | Sequence[int] | None | Literal["infer"] = "infer",
+    names: Sequence[Hashable] | None | lib.NoDefault = lib.no_default,
+    index_col: IndexLabel | Literal[False] | None = None,
     usecols=None,
-    squeeze=False,
-    prefix=None,
-    mangle_dupe_cols=True,
     # General Parsing Configuration
-    dtype: Optional[DtypeArg] = None,
-    engine=None,
+    dtype: DtypeArg | None = None,
+    engine: CSVEngine | None = None,
     converters=None,
     true_values=None,
     false_values=None,
-    skipinitialspace=False,
+    skipinitialspace: bool = False,
     skiprows=None,
-    skipfooter=0,
-    nrows=None,
+    skipfooter: int = 0,
+    nrows: int | None = None,
     # NA and Missing Data Handling
     na_values=None,
-    keep_default_na=True,
-    na_filter=True,
-    verbose=False,
-    skip_blank_lines=True,
+    keep_default_na: bool = True,
+    na_filter: bool = True,
+    verbose: bool = False,
+    skip_blank_lines: bool = True,
     # Datetime Handling
-    parse_dates=False,
-    infer_datetime_format=False,
-    keep_date_col=False,
+    parse_dates: bool | Sequence[Hashable] | None = None,
+    infer_datetime_format: bool = False,
+    keep_date_col: bool = False,
     date_parser=None,
-    dayfirst=False,
-    cache_dates=True,
+    dayfirst: bool = False,
+    cache_dates: bool = True,
     # Iteration
-    iterator=False,
-    chunksize=None,
+    iterator: bool = False,
+    chunksize: int | None = None,
     # Quoting, Compression, and File Format
-    compression="infer",
-    thousands=None,
+    compression: CompressionOptions = "infer",
+    thousands: str | None = None,
     decimal: str = ".",
-    lineterminator=None,
-    quotechar='"',
-    quoting=csv.QUOTE_MINIMAL,
-    doublequote=True,
-    escapechar=None,
-    comment=None,
-    encoding=None,
-    dialect=None,
+    lineterminator: str | None = None,
+    quotechar: str = '"',
+    quoting: int = csv.QUOTE_MINIMAL,
+    doublequote: bool = True,
+    escapechar: str | None = None,
+    comment: str | None = None,
+    encoding: str | None = None,
+    encoding_errors: str | None = "strict",
+    dialect: str | csv.Dialect | None = None,
     # Error Handling
-    error_bad_lines=True,
-    warn_bad_lines=True,
+    on_bad_lines: str = "error",
     # Internal
-    delim_whitespace=False,
+    delim_whitespace: bool = False,
     low_memory=_c_parser_defaults["low_memory"],
-    memory_map=False,
-    float_precision=None,
+    memory_map: bool = False,
+    float_precision: Literal["high", "legacy"] | None = None,
     storage_options: StorageOptions = None,
-):
-    kwds = locals()
+    use_nullable_dtypes: bool = False,
+) -> DataFrame | TextFileReader:
+    # locals() should never be modified
+    kwds = locals().copy()
     del kwds["filepath_or_buffer"]
     del kwds["sep"]
 
     kwds_defaults = _refine_defaults_read(
-        dialect, delimiter, delim_whitespace, engine, sep, defaults={"delimiter": ","}
+        dialect,
+        delimiter,
+        delim_whitespace,
+        engine,
+        sep,
+        on_bad_lines,
+        names,
+        defaults={"delimiter": ","},
     )
     kwds.update(kwds_defaults)
 
     return _read(filepath_or_buffer, kwds)
+
+
+# iterator=True -> TextFileReader
+@overload
+def read_table(
+    filepath_or_buffer: FilePath | ReadCsvBuffer[bytes] | ReadCsvBuffer[str],
+    *,
+    sep: str | None | lib.NoDefault = ...,
+    delimiter: str | None | lib.NoDefault = ...,
+    header: int | Sequence[int] | None | Literal["infer"] = ...,
+    names: Sequence[Hashable] | None | lib.NoDefault = ...,
+    index_col: IndexLabel | Literal[False] | None = ...,
+    usecols=...,
+    dtype: DtypeArg | None = ...,
+    engine: CSVEngine | None = ...,
+    converters=...,
+    true_values=...,
+    false_values=...,
+    skipinitialspace: bool = ...,
+    skiprows=...,
+    skipfooter: int = ...,
+    nrows: int | None = ...,
+    na_values=...,
+    keep_default_na: bool = ...,
+    na_filter: bool = ...,
+    verbose: bool = ...,
+    skip_blank_lines: bool = ...,
+    parse_dates: bool | Sequence[Hashable] = ...,
+    infer_datetime_format: bool = ...,
+    keep_date_col: bool = ...,
+    date_parser=...,
+    dayfirst: bool = ...,
+    cache_dates: bool = ...,
+    iterator: Literal[True],
+    chunksize: int | None = ...,
+    compression: CompressionOptions = ...,
+    thousands: str | None = ...,
+    decimal: str = ...,
+    lineterminator: str | None = ...,
+    quotechar: str = ...,
+    quoting: int = ...,
+    doublequote: bool = ...,
+    escapechar: str | None = ...,
+    comment: str | None = ...,
+    encoding: str | None = ...,
+    encoding_errors: str | None = ...,
+    dialect: str | csv.Dialect | None = ...,
+    on_bad_lines=...,
+    delim_whitespace: bool = ...,
+    low_memory=...,
+    memory_map: bool = ...,
+    float_precision: str | None = ...,
+    storage_options: StorageOptions = ...,
+    use_nullable_dtypes: bool = ...,
+) -> TextFileReader:
+    ...
+
+
+# chunksize=int -> TextFileReader
+@overload
+def read_table(
+    filepath_or_buffer: FilePath | ReadCsvBuffer[bytes] | ReadCsvBuffer[str],
+    *,
+    sep: str | None | lib.NoDefault = ...,
+    delimiter: str | None | lib.NoDefault = ...,
+    header: int | Sequence[int] | None | Literal["infer"] = ...,
+    names: Sequence[Hashable] | None | lib.NoDefault = ...,
+    index_col: IndexLabel | Literal[False] | None = ...,
+    usecols=...,
+    dtype: DtypeArg | None = ...,
+    engine: CSVEngine | None = ...,
+    converters=...,
+    true_values=...,
+    false_values=...,
+    skipinitialspace: bool = ...,
+    skiprows=...,
+    skipfooter: int = ...,
+    nrows: int | None = ...,
+    na_values=...,
+    keep_default_na: bool = ...,
+    na_filter: bool = ...,
+    verbose: bool = ...,
+    skip_blank_lines: bool = ...,
+    parse_dates: bool | Sequence[Hashable] = ...,
+    infer_datetime_format: bool = ...,
+    keep_date_col: bool = ...,
+    date_parser=...,
+    dayfirst: bool = ...,
+    cache_dates: bool = ...,
+    iterator: bool = ...,
+    chunksize: int,
+    compression: CompressionOptions = ...,
+    thousands: str | None = ...,
+    decimal: str = ...,
+    lineterminator: str | None = ...,
+    quotechar: str = ...,
+    quoting: int = ...,
+    doublequote: bool = ...,
+    escapechar: str | None = ...,
+    comment: str | None = ...,
+    encoding: str | None = ...,
+    encoding_errors: str | None = ...,
+    dialect: str | csv.Dialect | None = ...,
+    on_bad_lines=...,
+    delim_whitespace: bool = ...,
+    low_memory=...,
+    memory_map: bool = ...,
+    float_precision: str | None = ...,
+    storage_options: StorageOptions = ...,
+    use_nullable_dtypes: bool = ...,
+) -> TextFileReader:
+    ...
+
+
+# default -> DataFrame
+@overload
+def read_table(
+    filepath_or_buffer: FilePath | ReadCsvBuffer[bytes] | ReadCsvBuffer[str],
+    *,
+    sep: str | None | lib.NoDefault = ...,
+    delimiter: str | None | lib.NoDefault = ...,
+    header: int | Sequence[int] | None | Literal["infer"] = ...,
+    names: Sequence[Hashable] | None | lib.NoDefault = ...,
+    index_col: IndexLabel | Literal[False] | None = ...,
+    usecols=...,
+    dtype: DtypeArg | None = ...,
+    engine: CSVEngine | None = ...,
+    converters=...,
+    true_values=...,
+    false_values=...,
+    skipinitialspace: bool = ...,
+    skiprows=...,
+    skipfooter: int = ...,
+    nrows: int | None = ...,
+    na_values=...,
+    keep_default_na: bool = ...,
+    na_filter: bool = ...,
+    verbose: bool = ...,
+    skip_blank_lines: bool = ...,
+    parse_dates: bool | Sequence[Hashable] = ...,
+    infer_datetime_format: bool = ...,
+    keep_date_col: bool = ...,
+    date_parser=...,
+    dayfirst: bool = ...,
+    cache_dates: bool = ...,
+    iterator: Literal[False] = ...,
+    chunksize: None = ...,
+    compression: CompressionOptions = ...,
+    thousands: str | None = ...,
+    decimal: str = ...,
+    lineterminator: str | None = ...,
+    quotechar: str = ...,
+    quoting: int = ...,
+    doublequote: bool = ...,
+    escapechar: str | None = ...,
+    comment: str | None = ...,
+    encoding: str | None = ...,
+    encoding_errors: str | None = ...,
+    dialect: str | csv.Dialect | None = ...,
+    on_bad_lines=...,
+    delim_whitespace: bool = ...,
+    low_memory=...,
+    memory_map: bool = ...,
+    float_precision: str | None = ...,
+    storage_options: StorageOptions = ...,
+    use_nullable_dtypes: bool = ...,
+) -> DataFrame:
+    ...
+
+
+# Unions -> DataFrame | TextFileReader
+@overload
+def read_table(
+    filepath_or_buffer: FilePath | ReadCsvBuffer[bytes] | ReadCsvBuffer[str],
+    *,
+    sep: str | None | lib.NoDefault = ...,
+    delimiter: str | None | lib.NoDefault = ...,
+    header: int | Sequence[int] | None | Literal["infer"] = ...,
+    names: Sequence[Hashable] | None | lib.NoDefault = ...,
+    index_col: IndexLabel | Literal[False] | None = ...,
+    usecols=...,
+    dtype: DtypeArg | None = ...,
+    engine: CSVEngine | None = ...,
+    converters=...,
+    true_values=...,
+    false_values=...,
+    skipinitialspace: bool = ...,
+    skiprows=...,
+    skipfooter: int = ...,
+    nrows: int | None = ...,
+    na_values=...,
+    keep_default_na: bool = ...,
+    na_filter: bool = ...,
+    verbose: bool = ...,
+    skip_blank_lines: bool = ...,
+    parse_dates: bool | Sequence[Hashable] = ...,
+    infer_datetime_format: bool = ...,
+    keep_date_col: bool = ...,
+    date_parser=...,
+    dayfirst: bool = ...,
+    cache_dates: bool = ...,
+    iterator: bool = ...,
+    chunksize: int | None = ...,
+    compression: CompressionOptions = ...,
+    thousands: str | None = ...,
+    decimal: str = ...,
+    lineterminator: str | None = ...,
+    quotechar: str = ...,
+    quoting: int = ...,
+    doublequote: bool = ...,
+    escapechar: str | None = ...,
+    comment: str | None = ...,
+    encoding: str | None = ...,
+    encoding_errors: str | None = ...,
+    dialect: str | csv.Dialect | None = ...,
+    on_bad_lines=...,
+    delim_whitespace: bool = ...,
+    low_memory=...,
+    memory_map: bool = ...,
+    float_precision: str | None = ...,
+    storage_options: StorageOptions = ...,
+    use_nullable_dtypes: bool = ...,
+) -> DataFrame | TextFileReader:
+    ...
 
 
 @Appender(
@@ -543,74 +1123,84 @@ def read_csv(
         func_name="read_table",
         summary="Read general delimited file into DataFrame.",
         _default_sep=r"'\\t' (tab-stop)",
-        storage_options=generic._shared_docs["storage_options"],
+        storage_options=_shared_docs["storage_options"],
+        decompression_options=_shared_docs["decompression_options"]
+        % "filepath_or_buffer",
     )
 )
 def read_table(
-    filepath_or_buffer: FilePathOrBuffer,
-    sep=lib.no_default,
-    delimiter=None,
+    filepath_or_buffer: FilePath | ReadCsvBuffer[bytes] | ReadCsvBuffer[str],
+    *,
+    sep: str | None | lib.NoDefault = lib.no_default,
+    delimiter: str | None | lib.NoDefault = None,
     # Column and Index Locations and Names
-    header="infer",
-    names=None,
-    index_col=None,
+    header: int | Sequence[int] | None | Literal["infer"] = "infer",
+    names: Sequence[Hashable] | None | lib.NoDefault = lib.no_default,
+    index_col: IndexLabel | Literal[False] | None = None,
     usecols=None,
-    squeeze=False,
-    prefix=None,
-    mangle_dupe_cols=True,
     # General Parsing Configuration
-    dtype: Optional[DtypeArg] = None,
-    engine=None,
+    dtype: DtypeArg | None = None,
+    engine: CSVEngine | None = None,
     converters=None,
     true_values=None,
     false_values=None,
-    skipinitialspace=False,
+    skipinitialspace: bool = False,
     skiprows=None,
-    skipfooter=0,
-    nrows=None,
+    skipfooter: int = 0,
+    nrows: int | None = None,
     # NA and Missing Data Handling
     na_values=None,
-    keep_default_na=True,
-    na_filter=True,
-    verbose=False,
-    skip_blank_lines=True,
+    keep_default_na: bool = True,
+    na_filter: bool = True,
+    verbose: bool = False,
+    skip_blank_lines: bool = True,
     # Datetime Handling
-    parse_dates=False,
-    infer_datetime_format=False,
-    keep_date_col=False,
+    parse_dates: bool | Sequence[Hashable] = False,
+    infer_datetime_format: bool = False,
+    keep_date_col: bool = False,
     date_parser=None,
-    dayfirst=False,
-    cache_dates=True,
+    dayfirst: bool = False,
+    cache_dates: bool = True,
     # Iteration
-    iterator=False,
-    chunksize=None,
+    iterator: bool = False,
+    chunksize: int | None = None,
     # Quoting, Compression, and File Format
-    compression="infer",
-    thousands=None,
+    compression: CompressionOptions = "infer",
+    thousands: str | None = None,
     decimal: str = ".",
-    lineterminator=None,
-    quotechar='"',
-    quoting=csv.QUOTE_MINIMAL,
-    doublequote=True,
-    escapechar=None,
-    comment=None,
-    encoding=None,
-    dialect=None,
+    lineterminator: str | None = None,
+    quotechar: str = '"',
+    quoting: int = csv.QUOTE_MINIMAL,
+    doublequote: bool = True,
+    escapechar: str | None = None,
+    comment: str | None = None,
+    encoding: str | None = None,
+    encoding_errors: str | None = "strict",
+    dialect: str | csv.Dialect | None = None,
     # Error Handling
-    error_bad_lines=True,
-    warn_bad_lines=True,
+    on_bad_lines: str = "error",
     # Internal
-    delim_whitespace=False,
+    delim_whitespace: bool = False,
     low_memory=_c_parser_defaults["low_memory"],
-    memory_map=False,
-    float_precision=None,
-):
-    kwds = locals()
+    memory_map: bool = False,
+    float_precision: str | None = None,
+    storage_options: StorageOptions = None,
+    use_nullable_dtypes: bool = False,
+) -> DataFrame | TextFileReader:
+    # locals() should never be modified
+    kwds = locals().copy()
     del kwds["filepath_or_buffer"]
     del kwds["sep"]
 
     kwds_defaults = _refine_defaults_read(
-        dialect, delimiter, delim_whitespace, engine, sep, defaults={"delimiter": "\t"}
+        dialect,
+        delimiter,
+        delim_whitespace,
+        engine,
+        sep,
+        on_bad_lines,
+        names,
+        defaults={"delimiter": "\t"},
     )
     kwds.update(kwds_defaults)
 
@@ -618,12 +1208,13 @@ def read_table(
 
 
 def read_fwf(
-    filepath_or_buffer: FilePathOrBuffer,
-    colspecs="infer",
-    widths=None,
-    infer_nrows=100,
+    filepath_or_buffer: FilePath | ReadCsvBuffer[bytes] | ReadCsvBuffer[str],
+    *,
+    colspecs: Sequence[tuple[int, int]] | str | None = "infer",
+    widths: Sequence[int] | None = None,
+    infer_nrows: int = 100,
     **kwds,
-):
+) -> DataFrame | TextFileReader:
     r"""
     Read a table of fixed-width formatted lines into DataFrame.
 
@@ -635,18 +1226,12 @@ def read_fwf(
 
     Parameters
     ----------
-    filepath_or_buffer : str, path object or file-like object
-        Any valid string path is acceptable. The string could be a URL. Valid
-        URL schemes include http, ftp, s3, and file. For file URLs, a host is
+    filepath_or_buffer : str, path object, or file-like object
+        String, path object (implementing ``os.PathLike[str]``), or file-like
+        object implementing a text ``read()`` function.The string could be a URL.
+        Valid URL schemes include http, ftp, s3, and file. For file URLs, a host is
         expected. A local file could be:
         ``file://localhost/path/to/table.csv``.
-
-        If you want to pass in a path object, pandas accepts any
-        ``os.PathLike``.
-
-        By file-like object, we refer to objects with a ``read()`` method,
-        such as a file handle (e.g. via builtin ``open`` function)
-        or ``StringIO``.
     colspecs : list of tuple (int, int) or 'infer'. optional
         A list of tuples giving the extents of the fixed-width
         fields of each line as half-open intervals (i.e.,  [from, to[ ).
@@ -659,14 +1244,12 @@ def read_fwf(
     infer_nrows : int, default 100
         The number of rows to consider when letting the parser determine the
         `colspecs`.
-
-        .. versionadded:: 0.24.0
     **kwds : optional
         Optional keyword arguments can be passed to ``TextFileReader``.
 
     Returns
     -------
-    DataFrame or TextParser
+    DataFrame or TextFileReader
         A comma-separated values (csv) file is returned as two-dimensional
         data structure with labeled axes.
 
@@ -682,7 +1265,7 @@ def read_fwf(
     # Check input arguments.
     if colspecs is None and widths is None:
         raise ValueError("Must specify either colspecs or widths")
-    elif colspecs not in (None, "infer") and widths is not None:
+    if colspecs not in (None, "infer") and widths is not None:
         raise ValueError("You must specify only one of 'widths' and 'colspecs'")
 
     # Compute 'colspecs' from 'widths', if specified.
@@ -691,6 +1274,28 @@ def read_fwf(
         for w in widths:
             colspecs.append((col, col + w))
             col += w
+
+    # for mypy
+    assert colspecs is not None
+
+    # GH#40830
+    # Ensure length of `colspecs` matches length of `names`
+    names = kwds.get("names")
+    if names is not None:
+        if len(names) != len(colspecs) and colspecs != "infer":
+            # need to check len(index_col) as it might contain
+            # unnamed indices, in which case it's name is not required
+            len_index = 0
+            if kwds.get("index_col") is not None:
+                index_col: Any = kwds.get("index_col")
+                if index_col is not False:
+                    if not is_list_like(index_col):
+                        len_index = 1
+                    else:
+                        len_index = len(index_col)
+            if kwds.get("usecols") is None and len(names) + len_index != len(colspecs):
+                # If usecols is used colspec may be longer than names
+                raise ValueError("Length of colspecs must match length of names")
 
     kwds["colspecs"] = colspecs
     kwds["infer_nrows"] = infer_nrows
@@ -705,10 +1310,12 @@ class TextFileReader(abc.Iterator):
 
     """
 
-    def __init__(self, f, engine=None, **kwds):
-
-        self.f = f
-
+    def __init__(
+        self,
+        f: FilePath | ReadCsvBuffer[bytes] | ReadCsvBuffer[str] | list,
+        engine: CSVEngine | None = None,
+        **kwds,
+    ) -> None:
         if engine is not None:
             engine_specified = True
         else:
@@ -721,6 +1328,10 @@ class TextFileReader(abc.Iterator):
 
         dialect = _extract_dialect(kwds)
         if dialect is not None:
+            if engine == "pyarrow":
+                raise ValueError(
+                    "The 'dialect' option is not supported with the 'pyarrow' engine"
+                )
             kwds = _merge_with_dialect_properties(dialect, kwds)
 
         if kwds.get("header", "infer") == "infer":
@@ -736,7 +1347,6 @@ class TextFileReader(abc.Iterator):
 
         self.chunksize = options.pop("chunksize", None)
         self.nrows = options.pop("nrows", None)
-        self.squeeze = options.pop("squeeze", False)
 
         self._check_file_or_buffer(f, engine)
         self.options, self.engine = self._clean_options(options, engine)
@@ -744,25 +1354,35 @@ class TextFileReader(abc.Iterator):
         if "has_index_names" in kwds:
             self.options["has_index_names"] = kwds["has_index_names"]
 
-        self._engine = self._make_engine(self.engine)
+        self.handles: IOHandles | None = None
+        self._engine = self._make_engine(f, self.engine)
 
-    def close(self):
+    def close(self) -> None:
+        if self.handles is not None:
+            self.handles.close()
         self._engine.close()
 
-    def _get_options_with_defaults(self, engine):
+    def _get_options_with_defaults(self, engine: CSVEngine) -> dict[str, Any]:
         kwds = self.orig_options
 
         options = {}
-        default: Optional[object]
+        default: object | None
 
         for argname, default in parser_defaults.items():
             value = kwds.get(argname, default)
 
             # see gh-12935
-            if argname == "mangle_dupe_cols" and not value:
-                raise ValueError("Setting mangle_dupe_cols=False is not supported yet")
-            else:
-                options[argname] = value
+            if (
+                engine == "pyarrow"
+                and argname in _pyarrow_unsupported
+                and value != default
+                and value != getattr(value, "value", default)
+            ):
+                raise ValueError(
+                    f"The {repr(argname)} option is not supported with the "
+                    f"'pyarrow' engine"
+                )
+            options[argname] = value
 
         for argname, default in _c_parser_defaults.items():
             if argname in kwds:
@@ -771,15 +1391,13 @@ class TextFileReader(abc.Iterator):
                 if engine != "c" and value != default:
                     if "python" in engine and argname not in _python_unsupported:
                         pass
-                    elif value == _deprecated_defaults.get(argname, default):
-                        pass
                     else:
                         raise ValueError(
                             f"The {repr(argname)} option is not supported with the "
                             f"{repr(engine)} engine"
                         )
             else:
-                value = _deprecated_defaults.get(argname, default)
+                value = default
             options[argname] = value
 
         if engine == "python-fwf":
@@ -788,18 +1406,20 @@ class TextFileReader(abc.Iterator):
 
         return options
 
-    def _check_file_or_buffer(self, f, engine):
+    def _check_file_or_buffer(self, f, engine: CSVEngine) -> None:
         # see gh-16530
-        if is_file_like(f) and engine != "c" and not hasattr(f, "__next__"):
-            # The C engine doesn't need the file-like to have the "__next__"
-            # attribute. However, the Python engine explicitly calls
-            # "__next__(...)" when iterating through such an object, meaning it
+        if is_file_like(f) and engine != "c" and not hasattr(f, "__iter__"):
+            # The C engine doesn't need the file-like to have the "__iter__"
+            # attribute. However, the Python engine needs "__iter__(...)"
+            # when iterating through such an object, meaning it
             # needs to have that attribute
             raise ValueError(
                 "The 'python' engine cannot iterate through this file buffer."
             )
 
-    def _clean_options(self, options, engine):
+    def _clean_options(
+        self, options: dict[str, Any], engine: CSVEngine
+    ) -> tuple[dict[str, Any], CSVEngine]:
         result = options.copy()
 
         fallback_reason = None
@@ -814,9 +1434,9 @@ class TextFileReader(abc.Iterator):
         delim_whitespace = options["delim_whitespace"]
 
         if sep is None and not delim_whitespace:
-            if engine == "c":
+            if engine in ("c", "pyarrow"):
                 fallback_reason = (
-                    "the 'c' engine does not support "
+                    f"the '{engine}' engine does not support "
                     "sep=None with delim_whitespace=False"
                 )
                 engine = "python"
@@ -827,7 +1447,7 @@ class TextFileReader(abc.Iterator):
             elif engine not in ("python", "python-fwf"):
                 # wait until regex engine integrated
                 fallback_reason = (
-                    "the 'c' engine does not support "
+                    f"the '{engine}' engine does not support "
                     "regex separators (separators > 1 char and "
                     r"different from '\s+' are interpreted as regex)"
                 )
@@ -846,7 +1466,7 @@ class TextFileReader(abc.Iterator):
             if not encodeable and engine not in ("python", "python-fwf"):
                 fallback_reason = (
                     f"the separator encoded in {encoding} "
-                    "is > 1 char long, and the 'c' engine "
+                    f"is > 1 char long, and the '{engine}' engine "
                     "does not support such separators"
                 )
                 engine = "python"
@@ -861,7 +1481,7 @@ class TextFileReader(abc.Iterator):
                 fallback_reason = (
                     "ord(quotechar) > 127, meaning the "
                     "quotechar is larger than one byte, "
-                    "and the 'c' engine does not support such quotechars"
+                    f"and the '{engine}' engine does not support such quotechars"
                 )
                 engine = "python"
 
@@ -890,7 +1510,7 @@ class TextFileReader(abc.Iterator):
                     "engine='python'."
                 ),
                 ParserWarning,
-                stacklevel=5,
+                stacklevel=find_stack_level(),
             )
 
         index_col = options["index_col"]
@@ -900,18 +1520,6 @@ class TextFileReader(abc.Iterator):
         skiprows = options["skiprows"]
 
         validate_header_arg(options["header"])
-
-        for arg in _deprecated_args:
-            parser_default = _c_parser_defaults[arg]
-            depr_default = _deprecated_defaults[arg]
-            if result.get(arg, depr_default) != depr_default:
-                msg = (
-                    f"The {arg} argument has been deprecated and will be "
-                    "removed in a future version.\n\n"
-                )
-                warnings.warn(msg, FutureWarning, stacklevel=2)
-            else:
-                result[arg] = parser_default
 
         if index_col is True:
             raise ValueError("The value of index_col couldn't be 'True'")
@@ -937,8 +1545,15 @@ class TextFileReader(abc.Iterator):
         na_values, na_fvalues = _clean_na_values(na_values, keep_default_na)
 
         # handle skiprows; this is internally handled by the
-        # c-engine, so only need for python parsers
-        if engine != "c":
+        # c-engine, so only need for python and pyarrow parsers
+        if engine == "pyarrow":
+            if not is_integer(skiprows) and skiprows is not None:
+                # pyarrow expects skiprows to be passed as an integer
+                raise ValueError(
+                    "skiprows argument must be an integer when using "
+                    "engine='pyarrow'"
+                )
+        else:
             if is_integer(skiprows):
                 skiprows = list(range(skiprows))
             if skiprows is None:
@@ -955,52 +1570,111 @@ class TextFileReader(abc.Iterator):
 
         return result, engine
 
-    def __next__(self):
+    def __next__(self) -> DataFrame:
         try:
             return self.get_chunk()
         except StopIteration:
             self.close()
             raise
 
-    def _make_engine(self, engine="c"):
-        mapping: Dict[str, Type[ParserBase]] = {
+    def _make_engine(
+        self,
+        f: FilePath | ReadCsvBuffer[bytes] | ReadCsvBuffer[str] | list | IO,
+        engine: CSVEngine = "c",
+    ) -> ParserBase:
+        mapping: dict[str, type[ParserBase]] = {
             "c": CParserWrapper,
             "python": PythonParser,
+            "pyarrow": ArrowParserWrapper,
             "python-fwf": FixedWidthFieldParser,
         }
         if engine not in mapping:
             raise ValueError(
                 f"Unknown engine: {engine} (valid options are {mapping.keys()})"
             )
-        # error: Too many arguments for "ParserBase"
-        return mapping[engine](self.f, **self.options)  # type: ignore[call-arg]
+        if not isinstance(f, list):
+            # open file here
+            is_text = True
+            mode = "r"
+            if engine == "pyarrow":
+                is_text = False
+                mode = "rb"
+            elif (
+                engine == "c"
+                and self.options.get("encoding", "utf-8") == "utf-8"
+                and isinstance(stringify_path(f), str)
+            ):
+                # c engine can decode utf-8 bytes, adding TextIOWrapper makes
+                # the c-engine especially for memory_map=True far slower
+                is_text = False
+                if "b" not in mode:
+                    mode += "b"
+            self.handles = get_handle(
+                f,
+                mode,
+                encoding=self.options.get("encoding", None),
+                compression=self.options.get("compression", None),
+                memory_map=self.options.get("memory_map", False),
+                is_text=is_text,
+                errors=self.options.get("encoding_errors", "strict"),
+                storage_options=self.options.get("storage_options", None),
+            )
+            assert self.handles is not None
+            f = self.handles.handle
 
-    def _failover_to_python(self):
+        elif engine != "python":
+            msg = f"Invalid file path or buffer object type: {type(f)}"
+            raise ValueError(msg)
+
+        try:
+            return mapping[engine](f, **self.options)
+        except Exception:
+            if self.handles is not None:
+                self.handles.close()
+            raise
+
+    def _failover_to_python(self) -> None:
         raise AbstractMethodError(self)
 
-    def read(self, nrows=None):
-        nrows = validate_integer("nrows", nrows)
-        index, columns, col_dict = self._engine.read(nrows)
-
-        if index is None:
-            if col_dict:
-                # Any column is actually fine:
-                new_rows = len(next(iter(col_dict.values())))
-                index = RangeIndex(self._currow, self._currow + new_rows)
-            else:
-                new_rows = 0
+    def read(self, nrows: int | None = None) -> DataFrame:
+        if self.engine == "pyarrow":
+            try:
+                # error: "ParserBase" has no attribute "read"
+                df = self._engine.read()  # type: ignore[attr-defined]
+            except Exception:
+                self.close()
+                raise
         else:
-            new_rows = len(index)
+            nrows = validate_integer("nrows", nrows)
+            try:
+                # error: "ParserBase" has no attribute "read"
+                (
+                    index,
+                    columns,
+                    col_dict,
+                ) = self._engine.read(  # type: ignore[attr-defined]
+                    nrows
+                )
+            except Exception:
+                self.close()
+                raise
 
-        df = DataFrame(col_dict, columns=columns, index=index)
+            if index is None:
+                if col_dict:
+                    # Any column is actually fine:
+                    new_rows = len(next(iter(col_dict.values())))
+                    index = RangeIndex(self._currow, self._currow + new_rows)
+                else:
+                    new_rows = 0
+            else:
+                new_rows = len(index)
 
-        self._currow += new_rows
+            df = DataFrame(col_dict, columns=columns, index=index)
 
-        if self.squeeze and len(df.columns) == 1:
-            return df[df.columns[0]].copy()
+            self._currow += new_rows
         return df
 
-    def get_chunk(self, size=None):
+    def get_chunk(self, size: int | None = None) -> DataFrame:
         if size is None:
             size = self.chunksize
         if self.nrows is not None:
@@ -1009,14 +1683,19 @@ class TextFileReader(abc.Iterator):
             size = min(size, self.nrows - self._currow)
         return self.read(nrows=size)
 
-    def __enter__(self):
+    def __enter__(self) -> TextFileReader:
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         self.close()
 
 
-def TextParser(*args, **kwds):
+def TextParser(*args, **kwds) -> TextFileReader:
     """
     Converts lists of lists/tuples into DataFrames with proper type inference
     and optional (e.g. string to datetime) conversion. Also enables iterating
@@ -1058,8 +1737,6 @@ def TextParser(*args, **kwds):
         transformed content.
     encoding : str, optional
         Encoding to use for UTF when reading/writing (ex. 'utf-8')
-    squeeze : bool, default False
-        returns Series if only one column.
     infer_datetime_format: bool, default False
         If True and `parse_dates` is True for a column, try to infer the
         datetime format based on the first datetime string. If the format
@@ -1076,8 +1753,8 @@ def TextParser(*args, **kwds):
     return TextFileReader(*args, **kwds)
 
 
-def _clean_na_values(na_values, keep_default_na=True):
-    na_fvalues: Union[Set, Dict]
+def _clean_na_values(na_values, keep_default_na: bool = True):
+    na_fvalues: set | dict
     if na_values is None:
         if keep_default_na:
             na_values = STR_NA_VALUES
@@ -1127,8 +1804,8 @@ def _floatify_na_values(na_values):
 
 
 def _stringify_na_values(na_values):
-    """ return a stringified and numeric for these values """
-    result: List[Union[int, str, float]] = []
+    """return a stringified and numeric for these values"""
+    result: list[str | float] = []
     for x in na_values:
         result.append(str(x))
         result.append(x)
@@ -1152,12 +1829,14 @@ def _stringify_na_values(na_values):
 
 
 def _refine_defaults_read(
-    dialect: Union[str, csv.Dialect],
-    delimiter: Union[str, object],
+    dialect: str | csv.Dialect | None,
+    delimiter: str | None | lib.NoDefault,
     delim_whitespace: bool,
-    engine: str,
-    sep: Union[str, object],
-    defaults: Dict[str, Any],
+    engine: CSVEngine | None,
+    sep: str | None | lib.NoDefault,
+    on_bad_lines: str | Callable,
+    names: Sequence[Hashable] | None | lib.NoDefault,
+    defaults: dict[str, Any],
 ):
     """Validate/refine default values of input parameters of read_csv, read_table.
 
@@ -1182,6 +1861,12 @@ def _refine_defaults_read(
     sep : str or object
         A delimiter provided by the user (str) or a sentinel value, i.e.
         pandas._libs.lib.no_default.
+    on_bad_lines : str, callable
+        An option for handling bad lines or a sentinel value(None).
+    names : array-like, optional
+        List of column names to use. If the file contains a header row,
+        then you should explicitly pass ``header=0`` to override the column names.
+        Duplicates in this list are not allowed.
     defaults: dict
         Default values of input parameters.
 
@@ -1192,12 +1877,13 @@ def _refine_defaults_read(
 
     Raises
     ------
-    ValueError : If a delimiter was specified with ``sep`` (or ``delimiter``) and
+    ValueError :
+        If a delimiter was specified with ``sep`` (or ``delimiter``) and
         ``delim_whitespace=True``.
     """
     # fix types for sep, delimiter to Union(str, Any)
     delim_default = defaults["delimiter"]
-    kwds: Dict[str, Any] = {}
+    kwds: dict[str, Any] = {}
     # gh-23761
     #
     # When a dialect is passed, it overrides any of the overlapping
@@ -1215,6 +1901,11 @@ def _refine_defaults_read(
             sep is lib.no_default or sep == delim_default
         )
 
+    if delimiter and (sep is not lib.no_default):
+        raise ValueError("Specified a sep and a delimiter; you can only specify one.")
+
+    kwds["names"] = None if names is lib.no_default else names
+
     # Alias sep -> delimiter.
     if delimiter is None:
         delimiter = sep
@@ -1223,6 +1914,13 @@ def _refine_defaults_read(
         raise ValueError(
             "Specified a delimiter with both sep and "
             "delim_whitespace=True; you can only specify one."
+        )
+
+    if delimiter == "\n":
+        raise ValueError(
+            r"Specified \n as separator or delimiter. This forces the python engine "
+            "which does not accept a line terminator. Hence it is not allowed to use "
+            "the line terminator as separator.",
         )
 
     if delimiter is lib.no_default:
@@ -1237,10 +1935,25 @@ def _refine_defaults_read(
         kwds["engine"] = "c"
         kwds["engine_specified"] = False
 
+    if on_bad_lines == "error":
+        kwds["on_bad_lines"] = ParserBase.BadLineHandleMethod.ERROR
+    elif on_bad_lines == "warn":
+        kwds["on_bad_lines"] = ParserBase.BadLineHandleMethod.WARN
+    elif on_bad_lines == "skip":
+        kwds["on_bad_lines"] = ParserBase.BadLineHandleMethod.SKIP
+    elif callable(on_bad_lines):
+        if engine != "python":
+            raise ValueError(
+                "on_bad_line can only be a callable function if engine='python'"
+            )
+        kwds["on_bad_lines"] = on_bad_lines
+    else:
+        raise ValueError(f"Argument {on_bad_lines} is invalid for on_bad_lines")
+
     return kwds
 
 
-def _extract_dialect(kwds: Dict[str, Any]) -> Optional[csv.Dialect]:
+def _extract_dialect(kwds: dict[str, Any]) -> csv.Dialect | None:
     """
     Extract concrete csv dialect instance.
 
@@ -1286,8 +1999,8 @@ def _validate_dialect(dialect: csv.Dialect) -> None:
 
 def _merge_with_dialect_properties(
     dialect: csv.Dialect,
-    defaults: Dict[str, Any],
-) -> Dict[str, Any]:
+    defaults: dict[str, Any],
+) -> dict[str, Any]:
     """
     Merge default kwargs in TextFileReader with dialect parameters.
 
@@ -1317,7 +2030,7 @@ def _merge_with_dialect_properties(
 
         # Don't warn if the default parameter was passed in,
         # even if it conflicts with the dialect (gh-23761).
-        if provided != parser_default and provided != dialect_val:
+        if provided not in (parser_default, dialect_val):
             msg = (
                 f"Conflicting values for '{param}': '{provided}' was "
                 f"provided, but the dialect specifies '{dialect_val}'. "
@@ -1331,12 +2044,14 @@ def _merge_with_dialect_properties(
                 conflict_msgs.append(msg)
 
         if conflict_msgs:
-            warnings.warn("\n\n".join(conflict_msgs), ParserWarning, stacklevel=2)
+            warnings.warn(
+                "\n\n".join(conflict_msgs), ParserWarning, stacklevel=find_stack_level()
+            )
         kwds[param] = dialect_val
     return kwds
 
 
-def _validate_skipfooter(kwds: Dict[str, Any]) -> None:
+def _validate_skipfooter(kwds: dict[str, Any]) -> None:
     """
     Check whether skipfooter is compatible with other kwargs in TextFileReader.
 

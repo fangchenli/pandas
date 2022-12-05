@@ -1,12 +1,12 @@
 """
 Top level ``eval`` module.
 """
+from __future__ import annotations
 
 import tokenize
-from typing import Optional
+from typing import TYPE_CHECKING
 import warnings
 
-from pandas._libs.lib import no_default
 from pandas.util._validators import validate_bool_kwarg
 
 from pandas.core.computation.engines import ENGINES
@@ -16,11 +16,15 @@ from pandas.core.computation.expr import (
 )
 from pandas.core.computation.parsing import tokenize_string
 from pandas.core.computation.scope import ensure_scope
+from pandas.core.generic import NDFrame
 
 from pandas.io.formats.printing import pprint_thing
 
+if TYPE_CHECKING:
+    from pandas.core.computation.ops import BinOp
 
-def _check_engine(engine: Optional[str]) -> str:
+
+def _check_engine(engine: str | None) -> str:
     """
     Make sure a valid engine is passed.
 
@@ -42,9 +46,10 @@ def _check_engine(engine: Optional[str]) -> str:
         Engine name.
     """
     from pandas.core.computation.check import NUMEXPR_INSTALLED
+    from pandas.core.computation.expressions import USE_NUMEXPR
 
     if engine is None:
-        engine = "numexpr" if NUMEXPR_INSTALLED else "python"
+        engine = "numexpr" if USE_NUMEXPR else "python"
 
     if engine not in ENGINES:
         valid_engines = list(ENGINES.keys())
@@ -161,16 +166,15 @@ def _check_for_locals(expr: str, stack_level: int, parser: str):
 
 
 def eval(
-    expr,
-    parser="pandas",
-    engine: Optional[str] = None,
-    truediv=no_default,
+    expr: str | BinOp,  # we leave BinOp out of the docstr bc it isn't for users
+    parser: str = "pandas",
+    engine: str | None = None,
     local_dict=None,
     global_dict=None,
     resolvers=(),
-    level=0,
+    level: int = 0,
     target=None,
-    inplace=False,
+    inplace: bool = False,
 ):
     """
     Evaluate a Python expression as a string using various backends.
@@ -203,20 +207,13 @@ def eval(
 
         The engine used to evaluate the expression. Supported engines are
 
-        - None         : tries to use ``numexpr``, falls back to ``python``
-        - ``'numexpr'``: This default engine evaluates pandas objects using
-                         numexpr for large speed ups in complex expressions
-                         with large frames.
-        - ``'python'``: Performs operations as if you had ``eval``'d in top
-                        level python. This engine is generally not that useful.
+        - None : tries to use ``numexpr``, falls back to ``python``
+        - ``'numexpr'`` : This default engine evaluates pandas objects using
+          numexpr for large speed ups in complex expressions with large frames.
+        - ``'python'`` : Performs operations as if you had ``eval``'d in top
+          level python. This engine is generally not that useful.
 
         More backends may be available in the future.
-
-    truediv : bool, optional
-        Whether to use true division, like in Python >= 3.
-
-        .. deprecated:: 1.0.0
-
     local_dict : dict or None, optional
         A dictionary of local variables, taken from locals() by default.
     global_dict : dict or None, optional
@@ -299,20 +296,12 @@ def eval(
     """
     inplace = validate_bool_kwarg(inplace, "inplace")
 
-    if truediv is not no_default:
-        warnings.warn(
-            (
-                "The `truediv` parameter in pd.eval is deprecated and "
-                "will be removed in a future version."
-            ),
-            FutureWarning,
-            stacklevel=2,
-        )
-
+    exprs: list[str | BinOp]
     if isinstance(expr, str):
         _check_expression(expr)
         exprs = [e.strip() for e in expr.splitlines() if e.strip() != ""]
     else:
+        # ops.BinOp; for internal compat, not intended to be passed by users
         exprs = [expr]
     multi_line = len(exprs) > 1
 
@@ -355,7 +344,7 @@ def eval(
                     "Multi-line expressions are only valid "
                     "if all expressions contain an assignment"
                 )
-            elif inplace:
+            if inplace:
                 raise ValueError("Cannot operate inplace if there is no assignment")
 
         # assign if needed
@@ -379,7 +368,10 @@ def eval(
             try:
                 with warnings.catch_warnings(record=True):
                     # TODO: Filter the warnings we actually care about here.
-                    target[assigner] = ret
+                    if inplace and isinstance(target, NDFrame):
+                        target.loc[:, assigner] = ret
+                    else:
+                        target[assigner] = ret
             except (TypeError, IndexError) as err:
                 raise ValueError("Cannot assign expression output to target") from err
 

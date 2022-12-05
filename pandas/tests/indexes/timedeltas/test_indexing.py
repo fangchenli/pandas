@@ -14,6 +14,7 @@ from pandas import (
     TimedeltaIndex,
     Timestamp,
     notna,
+    offsets,
     timedelta_range,
     to_timedelta,
 )
@@ -21,14 +22,6 @@ import pandas._testing as tm
 
 
 class TestGetItem:
-    def test_ellipsis(self):
-        # GH#21282
-        idx = timedelta_range("1 day", "31 day", freq="D", name="idx")
-
-        result = idx[...]
-        assert result.equals(idx)
-        assert result is not idx
-
     def test_getitem_slice_keeps_name(self):
         # GH#4226
         tdi = timedelta_range("1d", "5d", freq="H", name="timebucket")
@@ -82,6 +75,23 @@ class TestGetItem:
 
 
 class TestGetLoc:
+    def test_get_loc_key_unit_mismatch(self):
+        idx = to_timedelta(["0 days", "1 days", "2 days"])
+        key = idx[1].as_unit("ms")
+        loc = idx.get_loc(key)
+        assert loc == 1
+
+    def test_get_loc_key_unit_mismatch_not_castable(self):
+        tdi = to_timedelta(["0 days", "1 days", "2 days"]).astype("m8[s]")
+        assert tdi.dtype == "m8[s]"
+        key = tdi[0].as_unit("ns") + Timedelta(1)
+
+        with pytest.raises(KeyError, match=r"Timedelta\('0 days 00:00:00.000000001'\)"):
+            tdi.get_loc(key)
+
+        assert key not in tdi
+
+    @pytest.mark.filterwarnings("ignore:Passing method:FutureWarning")
     def test_get_loc(self):
         idx = to_timedelta(["0 days", "1 days", "2 days"])
 
@@ -156,7 +166,7 @@ class TestWhere:
         result = tdi.where(cond, tdi[::-1])
         tm.assert_index_equal(result, expected)
 
-    def test_where_invalid_dtypes(self):
+    def test_where_invalid_dtypes(self, fixed_now_ts):
         tdi = timedelta_range("1 day", periods=3, freq="D", name="idx")
 
         tail = tdi[2:].tolist()
@@ -168,17 +178,17 @@ class TestWhere:
         result = tdi.where(mask, i2.asi8)
         tm.assert_index_equal(result, expected)
 
-        ts = i2 + Timestamp.now()
+        ts = i2 + fixed_now_ts
         expected = Index([ts[0], ts[1]] + tail, dtype=object, name="idx")
         result = tdi.where(mask, ts)
         tm.assert_index_equal(result, expected)
 
-        per = (i2 + Timestamp.now()).to_period("D")
+        per = (i2 + fixed_now_ts).to_period("D")
         expected = Index([per[0], per[1]] + tail, dtype=object, name="idx")
         result = tdi.where(mask, per)
         tm.assert_index_equal(result, expected)
 
-        ts = Timestamp.now()
+        ts = fixed_now_ts
         expected = Index([ts, ts] + tail, dtype=object, name="idx")
         result = tdi.where(mask, ts)
         tm.assert_index_equal(result, expected)
@@ -247,8 +257,7 @@ class TestTake:
         with pytest.raises(ValueError, match=msg):
             idx.take(indices, mode="clip")
 
-    # TODO: This method came from test_timedelta; de-dup with version above
-    def test_take2(self):
+    def test_take_equiv_getitem(self):
         tds = ["1day 02:00:00", "1 day 04:00:00", "1 day 10:00:00"]
         idx = timedelta_range(start="1d", end="2d", freq="H", name="idx")
         expected = TimedeltaIndex(tds, freq=None, name="idx")
@@ -291,3 +300,77 @@ class TestTake:
         msg = "index -5 is out of bounds for (axis 0 with )?size 3"
         with pytest.raises(IndexError, match=msg):
             idx.take(np.array([1, -5]))
+
+
+class TestMaybeCastSliceBound:
+    @pytest.fixture(params=["increasing", "decreasing", None])
+    def monotonic(self, request):
+        return request.param
+
+    @pytest.fixture
+    def tdi(self, monotonic):
+        tdi = timedelta_range("1 Day", periods=10)
+        if monotonic == "decreasing":
+            tdi = tdi[::-1]
+        elif monotonic is None:
+            taker = np.arange(10, dtype=np.intp)
+            np.random.shuffle(taker)
+            tdi = tdi.take(taker)
+        return tdi
+
+    def test_maybe_cast_slice_bound_invalid_str(self, tdi):
+        # test the low-level _maybe_cast_slice_bound and that we get the
+        #  expected exception+message all the way up the stack
+        msg = (
+            "cannot do slice indexing on TimedeltaIndex with these "
+            r"indexers \[foo\] of type str"
+        )
+        with pytest.raises(TypeError, match=msg):
+            tdi._maybe_cast_slice_bound("foo", side="left")
+        with pytest.raises(TypeError, match=msg):
+            tdi.get_slice_bound("foo", side="left")
+        with pytest.raises(TypeError, match=msg):
+            tdi.slice_locs("foo", None, None)
+
+    def test_slice_invalid_str_with_timedeltaindex(
+        self, tdi, frame_or_series, indexer_sl
+    ):
+        obj = frame_or_series(range(10), index=tdi)
+
+        msg = (
+            "cannot do slice indexing on TimedeltaIndex with these "
+            r"indexers \[foo\] of type str"
+        )
+        with pytest.raises(TypeError, match=msg):
+            indexer_sl(obj)["foo":]
+        with pytest.raises(TypeError, match=msg):
+            indexer_sl(obj)["foo":-1]
+        with pytest.raises(TypeError, match=msg):
+            indexer_sl(obj)[:"foo"]
+        with pytest.raises(TypeError, match=msg):
+            indexer_sl(obj)[tdi[0] : "foo"]
+
+
+class TestContains:
+    def test_contains_nonunique(self):
+        # GH#9512
+        for vals in (
+            [0, 1, 0],
+            [0, 0, -1],
+            [0, -1, -1],
+            ["00:01:00", "00:01:00", "00:02:00"],
+            ["00:01:00", "00:01:00", "00:00:01"],
+        ):
+            idx = TimedeltaIndex(vals)
+            assert idx[0] in idx
+
+    def test_contains(self):
+        # Checking for any NaT-like objects
+        # GH#13603
+        td = to_timedelta(range(5), unit="d") + offsets.Hour(1)
+        for v in [NaT, None, float("nan"), np.nan]:
+            assert v not in td
+
+        td = to_timedelta([NaT])
+        for v in [NaT, None, float("nan"), np.nan]:
+            assert v in td

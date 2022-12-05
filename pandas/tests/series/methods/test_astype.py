@@ -10,11 +10,13 @@ import numpy as np
 import pytest
 
 from pandas._libs.tslibs import iNaT
+import pandas.util._test_decorators as td
 
 from pandas import (
     NA,
     Categorical,
     CategoricalDtype,
+    DatetimeTZDtype,
     Index,
     Interval,
     NaT,
@@ -28,6 +30,21 @@ import pandas._testing as tm
 
 
 class TestAstypeAPI:
+    def test_astype_unitless_dt64_raises(self):
+        # GH#47844
+        ser = Series(["1970-01-01", "1970-01-01", "1970-01-01"], dtype="datetime64[ns]")
+        df = ser.to_frame()
+
+        msg = "Casting to unit-less dtype 'datetime64' is not supported"
+        with pytest.raises(TypeError, match=msg):
+            ser.astype(np.datetime64)
+        with pytest.raises(TypeError, match=msg):
+            df.astype(np.datetime64)
+        with pytest.raises(TypeError, match=msg):
+            ser.astype("datetime64")
+        with pytest.raises(TypeError, match=msg):
+            df.astype("datetime64")
+
     def test_arg_for_errors_in_astype(self):
         # see GH#14878
         ser = Series([1, 2, 3])
@@ -80,6 +97,20 @@ class TestAstypeAPI:
 
 
 class TestAstype:
+    def test_astype_mixed_object_to_dt64tz(self):
+        # pre-2.0 this raised ValueError bc of tz mismatch
+        # xref GH#32581
+        ts = Timestamp("2016-01-04 05:06:07", tz="US/Pacific")
+        ts2 = ts.tz_convert("Asia/Tokyo")
+
+        ser = Series([ts, ts2], dtype=object)
+        res = ser.astype("datetime64[ns, Europe/Brussels]")
+        expected = Series(
+            [ts.tz_convert("Europe/Brussels"), ts2.tz_convert("Europe/Brussels")],
+            dtype="datetime64[ns, Europe/Brussels]",
+        )
+        tm.assert_series_equal(res, expected)
+
     @pytest.mark.parametrize("dtype", np.typecodes["All"])
     def test_astype_empty_constructor_equality(self, dtype):
         # see GH#15524
@@ -91,8 +122,7 @@ class TestAstype:
             "m",  # Generic timestamps raise a ValueError. Already tested.
         ):
             init_empty = Series([], dtype=dtype)
-            with tm.assert_produces_warning(DeprecationWarning):
-                as_type_empty = Series([]).astype(dtype)
+            as_type_empty = Series([]).astype(dtype)
             tm.assert_series_equal(init_empty, as_type_empty)
 
     @pytest.mark.parametrize("dtype", [str, np.str_])
@@ -126,18 +156,18 @@ class TestAstype:
     def test_astype_generic_timestamp_no_frequency(self, dtype, request):
         # see GH#15524, GH#15987
         data = [1]
-        s = Series(data)
+        ser = Series(data)
 
         if np.dtype(dtype).name not in ["timedelta64", "datetime64"]:
             mark = pytest.mark.xfail(reason="GH#33890 Is assigned ns unit")
             request.node.add_marker(mark)
 
         msg = (
-            fr"The '{dtype.__name__}' dtype has no unit\. "
-            fr"Please pass in '{dtype.__name__}\[ns\]' instead."
+            rf"The '{dtype.__name__}' dtype has no unit\. "
+            rf"Please pass in '{dtype.__name__}\[ns\]' instead."
         )
         with pytest.raises(ValueError, match=msg):
-            s.astype(dtype)
+            ser.astype(dtype)
 
     def test_astype_dt64_to_str(self):
         # GH#10442 : testing astype(str) is correct for Series/DatetimeIndex
@@ -161,68 +191,67 @@ class TestAstype:
         tm.assert_series_equal(result, expected)
 
     def test_astype_datetime(self):
-        s = Series(iNaT, dtype="M8[ns]", index=range(5))
+        ser = Series(iNaT, dtype="M8[ns]", index=range(5))
 
-        s = s.astype("O")
-        assert s.dtype == np.object_
+        ser = ser.astype("O")
+        assert ser.dtype == np.object_
 
-        s = Series([datetime(2001, 1, 2, 0, 0)])
+        ser = Series([datetime(2001, 1, 2, 0, 0)])
 
-        s = s.astype("O")
-        assert s.dtype == np.object_
+        ser = ser.astype("O")
+        assert ser.dtype == np.object_
 
-        s = Series([datetime(2001, 1, 2, 0, 0) for i in range(3)])
+        ser = Series([datetime(2001, 1, 2, 0, 0) for i in range(3)])
 
-        s[1] = np.nan
-        assert s.dtype == "M8[ns]"
+        ser[1] = np.nan
+        assert ser.dtype == "M8[ns]"
 
-        s = s.astype("O")
-        assert s.dtype == np.object_
+        ser = ser.astype("O")
+        assert ser.dtype == np.object_
 
     def test_astype_datetime64tz(self):
-        s = Series(date_range("20130101", periods=3, tz="US/Eastern"))
+        ser = Series(date_range("20130101", periods=3, tz="US/Eastern"))
 
         # astype
-        result = s.astype(object)
-        expected = Series(s.astype(object), dtype=object)
+        result = ser.astype(object)
+        expected = Series(ser.astype(object), dtype=object)
         tm.assert_series_equal(result, expected)
 
-        result = Series(s.values).dt.tz_localize("UTC").dt.tz_convert(s.dt.tz)
-        tm.assert_series_equal(result, s)
+        result = Series(ser.values).dt.tz_localize("UTC").dt.tz_convert(ser.dt.tz)
+        tm.assert_series_equal(result, ser)
 
         # astype - object, preserves on construction
-        result = Series(s.astype(object))
-        expected = s.astype(object)
+        result = Series(ser.astype(object))
+        expected = ser.astype(object)
         tm.assert_series_equal(result, expected)
 
         # astype - datetime64[ns, tz]
-        with tm.assert_produces_warning(FutureWarning):
+        msg = "Cannot use .astype to convert from timezone-naive"
+        with pytest.raises(TypeError, match=msg):
             # dt64->dt64tz astype deprecated
-            result = Series(s.values).astype("datetime64[ns, US/Eastern]")
-        tm.assert_series_equal(result, s)
+            Series(ser.values).astype("datetime64[ns, US/Eastern]")
 
-        with tm.assert_produces_warning(FutureWarning):
+        with pytest.raises(TypeError, match=msg):
             # dt64->dt64tz astype deprecated
-            result = Series(s.values).astype(s.dtype)
-        tm.assert_series_equal(result, s)
+            Series(ser.values).astype(ser.dtype)
 
-        result = s.astype("datetime64[ns, CET]")
+        result = ser.astype("datetime64[ns, CET]")
         expected = Series(date_range("20130101 06:00:00", periods=3, tz="CET"))
         tm.assert_series_equal(result, expected)
 
     def test_astype_str_cast_dt64(self):
         # see GH#9757
         ts = Series([Timestamp("2010-01-04 00:00:00")])
-        s = ts.astype(str)
+        res = ts.astype(str)
 
         expected = Series(["2010-01-04"])
-        tm.assert_series_equal(s, expected)
+        tm.assert_series_equal(res, expected)
 
         ts = Series([Timestamp("2010-01-04 00:00:00", tz="US/Eastern")])
-        s = ts.astype(str)
+        res = ts.astype(str)
 
         expected = Series(["2010-01-04 00:00:00-05:00"])
-        tm.assert_series_equal(s, expected)
+        tm.assert_series_equal(res, expected)
 
     def test_astype_str_cast_td64(self):
         # see GH#9757
@@ -246,31 +275,37 @@ class TestAstype:
         assert result.dtype == np.object_
 
     @pytest.mark.parametrize(
-        "values",
+        "data, dtype",
         [
-            Series(["x", "y", "z"], dtype="string"),
-            Series(["x", "y", "z"], dtype="category"),
-            Series(3 * [Timestamp("2020-01-01", tz="UTC")]),
-            Series(3 * [Interval(0, 1)]),
+            (["x", "y", "z"], "string[python]"),
+            pytest.param(
+                ["x", "y", "z"],
+                "string[pyarrow]",
+                marks=td.skip_if_no("pyarrow", min_version="1.0.0"),
+            ),
+            (["x", "y", "z"], "category"),
+            (3 * [Timestamp("2020-01-01", tz="UTC")], None),
+            (3 * [Interval(0, 1)], None),
         ],
     )
     @pytest.mark.parametrize("errors", ["raise", "ignore"])
-    def test_astype_ignores_errors_for_extension_dtypes(self, values, errors):
+    def test_astype_ignores_errors_for_extension_dtypes(self, data, dtype, errors):
         # https://github.com/pandas-dev/pandas/issues/35471
+        ser = Series(data, dtype=dtype)
         if errors == "ignore":
-            expected = values
-            result = values.astype(float, errors="ignore")
+            expected = ser
+            result = ser.astype(float, errors="ignore")
             tm.assert_series_equal(result, expected)
         else:
             msg = "(Cannot cast)|(could not convert)"
             with pytest.raises((ValueError, TypeError), match=msg):
-                values.astype(float, errors=errors)
+                ser.astype(float, errors=errors)
 
     @pytest.mark.parametrize("dtype", [np.float16, np.float32, np.float64])
     def test_astype_from_float_to_str(self, dtype):
         # https://github.com/pandas-dev/pandas/issues/36451
-        s = Series([0.1], dtype=dtype)
-        result = s.astype(str)
+        ser = Series([0.1], dtype=dtype)
+        result = ser.astype(str)
         expected = Series(["0.1"])
         tm.assert_series_equal(result, expected)
 
@@ -284,28 +319,28 @@ class TestAstype:
     )
     def test_astype_to_str_preserves_na(self, value, string_value):
         # https://github.com/pandas-dev/pandas/issues/36904
-        s = Series(["a", "b", value], dtype=object)
-        result = s.astype(str)
+        ser = Series(["a", "b", value], dtype=object)
+        result = ser.astype(str)
         expected = Series(["a", "b", string_value], dtype=object)
         tm.assert_series_equal(result, expected)
 
     @pytest.mark.parametrize("dtype", ["float32", "float64", "int64", "int32"])
     def test_astype(self, dtype):
-        s = Series(np.random.randn(5), name="foo")
-        as_typed = s.astype(dtype)
+        ser = Series(np.random.randn(5), name="foo")
+        as_typed = ser.astype(dtype)
 
         assert as_typed.dtype == dtype
-        assert as_typed.name == s.name
+        assert as_typed.name == ser.name
 
     @pytest.mark.parametrize("value", [np.nan, np.inf])
     @pytest.mark.parametrize("dtype", [np.int32, np.int64])
     def test_astype_cast_nan_inf_int(self, dtype, value):
         # gh-14265: check NaN and inf raise error when converting to int
         msg = "Cannot convert non-finite values \\(NA or inf\\) to integer"
-        s = Series([value])
+        ser = Series([value])
 
         with pytest.raises(ValueError, match=msg):
-            s.astype(dtype)
+            ser.astype(dtype)
 
     @pytest.mark.parametrize("dtype", [int, np.int8, np.int64])
     def test_astype_cast_object_int_fail(self, dtype):
@@ -313,6 +348,17 @@ class TestAstype:
         msg = r"invalid literal for int\(\) with base 10: 'car'"
         with pytest.raises(ValueError, match=msg):
             arr.astype(dtype)
+
+    def test_astype_float_to_uint_negatives_raise(
+        self, float_numpy_dtype, any_unsigned_int_numpy_dtype
+    ):
+        # GH#45151
+        # TODO: same for EA float/uint dtypes
+        arr = np.arange(5).astype(float_numpy_dtype) - 3  # includes negatives
+        ser = Series(arr)
+
+        with pytest.raises(ValueError, match="losslessly"):
+            ser.astype(any_unsigned_int_numpy_dtype)
 
     def test_astype_cast_object_int(self):
         arr = Series(["1", "2", "3", "4"], dtype=object)
@@ -334,9 +380,9 @@ class TestAstype:
         if sys.getdefaultencoding() == "utf-8":
             test_series.append(Series(["野菜食べないとやばい".encode()]))
 
-        for s in test_series:
-            res = s.astype("unicode")
-            expec = s.map(str)
+        for ser in test_series:
+            res = ser.astype("unicode")
+            expec = ser.map(str)
             tm.assert_series_equal(res, expec)
 
         # Restore the former encoding
@@ -348,6 +394,81 @@ class TestAstype:
         # GH#39474
         result = Series(["foo", "bar", "baz"]).astype(bytes)
         assert result.dtypes == np.dtype("S3")
+
+    def test_astype_nan_to_bool(self):
+        # GH#43018
+        ser = Series(np.nan, dtype="object")
+        result = ser.astype("bool")
+        expected = Series(True, dtype="bool")
+        tm.assert_series_equal(result, expected)
+
+    @pytest.mark.parametrize(
+        "dtype",
+        tm.ALL_INT_EA_DTYPES + tm.FLOAT_EA_DTYPES,
+    )
+    def test_astype_ea_to_datetimetzdtype(self, dtype):
+        # GH37553
+        ser = Series([4, 0, 9], dtype=dtype)
+        result = ser.astype(DatetimeTZDtype(tz="US/Pacific"))
+
+        expected = Series(
+            {
+                0: Timestamp("1969-12-31 16:00:00.000000004-08:00", tz="US/Pacific"),
+                1: Timestamp("1969-12-31 16:00:00.000000000-08:00", tz="US/Pacific"),
+                2: Timestamp("1969-12-31 16:00:00.000000009-08:00", tz="US/Pacific"),
+            }
+        )
+
+        tm.assert_series_equal(result, expected)
+
+    def test_astype_retain_Attrs(self, any_numpy_dtype):
+        # GH#44414
+        ser = Series([0, 1, 2, 3])
+        ser.attrs["Location"] = "Michigan"
+
+        result = ser.astype(any_numpy_dtype).attrs
+        expected = ser.attrs
+
+        tm.assert_dict_equal(expected, result)
+
+
+class TestAstypeString:
+    @pytest.mark.parametrize(
+        "data, dtype",
+        [
+            ([True, NA], "boolean"),
+            (["A", NA], "category"),
+            (["2020-10-10", "2020-10-10"], "datetime64[ns]"),
+            (["2020-10-10", "2020-10-10", NaT], "datetime64[ns]"),
+            (
+                ["2012-01-01 00:00:00-05:00", NaT],
+                "datetime64[ns, US/Eastern]",
+            ),
+            ([1, None], "UInt16"),
+            (["1/1/2021", "2/1/2021"], "period[M]"),
+            (["1/1/2021", "2/1/2021", NaT], "period[M]"),
+            (["1 Day", "59 Days", NaT], "timedelta64[ns]"),
+            # currently no way to parse IntervalArray from a list of strings
+        ],
+    )
+    def test_astype_string_to_extension_dtype_roundtrip(
+        self, data, dtype, request, nullable_string_dtype
+    ):
+        if dtype == "boolean" or (
+            dtype in ("datetime64[ns]", "timedelta64[ns]") and NaT in data
+        ):
+            mark = pytest.mark.xfail(
+                reason="TODO StringArray.astype() with missing values #GH40566"
+            )
+            request.node.add_marker(mark)
+        # GH-40351
+        ser = Series(data, dtype=dtype)
+
+        # Note: just passing .astype(dtype) fails for dtype="category"
+        #  with bc ser.dtype.categories will be object dtype whereas
+        #  result.dtype.categories will have string dtype
+        result = ser.astype(nullable_string_dtype).astype(ser.dtype)
+        tm.assert_series_equal(result, ser)
 
 
 class TestAstypeCategorical:
@@ -409,16 +530,16 @@ class TestAstypeCategorical:
             ser.astype("object").astype(Categorical)
 
     def test_astype_categoricaldtype(self):
-        s = Series(["a", "b", "a"])
-        result = s.astype(CategoricalDtype(["a", "b"], ordered=True))
+        ser = Series(["a", "b", "a"])
+        result = ser.astype(CategoricalDtype(["a", "b"], ordered=True))
         expected = Series(Categorical(["a", "b", "a"], ordered=True))
         tm.assert_series_equal(result, expected)
 
-        result = s.astype(CategoricalDtype(["a", "b"], ordered=False))
+        result = ser.astype(CategoricalDtype(["a", "b"], ordered=False))
         expected = Series(Categorical(["a", "b", "a"], ordered=False))
         tm.assert_series_equal(result, expected)
 
-        result = s.astype(CategoricalDtype(["a", "b", "c"], ordered=False))
+        result = ser.astype(CategoricalDtype(["a", "b", "c"], ordered=False))
         expected = Series(
             Categorical(["a", "b", "a"], categories=["a", "b", "c"], ordered=False)
         )
@@ -434,41 +555,41 @@ class TestAstypeCategorical:
         # GH#10696, GH#18593
         s_data = list("abcaacbab")
         s_dtype = CategoricalDtype(list("bac"), ordered=series_ordered)
-        s = Series(s_data, dtype=s_dtype, name=name)
+        ser = Series(s_data, dtype=s_dtype, name=name)
 
         # unspecified categories
         dtype = CategoricalDtype(ordered=dtype_ordered)
-        result = s.astype(dtype)
+        result = ser.astype(dtype)
         exp_dtype = CategoricalDtype(s_dtype.categories, dtype_ordered)
         expected = Series(s_data, name=name, dtype=exp_dtype)
         tm.assert_series_equal(result, expected)
 
         # different categories
         dtype = CategoricalDtype(list("adc"), dtype_ordered)
-        result = s.astype(dtype)
+        result = ser.astype(dtype)
         expected = Series(s_data, name=name, dtype=dtype)
         tm.assert_series_equal(result, expected)
 
         if dtype_ordered is False:
             # not specifying ordered, so only test once
-            expected = s
-            result = s.astype("category")
+            expected = ser
+            result = ser.astype("category")
             tm.assert_series_equal(result, expected)
 
     def test_astype_bool_missing_to_categorical(self):
         # GH-19182
-        s = Series([True, False, np.nan])
-        assert s.dtypes == np.object_
+        ser = Series([True, False, np.nan])
+        assert ser.dtypes == np.object_
 
-        result = s.astype(CategoricalDtype(categories=[True, False]))
+        result = ser.astype(CategoricalDtype(categories=[True, False]))
         expected = Series(Categorical([True, False, np.nan], categories=[True, False]))
         tm.assert_series_equal(result, expected)
 
     def test_astype_categories_raises(self):
         # deprecated GH#17636, removed in GH#27141
-        s = Series(["a", "b", "a"])
+        ser = Series(["a", "b", "a"])
         with pytest.raises(TypeError, match="got an unexpected"):
-            s.astype("category", categories=["a", "b"], ordered=True)
+            ser.astype("category", categories=["a", "b"], ordered=True)
 
     @pytest.mark.parametrize("items", [["a", "b", "c", "a"], [1, 2, 3, 1]])
     def test_astype_from_categorical(self, items):
@@ -488,3 +609,9 @@ class TestAstypeCategorical:
         exp = Series(Categorical(lst, categories=list("abcdef"), ordered=True))
         res = ser.astype(CategoricalDtype(list("abcdef"), ordered=True))
         tm.assert_series_equal(res, exp)
+
+    def test_astype_timedelta64_with_np_nan(self):
+        # GH45798
+        result = Series([Timedelta(1), np.nan], dtype="timedelta64[ns]")
+        expected = Series([Timedelta(1), NaT], dtype="timedelta64[ns]")
+        tm.assert_series_equal(result, expected)

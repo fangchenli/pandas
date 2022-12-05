@@ -23,12 +23,14 @@ def test_foo():
 
 For more information, refer to the ``pytest`` documentation on ``skipif``.
 """
+from __future__ import annotations
+
 from contextlib import contextmanager
-from distutils.version import LooseVersion
+import gc
 import locale
 from typing import (
     Callable,
-    Optional,
+    Generator,
 )
 import warnings
 
@@ -37,6 +39,7 @@ import pytest
 
 from pandas._config import get_option
 
+from pandas._typing import F
 from pandas.compat import (
     IS64,
     is_platform_windows,
@@ -47,9 +50,10 @@ from pandas.core.computation.expressions import (
     NUMEXPR_INSTALLED,
     USE_NUMEXPR,
 )
+from pandas.util.version import Version
 
 
-def safe_import(mod_name: str, min_version: Optional[str] = None):
+def safe_import(mod_name: str, min_version: str | None = None):
     """
     Parameters
     ----------
@@ -73,6 +77,20 @@ def safe_import(mod_name: str, min_version: Optional[str] = None):
             message=".*decorator is deprecated since Python 3.8.*",
         )
 
+        # fastparquet import accesses pd.Int64Index
+        warnings.filterwarnings(
+            "ignore",
+            category=FutureWarning,
+            module="fastparquet",
+            message=".*Int64Index.*",
+        )
+
+        warnings.filterwarnings(
+            "ignore",
+            category=DeprecationWarning,
+            message="distutils Version classes are deprecated.*",
+        )
+
         try:
             mod = __import__(mod_name)
         except ImportError:
@@ -88,33 +106,26 @@ def safe_import(mod_name: str, min_version: Optional[str] = None):
         except AttributeError:
             # xlrd uses a capitalized attribute name
             version = getattr(sys.modules[mod_name], "__VERSION__")
-        if version:
-            from distutils.version import LooseVersion
-
-            if LooseVersion(version) >= LooseVersion(min_version):
-                return mod
+        if version and Version(version) >= Version(min_version):
+            return mod
 
     return False
 
 
-def _skip_if_no_mpl():
+def _skip_if_no_mpl() -> bool:
     mod = safe_import("matplotlib")
     if mod:
         mod.use("Agg")
+        return False
     else:
         return True
 
 
-def _skip_if_has_locale():
-    lang, _ = locale.getlocale()
-    if lang is not None:
-        return True
-
-
-def _skip_if_not_us_locale():
+def _skip_if_not_us_locale() -> bool:
     lang, _ = locale.getlocale()
     if lang != "en_US":
         return True
+    return False
 
 
 def _skip_if_no_scipy() -> bool:
@@ -126,7 +137,7 @@ def _skip_if_no_scipy() -> bool:
     )
 
 
-# TODO: return type, _pytest.mark.structures.MarkDecorator is not public
+# TODO(pytest#7469): return type, _pytest.mark.structures.MarkDecorator is not public
 # https://github.com/pytest-dev/pytest/issues/7469
 def skip_if_installed(package: str):
     """
@@ -142,9 +153,9 @@ def skip_if_installed(package: str):
     )
 
 
-# TODO: return type, _pytest.mark.structures.MarkDecorator is not public
+# TODO(pytest#7469): return type, _pytest.mark.structures.MarkDecorator is not public
 # https://github.com/pytest-dev/pytest/issues/7469
-def skip_if_no(package: str, min_version: Optional[str] = None):
+def skip_if_no(package: str, min_version: str | None = None):
     """
     Generic function to help skip tests when required packages are not
     present on the testing system.
@@ -188,14 +199,9 @@ skip_if_no_mpl = pytest.mark.skipif(
 skip_if_mpl = pytest.mark.skipif(not _skip_if_no_mpl(), reason="matplotlib is present")
 skip_if_32bit = pytest.mark.skipif(not IS64, reason="skipping for 32 bit")
 skip_if_windows = pytest.mark.skipif(is_platform_windows(), reason="Running on Windows")
-skip_if_windows_python_3 = pytest.mark.skipif(
-    is_platform_windows(), reason="not used on win32"
-)
-skip_if_has_locale = pytest.mark.skipif(
-    _skip_if_has_locale(), reason=f"Specific locale is set {locale.getlocale()[0]}"
-)
 skip_if_not_us_locale = pytest.mark.skipif(
-    _skip_if_not_us_locale(), reason=f"Specific locale is set {locale.getlocale()[0]}"
+    _skip_if_not_us_locale(),
+    reason=f"Specific locale is set {locale.getlocale()[0]}",
 )
 skip_if_no_scipy = pytest.mark.skipif(
     _skip_if_no_scipy(), reason="Missing SciPy requirement"
@@ -206,17 +212,19 @@ skip_if_no_ne = pytest.mark.skipif(
 )
 
 
-# TODO: return type, _pytest.mark.structures.MarkDecorator is not public
+# TODO(pytest#7469): return type, _pytest.mark.structures.MarkDecorator is not public
 # https://github.com/pytest-dev/pytest/issues/7469
-def skip_if_np_lt(ver_str: str, *args, reason: Optional[str] = None):
+def skip_if_np_lt(ver_str: str, *args, reason: str | None = None):
     if reason is None:
         reason = f"NumPy {ver_str} or greater required"
     return pytest.mark.skipif(
-        np.__version__ < LooseVersion(ver_str), *args, reason=reason
+        Version(np.__version__) < Version(ver_str),
+        *args,
+        reason=reason,
     )
 
 
-def parametrize_fixture_doc(*args):
+def parametrize_fixture_doc(*args) -> Callable[[F], F]:
     """
     Intended for use as a decorator for parametrized fixture,
     this function will wrap the decorated function with a pytest
@@ -252,29 +260,32 @@ def check_file_leaks(func) -> Callable:
 
 
 @contextmanager
-def file_leak_context():
+def file_leak_context() -> Generator[None, None, None]:
     """
     ContextManager analogue to check_file_leaks.
     """
     psutil = safe_import("psutil")
-    if not psutil:
+    if not psutil or is_platform_windows():
+        # Checking for file leaks can hang on Windows CI
         yield
     else:
         proc = psutil.Process()
         flist = proc.open_files()
         conns = proc.connections()
 
-        yield
+        try:
+            yield
+        finally:
+            gc.collect()
+            flist2 = proc.open_files()
+            # on some builds open_files includes file position, which we _dont_
+            #  expect to remain unchanged, so we need to compare excluding that
+            flist_ex = [(x.path, x.fd) for x in flist]
+            flist2_ex = [(x.path, x.fd) for x in flist2]
+            assert set(flist2_ex) <= set(flist_ex), (flist2, flist)
 
-        flist2 = proc.open_files()
-        # on some builds open_files includes file position, which we _dont_
-        #  expect to remain unchanged, so we need to compare excluding that
-        flist_ex = [(x.path, x.fd) for x in flist]
-        flist2_ex = [(x.path, x.fd) for x in flist2]
-        assert flist2_ex == flist_ex, (flist2, flist)
-
-        conns2 = proc.connections()
-        assert conns2 == conns, (conns2, conns)
+            conns2 = proc.connections()
+            assert conns2 == conns, (conns2, conns)
 
 
 def async_mark():
@@ -287,8 +298,14 @@ def async_mark():
     return async_mark
 
 
-skip_array_manager_not_yet_implemented = pytest.mark.skipif(
-    get_option("mode.data_manager") == "array", reason="JSON C code relies on Blocks"
+def mark_array_manager_not_yet_implemented(request) -> None:
+    mark = pytest.mark.xfail(reason="Not yet implemented for ArrayManager")
+    request.node.add_marker(mark)
+
+
+skip_array_manager_not_yet_implemented = pytest.mark.xfail(
+    get_option("mode.data_manager") == "array",
+    reason="Not yet implemented for ArrayManager",
 )
 
 skip_array_manager_invalid_test = pytest.mark.skipif(

@@ -306,6 +306,7 @@ Astype conversion on ``datetime64[ns]`` to ``object``, implicitly converts ``NaT
 
 .. ipython:: python
 
+   import datetime
    s = pd.Series([datetime.datetime(2001, 1, 2, 0, 0) for i in range(3)])
    s.dtype
    s[1] = np.nan
@@ -367,7 +368,7 @@ Enhancements
   - You can now select with a string from a DataFrame with a datelike index, in a similar way to a Series (:issue:`3070`)
 
     .. ipython:: python
-       :okwarning:
+       :okexcept:
 
         idx = pd.date_range("2001-10-1", periods=5, freq='M')
         ts = pd.Series(np.random.rand(len(idx)), index=idx)

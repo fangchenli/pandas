@@ -23,41 +23,38 @@ class Factorize:
             "int",
             "uint",
             "float",
-            "string",
+            "object",
             "datetime64[ns]",
             "datetime64[ns, tz]",
             "Int64",
             "boolean",
-            "string_arrow",
+            "string[pyarrow]",
         ],
     ]
     param_names = ["unique", "sort", "dtype"]
 
     def setup(self, unique, sort, dtype):
-        N = 10 ** 5
+        N = 10**5
         string_index = tm.makeStringIndex(N)
-        try:
-            from pandas.core.arrays.string_arrow import ArrowStringDtype
-
-            string_arrow = pd.array(string_index, dtype=ArrowStringDtype())
-        except ImportError:
-            string_arrow = None
-
-        if dtype == "string_arrow" and not string_arrow:
-            raise NotImplementedError
+        string_arrow = None
+        if dtype == "string[pyarrow]":
+            try:
+                string_arrow = pd.array(string_index, dtype="string[pyarrow]")
+            except ImportError:
+                raise NotImplementedError
 
         data = {
-            "int": pd.Int64Index(np.arange(N)),
-            "uint": pd.UInt64Index(np.arange(N)),
-            "float": pd.Float64Index(np.random.randn(N)),
-            "string": string_index,
+            "int": pd.Index(np.arange(N), dtype="int64"),
+            "uint": pd.Index(np.arange(N), dtype="uint64"),
+            "float": pd.Index(np.random.randn(N), dtype="float64"),
+            "object": string_index,
             "datetime64[ns]": pd.date_range("2011-01-01", freq="H", periods=N),
             "datetime64[ns, tz]": pd.date_range(
                 "2011-01-01", freq="H", periods=N, tz="Asia/Tokyo"
             ),
             "Int64": pd.array(np.arange(N), dtype="Int64"),
             "boolean": pd.array(np.random.randint(0, 2, N), dtype="boolean"),
-            "string_arrow": string_arrow,
+            "string[pyarrow]": string_arrow,
         }[dtype]
         if not unique:
             data = data.repeat(5)
@@ -77,11 +74,11 @@ class Duplicated:
     param_names = ["unique", "keep", "dtype"]
 
     def setup(self, unique, keep, dtype):
-        N = 10 ** 5
+        N = 10**5
         data = {
-            "int": pd.Int64Index(np.arange(N)),
-            "uint": pd.UInt64Index(np.arange(N)),
-            "float": pd.Float64Index(np.random.randn(N)),
+            "int": pd.Index(np.arange(N), dtype="int64"),
+            "uint": pd.Index(np.arange(N), dtype="uint64"),
+            "float": pd.Index(np.random.randn(N), dtype="float64"),
             "string": tm.makeStringIndex(N),
             "datetime64[ns]": pd.date_range("2011-01-01", freq="H", periods=N),
             "datetime64[ns, tz]": pd.date_range(
@@ -98,9 +95,32 @@ class Duplicated:
         self.idx.duplicated(keep=keep)
 
 
+class DuplicatedMaskedArray:
+
+    params = [
+        [True, False],
+        ["first", "last", False],
+        ["Int64", "Float64"],
+    ]
+    param_names = ["unique", "keep", "dtype"]
+
+    def setup(self, unique, keep, dtype):
+        N = 10**5
+        data = pd.Series(np.arange(N), dtype=dtype)
+        data[list(range(1, N, 100))] = pd.NA
+        if not unique:
+            data = data.repeat(5)
+        self.ser = data
+        # cache is_unique
+        self.ser.is_unique
+
+    def time_duplicated(self, unique, keep, dtype):
+        self.ser.duplicated(keep=keep)
+
+
 class Hashing:
     def setup_cache(self):
-        N = 10 ** 5
+        N = 10**5
 
         df = pd.DataFrame(
             {
@@ -148,7 +168,7 @@ class Quantile:
     param_names = ["quantile", "interpolation", "dtype"]
 
     def setup(self, quantile, interpolation, dtype):
-        N = 10 ** 5
+        N = 10**5
         data = {
             "int": np.arange(N),
             "uint": np.arange(N).astype(np.uint64),
@@ -161,7 +181,7 @@ class Quantile:
 
 
 class SortIntegerArray:
-    params = [10 ** 3, 10 ** 5]
+    params = [10**3, 10**5]
 
     def setup(self, N):
         data = np.arange(N, dtype=float)

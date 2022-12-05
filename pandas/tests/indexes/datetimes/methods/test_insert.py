@@ -47,7 +47,7 @@ class TestInsert:
         result = dti.insert(0, item)
         assert result.freq == dti.freq
 
-        # But not when we insert an item that doesnt conform to freq
+        # But not when we insert an item that doesn't conform to freq
         dti = DatetimeIndex([], tz=tz, freq="W-THU")
         result = dti.insert(0, item)
         assert result.freq is None
@@ -193,22 +193,26 @@ class TestInsert:
     # TODO: also changes DataFrame.__setitem__ with expansion
     def test_insert_mismatched_tz(self):
         # see GH#7299
+        # pre-2.0 with mismatched tzs we would cast to object
         idx = date_range("1/1/2000", periods=3, freq="D", tz="Asia/Tokyo", name="idx")
 
         # mismatched tz -> cast to object (could reasonably cast to same tz or UTC)
         item = Timestamp("2000-01-04", tz="US/Eastern")
         result = idx.insert(3, item)
         expected = Index(
-            list(idx[:3]) + [item] + list(idx[3:]), dtype=object, name="idx"
+            list(idx[:3]) + [item.tz_convert(idx.tz)] + list(idx[3:]),
+            name="idx",
         )
+        assert expected.dtype == idx.dtype
         tm.assert_index_equal(result, expected)
 
-        # mismatched tz -> cast to object (could reasonably cast to same tz)
         item = datetime(2000, 1, 4, tzinfo=pytz.timezone("US/Eastern"))
         result = idx.insert(3, item)
         expected = Index(
-            list(idx[:3]) + [item] + list(idx[3:]), dtype=object, name="idx"
+            list(idx[:3]) + [item.astimezone(idx.tzinfo)] + list(idx[3:]),
+            name="idx",
         )
+        assert expected.dtype == idx.dtype
         tm.assert_index_equal(result, expected)
 
     @pytest.mark.parametrize(
@@ -222,7 +226,6 @@ class TestInsert:
         result = dti.insert(1, item)
 
         if isinstance(item, np.ndarray):
-            # FIXME: without doing .item() here this segfaults
             assert item.item() == 0
             expected = Index([dti[0], 0] + list(dti[1:]), dtype=object, name=9)
         else:

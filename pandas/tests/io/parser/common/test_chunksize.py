@@ -15,6 +15,8 @@ from pandas import (
 )
 import pandas._testing as tm
 
+pytestmark = pytest.mark.usefixtures("pyarrow_skip")
+
 
 @pytest.mark.parametrize("index_col", [0, "index"])
 def test_read_chunksize_with_index(all_parsers, index_col):
@@ -159,7 +161,7 @@ def test_chunk_begins_with_newline_whitespace(all_parsers):
     tm.assert_frame_equal(result, expected)
 
 
-@pytest.mark.xfail(reason="GH38630, sometimes gives ResourceWarning", strict=False)
+@pytest.mark.slow
 def test_chunks_have_consistent_numerical_type(all_parsers):
     parser = all_parsers
     integers = [str(i) for i in range(499999)]
@@ -173,37 +175,29 @@ def test_chunks_have_consistent_numerical_type(all_parsers):
     assert result.a.dtype == float
 
 
-def test_warn_if_chunks_have_mismatched_type(all_parsers, request):
+def test_warn_if_chunks_have_mismatched_type(all_parsers):
     warning_type = None
     parser = all_parsers
-    integers = [str(i) for i in range(499999)]
-    data = "a\n" + "\n".join(integers + ["a", "b"] + integers)
+    size = 10000
 
     # see gh-3866: if chunks are different types and can't
     # be coerced using numerical types, then issue warning.
     if parser.engine == "c" and parser.low_memory:
         warning_type = DtypeWarning
+        # Use larger size to hit warning path
+        size = 499999
+
+    integers = [str(i) for i in range(size)]
+    data = "a\n" + "\n".join(integers + ["a", "b"] + integers)
 
     buf = StringIO(data)
 
-    try:
-        with tm.assert_produces_warning(warning_type):
-            df = parser.read_csv(buf)
-    except AssertionError as err:
-        # 2021-02-21 this occasionally fails on the CI with an unexpected
-        #  ResourceWarning that we have been unable to track down,
-        #  see GH#38630
-        if "ResourceWarning" not in str(err) or parser.engine != "python":
-            raise
-
-        # Check the main assertion of the test before re-raising
-        assert df.a.dtype == object
-
-        mark = pytest.mark.xfail(
-            reason="ResourceWarning for unclosed SSL Socket, GH#38630"
-        )
-        request.node.add_marker(mark)
-        raise
+    df = parser.read_csv_check_warnings(
+        warning_type,
+        r"Columns \(0\) have mixed types. "
+        "Specify dtype option on import or set low_memory=False.",
+        buf,
+    )
 
     assert df.a.dtype == object
 
@@ -241,3 +235,48 @@ def test_read_csv_memory_growth_chunksize(all_parsers):
         with parser.read_csv(path, chunksize=20) as result:
             for _ in result:
                 pass
+
+
+def test_chunksize_with_usecols_second_block_shorter(all_parsers):
+    # GH#21211
+    parser = all_parsers
+    data = """1,2,3,4
+5,6,7,8
+9,10,11
+"""
+
+    result_chunks = parser.read_csv(
+        StringIO(data),
+        names=["a", "b"],
+        chunksize=2,
+        usecols=[0, 1],
+        header=None,
+    )
+
+    expected_frames = [
+        DataFrame({"a": [1, 5], "b": [2, 6]}),
+        DataFrame({"a": [9], "b": [10]}, index=[2]),
+    ]
+
+    for i, result in enumerate(result_chunks):
+        tm.assert_frame_equal(result, expected_frames[i])
+
+
+def test_chunksize_second_block_shorter(all_parsers):
+    # GH#21211
+    parser = all_parsers
+    data = """a,b,c,d
+1,2,3,4
+5,6,7,8
+9,10,11
+"""
+
+    result_chunks = parser.read_csv(StringIO(data), chunksize=2)
+
+    expected_frames = [
+        DataFrame({"a": [1, 5], "b": [2, 6], "c": [3, 7], "d": [4, 8]}),
+        DataFrame({"a": [9], "b": [10], "c": [11], "d": [np.nan]}, index=[2]),
+    ]
+
+    for i, result in enumerate(result_chunks):
+        tm.assert_frame_equal(result, expected_frames[i])

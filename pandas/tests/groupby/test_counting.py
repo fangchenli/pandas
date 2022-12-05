@@ -188,27 +188,27 @@ class TestCounting:
             tm.assert_series_equal(g.ngroup(), Series(ngroupd))
             tm.assert_series_equal(g.cumcount(), Series(cumcounted))
 
-    def test_ngroup_respects_groupby_order(self):
+    def test_ngroup_respects_groupby_order(self, sort):
         np.random.seed(0)
         df = DataFrame({"a": np.random.choice(list("abcdef"), 100)})
-        for sort_flag in (False, True):
-            g = df.groupby(["a"], sort=sort_flag)
-            df["group_id"] = -1
-            df["group_index"] = -1
+        g = df.groupby("a", sort=sort)
+        df["group_id"] = -1
+        df["group_index"] = -1
 
-            for i, (_, group) in enumerate(g):
-                df.loc[group.index, "group_id"] = i
-                for j, ind in enumerate(group.index):
-                    df.loc[ind, "group_index"] = j
+        for i, (_, group) in enumerate(g):
+            df.loc[group.index, "group_id"] = i
+            for j, ind in enumerate(group.index):
+                df.loc[ind, "group_index"] = j
 
-            tm.assert_series_equal(Series(df["group_id"].values), g.ngroup())
-            tm.assert_series_equal(Series(df["group_index"].values), g.cumcount())
+        tm.assert_series_equal(Series(df["group_id"].values), g.ngroup())
+        tm.assert_series_equal(Series(df["group_index"].values), g.cumcount())
 
     @pytest.mark.parametrize(
         "datetimelike",
         [
             [Timestamp(f"2016-05-{i:02d} 20:09:25+00:00") for i in range(1, 4)],
             [Timestamp(f"2016-05-{i:02d} 20:09:25") for i in range(1, 4)],
+            [Timestamp(f"2016-05-{i:02d} 20:09:25", tz="UTC") for i in range(1, 4)],
             [Timedelta(x, unit="h") for x in range(1, 4)],
             [Period(freq="2W", year=2017, month=x) for x in range(1, 4)],
         ],
@@ -363,7 +363,7 @@ def test_count_uses_size_on_exception():
         pass
 
     class RaisingObject:
-        def __init__(self, msg="I will raise inside Cython"):
+        def __init__(self, msg="I will raise inside Cython") -> None:
             super().__init__()
             self.msg = msg
 

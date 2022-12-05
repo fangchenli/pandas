@@ -49,9 +49,6 @@ class TestSeriesLogicalOps:
     def test_logical_operators_int_dtype_with_int_dtype(self):
         # GH#9016: support bitwise op for integer types
 
-        # TODO: unused
-        # s_0101 = Series([0, 1, 0, 1])
-
         s_0123 = Series(range(4), dtype="int64")
         s_3333 = Series([3] * 4)
         s_4444 = Series([4] * 4)
@@ -267,39 +264,26 @@ class TestSeriesLogicalOps:
         result = op(ser, idx2)
         tm.assert_series_equal(result, expected)
 
-    def test_reversed_xor_with_index_returns_index(self):
-        # GH#22092, GH#19792
+    def test_reversed_xor_with_index_returns_series(self):
+        # GH#22092, GH#19792 pre-2.0 these were aliased to setops
         ser = Series([True, True, False, False])
-        idx1 = Index([True, False, True, False])
+        idx1 = Index(
+            [True, False, True, False], dtype=object
+        )  # TODO: raises if bool-dtype
         idx2 = Index([1, 0, 1, 0])
 
-        expected = Index.symmetric_difference(idx1, ser)
-        with tm.assert_produces_warning(FutureWarning):
-            result = idx1 ^ ser
-        tm.assert_index_equal(result, expected)
+        expected = Series([False, True, True, False])
+        result = idx1 ^ ser
+        tm.assert_series_equal(result, expected)
 
-        expected = Index.symmetric_difference(idx2, ser)
-        with tm.assert_produces_warning(FutureWarning):
-            result = idx2 ^ ser
-        tm.assert_index_equal(result, expected)
+        result = idx2 ^ ser
+        tm.assert_series_equal(result, expected)
 
     @pytest.mark.parametrize(
         "op",
         [
-            pytest.param(
-                ops.rand_,
-                marks=pytest.mark.xfail(
-                    reason="GH#22092 Index __and__ returns Index intersection",
-                    raises=AssertionError,
-                ),
-            ),
-            pytest.param(
-                ops.ror_,
-                marks=pytest.mark.xfail(
-                    reason="GH#22092 Index __or__ returns Index union",
-                    raises=AssertionError,
-                ),
-            ),
+            ops.rand_,
+            ops.ror_,
         ],
     )
     def test_reversed_logical_op_with_index_returns_series(self, op):
@@ -309,32 +293,30 @@ class TestSeriesLogicalOps:
         idx2 = Index([1, 0, 1, 0])
 
         expected = Series(op(idx1.values, ser.values))
-        with tm.assert_produces_warning(FutureWarning):
-            result = op(ser, idx1)
+        result = op(ser, idx1)
         tm.assert_series_equal(result, expected)
 
-        expected = Series(op(idx2.values, ser.values))
-        with tm.assert_produces_warning(FutureWarning):
-            result = op(ser, idx2)
+        expected = op(ser, Series(idx2))
+        result = op(ser, idx2)
         tm.assert_series_equal(result, expected)
 
     @pytest.mark.parametrize(
         "op, expected",
         [
-            (ops.rand_, Index([False, True])),
-            (ops.ror_, Index([False, True])),
-            (ops.rxor, Index([])),
+            (ops.rand_, Series([False, False])),
+            (ops.ror_, Series([True, True])),
+            (ops.rxor, Series([True, True])),
         ],
     )
     def test_reverse_ops_with_index(self, op, expected):
         # https://github.com/pandas-dev/pandas/pull/23628
         # multi-set Index ops are buggy, so let's avoid duplicates...
+        # GH#49503
         ser = Series([True, False])
         idx = Index([False, True])
-        with tm.assert_produces_warning(FutureWarning, check_stacklevel=False):
-            # behaving as set ops is deprecated, will become logical ops
-            result = op(ser, idx)
-        tm.assert_index_equal(result, expected)
+
+        result = op(ser, idx)
+        tm.assert_series_equal(result, expected)
 
     def test_logical_ops_label_based(self):
         # GH#4947

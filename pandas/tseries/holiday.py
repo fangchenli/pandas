@@ -1,11 +1,12 @@
+from __future__ import annotations
+
 from datetime import (
     datetime,
     timedelta,
 )
-from typing import List
 import warnings
 
-from dateutil.relativedelta import (  # noqa
+from dateutil.relativedelta import (
     FR,
     MO,
     SA,
@@ -53,9 +54,9 @@ def next_monday_or_tuesday(dt: datetime) -> datetime:
     (because Monday is already taken by adjacent holiday on the day before)
     """
     dow = dt.weekday()
-    if dow == 5 or dow == 6:
+    if dow in (5, 6):
         return dt + timedelta(2)
-    elif dow == 0:
+    if dow == 0:
         return dt + timedelta(1)
     return dt
 
@@ -159,7 +160,7 @@ class Holiday:
         start_date=None,
         end_date=None,
         days_of_week=None,
-    ):
+    ) -> None:
         """
         Parameters
         ----------
@@ -176,34 +177,37 @@ class Holiday:
 
         Examples
         --------
-        >>> from pandas.tseries.holiday import Holiday, nearest_workday
         >>> from dateutil.relativedelta import MO
 
-        >>> USMemorialDay = Holiday(
+        >>> USMemorialDay = pd.tseries.holiday.Holiday(
         ...     "Memorial Day", month=5, day=31, offset=pd.DateOffset(weekday=MO(-1))
         ... )
         >>> USMemorialDay
         Holiday: Memorial Day (month=5, day=31, offset=<DateOffset: weekday=MO(-1)>)
 
-        >>> USLaborDay = Holiday(
+        >>> USLaborDay = pd.tseries.holiday.Holiday(
         ...     "Labor Day", month=9, day=1, offset=pd.DateOffset(weekday=MO(1))
         ... )
         >>> USLaborDay
         Holiday: Labor Day (month=9, day=1, offset=<DateOffset: weekday=MO(+1)>)
 
-        >>> July3rd = Holiday("July 3rd", month=7, day=3)
+        >>> July3rd = pd.tseries.holiday.Holiday("July 3rd", month=7, day=3)
         >>> July3rd
         Holiday: July 3rd (month=7, day=3, )
 
-        >>> NewYears = Holiday(
-        ...     "New Years Day", month=1,  day=1, observance=nearest_workday
+        >>> NewYears = pd.tseries.holiday.Holiday(
+        ...     "New Years Day", month=1,  day=1,
+        ...      observance=pd.tseries.holiday.nearest_workday
         ... )
         >>> NewYears  # doctest: +SKIP
         Holiday: New Years Day (
             month=1, day=1, observance=<function nearest_workday at 0x66545e9bc440>
         )
 
-        >>> July3rd = Holiday("July 3rd", month=7, day=3, days_of_week=(0, 1, 2, 3))
+        >>> July3rd = pd.tseries.holiday.Holiday(
+        ...     "July 3rd", month=7, day=3,
+        ...     days_of_week=(0, 1, 2, 3)
+        ... )
         >>> July3rd
         Holiday: July 3rd (month=7, day=3, )
         """
@@ -238,7 +242,7 @@ class Holiday:
         repr = f"Holiday: {self.name} ({info})"
         return repr
 
-    def dates(self, start_date, end_date, return_name=False):
+    def dates(self, start_date, end_date, return_name: bool = False):
         """
         Calculate holidays observed between start date and end date
 
@@ -331,6 +335,9 @@ class Holiday:
         -------
         Dates with rules applied
         """
+        if dates.empty:
+            return DatetimeIndex([])
+
         if self.observance is not None:
             return dates.map(lambda d: self.observance(d))
 
@@ -352,7 +359,7 @@ class Holiday:
 holiday_calendars = {}
 
 
-def register(cls):
+def register(cls) -> None:
     try:
         name = cls.name
     except AttributeError:
@@ -384,12 +391,12 @@ class AbstractHolidayCalendar(metaclass=HolidayCalendarMetaClass):
     Abstract interface to create holidays following certain rules.
     """
 
-    rules: List[Holiday] = []
+    rules: list[Holiday] = []
     start_date = Timestamp(datetime(1970, 1, 1))
     end_date = Timestamp(datetime(2200, 12, 31))
     _cache = None
 
-    def __init__(self, name=None, rules=None):
+    def __init__(self, name=None, rules=None) -> None:
         """
         Initializes holiday object with a given set a rules.  Normally
         classes just have the rules defined within them.
@@ -416,7 +423,7 @@ class AbstractHolidayCalendar(metaclass=HolidayCalendarMetaClass):
 
         return None
 
-    def holidays(self, start=None, end=None, return_name=False):
+    def holidays(self, start=None, end=None, return_name: bool = False):
         """
         Returns a curve with holidays between start_date and end_date
 
@@ -502,7 +509,7 @@ class AbstractHolidayCalendar(metaclass=HolidayCalendarMetaClass):
         other_holidays.update(base_holidays)
         return list(other_holidays.values())
 
-    def merge(self, other, inplace=False):
+    def merge(self, other, inplace: bool = False):
         """
         Merge holiday calendars together.  The caller's class
         rules take precedence.  The merge will be done
@@ -529,17 +536,17 @@ USColumbusDay = Holiday(
     "Columbus Day", month=10, day=1, offset=DateOffset(weekday=MO(2))
 )
 USThanksgivingDay = Holiday(
-    "Thanksgiving", month=11, day=1, offset=DateOffset(weekday=TH(4))
+    "Thanksgiving Day", month=11, day=1, offset=DateOffset(weekday=TH(4))
 )
 USMartinLutherKingJr = Holiday(
-    "Martin Luther King Jr. Day",
+    "Birthday of Martin Luther King, Jr.",
     start_date=datetime(1986, 1, 1),
     month=1,
     day=1,
     offset=DateOffset(weekday=MO(3)),
 )
 USPresidentsDay = Holiday(
-    "Presidents Day", month=2, day=1, offset=DateOffset(weekday=MO(3))
+    "Washington’s Birthday", month=2, day=1, offset=DateOffset(weekday=MO(3))
 )
 GoodFriday = Holiday("Good Friday", month=1, day=1, offset=[Easter(), Day(-2)])
 
@@ -549,21 +556,27 @@ EasterMonday = Holiday("Easter Monday", month=1, day=1, offset=[Easter(), Day(1)
 class USFederalHolidayCalendar(AbstractHolidayCalendar):
     """
     US Federal Government Holiday Calendar based on rules specified by:
-    https://www.opm.gov/policy-data-oversight/
-       snow-dismissal-procedures/federal-holidays/
+    https://www.opm.gov/policy-data-oversight/pay-leave/federal-holidays/
     """
 
     rules = [
-        Holiday("New Years Day", month=1, day=1, observance=nearest_workday),
+        Holiday("New Year's Day", month=1, day=1, observance=nearest_workday),
         USMartinLutherKingJr,
         USPresidentsDay,
         USMemorialDay,
-        Holiday("July 4th", month=7, day=4, observance=nearest_workday),
+        Holiday(
+            "Juneteenth National Independence Day",
+            month=6,
+            day=19,
+            start_date="2021-06-18",
+            observance=nearest_workday,
+        ),
+        Holiday("Independence Day", month=7, day=4, observance=nearest_workday),
         USLaborDay,
         USColumbusDay,
         Holiday("Veterans Day", month=11, day=11, observance=nearest_workday),
         USThanksgivingDay,
-        Holiday("Christmas", month=12, day=25, observance=nearest_workday),
+        Holiday("Christmas Day", month=12, day=25, observance=nearest_workday),
     ]
 
 
@@ -571,3 +584,27 @@ def HolidayCalendarFactory(name, base, other, base_class=AbstractHolidayCalendar
     rules = AbstractHolidayCalendar.merge_class(base, other)
     calendar_class = type(name, (base_class,), {"rules": rules, "name": name})
     return calendar_class
+
+
+__all__ = [
+    "after_nearest_workday",
+    "before_nearest_workday",
+    "FR",
+    "get_calendar",
+    "HolidayCalendarFactory",
+    "MO",
+    "nearest_workday",
+    "next_monday",
+    "next_monday_or_tuesday",
+    "next_workday",
+    "previous_friday",
+    "previous_workday",
+    "register",
+    "SA",
+    "SU",
+    "sunday_to_monday",
+    "TH",
+    "TU",
+    "WE",
+    "weekend_to_monday",
+]

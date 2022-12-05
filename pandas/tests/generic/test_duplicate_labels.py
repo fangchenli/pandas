@@ -63,15 +63,12 @@ class TestPreserves:
         assert df.loc[["a"]].flags.allows_duplicate_labels is False
         assert df.loc[:, ["A", "B"]].flags.allows_duplicate_labels is False
 
-    @not_implemented
     def test_to_frame(self):
-        s = pd.Series(dtype=float).set_flags(allows_duplicate_labels=False)
-        assert s.to_frame().flags.allows_duplicate_labels is False
+        ser = pd.Series(dtype=float).set_flags(allows_duplicate_labels=False)
+        assert ser.to_frame().flags.allows_duplicate_labels is False
 
     @pytest.mark.parametrize("func", ["add", "sub"])
-    @pytest.mark.parametrize(
-        "frame", [False, pytest.param(True, marks=not_implemented)]
-    )
+    @pytest.mark.parametrize("frame", [False, True])
     @pytest.mark.parametrize("other", [1, pd.Series([1, 2], name="A")])
     def test_binops(self, func, other, frame):
         df = pd.Series([1, 2], name="A", index=["a", "b"]).set_flags(
@@ -85,7 +82,6 @@ class TestPreserves:
         assert df.flags.allows_duplicate_labels is False
         assert func(df).flags.allows_duplicate_labels is False
 
-    @not_implemented
     def test_preserve_getitem(self):
         df = pd.DataFrame({"A": [1, 2]}).set_flags(allows_duplicate_labels=False)
         assert df[["A"]].flags.allows_duplicate_labels is False
@@ -294,14 +290,12 @@ class TestRaises:
 
         assert data.flags.allows_duplicate_labels is True
 
-    @pytest.mark.parametrize(
-        "func", [operator.methodcaller("append", pd.Series(0, index=["a", "b"]))]
-    )
-    def test_series_raises(self, func):
-        s = pd.Series([0, 1], index=["a", "b"]).set_flags(allows_duplicate_labels=False)
+    def test_series_raises(self):
+        a = pd.Series(0, index=["a", "b"])
+        b = pd.Series([0, 1], index=["a", "b"]).set_flags(allows_duplicate_labels=False)
         msg = "Index has duplicates."
         with pytest.raises(pd.errors.DuplicateLabelError, match=msg):
-            func(s)
+            pd.concat([a, b])
 
     @pytest.mark.parametrize(
         "getter, target",
@@ -309,18 +303,12 @@ class TestRaises:
             (operator.itemgetter(["A", "A"]), None),
             # loc
             (operator.itemgetter(["a", "a"]), "loc"),
-            pytest.param(
-                operator.itemgetter(("a", ["A", "A"])), "loc", marks=not_implemented
-            ),
+            pytest.param(operator.itemgetter(("a", ["A", "A"])), "loc"),
             (operator.itemgetter((["a", "a"], "A")), "loc"),
             # iloc
             (operator.itemgetter([0, 0]), "iloc"),
-            pytest.param(
-                operator.itemgetter((0, [0, 0])), "iloc", marks=not_implemented
-            ),
-            pytest.param(
-                operator.itemgetter(([0, 0], 0)), "iloc", marks=not_implemented
-            ),
+            pytest.param(operator.itemgetter((0, [0, 0])), "iloc"),
+            pytest.param(operator.itemgetter(([0, 0], 0)), "iloc"),
         ],
     )
     def test_getitem_raises(self, getter, target):
@@ -426,7 +414,6 @@ def test_dataframe_insert_raises():
     "method, frame_only",
     [
         (operator.methodcaller("set_index", "A", inplace=True), True),
-        (operator.methodcaller("set_axis", ["A", "B"], inplace=True), False),
         (operator.methodcaller("reset_index", inplace=True), True),
         (operator.methodcaller("rename", lambda x: x, inplace=True), False),
     ],

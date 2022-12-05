@@ -10,7 +10,6 @@ from pandas import (
     DataFrame,
     Index,
     MultiIndex,
-    Series,
     merge,
 )
 import pandas._testing as tm
@@ -32,9 +31,8 @@ class TestRename:
             "errors",
         }
 
-    @pytest.mark.parametrize("klass", [Series, DataFrame])
-    def test_rename_mi(self, klass):
-        obj = klass(
+    def test_rename_mi(self, frame_or_series):
+        obj = frame_or_series(
             [11, 21, 31],
             index=MultiIndex.from_tuples([("A", x) for x in ["a", "B", "c"]]),
         )
@@ -171,24 +169,37 @@ class TestRename:
         tm.assert_index_equal(renamed.index, new_index)
 
     @td.skip_array_manager_not_yet_implemented  # TODO(ArrayManager) setitem copy/view
-    def test_rename_nocopy(self, float_frame):
+    def test_rename_nocopy(self, float_frame, using_copy_on_write):
         renamed = float_frame.rename(columns={"C": "foo"}, copy=False)
-        renamed["foo"] = 1.0
-        assert (float_frame["C"] == 1.0).all()
+
+        assert np.shares_memory(renamed["foo"]._values, float_frame["C"]._values)
+
+        # TODO(CoW) this also shouldn't warn in case of CoW, but the heuristic
+        # checking if the array shares memory doesn't work if CoW happened
+        with tm.assert_produces_warning(FutureWarning if using_copy_on_write else None):
+            # This loc setitem already happens inplace, so no warning
+            #  that this will change in the future
+            renamed.loc[:, "foo"] = 1.0
+        if using_copy_on_write:
+            assert not (float_frame["C"] == 1.0).all()
+        else:
+            assert (float_frame["C"] == 1.0).all()
 
     def test_rename_inplace(self, float_frame):
         float_frame.rename(columns={"C": "foo"})
         assert "C" in float_frame
         assert "foo" not in float_frame
 
-        c_id = id(float_frame["C"])
+        c_values = float_frame["C"]
         float_frame = float_frame.copy()
         return_value = float_frame.rename(columns={"C": "foo"}, inplace=True)
         assert return_value is None
 
         assert "C" not in float_frame
         assert "foo" in float_frame
-        assert id(float_frame["foo"]) != c_id
+        # GH 44153
+        # Used to be id(float_frame["foo"]) != c_id, but flaky in the CI
+        assert float_frame["foo"] is not c_values
 
     def test_rename_bug(self):
         # GH 5344
@@ -323,7 +334,7 @@ class TestRename:
 
         # Duplicates
         with pytest.raises(TypeError, match="multiple values"):
-            df.rename(id, mapper=id)
+            df.rename(id, mapper=id)  # pylint: disable=redundant-keyword-arg
 
     def test_rename_positional_raises(self):
         # GH 29136
@@ -362,7 +373,6 @@ class TestRename:
         with pytest.raises(TypeError, match=msg):
             df.rename({}, columns={}, index={})
 
-    @td.skip_array_manager_not_yet_implemented
     def test_rename_with_duplicate_columns(self):
         # GH#4403
         df4 = DataFrame(
@@ -403,3 +413,14 @@ class TestRename:
             ],
         ).set_index(["STK_ID", "RPT_Date"], drop=False)
         tm.assert_frame_equal(result, expected)
+
+    def test_rename_boolean_index(self):
+        df = DataFrame(np.arange(15).reshape(3, 5), columns=[False, True, 2, 3, 4])
+        mapper = {0: "foo", 1: "bar", 2: "bah"}
+        res = df.rename(index=mapper)
+        exp = DataFrame(
+            np.arange(15).reshape(3, 5),
+            columns=[False, True, 2, 3, 4],
+            index=["foo", "bar", "bah"],
+        )
+        tm.assert_frame_equal(res, exp)

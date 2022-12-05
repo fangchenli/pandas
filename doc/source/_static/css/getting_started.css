@@ -131,20 +131,30 @@ ul.task-bullet > li > p:first-child {
 
 /* Getting started index page */
 
-.intro-card {
+.comparison-card {
   background:#FFF;
   border-radius:0;
   padding: 30px 10px 10px 10px;
   margin: 10px 0px;
 }
 
-.intro-card .card-text {
-  margin:20px 0px;
-  /*min-height: 150px; */
+.comparison-card p.card-text {
+  margin: 0px;
 }
 
-.intro-card .card-img-top {
+.comparison-card .card-img-top {
   margin: 10px;
+  margin-bottom: 20px;
+  height: 72px;
+}
+
+.comparison-card-excel .card-img-top, .comparison-card-stata .card-img-top, .comparison-card-sas .card-img-top {
+  height: 52px;
+}
+
+.comparison-card .card-footer {
+  border: none;
+  background-color: transparent;
 }
 
 .install-block {
@@ -153,16 +163,18 @@ ul.task-bullet > li > p:first-child {
 
 .install-card .card-header {
   border: none;
-  background-color:white;
-  color: #150458;
+  background-color: transparent;
+  padding: 1rem 1rem 0rem 1rem;
+}
+
+.install-card .card-header p.card-text {
   font-size: 1.1rem;
   font-weight: bold;
-  padding: 1rem 1rem 0rem 1rem;
 }
 
 .install-card .card-footer {
   border: none;
-  background-color:white;
+  background-color: transparent;
 }
 
 .install-card pre {

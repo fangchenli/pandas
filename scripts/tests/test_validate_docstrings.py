@@ -2,7 +2,8 @@ import io
 import textwrap
 
 import pytest
-import validate_docstrings
+
+from .. import validate_docstrings
 
 
 class BadDocstrings:
@@ -22,9 +23,8 @@ class BadDocstrings:
         pandas.Series.rename : Alter Series index labels or name.
         DataFrame.head : The first `n` rows of the caller object.
         """
-        pass
 
-    def redundant_import(self, foo=None, bar=None):
+    def redundant_import(self, paramx=None, paramy=None):
         """
         A sample DataFrame method.
 
@@ -44,7 +44,6 @@ class BadDocstrings:
         >>> df.all(bool_only=True)
         Series([], dtype: bool)
         """
-        pass
 
     def unused_import(self):
         """
@@ -53,7 +52,6 @@ class BadDocstrings:
         >>> import pandas as pdf
         >>> df = pd.DataFrame(np.ones((3, 3)), columns=('a', 'b', 'c'))
         """
-        pass
 
     def missing_whitespace_around_arithmetic_operator(self):
         """
@@ -62,7 +60,6 @@ class BadDocstrings:
         >>> 2+5
         7
         """
-        pass
 
     def indentation_is_not_a_multiple_of_four(self):
         """
@@ -71,7 +68,6 @@ class BadDocstrings:
         >>> if 2 + 5:
         ...   pass
         """
-        pass
 
     def missing_whitespace_after_comma(self):
         """
@@ -79,7 +75,19 @@ class BadDocstrings:
         --------
         >>> df = pd.DataFrame(np.ones((3,3)),columns=('a','b', 'c'))
         """
-        pass
+
+    def write_array_like_with_hyphen_not_underscore(self):
+        """
+        In docstrings, use array-like over array_like
+        """
+
+    def leftover_files(self):
+        """
+        Examples
+        --------
+        >>> import pathlib
+        >>> pathlib.Path("foo.txt").touch()
+        """
 
 
 class TestValidator:
@@ -162,12 +170,19 @@ class TestValidator:
             (
                 "BadDocstrings",
                 "indentation_is_not_a_multiple_of_four",
-                ("flake8 error: E111 indentation is not a multiple of four",),
+                # with flake8 3.9.0, the message ends with four spaces,
+                #  whereas in earlier versions, it ended with "four"
+                ("flake8 error: E111 indentation is not a multiple of 4",),
             ),
             (
                 "BadDocstrings",
                 "missing_whitespace_after_comma",
                 ("flake8 error: E231 missing whitespace after ',' (3 times)",),
+            ),
+            (
+                "BadDocstrings",
+                "write_array_like_with_hyphen_not_underscore",
+                ("Use 'array-like' rather than 'array_like' in docstrings",),
             ),
         ],
     )
@@ -176,7 +191,13 @@ class TestValidator:
             self._import_path(klass=klass, func=func)
         )
         for msg in msgs:
-            assert msg in " ".join(err[1] for err in result["errors"])
+            assert msg in " ".join([err[1] for err in result["errors"]])
+
+    def test_leftover_files_raises(self):
+        with pytest.raises(Exception, match="The following files"):
+            validate_docstrings.pandas_validate(
+                self._import_path(klass="BadDocstrings", func="leftover_files")
+            )
 
     def test_validate_all_ignore_deprecated(self, monkeypatch):
         monkeypatch.setattr(

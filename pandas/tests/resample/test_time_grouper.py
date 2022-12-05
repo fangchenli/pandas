@@ -78,17 +78,18 @@ def test_apply_iteration():
 
 
 @pytest.mark.parametrize(
-    "name, func",
+    "func",
     [
-        ("Int64Index", tm.makeIntIndex),
-        ("Index", tm.makeUnicodeIndex),
-        ("Float64Index", tm.makeFloatIndex),
-        ("MultiIndex", lambda m: tm.makeCustomIndex(m, 2)),
+        tm.makeIntIndex,
+        tm.makeStringIndex,
+        tm.makeFloatIndex,
+        (lambda m: tm.makeCustomIndex(m, 2)),
     ],
 )
-def test_fails_on_no_datetime_index(name, func):
+def test_fails_on_no_datetime_index(func):
     n = 2
     index = func(n)
+    name = type(index).__name__
     df = DataFrame({"a": np.random.randn(n)}, index=index)
 
     msg = (
@@ -121,12 +122,8 @@ def test_aaa_group_order():
     tm.assert_frame_equal(grouped.get_group(datetime(2013, 1, 5)), df[4::5])
 
 
-def test_aggregate_normal(request, resample_method):
+def test_aggregate_normal(resample_method):
     """Check TimeGrouper's aggregation is identical as normal groupby."""
-    if resample_method == "ohlc":
-        request.node.add_marker(
-            pytest.mark.xfail(reason="DataError: No numeric types to aggregate")
-        )
 
     data = np.random.randn(20, 4)
     normal_df = DataFrame(data, columns=["A", "B", "C", "D"])
@@ -149,16 +146,31 @@ def test_aggregate_normal(request, resample_method):
     expected.index = date_range(start="2013-01-01", freq="D", periods=5, name="key")
     tm.assert_equal(expected, dt_result)
 
-    # if TimeGrouper is used included, 'nth' doesn't work yet
 
-    """
-    for func in ['nth']:
-        expected = getattr(normal_grouped, func)(3)
-        expected.index = date_range(start='2013-01-01',
-                                    freq='D', periods=5, name='key')
-        dt_result = getattr(dt_grouped, func)(3)
-        tm.assert_frame_equal(expected, dt_result)
-    """
+@pytest.mark.xfail(reason="if TimeGrouper is used included, 'nth' doesn't work yet")
+def test_aggregate_nth():
+    """Check TimeGrouper's aggregation is identical as normal groupby."""
+
+    data = np.random.randn(20, 4)
+    normal_df = DataFrame(data, columns=["A", "B", "C", "D"])
+    normal_df["key"] = [1, 2, 3, 4, 5] * 4
+
+    dt_df = DataFrame(data, columns=["A", "B", "C", "D"])
+    dt_df["key"] = [
+        datetime(2013, 1, 1),
+        datetime(2013, 1, 2),
+        datetime(2013, 1, 3),
+        datetime(2013, 1, 4),
+        datetime(2013, 1, 5),
+    ] * 4
+
+    normal_grouped = normal_df.groupby("key")
+    dt_grouped = dt_df.groupby(Grouper(key="key", freq="D"))
+
+    expected = normal_grouped.nth(3)
+    expected.index = date_range(start="2013-01-01", freq="D", periods=5, name="key")
+    dt_result = dt_grouped.nth(3)
+    tm.assert_frame_equal(expected, dt_result)
 
 
 @pytest.mark.parametrize(
@@ -211,7 +223,7 @@ def test_aggregate_with_nat(func, fill_value):
     dt_result = getattr(dt_grouped, func)()
 
     pad = DataFrame([[fill_value] * 4], index=[3], columns=["A", "B", "C", "D"])
-    expected = normal_result.append(pad)
+    expected = pd.concat([normal_result, pad])
     expected = expected.sort_index()
     dti = date_range(start="2013-01-01", freq="D", periods=5, name="key")
     expected.index = dti._with_freq(None)  # TODO: is this desired?
@@ -242,7 +254,7 @@ def test_aggregate_with_nat_size():
     dt_result = dt_grouped.size()
 
     pad = Series([0], index=[3])
-    expected = normal_result.append(pad)
+    expected = pd.concat([normal_result, pad])
     expected = expected.sort_index()
     expected.index = date_range(
         start="2013-01-01", freq="D", periods=5, name="key"
@@ -255,7 +267,7 @@ def test_repr():
     # GH18203
     result = repr(Grouper(key="A", freq="H"))
     expected = (
-        "TimeGrouper(key='A', freq=<Hour>, axis=0, sort=True, "
+        "TimeGrouper(key='A', freq=<Hour>, axis=0, sort=True, dropna=True, "
         "closed='left', label='left', how='mean', "
         "convention='e', origin='start_day')"
     )
@@ -263,7 +275,7 @@ def test_repr():
 
     result = repr(Grouper(key="A", freq="H", origin="2000-01-01"))
     expected = (
-        "TimeGrouper(key='A', freq=<Hour>, axis=0, sort=True, "
+        "TimeGrouper(key='A', freq=<Hour>, axis=0, sort=True, dropna=True, "
         "closed='left', label='left', how='mean', "
         "convention='e', origin=Timestamp('2000-01-01 00:00:00'))"
     )
@@ -309,9 +321,10 @@ def test_groupby_resample_interpolate():
         .resample("1D")
         .interpolate(method="linear")
     )
+
     expected_ind = pd.MultiIndex.from_tuples(
         [
-            (50, "2018-01-07"),
+            (50, Timestamp("2018-01-07")),
             (50, Timestamp("2018-01-08")),
             (50, Timestamp("2018-01-09")),
             (50, Timestamp("2018-01-10")),
@@ -330,6 +343,7 @@ def test_groupby_resample_interpolate():
         ],
         names=["volume", "week_starting"],
     )
+
     expected = DataFrame(
         data={
             "price": [

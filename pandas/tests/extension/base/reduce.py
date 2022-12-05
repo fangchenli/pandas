@@ -14,13 +14,19 @@ class BaseReduceTests(BaseExtensionTests):
     """
 
     def check_reduce(self, s, op_name, skipna):
-        result = getattr(s, op_name)(skipna=skipna)
-        expected = getattr(s.astype("float64"), op_name)(skipna=skipna)
+        res_op = getattr(s, op_name)
+        exp_op = getattr(s.astype("float64"), op_name)
+        if op_name == "count":
+            result = res_op()
+            expected = exp_op()
+        else:
+            result = res_op(skipna=skipna)
+            expected = exp_op(skipna=skipna)
         tm.assert_almost_equal(result, expected)
 
 
 class BaseNoReduceTests(BaseReduceTests):
-    """ we don't define any reductions """
+    """we don't define any reductions"""
 
     @pytest.mark.parametrize("skipna", [True, False])
     def test_reduce_series_numeric(self, data, all_numeric_reductions, skipna):
@@ -29,7 +35,7 @@ class BaseNoReduceTests(BaseReduceTests):
 
         msg = (
             "[Cc]annot perform|Categorical is not ordered for operation|"
-            "'Categorical' does not implement reduction|"
+            "does not support reduction|"
         )
 
         with pytest.raises(TypeError, match=msg):
@@ -42,7 +48,7 @@ class BaseNoReduceTests(BaseReduceTests):
 
         msg = (
             "[Cc]annot perform|Categorical is not ordered for operation|"
-            "'Categorical' does not implement reduction|"
+            "does not support reduction|"
         )
 
         with pytest.raises(TypeError, match=msg):

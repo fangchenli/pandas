@@ -103,8 +103,10 @@ class TestSetIndex:
         # single level
         res = df.set_index("index")
         exp = DataFrame(
-            data={"a": [0, 1, 2], "b": [3, 4, 5]}, index=Index(di, name="index")
+            data={"a": [0, 1, 2], "b": [3, 4, 5]},
+            index=Index(di, name="index"),
         )
+        exp.index = exp.index._with_freq(None)
         tm.assert_frame_equal(res, exp)
 
         # GH#12920
@@ -593,7 +595,7 @@ class TestSetIndexCustomLabelType:
         # GH#24969
 
         class Thing:
-            def __init__(self, name, color):
+            def __init__(self, name, color) -> None:
                 self.name = name
                 self.color = color
 
@@ -671,7 +673,7 @@ class TestSetIndexCustomLabelType:
 
         # purposefully inherit from something unhashable
         class Thing(set):
-            def __init__(self, name, color):
+            def __init__(self, name, color) -> None:
                 self.name = name
                 self.color = color
 

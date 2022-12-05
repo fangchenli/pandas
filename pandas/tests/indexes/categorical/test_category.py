@@ -2,9 +2,13 @@ import numpy as np
 import pytest
 
 from pandas._libs import index as libindex
+from pandas._libs.arrays import NDArrayBacked
 
 import pandas as pd
-from pandas import Categorical
+from pandas import (
+    Categorical,
+    CategoricalDtype,
+)
 import pandas._testing as tm
 from pandas.core.indexes.api import (
     CategoricalIndex,
@@ -14,13 +18,17 @@ from pandas.tests.indexes.common import Base
 
 
 class TestCategoricalIndex(Base):
-    _holder = CategoricalIndex
+    _index_cls = CategoricalIndex
 
     @pytest.fixture
-    def index(self, request):
+    def simple_index(self) -> CategoricalIndex:
+        return self._index_cls(list("aabbca"), categories=list("cab"), ordered=False)
+
+    @pytest.fixture
+    def index(self):
         return tm.makeCategoricalIndex(100)
 
-    def create_index(self, categories=None, ordered=False):
+    def create_index(self, *, categories=None, ordered=False):
         if categories is None:
             categories = list("cab")
         return CategoricalIndex(list("aabbca"), categories=categories, ordered=ordered)
@@ -30,9 +38,9 @@ class TestCategoricalIndex(Base):
         key = idx[0]
         assert idx._can_hold_identifiers_and_holds_name(key) is True
 
-    def test_insert(self):
+    def test_insert(self, simple_index):
 
-        ci = self.create_index()
+        ci = simple_index
         categories = ci.categories
 
         # test 0th element
@@ -67,9 +75,9 @@ class TestCategoricalIndex(Base):
         expected = Index([pd.NaT, 0, 1, 1], dtype=object)
         tm.assert_index_equal(result, expected)
 
-    def test_delete(self):
+    def test_delete(self, simple_index):
 
-        ci = self.create_index()
+        ci = simple_index
         categories = ci.categories
 
         result = ci.delete(0)
@@ -186,18 +194,19 @@ class TestCategoricalIndex(Base):
             tm.assert_index_equal(result, e)
 
     @pytest.mark.parametrize(
-        "data, categories, expected_data, expected_categories",
+        "data, categories, expected_data",
         [
-            ([1, 1, 1], [1, 2, 3], [1], [1]),
-            ([1, 1, 1], list("abc"), [np.nan], []),
-            ([1, 2, "a"], [1, 2, 3], [1, 2, np.nan], [1, 2]),
-            ([2, "a", "b"], list("abc"), [np.nan, "a", "b"], ["a", "b"]),
+            ([1, 1, 1], [1, 2, 3], [1]),
+            ([1, 1, 1], list("abc"), [np.nan]),
+            ([1, 2, "a"], [1, 2, 3], [1, 2, np.nan]),
+            ([2, "a", "b"], list("abc"), [np.nan, "a", "b"]),
         ],
     )
-    def test_unique(self, data, categories, expected_data, expected_categories):
+    def test_unique(self, data, categories, expected_data, ordered):
+        dtype = CategoricalDtype(categories, ordered=ordered)
 
-        idx = CategoricalIndex(data, categories=categories)
-        expected = CategoricalIndex(expected_data, categories=expected_categories)
+        idx = CategoricalIndex(data, dtype=dtype)
+        expected = CategoricalIndex(expected_data, dtype=dtype)
         tm.assert_index_equal(idx.unique(), expected)
 
     def test_repr_roundtrip(self):
@@ -250,13 +259,10 @@ class TestCategoricalIndex(Base):
         #
         # Must be tested separately from other indexes because
         # self.values is not an ndarray.
-        # GH#29918 Index.base has been removed
-        # FIXME: is this test still meaningful?
-        _base = lambda ar: ar if getattr(ar, "base", None) is None else ar.base
 
         result = CategoricalIndex(index.values, copy=True)
         tm.assert_index_equal(index, result)
-        assert _base(index.values) is not _base(result.values)
+        assert not np.shares_memory(result._data._codes, index._data._codes)
 
         result = CategoricalIndex(index.values, copy=False)
         assert result._data._codes is index._data._codes
@@ -279,6 +285,24 @@ class TestCategoricalIndex(Base):
 class TestCategoricalIndex2:
     # Tests that are not overriding a test in Base
 
+    def test_view_i8(self):
+        # GH#25464
+        ci = tm.makeCategoricalIndex(100)
+        msg = "When changing to a larger dtype, its size must be a divisor"
+        with pytest.raises(ValueError, match=msg):
+            ci.view("i8")
+        with pytest.raises(ValueError, match=msg):
+            ci._data.view("i8")
+
+        ci = ci[:-4]  # length divisible by 8
+
+        res = ci.view("i8")
+        expected = ci._data.codes.view("i8")
+        tm.assert_numpy_array_equal(res, expected)
+
+        cat = ci._data
+        tm.assert_numpy_array_equal(cat.view("i8"), expected)
+
     @pytest.mark.parametrize(
         "dtype, engine_type",
         [
@@ -298,7 +322,8 @@ class TestCategoricalIndex2:
             # having 2**32 - 2**31 categories would be very memory-intensive,
             # so we cheat a bit with the dtype
             ci = CategoricalIndex(range(32768))  # == 2**16 - 2**(16 - 1)
-            ci.values._ndarray = ci.values._ndarray.astype("int64")
+            arr = ci.values._ndarray.astype("int64")
+            NDArrayBacked.__init__(ci._data, arr, ci.dtype)
         assert np.issubdtype(ci.codes.dtype, dtype)
         assert isinstance(ci._engine, engine_type)
 

@@ -59,17 +59,16 @@ class TestSortValues:
     def test_sort_values(self, non_monotonic_idx):
         idx = non_monotonic_idx
         ordered = idx.sort_values()
-        assert ordered.is_monotonic
-
+        assert ordered.is_monotonic_increasing
         ordered = idx.sort_values(ascending=False)
-        assert ordered[::-1].is_monotonic
+        assert ordered[::-1].is_monotonic_increasing
 
         ordered, dexer = idx.sort_values(return_indexer=True)
-        assert ordered.is_monotonic
+        assert ordered.is_monotonic_increasing
         tm.assert_numpy_array_equal(dexer, np.array([1, 2, 0], dtype=np.intp))
 
         ordered, dexer = idx.sort_values(return_indexer=True, ascending=False)
-        assert ordered[::-1].is_monotonic
+        assert ordered[::-1].is_monotonic_increasing
         tm.assert_numpy_array_equal(dexer, np.array([0, 2, 1], dtype=np.intp))
 
     def check_sort_values_with_freq(self, idx):
@@ -295,7 +294,7 @@ class TestSortValues:
         self.check_sort_values_without_freq(idx, expected)
 
     def test_sort_values_without_freq_periodindex_nat(self):
-        # doesnt quite fit into check_sort_values_without_freq
+        # doesn't quite fit into check_sort_values_without_freq
         idx = PeriodIndex(["2011", "2013", "NaT", "2011"], name="pidx", freq="D")
         expected = PeriodIndex(["NaT", "2011", "2011", "2013"], name="pidx", freq="D")
 

@@ -183,9 +183,10 @@ class TestPeriodIndex:
         vals = np.arange(100000, 100000 + 10000, 100, dtype=np.int64)
         vals = vals.view(np.dtype("M8[us]"))
 
-        msg = r"Wrong dtype: datetime64\[us\]"
-        with pytest.raises(ValueError, match=msg):
-            PeriodIndex(vals, freq="D")
+        pi = PeriodIndex(vals, freq="D")
+
+        expected = PeriodIndex(vals.astype("M8[ns]"), freq="D")
+        tm.assert_index_equal(pi, expected)
 
     @pytest.mark.parametrize("box", [None, "series", "index"])
     def test_constructor_datetime64arr_ok(self, box):
@@ -534,11 +535,8 @@ class TestShallowCopy:
 
 
 class TestSeriesPeriod:
-    def setup_method(self, method):
-        self.series = Series(period_range("2000-01-01", periods=10, freq="D"))
-
     def test_constructor_cant_cast_period(self):
-        msg = "Cannot cast PeriodArray to dtype float64"
+        msg = "Cannot cast PeriodIndex to dtype float64"
         with pytest.raises(TypeError, match=msg):
             Series(period_range("2000-01-01", periods=10, freq="D"), dtype=float)
 

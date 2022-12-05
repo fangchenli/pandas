@@ -3,6 +3,8 @@ from datetime import datetime
 import numpy as np
 
 from pandas import (
+    NA,
+    Index,
     NaT,
     Series,
     date_range,
@@ -12,19 +14,35 @@ from .pandas_vb_common import tm
 
 
 class SeriesConstructor:
-
-    params = [None, "dict"]
-    param_names = ["data"]
-
-    def setup(self, data):
+    def setup(self):
         self.idx = date_range(
             start=datetime(2015, 10, 26), end=datetime(2016, 1, 1), freq="50s"
         )
-        dict_data = dict(zip(self.idx, range(len(self.idx))))
-        self.data = None if data is None else dict_data
+        self.data = dict(zip(self.idx, range(len(self.idx))))
+        self.array = np.array([1, 2, 3])
+        self.idx2 = Index(["a", "b", "c"])
 
-    def time_constructor(self, data):
+    def time_constructor_dict(self):
         Series(data=self.data, index=self.idx)
+
+    def time_constructor_no_data(self):
+        Series(data=None, index=self.idx)
+
+    def time_constructor_fastpath(self):
+        Series(self.array, index=self.idx2, name="name", fastpath=True)
+
+
+class ToFrame:
+    params = [["int64", "datetime64[ns]", "category", "Int64"], [None, "foo"]]
+    param_names = ["dtype", "name"]
+
+    def setup(self, dtype, name):
+        arr = np.arange(10**5)
+        ser = Series(arr, dtype=dtype)
+        self.ser = ser
+
+    def time_to_frame(self, dtype, name):
+        self.ser.to_frame(name)
 
 
 class NSort:
@@ -48,7 +66,7 @@ class Dropna:
     param_names = ["dtype"]
 
     def setup(self, dtype):
-        N = 10 ** 6
+        N = 10**6
         data = {
             "int": np.random.randint(1, 10, N),
             "datetime": date_range("2000-01-01", freq="S", periods=N),
@@ -59,6 +77,48 @@ class Dropna:
 
     def time_dropna(self, dtype):
         self.s.dropna()
+
+
+class Fillna:
+
+    params = [
+        [
+            "datetime64[ns]",
+            "float64",
+            "Int64",
+            "int64[pyarrow]",
+            "string",
+            "string[pyarrow]",
+        ],
+        [None, "pad", "backfill"],
+    ]
+    param_names = ["dtype", "method"]
+
+    def setup(self, dtype, method):
+        N = 10**6
+        if dtype == "datetime64[ns]":
+            data = date_range("2000-01-01", freq="S", periods=N)
+            na_value = NaT
+        elif dtype == "float64":
+            data = np.random.randn(N)
+            na_value = np.nan
+        elif dtype in ("Int64", "int64[pyarrow]"):
+            data = np.arange(N)
+            na_value = NA
+        elif dtype in ("string", "string[pyarrow]"):
+            data = tm.rands_array(5, N)
+            na_value = NA
+        else:
+            raise NotImplementedError
+        fill_value = data[0]
+        ser = Series(data, dtype=dtype)
+        ser[::2] = na_value
+        self.ser = ser
+        self.fill_value = fill_value
+
+    def time_fillna(self, dtype, method):
+        value = self.fill_value if method is None else None
+        self.ser.fillna(value=value, method=method)
 
 
 class SearchSorted:
@@ -81,7 +141,7 @@ class SearchSorted:
     param_names = ["dtype"]
 
     def setup(self, dtype):
-        N = 10 ** 5
+        N = 10**5
         data = np.array([1] * N + [2] * N + [3] * N).astype(dtype)
         self.s = Series(data)
 
@@ -117,7 +177,7 @@ class Map:
 
 
 class Clip:
-    params = [50, 1000, 10 ** 5]
+    params = [50, 1000, 10**5]
     param_names = ["n"]
 
     def setup(self, n):
@@ -127,9 +187,19 @@ class Clip:
         self.s.clip(0, 1)
 
 
+class ClipDt:
+    def setup(self):
+        dr = date_range("20220101", periods=100_000, freq="s", tz="UTC")
+        self.clipper_dt = dr[0:1_000].repeat(100)
+        self.s = Series(dr)
+
+    def time_clip(self):
+        self.s.clip(upper=self.clipper_dt)
+
+
 class ValueCounts:
 
-    params = [[10 ** 3, 10 ** 4, 10 ** 5], ["int", "uint", "float", "object"]]
+    params = [[10**3, 10**4, 10**5], ["int", "uint", "float", "object"]]
     param_names = ["N", "dtype"]
 
     def setup(self, N, dtype):
@@ -139,17 +209,53 @@ class ValueCounts:
         self.s.value_counts()
 
 
+class ValueCountsEA:
+
+    params = [[10**3, 10**4, 10**5], [True, False]]
+    param_names = ["N", "dropna"]
+
+    def setup(self, N, dropna):
+        self.s = Series(np.random.randint(0, N, size=10 * N), dtype="Int64")
+        self.s.loc[1] = NA
+
+    def time_value_counts(self, N, dropna):
+        self.s.value_counts(dropna=dropna)
+
+
+class ValueCountsObjectDropNAFalse:
+
+    params = [10**3, 10**4, 10**5]
+    param_names = ["N"]
+
+    def setup(self, N):
+        self.s = Series(np.random.randint(0, N, size=10 * N)).astype("object")
+
+    def time_value_counts(self, N):
+        self.s.value_counts(dropna=False)
+
+
 class Mode:
 
-    params = [[10 ** 3, 10 ** 4, 10 ** 5], ["int", "uint", "float", "object"]]
+    params = [[10**3, 10**4, 10**5], ["int", "uint", "float", "object"]]
     param_names = ["N", "dtype"]
 
     def setup(self, N, dtype):
-        np.random.seed(42)
         self.s = Series(np.random.randint(0, N, size=10 * N)).astype(dtype)
 
     def time_mode(self, N, dtype):
         self.s.mode()
+
+
+class ModeObjectDropNAFalse:
+
+    params = [10**3, 10**4, 10**5]
+    param_names = ["N"]
+
+    def setup(self, N):
+        self.s = Series(np.random.randint(0, N, size=10 * N)).astype("object")
+
+    def time_mode(self, N):
+        self.s.mode(dropna=False)
 
 
 class Dir:
@@ -163,7 +269,7 @@ class Dir:
 class SeriesGetattr:
     # https://github.com/pandas-dev/pandas/issues/19764
     def setup(self):
-        self.s = Series(1, index=date_range("2012-01-01", freq="s", periods=10 ** 6))
+        self.s = Series(1, index=date_range("2012-01-01", freq="s", periods=10**6))
 
     def time_series_datetimeindex_repr(self):
         getattr(self.s, "a", None)
@@ -171,7 +277,7 @@ class SeriesGetattr:
 
 class All:
 
-    params = [[10 ** 3, 10 ** 6], ["fast", "slow"], ["bool", "boolean"]]
+    params = [[10**3, 10**6], ["fast", "slow"], ["bool", "boolean"]]
     param_names = ["N", "case", "dtype"]
 
     def setup(self, N, case, dtype):
@@ -184,7 +290,7 @@ class All:
 
 class Any:
 
-    params = [[10 ** 3, 10 ** 6], ["fast", "slow"], ["bool", "boolean"]]
+    params = [[10**3, 10**6], ["fast", "slow"], ["bool", "boolean"]]
     param_names = ["N", "case", "dtype"]
 
     def setup(self, N, case, dtype):
@@ -212,7 +318,7 @@ class NanOps:
             "kurt",
             "prod",
         ],
-        [10 ** 3, 10 ** 6],
+        [10**3, 10**6],
         ["int8", "int32", "int64", "float64", "Int64", "boolean"],
     ]
     param_names = ["func", "N", "dtype"]
@@ -240,6 +346,39 @@ class Rank:
 
     def time_rank(self, dtype):
         self.s.rank()
+
+
+class Iter:
+
+    param_names = ["dtype"]
+    params = [
+        "bool",
+        "boolean",
+        "int64",
+        "Int64",
+        "float64",
+        "Float64",
+        "datetime64[ns]",
+    ]
+
+    def setup(self, dtype):
+        N = 10**5
+        if dtype in ["bool", "boolean"]:
+            data = np.repeat([True, False], N // 2)
+        elif dtype in ["int64", "Int64"]:
+            data = np.arange(N)
+        elif dtype in ["float64", "Float64"]:
+            data = np.random.randn(N)
+        elif dtype == "datetime64[ns]":
+            data = date_range("2000-01-01", freq="s", periods=N)
+        else:
+            raise NotImplementedError
+
+        self.s = Series(data, dtype=dtype)
+
+    def time_iter(self, dtype):
+        for v in self.s:
+            pass
 
 
 from .pandas_vb_common import setup  # noqa: F401 isort:skip

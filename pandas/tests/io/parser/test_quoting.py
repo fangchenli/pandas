@@ -8,10 +8,13 @@ from io import StringIO
 
 import pytest
 
+from pandas.compat import PY311
 from pandas.errors import ParserError
 
 from pandas import DataFrame
 import pandas._testing as tm
+
+pytestmark = pytest.mark.usefixtures("pyarrow_skip")
 
 
 @pytest.mark.parametrize(
@@ -22,7 +25,7 @@ import pandas._testing as tm
             {"quotechar": None, "quoting": csv.QUOTE_MINIMAL},
             "quotechar must be set if quoting enabled",
         ),
-        ({"quotechar": 2}, '"quotechar" must be string, not int'),
+        ({"quotechar": 2}, '"quotechar" must be string( or None)?, not int'),
     ],
 )
 def test_bad_quote_char(all_parsers, kwargs, msg):
@@ -36,7 +39,7 @@ def test_bad_quote_char(all_parsers, kwargs, msg):
 @pytest.mark.parametrize(
     "quoting,msg",
     [
-        ("foo", '"quoting" must be an integer'),
+        ("foo", '"quoting" must be an integer|Argument'),
         (5, 'bad "quoting" value'),  # quoting must be in the range [0, 3]
     ],
 )
@@ -78,11 +81,16 @@ def test_null_quote_char(all_parsers, quoting, quote_char):
 
     if quoting != csv.QUOTE_NONE:
         # Sanity checking.
-        msg = "quotechar must be set if quoting enabled"
+        msg = (
+            '"quotechar" must be a 1-character string'
+            if PY311 and all_parsers.engine == "python" and quote_char == ""
+            else "quotechar must be set if quoting enabled"
+        )
 
         with pytest.raises(TypeError, match=msg):
             parser.read_csv(StringIO(data), **kwargs)
-    else:
+    elif not (PY311 and all_parsers.engine == "python"):
+        # Python 3.11+ doesn't support null/blank quote chars in their csv parsers
         expected = DataFrame([[1, 2, 3]], columns=["a", "b", "c"])
         result = parser.read_csv(StringIO(data), **kwargs)
         tm.assert_frame_equal(result, expected)

@@ -1,48 +1,55 @@
 import numpy as np
 import pytest
 
+from pandas.errors import InvalidIndexError
+
 from pandas import (
-    Float64Index,
     Index,
-    Int64Index,
     RangeIndex,
     Series,
     Timestamp,
-    UInt64Index,
 )
 import pandas._testing as tm
 
 
 @pytest.fixture
 def index_large():
-    # large values used in UInt64Index tests where no compat needed with Int64/Float64
-    large = [2 ** 63, 2 ** 63 + 10, 2 ** 63 + 15, 2 ** 63 + 20, 2 ** 63 + 25]
-    return UInt64Index(large)
+    # large values used in Index[uint64] tests where no compat needed with Int64/Float64
+    large = [2**63, 2**63 + 10, 2**63 + 15, 2**63 + 20, 2**63 + 25]
+    return Index(large, dtype=np.uint64)
 
 
 class TestGetLoc:
     @pytest.mark.parametrize("method", [None, "pad", "backfill", "nearest"])
     def test_get_loc(self, method):
         index = Index([0, 1, 2])
-        assert index.get_loc(1, method=method) == 1
+        warn = None if method is None else FutureWarning
+
+        with tm.assert_produces_warning(warn, match="deprecated"):
+            assert index.get_loc(1, method=method) == 1
 
         if method:
-            assert index.get_loc(1, method=method, tolerance=0) == 1
+            with tm.assert_produces_warning(warn, match="deprecated"):
+                assert index.get_loc(1, method=method, tolerance=0) == 1
 
     @pytest.mark.parametrize("method", [None, "pad", "backfill", "nearest"])
+    @pytest.mark.filterwarnings("ignore:Passing method:FutureWarning")
     def test_get_loc_raises_bad_label(self, method):
         index = Index([0, 1, 2])
         if method:
             msg = "not supported between"
+            err = TypeError
         else:
-            msg = "invalid key"
+            msg = r"\[1, 2\]"
+            err = InvalidIndexError
 
-        with pytest.raises(TypeError, match=msg):
+        with pytest.raises(err, match=msg):
             index.get_loc([1, 2], method=method)
 
     @pytest.mark.parametrize(
         "method,loc", [("pad", 1), ("backfill", 2), ("nearest", 1)]
     )
+    @pytest.mark.filterwarnings("ignore:Passing method:FutureWarning")
     def test_get_loc_tolerance(self, method, loc):
         index = Index([0, 1, 2])
         assert index.get_loc(1.1, method) == loc
@@ -52,12 +59,14 @@ class TestGetLoc:
     def test_get_loc_outside_tolerance_raises(self, method):
         index = Index([0, 1, 2])
         with pytest.raises(KeyError, match="1.1"):
-            index.get_loc(1.1, method, tolerance=0.05)
+            with tm.assert_produces_warning(FutureWarning, match="deprecated"):
+                index.get_loc(1.1, method, tolerance=0.05)
 
     def test_get_loc_bad_tolerance_raises(self):
         index = Index([0, 1, 2])
         with pytest.raises(ValueError, match="must be numeric"):
-            index.get_loc(1.1, "nearest", tolerance="invalid")
+            with tm.assert_produces_warning(FutureWarning, match="deprecated"):
+                index.get_loc(1.1, "nearest", tolerance="invalid")
 
     def test_get_loc_tolerance_no_method_raises(self):
         index = Index([0, 1, 2])
@@ -67,10 +76,12 @@ class TestGetLoc:
     def test_get_loc_raises_missized_tolerance(self):
         index = Index([0, 1, 2])
         with pytest.raises(ValueError, match="tolerance size must match"):
-            index.get_loc(1.1, "nearest", tolerance=[1, 1])
+            with tm.assert_produces_warning(FutureWarning, match="deprecated"):
+                index.get_loc(1.1, "nearest", tolerance=[1, 1])
 
+    @pytest.mark.filterwarnings("ignore:Passing method:FutureWarning")
     def test_get_loc_float64(self):
-        idx = Float64Index([0.0, 1.0, 2.0])
+        idx = Index([0.0, 1.0, 2.0], dtype=np.float64)
         for method in [None, "pad", "backfill", "nearest"]:
             assert idx.get_loc(1, method) == 1
             if method is not None:
@@ -103,11 +114,11 @@ class TestGetLoc:
             idx.get_loc(1.4, method="nearest", tolerance=np.array([1, 2]))
 
     def test_get_loc_na(self):
-        idx = Float64Index([np.nan, 1, 2])
+        idx = Index([np.nan, 1, 2], dtype=np.float64)
         assert idx.get_loc(1) == 1
         assert idx.get_loc(np.nan) == 0
 
-        idx = Float64Index([np.nan, 1, np.nan])
+        idx = Index([np.nan, 1, np.nan], dtype=np.float64)
         assert idx.get_loc(1) == 1
 
         # representable by slice [0:2:2]
@@ -115,7 +126,7 @@ class TestGetLoc:
         with pytest.raises(KeyError, match=msg):
             idx.slice_locs(np.nan)
         # not representable by slice
-        idx = Float64Index([np.nan, 1, np.nan, np.nan])
+        idx = Index([np.nan, 1, np.nan, np.nan], dtype=np.float64)
         assert idx.get_loc(1) == 1
         msg = "'Cannot get left slice bound for non-unique label: nan"
         with pytest.raises(KeyError, match=msg):
@@ -123,13 +134,13 @@ class TestGetLoc:
 
     def test_get_loc_missing_nan(self):
         # GH#8569
-        idx = Float64Index([1, 2])
+        idx = Index([1, 2], dtype=np.float64)
         assert idx.get_loc(1) == 0
         with pytest.raises(KeyError, match=r"^3$"):
             idx.get_loc(3)
         with pytest.raises(KeyError, match="^nan$"):
             idx.get_loc(np.nan)
-        with pytest.raises(TypeError, match=r"'\[nan\]' is an invalid key"):
+        with pytest.raises(InvalidIndexError, match=r"\[nan\]"):
             # listlike/non-hashable raises TypeError
             idx.get_loc([np.nan])
 
@@ -139,7 +150,27 @@ class TestGetLoc:
         # GH#39382
         idx = Index(vals)
         with pytest.raises(KeyError, match="nan"):
-            idx.get_loc(np.nan, method=method)
+            with tm.assert_produces_warning(FutureWarning, match="deprecated"):
+                idx.get_loc(np.nan, method=method)
+
+    @pytest.mark.parametrize("dtype", ["f8", "i8", "u8"])
+    def test_get_loc_numericindex_none_raises(self, dtype):
+        # case that goes through searchsorted and key is non-comparable to values
+        arr = np.arange(10**7, dtype=dtype)
+        idx = Index(arr)
+        with pytest.raises(KeyError, match="None"):
+            idx.get_loc(None)
+
+    def test_get_loc_overflows(self):
+        # unique but non-monotonic goes through IndexEngine.mapping.get_item
+        idx = Index([0, 2, 1])
+
+        val = np.iinfo(np.int64).max + 1
+
+        with pytest.raises(KeyError, match=str(val)):
+            idx.get_loc(val)
+        with pytest.raises(KeyError, match=str(val)):
+            idx._engine.get_loc(val)
 
 
 class TestGetIndexer:
@@ -249,14 +280,16 @@ class TestGetIndexer:
         actual = index.get_indexer([0.2, 1.8, 8.5], method=method)
         tm.assert_numpy_array_equal(actual, np.array(expected, dtype=np.intp))
 
-    @pytest.mark.parametrize(
-        "idx_class", [Int64Index, RangeIndex, Float64Index, UInt64Index]
-    )
+    @pytest.mark.parametrize("idx_dtype", ["int64", "float64", "uint64", "range"])
     @pytest.mark.parametrize("method", ["get_indexer", "get_indexer_non_unique"])
-    def test_get_indexer_numeric_index_boolean_target(self, method, idx_class):
+    def test_get_indexer_numeric_index_boolean_target(self, method, idx_dtype):
         # GH 16877
 
-        numeric_index = idx_class(RangeIndex(4))
+        if idx_dtype == "range":
+            numeric_index = RangeIndex(4)
+        else:
+            numeric_index = Index(np.arange(4, dtype=idx_dtype))
+
         other = Index([True, False, True])
 
         result = getattr(numeric_index, method)(other)
@@ -300,7 +333,7 @@ class TestGetIndexer:
         tm.assert_numpy_array_equal(res, expected)
 
     def test_get_indexer_float64(self):
-        idx = Float64Index([0.0, 1.0, 2.0])
+        idx = Index([0.0, 1.0, 2.0], dtype=np.float64)
         tm.assert_numpy_array_equal(
             idx.get_indexer(idx), np.array([0, 1, 2], dtype=np.intp)
         )
@@ -318,39 +351,39 @@ class TestGetIndexer:
 
     def test_get_indexer_nan(self):
         # GH#7820
-        result = Float64Index([1, 2, np.nan]).get_indexer([np.nan])
+        result = Index([1, 2, np.nan], dtype=np.float64).get_indexer([np.nan])
         expected = np.array([2], dtype=np.intp)
         tm.assert_numpy_array_equal(result, expected)
 
     def test_get_indexer_int64(self):
-        index = Int64Index(range(0, 20, 2))
-        target = Int64Index(np.arange(10))
+        index = Index(range(0, 20, 2), dtype=np.int64)
+        target = Index(np.arange(10), dtype=np.int64)
         indexer = index.get_indexer(target)
         expected = np.array([0, -1, 1, -1, 2, -1, 3, -1, 4, -1], dtype=np.intp)
         tm.assert_numpy_array_equal(indexer, expected)
 
-        target = Int64Index(np.arange(10))
+        target = Index(np.arange(10), dtype=np.int64)
         indexer = index.get_indexer(target, method="pad")
         expected = np.array([0, 0, 1, 1, 2, 2, 3, 3, 4, 4], dtype=np.intp)
         tm.assert_numpy_array_equal(indexer, expected)
 
-        target = Int64Index(np.arange(10))
+        target = Index(np.arange(10), dtype=np.int64)
         indexer = index.get_indexer(target, method="backfill")
         expected = np.array([0, 1, 1, 2, 2, 3, 3, 4, 4, 5], dtype=np.intp)
         tm.assert_numpy_array_equal(indexer, expected)
 
     def test_get_indexer_uint64(self, index_large):
-        target = UInt64Index(np.arange(10).astype("uint64") * 5 + 2 ** 63)
+        target = Index(np.arange(10).astype("uint64") * 5 + 2**63)
         indexer = index_large.get_indexer(target)
         expected = np.array([0, -1, 1, 2, 3, 4, -1, -1, -1, -1], dtype=np.intp)
         tm.assert_numpy_array_equal(indexer, expected)
 
-        target = UInt64Index(np.arange(10).astype("uint64") * 5 + 2 ** 63)
+        target = Index(np.arange(10).astype("uint64") * 5 + 2**63)
         indexer = index_large.get_indexer(target, method="pad")
         expected = np.array([0, 0, 1, 2, 3, 4, 4, 4, 4, 4], dtype=np.intp)
         tm.assert_numpy_array_equal(indexer, expected)
 
-        target = UInt64Index(np.arange(10).astype("uint64") * 5 + 2 ** 63)
+        target = Index(np.arange(10).astype("uint64") * 5 + 2**63)
         indexer = index_large.get_indexer(target, method="backfill")
         expected = np.array([0, 1, 1, 2, 3, 4, -1, -1, -1, -1], dtype=np.intp)
         tm.assert_numpy_array_equal(indexer, expected)
@@ -360,45 +393,68 @@ class TestWhere:
     @pytest.mark.parametrize(
         "index",
         [
-            Float64Index(np.arange(5, dtype="float64")),
-            Int64Index(range(0, 20, 2)),
-            UInt64Index(np.arange(5, dtype="uint64")),
+            Index(np.arange(5, dtype="float64")),
+            Index(range(0, 20, 2), dtype=np.int64),
+            Index(np.arange(5, dtype="uint64")),
         ],
     )
-    @pytest.mark.parametrize("klass", [list, tuple, np.array, Series])
-    def test_where(self, klass, index):
+    def test_where(self, listlike_box, index):
         cond = [True] * len(index)
         expected = index
-        result = index.where(klass(cond))
+        result = index.where(listlike_box(cond))
 
         cond = [False] + [True] * (len(index) - 1)
-        expected = Float64Index([index._na_value] + index[1:].tolist())
-        result = index.where(klass(cond))
+        expected = Index([index._na_value] + index[1:].tolist(), dtype=np.float64)
+        result = index.where(listlike_box(cond))
+        tm.assert_index_equal(result, expected)
+
+    def test_where_uint64(self):
+        idx = Index([0, 6, 2], dtype=np.uint64)
+        mask = np.array([False, True, False])
+        other = np.array([1], dtype=np.int64)
+
+        expected = Index([1, 6, 1], dtype=np.uint64)
+
+        result = idx.where(mask, other)
+        tm.assert_index_equal(result, expected)
+
+        result = idx.putmask(~mask, other)
+        tm.assert_index_equal(result, expected)
+
+    def test_where_infers_type_instead_of_trying_to_convert_string_to_float(self):
+        # GH 32413
+        index = Index([1, np.nan])
+        cond = index.notna()
+        other = Index(["a", "b"], dtype="string")
+
+        expected = Index([1.0, "b"])
+        result = index.where(cond, other)
+
         tm.assert_index_equal(result, expected)
 
 
 class TestTake:
-    @pytest.mark.parametrize("klass", [Float64Index, Int64Index, UInt64Index])
-    def test_take_preserve_name(self, klass):
-        index = klass([1, 2, 3, 4], name="foo")
+    @pytest.mark.parametrize("idx_dtype", [np.float64, np.int64, np.uint64])
+    def test_take_preserve_name(self, idx_dtype):
+        index = Index([1, 2, 3, 4], dtype=idx_dtype, name="foo")
         taken = index.take([3, 0, 1])
         assert index.name == taken.name
 
     def test_take_fill_value_float64(self):
         # GH 12631
-        idx = Float64Index([1.0, 2.0, 3.0], name="xxx")
+        idx = Index([1.0, 2.0, 3.0], name="xxx", dtype=np.float64)
         result = idx.take(np.array([1, 0, -1]))
-        expected = Float64Index([2.0, 1.0, 3.0], name="xxx")
+        expected = Index([2.0, 1.0, 3.0], dtype=np.float64, name="xxx")
         tm.assert_index_equal(result, expected)
 
         # fill_value
         result = idx.take(np.array([1, 0, -1]), fill_value=True)
-        expected = Float64Index([2.0, 1.0, np.nan], name="xxx")
+        expected = Index([2.0, 1.0, np.nan], dtype=np.float64, name="xxx")
         tm.assert_index_equal(result, expected)
 
         # allow_fill=False
         result = idx.take(np.array([1, 0, -1]), allow_fill=False, fill_value=True)
-        expected = Float64Index([2.0, 1.0, 3.0], name="xxx")
+        expected = Index([2.0, 1.0, 3.0], dtype=np.float64, name="xxx")
         tm.assert_index_equal(result, expected)
 
         msg = (
@@ -414,15 +470,15 @@ class TestTake:
         with pytest.raises(IndexError, match=msg):
             idx.take(np.array([1, -5]))
 
-    @pytest.mark.parametrize("klass", [Int64Index, UInt64Index])
-    def test_take_fill_value_ints(self, klass):
+    @pytest.mark.parametrize("dtype", [np.int64, np.uint64])
+    def test_take_fill_value_ints(self, dtype):
         # see gh-12631
-        idx = klass([1, 2, 3], name="xxx")
+        idx = Index([1, 2, 3], dtype=dtype, name="xxx")
         result = idx.take(np.array([1, 0, -1]))
-        expected = klass([2, 1, 3], name="xxx")
+        expected = Index([2, 1, 3], dtype=dtype, name="xxx")
         tm.assert_index_equal(result, expected)
 
-        name = klass.__name__
+        name = type(idx).__name__
         msg = f"Unable to fill values because {name} cannot contain NA"
 
         # fill_value=True
@@ -431,7 +487,7 @@ class TestTake:
 
         # allow_fill=False
         result = idx.take(np.array([1, 0, -1]), allow_fill=False, fill_value=True)
-        expected = klass([2, 1, 3], name="xxx")
+        expected = Index([2, 1, 3], dtype=dtype, name="xxx")
         tm.assert_index_equal(result, expected)
 
         with pytest.raises(ValueError, match=msg):
@@ -445,18 +501,18 @@ class TestTake:
 
 
 class TestContains:
-    @pytest.mark.parametrize("klass", [Float64Index, Int64Index, UInt64Index])
-    def test_contains_none(self, klass):
+    @pytest.mark.parametrize("dtype", [np.float64, np.int64, np.uint64])
+    def test_contains_none(self, dtype):
         # GH#35788 should return False, not raise TypeError
-        index = klass([0, 1, 2, 3, 4])
+        index = Index([0, 1, 2, 3, 4], dtype=dtype)
         assert None not in index
 
     def test_contains_float64_nans(self):
-        index = Float64Index([1.0, 2.0, np.nan])
+        index = Index([1.0, 2.0, np.nan], dtype=np.float64)
         assert np.nan in index
 
     def test_contains_float64_not_nans(self):
-        index = Float64Index([1.0, 2.0, np.nan])
+        index = Index([1.0, 2.0, np.nan], dtype=np.float64)
         assert 1.0 in index
 
 
@@ -517,17 +573,15 @@ class TestSliceLocs:
 
 
 class TestGetSliceBounds:
-    @pytest.mark.parametrize("kind", ["getitem", "loc", None])
     @pytest.mark.parametrize("side, expected", [("left", 4), ("right", 5)])
-    def test_get_slice_bounds_within(self, kind, side, expected):
+    def test_get_slice_bounds_within(self, side, expected):
         index = Index(range(6))
-        result = index.get_slice_bound(4, kind=kind, side=side)
+        result = index.get_slice_bound(4, side=side)
         assert result == expected
 
-    @pytest.mark.parametrize("kind", ["getitem", "loc", None])
     @pytest.mark.parametrize("side", ["left", "right"])
     @pytest.mark.parametrize("bound, expected", [(-1, 0), (10, 6)])
-    def test_get_slice_bounds_outside(self, kind, side, expected, bound):
+    def test_get_slice_bounds_outside(self, side, expected, bound):
         index = Index(range(6))
-        result = index.get_slice_bound(bound, kind=kind, side=side)
+        result = index.get_slice_bound(bound, side=side)
         assert result == expected

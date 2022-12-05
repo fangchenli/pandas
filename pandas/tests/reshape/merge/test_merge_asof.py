@@ -6,6 +6,7 @@ import pytz
 
 import pandas as pd
 from pandas import (
+    Index,
     Timedelta,
     merge_asof,
     read_csv,
@@ -26,20 +27,32 @@ class TestAsOfMerge:
         x.time = to_datetime(x.time)
         return x
 
-    @pytest.fixture(autouse=True)
-    def setup_method(self, datapath):
+    @pytest.fixture
+    def trades(self, datapath):
+        return self.read_data(datapath, "trades.csv")
 
-        self.trades = self.read_data(datapath, "trades.csv")
-        self.quotes = self.read_data(datapath, "quotes.csv", dedupe=True)
-        self.asof = self.read_data(datapath, "asof.csv")
-        self.tolerance = self.read_data(datapath, "tolerance.csv")
-        self.allow_exact_matches = self.read_data(datapath, "allow_exact_matches.csv")
-        self.allow_exact_matches_and_tolerance = self.read_data(
-            datapath, "allow_exact_matches_and_tolerance.csv"
-        )
+    @pytest.fixture
+    def quotes(self, datapath):
+        return self.read_data(datapath, "quotes.csv", dedupe=True)
+
+    @pytest.fixture
+    def asof(self, datapath):
+        return self.read_data(datapath, "asof.csv")
+
+    @pytest.fixture
+    def tolerance(self, datapath):
+        return self.read_data(datapath, "tolerance.csv")
+
+    @pytest.fixture
+    def allow_exact_matches(self, datapath):
+        return self.read_data(datapath, "allow_exact_matches.csv")
+
+    @pytest.fixture
+    def allow_exact_matches_and_tolerance(self, datapath):
+        return self.read_data(datapath, "allow_exact_matches_and_tolerance.csv")
 
     def test_examples1(self):
-        """ doc-string examples """
+        """doc-string examples"""
         left = pd.DataFrame({"a": [1, 5, 10], "left_val": ["a", "b", "c"]})
         right = pd.DataFrame({"a": [1, 2, 3, 6, 7], "right_val": [1, 2, 3, 6, 7]})
 
@@ -51,7 +64,7 @@ class TestAsOfMerge:
         tm.assert_frame_equal(result, expected)
 
     def test_examples2(self):
-        """ doc-string examples """
+        """doc-string examples"""
         trades = pd.DataFrame(
             {
                 "time": to_datetime(
@@ -135,7 +148,7 @@ class TestAsOfMerge:
         tm.assert_frame_equal(result, expected)
 
     def test_examples3(self):
-        """ doc-string examples """
+        """doc-string examples"""
         # GH14887
 
         left = pd.DataFrame({"a": [1, 5, 10], "left_val": ["a", "b", "c"]})
@@ -149,7 +162,7 @@ class TestAsOfMerge:
         tm.assert_frame_equal(result, expected)
 
     def test_examples4(self):
-        """ doc-string examples """
+        """doc-string examples"""
         # GH14887
 
         left = pd.DataFrame({"a": [1, 5, 10], "left_val": ["a", "b", "c"]})
@@ -162,33 +175,28 @@ class TestAsOfMerge:
         result = merge_asof(left, right, on="a", direction="nearest")
         tm.assert_frame_equal(result, expected)
 
-    def test_basic(self):
+    def test_basic(self, trades, asof, quotes):
 
-        expected = self.asof
-        trades = self.trades
-        quotes = self.quotes
+        expected = asof
 
         result = merge_asof(trades, quotes, on="time", by="ticker")
         tm.assert_frame_equal(result, expected)
 
-    def test_basic_categorical(self):
+    def test_basic_categorical(self, trades, asof, quotes):
 
-        expected = self.asof
-        trades = self.trades.copy()
+        expected = asof
         trades.ticker = trades.ticker.astype("category")
-        quotes = self.quotes.copy()
         quotes.ticker = quotes.ticker.astype("category")
         expected.ticker = expected.ticker.astype("category")
 
         result = merge_asof(trades, quotes, on="time", by="ticker")
         tm.assert_frame_equal(result, expected)
 
-    def test_basic_left_index(self):
+    def test_basic_left_index(self, trades, asof, quotes):
 
         # GH14253
-        expected = self.asof
-        trades = self.trades.set_index("time")
-        quotes = self.quotes
+        expected = asof
+        trades = trades.set_index("time")
 
         result = merge_asof(
             trades, quotes, left_index=True, right_on="time", by="ticker"
@@ -199,77 +207,76 @@ class TestAsOfMerge:
         expected = expected[result.columns]
         tm.assert_frame_equal(result, expected)
 
-    def test_basic_right_index(self):
+    def test_basic_right_index(self, trades, asof, quotes):
 
-        expected = self.asof
-        trades = self.trades
-        quotes = self.quotes.set_index("time")
+        expected = asof
+        quotes = quotes.set_index("time")
 
         result = merge_asof(
             trades, quotes, left_on="time", right_index=True, by="ticker"
         )
         tm.assert_frame_equal(result, expected)
 
-    def test_basic_left_index_right_index(self):
+    def test_basic_left_index_right_index(self, trades, asof, quotes):
 
-        expected = self.asof.set_index("time")
-        trades = self.trades.set_index("time")
-        quotes = self.quotes.set_index("time")
+        expected = asof.set_index("time")
+        trades = trades.set_index("time")
+        quotes = quotes.set_index("time")
 
         result = merge_asof(
             trades, quotes, left_index=True, right_index=True, by="ticker"
         )
         tm.assert_frame_equal(result, expected)
 
-    def test_multi_index(self):
+    def test_multi_index_left(self, trades, quotes):
 
         # MultiIndex is prohibited
-        trades = self.trades.set_index(["time", "price"])
-        quotes = self.quotes.set_index("time")
+        trades = trades.set_index(["time", "price"])
+        quotes = quotes.set_index("time")
         with pytest.raises(MergeError, match="left can only have one index"):
             merge_asof(trades, quotes, left_index=True, right_index=True)
 
-        trades = self.trades.set_index("time")
-        quotes = self.quotes.set_index(["time", "bid"])
+    def test_multi_index_right(self, trades, quotes):
+
+        # MultiIndex is prohibited
+        trades = trades.set_index("time")
+        quotes = quotes.set_index(["time", "bid"])
         with pytest.raises(MergeError, match="right can only have one index"):
             merge_asof(trades, quotes, left_index=True, right_index=True)
 
-    def test_on_and_index(self):
+    def test_on_and_index_left_on(self, trades, quotes):
 
         # "on" parameter and index together is prohibited
-        trades = self.trades.set_index("time")
-        quotes = self.quotes.set_index("time")
+        trades = trades.set_index("time")
+        quotes = quotes.set_index("time")
         msg = 'Can only pass argument "left_on" OR "left_index" not both.'
         with pytest.raises(MergeError, match=msg):
             merge_asof(
                 trades, quotes, left_on="price", left_index=True, right_index=True
             )
 
-        trades = self.trades.set_index("time")
-        quotes = self.quotes.set_index("time")
+    def test_on_and_index_right_on(self, trades, quotes):
+        trades = trades.set_index("time")
+        quotes = quotes.set_index("time")
         msg = 'Can only pass argument "right_on" OR "right_index" not both.'
         with pytest.raises(MergeError, match=msg):
             merge_asof(
                 trades, quotes, right_on="bid", left_index=True, right_index=True
             )
 
-    def test_basic_left_by_right_by(self):
+    def test_basic_left_by_right_by(self, trades, asof, quotes):
 
         # GH14253
-        expected = self.asof
-        trades = self.trades
-        quotes = self.quotes
+        expected = asof
 
         result = merge_asof(
             trades, quotes, on="time", left_by="ticker", right_by="ticker"
         )
         tm.assert_frame_equal(result, expected)
 
-    def test_missing_right_by(self):
+    def test_missing_right_by(self, trades, asof, quotes):
 
-        expected = self.asof
-        trades = self.trades
-        quotes = self.quotes
+        expected = asof
 
         q = quotes[quotes.ticker != "MSFT"]
         result = merge_asof(trades, q, on="time", by="ticker")
@@ -465,7 +472,7 @@ class TestAsOfMerge:
         result = merge_asof(trades, quotes, on="time", by="ticker")
         tm.assert_frame_equal(result, expected)
 
-    def test_basic_no_by(self):
+    def test_basic_no_by(self, trades, asof, quotes):
         f = (
             lambda x: x[x.ticker == "MSFT"]
             .drop("ticker", axis=1)
@@ -473,17 +480,14 @@ class TestAsOfMerge:
         )
 
         # just use a single ticker
-        expected = f(self.asof)
-        trades = f(self.trades)
-        quotes = f(self.quotes)
+        expected = f(asof)
+        trades = f(trades)
+        quotes = f(quotes)
 
         result = merge_asof(trades, quotes, on="time")
         tm.assert_frame_equal(result, expected)
 
-    def test_valid_join_keys(self):
-
-        trades = self.trades
-        quotes = self.quotes
+    def test_valid_join_keys(self, trades, quotes):
 
         msg = r"incompatible merge keys \[1\] .* must be the same type"
 
@@ -496,14 +500,14 @@ class TestAsOfMerge:
         with pytest.raises(MergeError, match="can only asof on a key for left"):
             merge_asof(trades, quotes, by="ticker")
 
-    def test_with_duplicates(self, datapath):
+    def test_with_duplicates(self, datapath, trades, quotes):
 
         q = (
-            pd.concat([self.quotes, self.quotes])
+            pd.concat([quotes, quotes])
             .sort_values(["time", "ticker"])
             .reset_index(drop=True)
         )
-        result = merge_asof(self.trades, q, on="time", by="ticker")
+        result = merge_asof(trades, q, on="time", by="ticker")
         expected = self.read_data(datapath, "asof.csv")
         tm.assert_frame_equal(result, expected)
 
@@ -517,10 +521,7 @@ class TestAsOfMerge:
         )
         tm.assert_frame_equal(result, expected)
 
-    def test_valid_allow_exact_matches(self):
-
-        trades = self.trades
-        quotes = self.quotes
+    def test_valid_allow_exact_matches(self, trades, quotes):
 
         msg = "allow_exact_matches must be boolean, passed foo"
 
@@ -529,10 +530,7 @@ class TestAsOfMerge:
                 trades, quotes, on="time", by="ticker", allow_exact_matches="foo"
             )
 
-    def test_valid_tolerance(self):
-
-        trades = self.trades
-        quotes = self.quotes
+    def test_valid_tolerance(self, trades, quotes):
 
         # dti
         merge_asof(trades, quotes, on="time", by="ticker", tolerance=Timedelta("1s"))
@@ -579,42 +577,40 @@ class TestAsOfMerge:
                 tolerance=-1,
             )
 
-    def test_non_sorted(self):
+    def test_non_sorted(self, trades, quotes):
 
-        trades = self.trades.sort_values("time", ascending=False)
-        quotes = self.quotes.sort_values("time", ascending=False)
+        trades = trades.sort_values("time", ascending=False)
+        quotes = quotes.sort_values("time", ascending=False)
 
         # we require that we are already sorted on time & quotes
-        assert not trades.time.is_monotonic
-        assert not quotes.time.is_monotonic
+        assert not trades.time.is_monotonic_increasing
+        assert not quotes.time.is_monotonic_increasing
         with pytest.raises(ValueError, match="left keys must be sorted"):
             merge_asof(trades, quotes, on="time", by="ticker")
 
-        trades = self.trades.sort_values("time")
-        assert trades.time.is_monotonic
-        assert not quotes.time.is_monotonic
+        trades = trades.sort_values("time")
+        assert trades.time.is_monotonic_increasing
+        assert not quotes.time.is_monotonic_increasing
         with pytest.raises(ValueError, match="right keys must be sorted"):
             merge_asof(trades, quotes, on="time", by="ticker")
 
-        quotes = self.quotes.sort_values("time")
-        assert trades.time.is_monotonic
-        assert quotes.time.is_monotonic
+        quotes = quotes.sort_values("time")
+        assert trades.time.is_monotonic_increasing
+        assert quotes.time.is_monotonic_increasing
 
         # ok, though has dupes
-        merge_asof(trades, self.quotes, on="time", by="ticker")
+        merge_asof(trades, quotes, on="time", by="ticker")
 
     @pytest.mark.parametrize(
-        "tolerance",
+        "tolerance_ts",
         [Timedelta("1day"), datetime.timedelta(days=1)],
         ids=["Timedelta", "datetime.timedelta"],
     )
-    def test_tolerance(self, tolerance):
-
-        trades = self.trades
-        quotes = self.quotes
-
-        result = merge_asof(trades, quotes, on="time", by="ticker", tolerance=tolerance)
-        expected = self.tolerance
+    def test_tolerance(self, tolerance_ts, trades, quotes, tolerance):
+        result = merge_asof(
+            trades, quotes, on="time", by="ticker", tolerance=tolerance_ts
+        )
+        expected = tolerance
         tm.assert_frame_equal(result, expected)
 
     def test_tolerance_forward(self):
@@ -701,11 +697,11 @@ class TestAsOfMerge:
         result = merge_asof(left, right, on="a", direction="nearest", tolerance=0.5)
         tm.assert_frame_equal(result, expected)
 
-    def test_index_tolerance(self):
+    def test_index_tolerance(self, trades, quotes, tolerance):
         # GH 15135
-        expected = self.tolerance.set_index("time")
-        trades = self.trades.set_index("time")
-        quotes = self.quotes.set_index("time")
+        expected = tolerance.set_index("time")
+        trades = trades.set_index("time")
+        quotes = quotes.set_index("time")
 
         result = merge_asof(
             trades,
@@ -717,12 +713,12 @@ class TestAsOfMerge:
         )
         tm.assert_frame_equal(result, expected)
 
-    def test_allow_exact_matches(self):
+    def test_allow_exact_matches(self, trades, quotes, allow_exact_matches):
 
         result = merge_asof(
-            self.trades, self.quotes, on="time", by="ticker", allow_exact_matches=False
+            trades, quotes, on="time", by="ticker", allow_exact_matches=False
         )
-        expected = self.allow_exact_matches
+        expected = allow_exact_matches
         tm.assert_frame_equal(result, expected)
 
     def test_allow_exact_matches_forward(self):
@@ -755,17 +751,19 @@ class TestAsOfMerge:
         )
         tm.assert_frame_equal(result, expected)
 
-    def test_allow_exact_matches_and_tolerance(self):
+    def test_allow_exact_matches_and_tolerance(
+        self, trades, quotes, allow_exact_matches_and_tolerance
+    ):
 
         result = merge_asof(
-            self.trades,
-            self.quotes,
+            trades,
+            quotes,
             on="time",
             by="ticker",
             tolerance=Timedelta("100ms"),
             allow_exact_matches=False,
         )
-        expected = self.allow_exact_matches_and_tolerance
+        expected = allow_exact_matches_and_tolerance
         tm.assert_frame_equal(result, expected)
 
     def test_allow_exact_matches_and_tolerance2(self):
@@ -1046,9 +1044,9 @@ class TestAsOfMerge:
 
         tm.assert_frame_equal(result, expected)
 
-    def test_on_specialized_type(self, any_real_dtype):
+    def test_on_specialized_type(self, any_real_numpy_dtype):
         # see gh-13936
-        dtype = np.dtype(any_real_dtype).type
+        dtype = np.dtype(any_real_numpy_dtype).type
 
         df1 = pd.DataFrame(
             {"value": [5, 2, 25, 100, 78, 120, 79], "symbol": list("ABCDEFG")},
@@ -1077,9 +1075,9 @@ class TestAsOfMerge:
 
         tm.assert_frame_equal(result, expected)
 
-    def test_on_specialized_type_by_int(self, any_real_dtype):
+    def test_on_specialized_type_by_int(self, any_real_numpy_dtype):
         # see gh-13936
-        dtype = np.dtype(any_real_dtype).type
+        dtype = np.dtype(any_real_numpy_dtype).type
 
         df1 = pd.DataFrame(
             {
@@ -1223,6 +1221,50 @@ class TestAsOfMerge:
             else:
                 merge_asof(df, df_null, on="a")
 
+    def test_by_nullable(self, any_numeric_ea_dtype):
+        # Note: this test passes if instead of using pd.array we use
+        #  np.array([np.nan, 1]).  Other than that, I (@jbrockmendel)
+        #  have NO IDEA what the expected behavior is.
+        # TODO(GH#32306): may be relevant to the expected behavior here.
+
+        arr = pd.array([pd.NA, 0, 1], dtype=any_numeric_ea_dtype)
+        if arr.dtype.kind in ["i", "u"]:
+            max_val = np.iinfo(arr.dtype.numpy_dtype).max
+        else:
+            max_val = np.finfo(arr.dtype.numpy_dtype).max
+        # set value s.t. (at least for integer dtypes) arr._values_for_argsort
+        #  is not an injection
+        arr[2] = max_val
+
+        left = pd.DataFrame(
+            {
+                "by_col1": arr,
+                "by_col2": ["HELLO", "To", "You"],
+                "on_col": [2, 4, 6],
+                "value": ["a", "c", "e"],
+            }
+        )
+        right = pd.DataFrame(
+            {
+                "by_col1": arr,
+                "by_col2": ["WORLD", "Wide", "Web"],
+                "on_col": [1, 2, 6],
+                "value": ["b", "d", "f"],
+            }
+        )
+
+        result = merge_asof(left, right, by=["by_col1", "by_col2"], on="on_col")
+        expected = pd.DataFrame(
+            {
+                "by_col1": arr,
+                "by_col2": ["HELLO", "To", "You"],
+                "on_col": [2, 4, 6],
+                "value_x": ["a", "c", "e"],
+            }
+        )
+        expected["value_y"] = np.array([np.nan, np.nan, np.nan], dtype=object)
+        tm.assert_frame_equal(result, expected)
+
     def test_merge_by_col_tz_aware(self):
         # GH 21184
         left = pd.DataFrame(
@@ -1308,18 +1350,19 @@ class TestAsOfMerge:
 
         tm.assert_frame_equal(result, expected)
 
-    def test_int_type_tolerance(self, any_int_dtype):
+    # TODO: any_int_dtype; causes failures in _get_join_indexers
+    def test_int_type_tolerance(self, any_int_numpy_dtype):
         # GH #28870
 
         left = pd.DataFrame({"a": [0, 10, 20], "left_val": [1, 2, 3]})
         right = pd.DataFrame({"a": [5, 15, 25], "right_val": [1, 2, 3]})
-        left["a"] = left["a"].astype(any_int_dtype)
-        right["a"] = right["a"].astype(any_int_dtype)
+        left["a"] = left["a"].astype(any_int_numpy_dtype)
+        right["a"] = right["a"].astype(any_int_numpy_dtype)
 
         expected = pd.DataFrame(
             {"a": [0, 10, 20], "left_val": [1, 2, 3], "right_val": [np.nan, 1.0, 2.0]}
         )
-        expected["a"] = expected["a"].astype(any_int_dtype)
+        expected["a"] = expected["a"].astype(any_int_numpy_dtype)
 
         result = merge_asof(left, right, on="a", tolerance=10)
         tm.assert_frame_equal(result, expected)
@@ -1338,7 +1381,9 @@ class TestAsOfMerge:
                 "from_date": index[1:],
                 "abc": [2.46] * 3 + [2.19],
             },
-            index=pd.Index([1, 2, 3, 4]),
+            index=pd.date_range(
+                "2019-10-01 00:30:00", freq="30min", periods=4, tz="UTC"
+            ),
         )
         tm.assert_frame_equal(result, expected)
 
@@ -1351,7 +1396,7 @@ class TestAsOfMerge:
                 "abc": [2.46] * 4 + [2.19],
                 "xyz": [np.nan, 0.9, 0.8, 0.7, 0.6],
             },
-            index=pd.Index([0, 1, 2, 3, 4]),
+            index=Index([0, 1, 2, 3, 4]),
         )
         tm.assert_frame_equal(result, expected)
 
@@ -1412,3 +1457,113 @@ def test_merge_asof_non_numerical_dtype_object():
             left_by="a",
             right_by="left_val",
         )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"right_index": True, "left_index": True},
+        {"left_on": "left_time", "right_index": True},
+        {"left_index": True, "right_on": "right"},
+    ],
+)
+def test_merge_asof_index_behavior(kwargs):
+    # GH 33463
+    index = Index([1, 5, 10], name="test")
+    left = pd.DataFrame({"left": ["a", "b", "c"], "left_time": [1, 4, 10]}, index=index)
+    right = pd.DataFrame({"right": [1, 2, 3, 6, 7]}, index=[1, 2, 3, 6, 7])
+    result = merge_asof(left, right, **kwargs)
+
+    expected = pd.DataFrame(
+        {"left": ["a", "b", "c"], "left_time": [1, 4, 10], "right": [1, 3, 7]},
+        index=index,
+    )
+    tm.assert_frame_equal(result, expected)
+
+
+def test_merge_asof_numeri_column_in_index():
+    # GH#34488
+    left = pd.DataFrame({"b": [10, 11, 12]}, index=Index([1, 2, 3], name="a"))
+    right = pd.DataFrame({"c": [20, 21, 22]}, index=Index([0, 2, 3], name="a"))
+
+    result = merge_asof(left, right, left_on="a", right_on="a")
+    expected = pd.DataFrame({"a": [1, 2, 3], "b": [10, 11, 12], "c": [20, 21, 22]})
+    tm.assert_frame_equal(result, expected)
+
+
+def test_merge_asof_numeri_column_in_multiindex():
+    # GH#34488
+    left = pd.DataFrame(
+        {"b": [10, 11, 12]},
+        index=pd.MultiIndex.from_arrays([[1, 2, 3], ["a", "b", "c"]], names=["a", "z"]),
+    )
+    right = pd.DataFrame(
+        {"c": [20, 21, 22]},
+        index=pd.MultiIndex.from_arrays([[1, 2, 3], ["x", "y", "z"]], names=["a", "y"]),
+    )
+
+    result = merge_asof(left, right, left_on="a", right_on="a")
+    expected = pd.DataFrame({"a": [1, 2, 3], "b": [10, 11, 12], "c": [20, 21, 22]})
+    tm.assert_frame_equal(result, expected)
+
+
+def test_merge_asof_numeri_column_in_index_object_dtype():
+    # GH#34488
+    left = pd.DataFrame({"b": [10, 11, 12]}, index=Index(["1", "2", "3"], name="a"))
+    right = pd.DataFrame({"c": [20, 21, 22]}, index=Index(["m", "n", "o"], name="a"))
+
+    with pytest.raises(
+        MergeError,
+        match=r"Incompatible merge dtype, .*, both sides must have numeric dtype",
+    ):
+        merge_asof(left, right, left_on="a", right_on="a")
+
+    left = left.reset_index().set_index(["a", "b"])
+    right = right.reset_index().set_index(["a", "c"])
+
+    with pytest.raises(
+        MergeError,
+        match=r"Incompatible merge dtype, .*, both sides must have numeric dtype",
+    ):
+        merge_asof(left, right, left_on="a", right_on="a")
+
+
+def test_merge_asof_array_as_on():
+    # GH#42844
+    right = pd.DataFrame(
+        {
+            "a": [2, 6],
+            "ts": [pd.Timestamp("2021/01/01 00:37"), pd.Timestamp("2021/01/01 01:40")],
+        }
+    )
+    ts_merge = pd.date_range(
+        start=pd.Timestamp("2021/01/01 00:00"), periods=3, freq="1h"
+    )
+    left = pd.DataFrame({"b": [4, 8, 7]})
+    result = merge_asof(
+        left,
+        right,
+        left_on=ts_merge,
+        right_on="ts",
+        allow_exact_matches=False,
+        direction="backward",
+    )
+    expected = pd.DataFrame({"b": [4, 8, 7], "a": [np.nan, 2, 6], "ts": ts_merge})
+    tm.assert_frame_equal(result, expected)
+
+    result = merge_asof(
+        right,
+        left,
+        left_on="ts",
+        right_on=ts_merge,
+        allow_exact_matches=False,
+        direction="backward",
+    )
+    expected = pd.DataFrame(
+        {
+            "a": [2, 6],
+            "ts": [pd.Timestamp("2021/01/01 00:37"), pd.Timestamp("2021/01/01 01:40")],
+            "b": [4, 8],
+        }
+    )
+    tm.assert_frame_equal(result, expected)

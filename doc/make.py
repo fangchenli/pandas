@@ -45,7 +45,7 @@ class DocBuilder:
         single_doc=None,
         verbosity=0,
         warnings_are_errors=False,
-    ):
+    ) -> None:
         self.num_jobs = num_jobs
         self.include_api = include_api
         self.whatsnew = whatsnew
@@ -54,7 +54,6 @@ class DocBuilder:
 
         if single_doc:
             single_doc = self._process_single_doc(single_doc)
-            include_api = False
             os.environ["SPHINX_PATTERN"] = single_doc
         elif not include_api:
             os.environ["SPHINX_PATTERN"] = "-api"
@@ -260,8 +259,7 @@ class DocBuilder:
                     "You should check the file "
                     '"build/latex/pandas.pdf" for problems.'
                 )
-            else:
-                self._run_os("make")
+            self._run_os("make")
             return ret_code
 
     def latex_forced(self):

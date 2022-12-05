@@ -556,7 +556,6 @@ optional ``level`` parameter which applies only if the object has a
     ``count``, Number of non-NA observations
     ``sum``, Sum of values
     ``mean``, Mean of values
-    ``mad``, Mean absolute deviation
     ``median``, Arithmetic median of values
     ``min``, Minimum
     ``max``, Maximum
@@ -848,8 +847,8 @@ have introduced the popular ``(%>%)`` (read pipe) operator for R_.
 The implementation of ``pipe`` here is quite clean and feels right at home in Python.
 We encourage you to view the source code of :meth:`~DataFrame.pipe`.
 
-.. _dplyr: https://github.com/hadley/dplyr
-.. _magrittr: https://github.com/smbache/magrittr
+.. _dplyr: https://github.com/tidyverse/dplyr
+.. _magrittr: https://github.com/tidyverse/magrittr
 .. _R: https://www.r-project.org
 
 
@@ -1040,30 +1039,6 @@ not noted for a particular column will be ``NaN``:
 
    tsdf.agg({"A": ["mean", "min"], "B": "sum"})
 
-.. _basics.aggregation.mixed_string:
-
-Mixed dtypes
-++++++++++++
-
-When presented with mixed dtypes that cannot aggregate, ``.agg`` will only take the valid
-aggregations. This is similar to how ``.groupby.agg`` works.
-
-.. ipython:: python
-
-   mdf = pd.DataFrame(
-       {
-           "A": [1, 2, 3],
-           "B": [1.0, 2.0, 3.0],
-           "C": ["foo", "bar", "baz"],
-           "D": pd.date_range("20130101", periods=3),
-       }
-   )
-   mdf.dtypes
-
-.. ipython:: python
-
-   mdf.agg(["min", "sum"])
-
 .. _basics.aggregation.custom_describe:
 
 Custom describe
@@ -1184,10 +1159,8 @@ a single value and returning a single value. For example:
 
    df4
 
-
    def f(x):
        return len(str(x))
-
 
    df4["one"].map(f)
    df4.applymap(f)
@@ -1491,8 +1464,6 @@ for altering the ``Series.name`` attribute.
    s.rename("scalar-name")
 
 .. _basics.rename_axis:
-
-.. versionadded:: 0.24.0
 
 The methods :meth:`DataFrame.rename_axis` and :meth:`Series.rename_axis`
 allow specific names of a ``MultiIndex`` to be changed (as opposed to the
@@ -2051,32 +2022,33 @@ The following table lists all of pandas extension types. For methods requiring `
 arguments, strings can be specified as indicated. See the respective
 documentation sections for more on each type.
 
-+-------------------+---------------------------+--------------------+-------------------------------+-----------------------------------------+-------------------------------+
-| Kind of Data      | Data Type                 | Scalar             | Array                         | String Aliases                          | Documentation                 |
-+===================+===========================+====================+===============================+=========================================+===============================+
-| tz-aware datetime | :class:`DatetimeTZDtype`  | :class:`Timestamp` | :class:`arrays.DatetimeArray` | ``'datetime64[ns, <tz>]'``              | :ref:`timeseries.timezone`    |
-+-------------------+---------------------------+--------------------+-------------------------------+-----------------------------------------+-------------------------------+
-| Categorical       | :class:`CategoricalDtype` | (none)             | :class:`Categorical`          | ``'category'``                          | :ref:`categorical`            |
-+-------------------+---------------------------+--------------------+-------------------------------+-----------------------------------------+-------------------------------+
-| period            | :class:`PeriodDtype`      | :class:`Period`    | :class:`arrays.PeriodArray`   | ``'period[<freq>]'``,                   | :ref:`timeseries.periods`     |
-| (time spans)      |                           |                    |                               | ``'Period[<freq>]'``                    |                               |
-+-------------------+---------------------------+--------------------+-------------------------------+-----------------------------------------+-------------------------------+
-| sparse            | :class:`SparseDtype`      | (none)             | :class:`arrays.SparseArray`   | ``'Sparse'``, ``'Sparse[int]'``,        | :ref:`sparse`                 |
-|                   |                           |                    |                               | ``'Sparse[float]'``                     |                               |
-+-------------------+---------------------------+--------------------+-------------------------------+-----------------------------------------+-------------------------------+
-| intervals         | :class:`IntervalDtype`    | :class:`Interval`  | :class:`arrays.IntervalArray` | ``'interval'``, ``'Interval'``,         | :ref:`advanced.intervalindex` |
-|                   |                           |                    |                               | ``'Interval[<numpy_dtype>]'``,          |                               |
-|                   |                           |                    |                               | ``'Interval[datetime64[ns, <tz>]]'``,   |                               |
-|                   |                           |                    |                               | ``'Interval[timedelta64[<freq>]]'``     |                               |
-+-------------------+---------------------------+--------------------+-------------------------------+-----------------------------------------+-------------------------------+
-| nullable integer  + :class:`Int64Dtype`, ...  | (none)             | :class:`arrays.IntegerArray`  | ``'Int8'``, ``'Int16'``, ``'Int32'``,   | :ref:`integer_na`             |
-|                   |                           |                    |                               | ``'Int64'``, ``'UInt8'``, ``'UInt16'``, |                               |
-|                   |                           |                    |                               | ``'UInt32'``, ``'UInt64'``              |                               |
-+-------------------+---------------------------+--------------------+-------------------------------+-----------------------------------------+-------------------------------+
-| Strings           | :class:`StringDtype`      | :class:`str`       | :class:`arrays.StringArray`   | ``'string'``                            | :ref:`text`                   |
-+-------------------+---------------------------+--------------------+-------------------------------+-----------------------------------------+-------------------------------+
-| Boolean (with NA) | :class:`BooleanDtype`     | :class:`bool`      | :class:`arrays.BooleanArray`  | ``'boolean'``                           | :ref:`api.arrays.bool`        |
-+-------------------+---------------------------+--------------------+-------------------------------+-----------------------------------------+-------------------------------+
++-------------------------------------------------+---------------------------+--------------------+-------------------------------+----------------------------------------+
+| Kind of Data                                    | Data Type                 | Scalar             | Array                         | String Aliases                         |
++=================================================+===============+===========+========+===========+===============================+========================================+
+| :ref:`tz-aware datetime <timeseries.timezone>`  | :class:`DatetimeTZDtype`  | :class:`Timestamp` | :class:`arrays.DatetimeArray` | ``'datetime64[ns, <tz>]'``             |
+|                                                 |                           |                    |                               |                                        |
++-------------------------------------------------+---------------+-----------+--------------------+-------------------------------+----------------------------------------+
+| :ref:`Categorical <categorical>`                | :class:`CategoricalDtype` | (none)             | :class:`Categorical`          | ``'category'``                         |
++-------------------------------------------------+---------------------------+--------------------+-------------------------------+----------------------------------------+
+| :ref:`period (time spans) <timeseries.periods>` | :class:`PeriodDtype`      | :class:`Period`    | :class:`arrays.PeriodArray`   | ``'period[<freq>]'``,                  |
+|                                                 |                           |                    | ``'Period[<freq>]'``          |                                        |
++-------------------------------------------------+---------------------------+--------------------+-------------------------------+----------------------------------------+
+| :ref:`sparse <sparse>`                          | :class:`SparseDtype`      | (none)             | :class:`arrays.SparseArray`   | ``'Sparse'``, ``'Sparse[int]'``,       |
+|                                                 |                           |                    |                               | ``'Sparse[float]'``                    |
++-------------------------------------------------+---------------------------+--------------------+-------------------------------+----------------------------------------+
+| :ref:`intervals <advanced.intervalindex>`       | :class:`IntervalDtype`    | :class:`Interval`  | :class:`arrays.IntervalArray` | ``'interval'``, ``'Interval'``,        |
+|                                                 |                           |                    |                               | ``'Interval[<numpy_dtype>]'``,         |
+|                                                 |                           |                    |                               | ``'Interval[datetime64[ns, <tz>]]'``,  |
+|                                                 |                           |                    |                               | ``'Interval[timedelta64[<freq>]]'``    |
++-------------------------------------------------+---------------------------+--------------------+-------------------------------+----------------------------------------+
+| :ref:`nullable integer <integer_na>`            | :class:`Int64Dtype`, ...  | (none)             | :class:`arrays.IntegerArray`  | ``'Int8'``, ``'Int16'``, ``'Int32'``,  |
+|                                                 |                           |                    |                               | ``'Int64'``, ``'UInt8'``, ``'UInt16'``,|
+|                                                 |                           |                    |                               | ``'UInt32'``, ``'UInt64'``             |
++-------------------------------------------------+---------------------------+--------------------+-------------------------------+----------------------------------------+
+| :ref:`Strings <text>`                           | :class:`StringDtype`      | :class:`str`       | :class:`arrays.StringArray`   | ``'string'``                           |
++-------------------------------------------------+---------------------------+--------------------+-------------------------------+----------------------------------------+
+| :ref:`Boolean (with NA) <api.arrays.bool>`      | :class:`BooleanDtype`     | :class:`bool`      | :class:`arrays.BooleanArray`  | ``'boolean'``                          |
++-------------------------------------------------+---------------------------+--------------------+-------------------------------+----------------------------------------+
 
 pandas has two ways to store strings.
 

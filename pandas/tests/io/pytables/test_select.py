@@ -1,4 +1,3 @@
-from distutils.version import LooseVersion
 from warnings import catch_warnings
 
 import numpy as np
@@ -22,14 +21,12 @@ from pandas import (
 )
 from pandas.tests.io.pytables.common import (
     _maybe_remove,
-    ensure_clean_path,
     ensure_clean_store,
-    tables,
 )
 
 from pandas.io.pytables import Term
 
-pytestmark = pytest.mark.single
+pytestmark = pytest.mark.single_cpu
 
 
 def test_select_columns_in_where(setup_path):
@@ -190,12 +187,12 @@ def test_select_dtypes(setup_path):
         _maybe_remove(store, "df")
         store.append("df", df, data_columns=True)
 
-        expected = df[df.boolv == True].reindex(columns=["A", "boolv"])  # noqa
+        expected = df[df.boolv == True].reindex(columns=["A", "boolv"])  # noqa:E712
         for v in [True, "true", 1]:
             result = store.select("df", f"boolv == {v}", columns=["A", "boolv"])
             tm.assert_frame_equal(expected, result)
 
-        expected = df[df.boolv == False].reindex(columns=["A", "boolv"])  # noqa
+        expected = df[df.boolv == False].reindex(columns=["A", "boolv"])  # noqa:E712
         for v in [False, "false", 0]:
             result = store.select("df", f"boolv == {v}", columns=["A", "boolv"])
             tm.assert_frame_equal(expected, result)
@@ -267,7 +264,7 @@ def test_select_dtypes(setup_path):
         expected = df[df["A"] > 0]
 
         store.append("df", df, data_columns=True)
-        np_zero = np.float64(0)  # noqa
+        np_zero = np.float64(0)  # noqa:F841
         result = store.select("df", where=["A>np_zero"])
         tm.assert_frame_equal(expected, result)
 
@@ -322,7 +319,7 @@ def test_select_with_many_inputs(setup_path):
         assert len(result) == 100
 
 
-def test_select_iterator(setup_path):
+def test_select_iterator(tmp_path, setup_path):
 
     # single table
     with ensure_clean_store(setup_path) as store:
@@ -346,29 +343,29 @@ def test_select_iterator(setup_path):
         result = concat(results)
         tm.assert_frame_equal(result, expected)
 
-    with ensure_clean_path(setup_path) as path:
+    path = tmp_path / setup_path
 
-        df = tm.makeTimeDataFrame(500)
-        df.to_hdf(path, "df_non_table")
+    df = tm.makeTimeDataFrame(500)
+    df.to_hdf(path, "df_non_table")
 
-        msg = "can only use an iterator or chunksize on a table"
-        with pytest.raises(TypeError, match=msg):
-            read_hdf(path, "df_non_table", chunksize=100)
+    msg = "can only use an iterator or chunksize on a table"
+    with pytest.raises(TypeError, match=msg):
+        read_hdf(path, "df_non_table", chunksize=100)
 
-        with pytest.raises(TypeError, match=msg):
-            read_hdf(path, "df_non_table", iterator=True)
+    with pytest.raises(TypeError, match=msg):
+        read_hdf(path, "df_non_table", iterator=True)
 
-    with ensure_clean_path(setup_path) as path:
+    path = tmp_path / setup_path
 
-        df = tm.makeTimeDataFrame(500)
-        df.to_hdf(path, "df", format="table")
+    df = tm.makeTimeDataFrame(500)
+    df.to_hdf(path, "df", format="table")
 
-        results = list(read_hdf(path, "df", chunksize=100))
-        result = concat(results)
+    results = list(read_hdf(path, "df", chunksize=100))
+    result = concat(results)
 
-        assert len(results) == 5
-        tm.assert_frame_equal(result, df)
-        tm.assert_frame_equal(result, read_hdf(path, "df"))
+    assert len(results) == 5
+    tm.assert_frame_equal(result, df)
+    tm.assert_frame_equal(result, read_hdf(path, "df"))
 
     # multiple
 
@@ -661,56 +658,53 @@ def test_frame_select_complex(setup_path):
         tm.assert_frame_equal(result, expected)
 
 
-def test_frame_select_complex2(setup_path):
+def test_frame_select_complex2(tmp_path):
 
-    with ensure_clean_path(["parms.hdf", "hist.hdf"]) as paths:
+    pp = tmp_path / "params.hdf"
+    hh = tmp_path / "hist.hdf"
 
-        pp, hh = paths
+    # use non-trivial selection criteria
+    params = DataFrame({"A": [1, 1, 2, 2, 3]})
+    params.to_hdf(pp, "df", mode="w", format="table", data_columns=["A"])
 
-        # use non-trivial selection criteria
-        parms = DataFrame({"A": [1, 1, 2, 2, 3]})
-        parms.to_hdf(pp, "df", mode="w", format="table", data_columns=["A"])
+    selection = read_hdf(pp, "df", where="A=[2,3]")
+    hist = DataFrame(
+        np.random.randn(25, 1),
+        columns=["data"],
+        index=MultiIndex.from_tuples(
+            [(i, j) for i in range(5) for j in range(5)], names=["l1", "l2"]
+        ),
+    )
 
-        selection = read_hdf(pp, "df", where="A=[2,3]")
-        hist = DataFrame(
-            np.random.randn(25, 1),
-            columns=["data"],
-            index=MultiIndex.from_tuples(
-                [(i, j) for i in range(5) for j in range(5)], names=["l1", "l2"]
-            ),
-        )
+    hist.to_hdf(hh, "df", mode="w", format="table")
 
-        hist.to_hdf(hh, "df", mode="w", format="table")
+    expected = read_hdf(hh, "df", where="l1=[2, 3, 4]")
 
-        expected = read_hdf(hh, "df", where="l1=[2, 3, 4]")
-
-        # scope with list like
-        l = selection.index.tolist()  # noqa
-        store = HDFStore(hh)
-        result = store.select("df", where="l1=l")
-        tm.assert_frame_equal(result, expected)
-        store.close()
-
-        result = read_hdf(hh, "df", where="l1=l")
+    # scope with list like
+    l0 = selection.index.tolist()  # noqa:F841
+    with HDFStore(hh) as store:
+        result = store.select("df", where="l1=l0")
         tm.assert_frame_equal(result, expected)
 
-        # index
-        index = selection.index  # noqa
-        result = read_hdf(hh, "df", where="l1=index")
-        tm.assert_frame_equal(result, expected)
+    result = read_hdf(hh, "df", where="l1=l0")
+    tm.assert_frame_equal(result, expected)
 
-        result = read_hdf(hh, "df", where="l1=selection.index")
-        tm.assert_frame_equal(result, expected)
+    # index
+    index = selection.index  # noqa:F841
+    result = read_hdf(hh, "df", where="l1=index")
+    tm.assert_frame_equal(result, expected)
 
-        result = read_hdf(hh, "df", where="l1=selection.index.tolist()")
-        tm.assert_frame_equal(result, expected)
+    result = read_hdf(hh, "df", where="l1=selection.index")
+    tm.assert_frame_equal(result, expected)
 
-        result = read_hdf(hh, "df", where="l1=list(selection.index)")
-        tm.assert_frame_equal(result, expected)
+    result = read_hdf(hh, "df", where="l1=selection.index.tolist()")
+    tm.assert_frame_equal(result, expected)
 
-        # scope with index
-        store = HDFStore(hh)
+    result = read_hdf(hh, "df", where="l1=list(selection.index)")
+    tm.assert_frame_equal(result, expected)
 
+    # scope with index
+    with HDFStore(hh) as store:
         result = store.select("df", where="l1=index")
         tm.assert_frame_equal(result, expected)
 
@@ -722,8 +716,6 @@ def test_frame_select_complex2(setup_path):
 
         result = store.select("df", where="l1=list(selection.index)")
         tm.assert_frame_equal(result, expected)
-
-        store.close()
 
 
 def test_invalid_filtering(setup_path):
@@ -860,10 +852,6 @@ def test_select_as_multiple(setup_path):
             )
 
 
-@pytest.mark.skipif(
-    LooseVersion(tables.__version__) < LooseVersion("3.1.0"),
-    reason=("tables version does not support fix for nan selection bug: GH 4858"),
-)
 def test_nan_selection_bug_4858(setup_path):
 
     with ensure_clean_store(setup_path) as store:
@@ -934,7 +922,7 @@ def test_query_compare_column_type(setup_path):
     with ensure_clean_store(setup_path) as store:
         store.append("test", df, format="table", data_columns=True)
 
-        ts = Timestamp("2014-01-01")  # noqa
+        ts = Timestamp("2014-01-01")  # noqa:F841
         result = store.select("test", where="real_date > ts")
         expected = df.loc[[1], :]
         tm.assert_frame_equal(expected, result)
@@ -971,12 +959,12 @@ def test_query_compare_column_type(setup_path):
 
 
 @pytest.mark.parametrize("where", ["", (), (None,), [], [None]])
-def test_select_empty_where(where):
+def test_select_empty_where(tmp_path, where):
     # GH26610
 
     df = DataFrame([1, 2, 3])
-    with ensure_clean_path("empty_where.h5") as path:
-        with HDFStore(path) as store:
-            store.put("df", df, "t")
-            result = read_hdf(store, "df", where=where)
-            tm.assert_frame_equal(result, df)
+    path = tmp_path / "empty_where.h5"
+    with HDFStore(path) as store:
+        store.put("df", df, "t")
+        result = read_hdf(store, "df", where=where)
+        tm.assert_frame_equal(result, df)

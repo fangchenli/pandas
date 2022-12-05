@@ -23,7 +23,7 @@ array that are ``nan`` aren't actually stored, only the non-``nan`` elements are
 Those non-``nan`` elements have a ``float64`` dtype.
 
 The sparse objects exist for memory efficiency reasons. Suppose you had a
-large, mostly NA ``DataFrame``:
+large, mostly NA :class:`DataFrame`:
 
 .. ipython:: python
 
@@ -114,8 +114,6 @@ in many places
 Sparse accessor
 ---------------
 
-.. versionadded:: 0.24.0
-
 pandas provides a ``.sparse`` accessor, similar to ``.str`` for string data, ``.cat``
 for categorical data, and ``.dt`` for datetime-like data. This namespace provides
 attributes and methods that are specific to sparse data.
@@ -129,9 +127,6 @@ attributes and methods that are specific to sparse data.
 This accessor is available only on data with ``SparseDtype``, and on the :class:`Series`
 class itself for creating a Series with sparse data from a scipy COO matrix with.
 
-
-.. versionadded:: 0.25.0
-
 A ``.sparse`` accessor has been added for :class:`DataFrame` as well.
 See :ref:`api.frame.sparse` for more.
 
@@ -141,7 +136,7 @@ Sparse calculation
 ------------------
 
 You can apply NumPy `ufuncs <https://numpy.org/doc/stable/reference/ufuncs.html>`_
-to ``SparseArray`` and get a ``SparseArray`` as a result.
+to :class:`arrays.SparseArray` and get a :class:`arrays.SparseArray` as a result.
 
 .. ipython:: python
 
@@ -185,7 +180,7 @@ your code, rather than ignoring the warning.
 **Construction**
 
 From an array-like, use the regular :class:`Series` or
-:class:`DataFrame` constructors with :class:`SparseArray` values.
+:class:`DataFrame` constructors with :class:`arrays.SparseArray` values.
 
 .. code-block:: python
 
@@ -242,7 +237,7 @@ Sparse-specific properties, like ``density``, are available on the ``.sparse`` a
 **General differences**
 
 In a ``SparseDataFrame``, *all* columns were sparse. A :class:`DataFrame` can have a mixture of
-sparse and dense columns. As a consequence, assigning new columns to a ``DataFrame`` with sparse
+sparse and dense columns. As a consequence, assigning new columns to a :class:`DataFrame` with sparse
 values will not automatically convert the input to be sparse.
 
 .. code-block:: python
@@ -268,12 +263,10 @@ have no replacement.
 
 .. _sparse.scipysparse:
 
-Interaction with scipy.sparse
------------------------------
+Interaction with *scipy.sparse*
+-------------------------------
 
-Use :meth:`DataFrame.sparse.from_spmatrix` to create a ``DataFrame`` with sparse values from a sparse matrix.
-
-.. versionadded:: 0.25.0
+Use :meth:`DataFrame.sparse.from_spmatrix` to create a :class:`DataFrame` with sparse values from a sparse matrix.
 
 .. ipython:: python
 
@@ -296,9 +289,9 @@ To convert back to sparse SciPy matrix in COO format, you can use the :meth:`Dat
 
    sdf.sparse.to_coo()
 
-meth:`Series.sparse.to_coo` is implemented for transforming a ``Series`` with sparse values indexed by a :class:`MultiIndex` to a :class:`scipy.sparse.coo_matrix`.
+:meth:`Series.sparse.to_coo` is implemented for transforming a :class:`Series` with sparse values indexed by a :class:`MultiIndex` to a :class:`scipy.sparse.coo_matrix`.
 
-The method requires a ``MultiIndex`` with two or more levels.
+The method requires a :class:`MultiIndex` with two or more levels.
 
 .. ipython:: python
 
@@ -317,14 +310,13 @@ The method requires a ``MultiIndex`` with two or more levels.
    ss = s.astype('Sparse')
    ss
 
-In the example below, we transform the ``Series`` to a sparse representation of a 2-d array by specifying that the first and second ``MultiIndex`` levels define labels for the rows and the third and fourth levels define labels for the columns. We also specify that the column and row labels should be sorted in the final sparse representation.
+In the example below, we transform the :class:`Series` to a sparse representation of a 2-d array by specifying that the first and second ``MultiIndex`` levels define labels for the rows and the third and fourth levels define labels for the columns. We also specify that the column and row labels should be sorted in the final sparse representation.
 
 .. ipython:: python
 
    A, rows, columns = ss.sparse.to_coo(
        row_levels=["A", "B"], column_levels=["C", "D"], sort_labels=True
    )
-
 
    A
    A.todense()
@@ -344,7 +336,7 @@ Specifying different row and column labels (and not sorting them) yields a diffe
    rows
    columns
 
-A convenience method :meth:`Series.sparse.from_coo` is implemented for creating a ``Series`` with sparse values from a ``scipy.sparse.coo_matrix``.
+A convenience method :meth:`Series.sparse.from_coo` is implemented for creating a :class:`Series` with sparse values from a ``scipy.sparse.coo_matrix``.
 
 .. ipython:: python
 
@@ -353,7 +345,7 @@ A convenience method :meth:`Series.sparse.from_coo` is implemented for creating 
    A
    A.todense()
 
-The default behaviour (with ``dense_index=False``) simply returns a ``Series`` containing
+The default behaviour (with ``dense_index=False``) simply returns a :class:`Series` containing
 only the non-null entries.
 
 .. ipython:: python

@@ -9,9 +9,7 @@ from pandas.core.dtypes.dtypes import IntervalDtype
 from pandas import (
     Categorical,
     CategoricalIndex,
-    Float64Index,
     Index,
-    Int64Index,
     Interval,
     IntervalIndex,
     date_range,
@@ -20,6 +18,10 @@ from pandas import (
     timedelta_range,
 )
 import pandas._testing as tm
+from pandas.core.api import (
+    Float64Index,
+    Int64Index,
+)
 from pandas.core.arrays import IntervalArray
 import pandas.core.common as com
 
@@ -36,7 +38,6 @@ class ConstructorTests:
     get_kwargs_from_breaks to the expected format.
     """
 
-    @pytest.mark.filterwarnings("ignore:Passing keywords other:FutureWarning")
     @pytest.mark.parametrize(
         "breaks",
         [
@@ -72,21 +73,13 @@ class ConstructorTests:
     )
     def test_constructor_dtype(self, constructor, breaks, subtype):
         # GH 19262: conversion via dtype parameter
-        warn = None
-        if subtype == "int64" and breaks.dtype.kind in ["M", "m"]:
-            # astype(int64) deprecated
-            warn = FutureWarning
-
-        with tm.assert_produces_warning(warn, check_stacklevel=False):
-            expected_kwargs = self.get_kwargs_from_breaks(breaks.astype(subtype))
+        expected_kwargs = self.get_kwargs_from_breaks(breaks.astype(subtype))
         expected = constructor(**expected_kwargs)
 
         result_kwargs = self.get_kwargs_from_breaks(breaks)
         iv_dtype = IntervalDtype(subtype, "right")
         for dtype in (iv_dtype, str(iv_dtype)):
-            with tm.assert_produces_warning(warn, check_stacklevel=False):
-
-                result = constructor(dtype=dtype, **result_kwargs)
+            result = constructor(dtype=dtype, **result_kwargs)
             tm.assert_index_equal(result, expected)
 
     @pytest.mark.parametrize(
@@ -102,22 +95,16 @@ class ConstructorTests:
     )
     def test_constructor_pass_closed(self, constructor, breaks):
         # not passing closed to IntervalDtype, but to IntervalArray constructor
-        warn = None
-        if isinstance(constructor, partial) and constructor.func is Index:
-            # passing kwargs to Index is deprecated
-            warn = FutureWarning
-
         iv_dtype = IntervalDtype(breaks.dtype)
 
         result_kwargs = self.get_kwargs_from_breaks(breaks)
 
         for dtype in (iv_dtype, str(iv_dtype)):
-            with tm.assert_produces_warning(warn, check_stacklevel=False):
+            with tm.assert_produces_warning(None):
 
                 result = constructor(dtype=dtype, closed="left", **result_kwargs)
             assert result.dtype.closed == "left"
 
-    @pytest.mark.filterwarnings("ignore:Passing keywords other:FutureWarning")
     @pytest.mark.parametrize("breaks", [[np.nan] * 2, [np.nan] * 4, [np.nan] * 50])
     def test_constructor_nan(self, constructor, breaks, closed):
         # GH 18421
@@ -131,7 +118,6 @@ class ConstructorTests:
         assert result.dtype.subtype == expected_subtype
         tm.assert_numpy_array_equal(np.array(result), expected_values)
 
-    @pytest.mark.filterwarnings("ignore:Passing keywords other:FutureWarning")
     @pytest.mark.parametrize(
         "breaks",
         [
@@ -176,9 +162,6 @@ class ConstructorTests:
     @pytest.mark.parametrize("cat_constructor", [Categorical, CategoricalIndex])
     def test_constructor_categorical_valid(self, constructor, cat_constructor):
         # GH 21243/21253
-        if isinstance(constructor, partial) and constructor.func is Index:
-            # Index is defined to create CategoricalIndex from categorical data
-            pytest.skip()
 
         breaks = np.arange(10, dtype="int64")
         expected = IntervalIndex.from_breaks(breaks)
@@ -362,8 +345,13 @@ class TestClassConstructors(ConstructorTests):
         params=[IntervalIndex, partial(Index, dtype="interval")],
         ids=["IntervalIndex", "Index"],
     )
-    def constructor(self, request):
+    def klass(self, request):
+        # We use a separate fixture here to include Index.__new__ with dtype kwarg
         return request.param
+
+    @pytest.fixture
+    def constructor(self):
+        return IntervalIndex
 
     def get_kwargs_from_breaks(self, breaks, closed="right"):
         """
@@ -389,7 +377,6 @@ class TestClassConstructors(ConstructorTests):
         override the base class implementation since errors are handled
         differently; checks unnecessary since caught at the Interval level
         """
-        pass
 
     def test_constructor_string(self):
         # GH23013
@@ -397,27 +384,26 @@ class TestClassConstructors(ConstructorTests):
         # the interval of strings is already forbidden.
         pass
 
-    def test_constructor_errors(self, constructor):
+    def test_constructor_errors(self, klass):
         # mismatched closed within intervals with no constructor override
         ivs = [Interval(0, 1, closed="right"), Interval(2, 3, closed="left")]
         msg = "intervals must all be closed on the same side"
         with pytest.raises(ValueError, match=msg):
-            constructor(ivs)
+            klass(ivs)
 
         # scalar
         msg = (
-            r"IntervalIndex\(...\) must be called with a collection of "
+            r"(IntervalIndex|Index)\(...\) must be called with a collection of "
             "some kind, 5 was passed"
         )
         with pytest.raises(TypeError, match=msg):
-            constructor(5)
+            klass(5)
 
-        # not an interval
-        msg = "type <class 'numpy.int64'> with value 0 is not an interval"
+        # not an interval; dtype depends on 32bit/windows builds
+        msg = "type <class 'numpy.int(32|64)'> with value 0 is not an interval"
         with pytest.raises(TypeError, match=msg):
-            constructor([0, 1])
+            klass([0, 1])
 
-    @pytest.mark.filterwarnings("ignore:Passing keywords other:FutureWarning")
     @pytest.mark.parametrize(
         "data, closed",
         [

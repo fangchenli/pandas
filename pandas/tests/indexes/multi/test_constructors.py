@@ -7,7 +7,7 @@ import itertools
 import numpy as np
 import pytest
 
-from pandas._libs.tslib import Timestamp
+from pandas.compat import pa_version_under6p0
 
 from pandas.core.dtypes.cast import construct_1d_object_array_from_listlike
 
@@ -16,6 +16,7 @@ from pandas import (
     Index,
     MultiIndex,
     Series,
+    Timestamp,
     date_range,
 )
 import pandas._testing as tm
@@ -108,7 +109,7 @@ def test_constructor_mismatched_codes_levels(idx):
 def test_na_levels():
     # GH26408
     # test if codes are re-assigned value -1 for levels
-    # with mising values (NaN, NaT, None)
+    # with missing values (NaN, NaT, None)
     result = MultiIndex(
         levels=[[np.nan, None, pd.NaT, 128, 2]], codes=[[0, -1, 1, 2, 3, 4]]
     )
@@ -649,6 +650,28 @@ def test_from_frame():
     tm.assert_index_equal(expected, result)
 
 
+@pytest.mark.skipif(pa_version_under6p0, reason="minimum pyarrow not installed")
+def test_from_frame_missing_values_multiIndex():
+    # GH 39984
+    import pyarrow as pa
+
+    df = pd.DataFrame(
+        {
+            "a": Series([1, 2, None], dtype="Int64"),
+            "b": pd.Float64Dtype().__from_arrow__(pa.array([0.2, np.nan, None])),
+        }
+    )
+    multi_indexed = MultiIndex.from_frame(df)
+    expected = MultiIndex.from_arrays(
+        [
+            Series([1, 2, None]).astype("Int64"),
+            pd.Float64Dtype().__from_arrow__(pa.array([0.2, np.nan, None])),
+        ],
+        names=["a", "b"],
+    )
+    tm.assert_index_equal(multi_indexed, expected)
+
+
 @pytest.mark.parametrize(
     "non_frame",
     [
@@ -828,3 +851,13 @@ def test_multiindex_inference_consistency():
     mi = MultiIndex.from_tuples([(x,) for x in arr])
     lev = mi.levels[0]
     assert lev.dtype == object
+
+
+def test_dtype_representation():
+    # GH#46900
+    pmidx = MultiIndex.from_arrays([[1], ["a"]], names=[("a", "b"), ("c", "d")])
+    result = pmidx.dtypes
+    expected = Series(
+        ["int64", "object"], index=MultiIndex.from_tuples([("a", "b"), ("c", "d")])
+    )
+    tm.assert_series_equal(result, expected)

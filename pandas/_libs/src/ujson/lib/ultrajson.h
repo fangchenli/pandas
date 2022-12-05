@@ -29,7 +29,7 @@ Portions of code from MODP_ASCII - Ascii transformations (upper/lower, etc)
 https://github.com/client9/stringencoders
 Copyright (c) 2007  Nick Galbreath -- nickg [at] modp [dot] com. All rights reserved.
 
-Numeric decoder derived from from TCL library
+Numeric decoder derived from TCL library
 https://www.opensource.apple.com/source/tcl/tcl-14/tcl/license.terms
  * Copyright (c) 1988-1993 The Regents of the University of California.
  * Copyright (c) 1994 Sun Microsystems, Inc.
@@ -54,6 +54,7 @@ tree doesn't have cyclic references.
 
 #include <stdio.h>
 #include <wchar.h>
+#include "../../headers/portable.h"
 
 // Don't output any extra whitespaces when encoding
 #define JSON_NO_EXTRA_WHITESPACE
@@ -297,6 +298,7 @@ typedef struct __JSONObjectDecoder {
   JSOBJ (*endArray)(void *prv, JSOBJ obj);
   JSOBJ (*newInt)(void *prv, JSINT32 value);
   JSOBJ (*newLong)(void *prv, JSINT64 value);
+  JSOBJ (*newUnsignedLong)(void *prv, JSUINT64 value);
   JSOBJ (*newDouble)(void *prv, double value);
   void (*releaseObject)(void *prv, JSOBJ obj, void *decoder);
   JSPFN_MALLOC malloc;

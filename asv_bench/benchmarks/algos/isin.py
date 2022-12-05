@@ -1,13 +1,14 @@
 import numpy as np
 
-from pandas.compat.numpy import np_version_under1p20
-
 from pandas import (
     Categorical,
+    Index,
     NaT,
     Series,
     date_range,
 )
+
+from ..pandas_vb_common import tm
 
 
 class IsIn:
@@ -22,6 +23,9 @@ class IsIn:
         "datetime64[ns]",
         "category[object]",
         "category[int]",
+        "str",
+        "string[python]",
+        "string[pyarrow]",
     ]
     param_names = ["dtype"]
 
@@ -45,9 +49,7 @@ class IsIn:
 
         elif dtype in ["category[object]", "category[int]"]:
             # Note: sizes are different in this case than others
-            np.random.seed(1234)
-
-            n = 5 * 10 ** 5
+            n = 5 * 10**5
             sample_size = 100
 
             arr = list(np.random.randint(0, n // 10, size=n))
@@ -56,6 +58,13 @@ class IsIn:
 
             self.values = np.random.choice(arr, sample_size)
             self.series = Series(arr).astype("category")
+
+        elif dtype in ["str", "string[python]", "string[pyarrow]"]:
+            try:
+                self.series = Series(tm.makeStringIndex(N), dtype=dtype)
+            except ImportError:
+                raise NotImplementedError
+            self.values = list(self.series[:2])
 
         else:
             self.series = Series(np.random.randint(1, 10, N)).astype(dtype)
@@ -87,7 +96,6 @@ class IsinAlmostFullWithRandomInt:
     def setup(self, dtype, exponent, title):
         M = 3 * 2 ** (exponent - 2)
         # 0.77-the maximal share of occupied buckets
-        np.random.seed(42)
         self.series = Series(np.random.randint(0, M, M)).astype(dtype)
 
         values = np.random.randint(0, M, M).astype(dtype)
@@ -120,7 +128,6 @@ class IsinWithRandomFloat:
     param_names = ["dtype", "size", "title"]
 
     def setup(self, dtype, size, title):
-        np.random.seed(42)
         self.values = np.random.rand(size)
         self.series = Series(self.values).astype(dtype)
         np.random.shuffle(self.values)
@@ -167,8 +174,7 @@ class IsinWithArange:
 
     def setup(self, dtype, M, offset_factor):
         offset = int(M * offset_factor)
-        np.random.seed(42)
-        tmp = Series(np.random.randint(offset, M + offset, 10 ** 6))
+        tmp = Series(np.random.randint(offset, M + offset, 10**6))
         self.series = tmp.astype(dtype)
         self.values = np.arange(M).astype(dtype)
 
@@ -185,8 +191,8 @@ class IsInFloat64:
     param_names = ["dtype", "title"]
 
     def setup(self, dtype, title):
-        N_many = 10 ** 5
-        N_few = 10 ** 6
+        N_many = 10**5
+        N_few = 10**6
         self.series = Series([1, 2], dtype=dtype)
 
         if title == "many_different_values":
@@ -234,10 +240,10 @@ class IsInForObjects:
     param_names = ["series_type", "vals_type"]
 
     def setup(self, series_type, vals_type):
-        N_many = 10 ** 5
+        N_many = 10**5
 
         if series_type == "nans":
-            ser_vals = np.full(10 ** 4, np.nan)
+            ser_vals = np.full(10**4, np.nan)
         elif series_type == "short":
             ser_vals = np.arange(2)
         elif series_type == "long":
@@ -248,7 +254,7 @@ class IsInForObjects:
         self.series = Series(ser_vals).astype(object)
 
         if vals_type == "nans":
-            values = np.full(10 ** 4, np.nan)
+            values = np.full(10**4, np.nan)
         elif vals_type == "short":
             values = np.arange(2)
         elif vals_type == "long":
@@ -271,17 +277,11 @@ class IsInLongSeriesLookUpDominates:
     param_names = ["dtype", "MaxNumber", "series_type"]
 
     def setup(self, dtype, MaxNumber, series_type):
-        N = 10 ** 7
-
-        # https://github.com/pandas-dev/pandas/issues/39844
-        if not np_version_under1p20 and dtype in ("Int64", "Float64"):
-            raise NotImplementedError
+        N = 10**7
 
         if series_type == "random_hits":
-            np.random.seed(42)
             array = np.random.randint(0, MaxNumber, N)
         if series_type == "random_misses":
-            np.random.seed(42)
             array = np.random.randint(0, MaxNumber, N) + MaxNumber
         if series_type == "monotone_hits":
             array = np.repeat(np.arange(MaxNumber), N // MaxNumber)
@@ -289,7 +289,8 @@ class IsInLongSeriesLookUpDominates:
             array = np.arange(N) + MaxNumber
 
         self.series = Series(array).astype(dtype)
-        self.values = np.arange(MaxNumber).astype(dtype)
+
+        self.values = np.arange(MaxNumber).astype(dtype.lower())
 
     def time_isin(self, dtypes, MaxNumber, series_type):
         self.series.isin(self.values)
@@ -303,21 +304,39 @@ class IsInLongSeriesValuesDominate:
     param_names = ["dtype", "series_type"]
 
     def setup(self, dtype, series_type):
-        N = 10 ** 7
-
-        # https://github.com/pandas-dev/pandas/issues/39844
-        if not np_version_under1p20 and dtype in ("Int64", "Float64"):
-            raise NotImplementedError
+        N = 10**7
 
         if series_type == "random":
-            np.random.seed(42)
             vals = np.random.randint(0, 10 * N, N)
         if series_type == "monotone":
             vals = np.arange(N)
 
-        self.values = vals.astype(dtype)
-        M = 10 ** 6 + 1
+        self.values = vals.astype(dtype.lower())
+        M = 10**6 + 1
         self.series = Series(np.arange(M)).astype(dtype)
 
     def time_isin(self, dtypes, series_type):
         self.series.isin(self.values)
+
+
+class IsInWithLongTupples:
+    def setup(self):
+        t = tuple(range(1000))
+        self.series = Series([t] * 1000)
+        self.values = [t]
+
+    def time_isin(self):
+        self.series.isin(self.values)
+
+
+class IsInIndexes:
+    def setup(self):
+        self.range_idx = Index(range(1000))
+        self.index = Index(list(range(1000)))
+        self.series = Series(np.random.randint(100_000, size=1000))
+
+    def time_isin_range_index(self):
+        self.series.isin(self.range_idx)
+
+    def time_isin_index(self):
+        self.series.isin(self.index)

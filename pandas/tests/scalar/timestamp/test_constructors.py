@@ -1,7 +1,9 @@
 import calendar
 from datetime import (
+    date,
     datetime,
     timedelta,
+    timezone,
 )
 
 import dateutil.tz
@@ -10,19 +12,61 @@ import numpy as np
 import pytest
 import pytz
 
+from pandas._libs.tslibs.dtypes import NpyDatetimeUnit
+from pandas.compat import PY310
 from pandas.errors import OutOfBoundsDatetime
 
 from pandas import (
     Period,
     Timedelta,
     Timestamp,
-    compat,
 )
-
-from pandas.tseries import offsets
 
 
 class TestTimestampConstructors:
+    def test_constructor_from_date_second_reso(self):
+        # GH#49034 constructing from a pydate object gets lowest supported
+        #  reso, i.e. seconds
+        obj = date(2012, 9, 1)
+        ts = Timestamp(obj)
+        assert ts.unit == "s"
+
+    @pytest.mark.parametrize("typ", [int, float])
+    def test_constructor_int_float_with_YM_unit(self, typ):
+        # GH#47266 avoid the conversions in cast_from_unit
+        val = typ(150)
+
+        ts = Timestamp(val, unit="Y")
+        expected = Timestamp("2120-01-01")
+        assert ts == expected
+
+        ts = Timestamp(val, unit="M")
+        expected = Timestamp("1982-07-01")
+        assert ts == expected
+
+    def test_constructor_float_not_round_with_YM_unit_deprecated(self):
+        # GH#47267 avoid the conversions in cast_from-unit
+
+        msg = "Conversion of non-round float with unit=[MY] is ambiguous"
+        with pytest.raises(ValueError, match=msg):
+            Timestamp(150.5, unit="Y")
+
+        with pytest.raises(ValueError, match=msg):
+            Timestamp(150.5, unit="M")
+
+    def test_constructor_datetime64_with_tz(self):
+        # GH#42288, GH#24559
+        dt = np.datetime64("1970-01-01 05:00:00")
+        tzstr = "UTC+05:00"
+
+        # pre-2.0 this interpreted dt as a UTC time. in 2.0 this is treated
+        #  as a wall-time, consistent with DatetimeIndex behavior
+        ts = Timestamp(dt, tz=tzstr)
+
+        alt = Timestamp(dt).tz_localize(tzstr)
+        assert ts == alt
+        assert ts.hour == 5
+
     def test_constructor(self):
         base_str = "2014-07-01 09:00"
         base_dt = datetime(2014, 7, 1, 9)
@@ -61,8 +105,9 @@ class TestTimestampConstructors:
             (dateutil.tz.tzoffset(None, 18000), 5),
         ]
 
-        for date_str, date, expected in tests:
-            for result in [Timestamp(date_str), Timestamp(date)]:
+        for date_str, date_obj, expected in tests:
+            for result in [Timestamp(date_str), Timestamp(date_obj)]:
+                result = result.as_unit("ns")  # test originally written before non-nano
                 # only with timestring
                 assert result.value == expected
 
@@ -72,7 +117,10 @@ class TestTimestampConstructors:
 
             # with timezone
             for tz, offset in timezones:
-                for result in [Timestamp(date_str, tz=tz), Timestamp(date, tz=tz)]:
+                for result in [Timestamp(date_str, tz=tz), Timestamp(date_obj, tz=tz)]:
+                    result = result.as_unit(
+                        "ns"
+                    )  # test originally written before non-nano
                     expected_tz = expected - offset * 3600 * 1_000_000_000
                     assert result.value == expected_tz
 
@@ -193,11 +241,11 @@ class TestTimestampConstructors:
         with pytest.raises(ValueError, match=msg):
             Timestamp("2017-10-22", tzinfo=pytz.utc, tz="UTC")
 
-        msg = "Invalid frequency:"
+        msg = "Cannot pass a date attribute keyword argument when passing a date string"
         with pytest.raises(ValueError, match=msg):
             # GH#5168
             # case where user tries to pass tz as an arg, not kwarg, gets
-            # interpreted as a `freq`
+            # interpreted as `year`
             Timestamp("2012-01-01", "US/Pacific")
 
     def test_constructor_strptime(self):
@@ -221,9 +269,36 @@ class TestTimestampConstructors:
         ]
         assert all(ts == stamps[0] for ts in stamps)
 
+    def test_constructor_positional_with_tzinfo(self):
+        # GH#31929
+        ts = Timestamp(2020, 12, 31, tzinfo=timezone.utc)
+        expected = Timestamp("2020-12-31", tzinfo=timezone.utc)
+        assert ts == expected
+
+    @pytest.mark.parametrize("kwd", ["nanosecond", "microsecond", "second", "minute"])
+    def test_constructor_positional_keyword_mixed_with_tzinfo(self, kwd, request):
+        # TODO: if we passed microsecond with a keyword we would mess up
+        #  xref GH#45307
+        if kwd != "nanosecond":
+            # nanosecond is keyword-only as of 2.0, others are not
+            mark = pytest.mark.xfail(reason="GH#45307")
+            request.node.add_marker(mark)
+
+        kwargs = {kwd: 4}
+        ts = Timestamp(2020, 12, 31, tzinfo=timezone.utc, **kwargs)
+
+        td_kwargs = {kwd + "s": 4}
+        td = Timedelta(**td_kwargs)
+        expected = Timestamp("2020-12-31", tz=timezone.utc) + td
+        assert ts == expected
+
     def test_constructor_positional(self):
         # see gh-10758
-        msg = "an integer is required"
+        msg = (
+            "'NoneType' object cannot be interpreted as an integer"
+            if PY310
+            else "an integer is required"
+        )
         with pytest.raises(TypeError, match=msg):
             Timestamp(2000, 1)
 
@@ -267,27 +342,23 @@ class TestTimestampConstructors:
             Timestamp("20151112")
         )
 
-        assert (
-            repr(
-                Timestamp(
-                    year=2015,
-                    month=11,
-                    day=12,
-                    hour=1,
-                    minute=2,
-                    second=3,
-                    microsecond=999999,
-                )
+        assert repr(
+            Timestamp(
+                year=2015,
+                month=11,
+                day=12,
+                hour=1,
+                minute=2,
+                second=3,
+                microsecond=999999,
             )
-            == repr(Timestamp("2015-11-12 01:02:03.999999"))
-        )
+        ) == repr(Timestamp("2015-11-12 01:02:03.999999"))
 
     def test_constructor_fromordinal(self):
         base = datetime(2000, 1, 1)
 
-        ts = Timestamp.fromordinal(base.toordinal(), freq="D")
+        ts = Timestamp.fromordinal(base.toordinal())
         assert base == ts
-        assert ts.freq == "D"
         assert base.toordinal() == ts.toordinal()
 
         ts = Timestamp.fromordinal(base.toordinal(), tz="US/Eastern")
@@ -387,14 +458,26 @@ class TestTimestampConstructors:
         Timestamp(min_ts_us)
         Timestamp(max_ts_us)
 
+        # We used to raise on these before supporting non-nano
+        us_val = NpyDatetimeUnit.NPY_FR_us.value
+        assert Timestamp(min_ts_us - one_us)._creso == us_val
+        assert Timestamp(max_ts_us + one_us)._creso == us_val
+
+        # https://github.com/numpy/numpy/issues/22346 for why
+        #  we can't use the same construction as above with minute resolution
+
+        # too_low, too_high are the _just_ outside the range of M8[s]
+        too_low = np.datetime64("-292277022657-01-27T08:29", "m")
+        too_high = np.datetime64("292277026596-12-04T15:31", "m")
+
         msg = "Out of bounds"
         # One us less than the minimum is an error
         with pytest.raises(ValueError, match=msg):
-            Timestamp(min_ts_us - one_us)
+            Timestamp(too_low)
 
         # One us more than the maximum is an error
         with pytest.raises(ValueError, match=msg):
-            Timestamp(max_ts_us + one_us)
+            Timestamp(too_high)
 
     def test_out_of_bounds_string(self):
         msg = "Out of bounds"
@@ -419,7 +502,20 @@ class TestTimestampConstructors:
         for date_string in out_of_bounds_dates:
             for unit in time_units:
                 dt64 = np.datetime64(date_string, unit)
-                msg = "Out of bounds"
+                ts = Timestamp(dt64)
+                if unit in ["s", "ms", "us"]:
+                    # We can preserve the input unit
+                    assert ts.value == dt64.view("i8")
+                else:
+                    # we chose the closest unit that we _do_ support
+                    assert ts._creso == NpyDatetimeUnit.NPY_FR_s.value
+
+        # With more extreme cases, we can't even fit inside second resolution
+        info = np.iinfo(np.int64)
+        msg = "Out of bounds nanosecond timestamp:"
+        for value in [info.min + 1, info.max]:
+            for unit in ["D", "h", "m"]:
+                dt64 = np.datetime64(value, unit)
                 with pytest.raises(OutOfBoundsDatetime, match=msg):
                     Timestamp(dt64)
 
@@ -429,6 +525,13 @@ class TestTimestampConstructors:
             for unit in time_units:
                 dt64 = np.datetime64(date_string, unit)
                 Timestamp(dt64)
+
+    @pytest.mark.parametrize("arg", ["001-01-01", "0001-01-01"])
+    def test_out_of_bounds_string_consistency(self, arg):
+        # GH 15829
+        msg = "Out of bounds"
+        with pytest.raises(OutOfBoundsDatetime, match=msg):
+            Timestamp(arg)
 
     def test_min_valid(self):
         # Ensure that Timestamp.min is a valid Timestamp
@@ -507,18 +610,6 @@ class TestTimestampConstructors:
         expected = Timestamp(datetime(2013, 1, 1), tz=pytz.FixedOffset(540))
         assert result == expected
 
-    def test_construct_timestamp_preserve_original_frequency(self):
-        # GH 22311
-        result = Timestamp(Timestamp("2010-08-08", freq="D")).freq
-        expected = offsets.Day()
-        assert result == expected
-
-    def test_constructor_invalid_frequency(self):
-        # GH 22311
-        msg = "Invalid frequency:"
-        with pytest.raises(ValueError, match=msg):
-            Timestamp("2012-01-01", freq=[])
-
     @pytest.mark.parametrize("box", [datetime, Timestamp])
     def test_raise_tz_and_tzinfo_in_datetime_input(self, box):
         # GH 23579
@@ -547,10 +638,6 @@ class TestTimestampConstructors:
         expected = Timestamp(2000, 1, 1)
         assert result == expected
 
-    @pytest.mark.skipif(
-        not compat.PY38,
-        reason="datetime.fromisocalendar was added in Python version 3.8",
-    )
     def test_constructor_fromisocalendar(self):
         # GH 30395
         expected_timestamp = Timestamp("2000-01-03 00:00:00")
@@ -603,3 +690,10 @@ def test_constructor_missing_keyword(kwargs):
 
     with pytest.raises(TypeError, match=msg):
         Timestamp(**kwargs)
+
+
+@pytest.mark.parametrize("nano", [-1, 1000])
+def test_timestamp_nano_range(nano):
+    # GH 48255
+    with pytest.raises(ValueError, match="nanosecond must be in 0..999"):
+        Timestamp(year=2022, month=1, day=1, nanosecond=nano)

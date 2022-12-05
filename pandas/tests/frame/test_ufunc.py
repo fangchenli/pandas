@@ -1,6 +1,10 @@
+from functools import partial
+import re
+
 import numpy as np
 import pytest
 
+from pandas.compat.numpy import np_version_gte1p22
 import pandas.util._test_decorators as td
 
 import pandas as pd
@@ -57,6 +61,42 @@ def test_binary_input_dispatch_binop(dtype):
     expected = pd.DataFrame(
         np.add(values, values), index=df.index, columns=df.columns
     ).astype(dtype)
+    tm.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize(
+    "func,arg,expected",
+    [
+        (np.add, 1, [2, 3, 4, 5]),
+        (
+            partial(np.add, where=[[False, True], [True, False]]),
+            np.array([[1, 1], [1, 1]]),
+            [0, 3, 4, 0],
+        ),
+        (np.power, np.array([[1, 1], [2, 2]]), [1, 2, 9, 16]),
+        (np.subtract, 2, [-1, 0, 1, 2]),
+        (
+            partial(np.negative, where=np.array([[False, True], [True, False]])),
+            None,
+            [0, -2, -3, 0],
+        ),
+    ],
+)
+def test_ufunc_passes_args(func, arg, expected):
+    # GH#40662
+    arr = np.array([[1, 2], [3, 4]])
+    df = pd.DataFrame(arr)
+    result_inplace = np.zeros_like(arr)
+    # 1-argument ufunc
+    if arg is None:
+        result = func(df, out=result_inplace)
+    else:
+        result = func(df, arg, out=result_inplace)
+
+    expected = np.array(expected).reshape(2, 2)
+    tm.assert_numpy_array_equal(result_inplace, expected)
+
+    expected = pd.DataFrame(expected)
     tm.assert_frame_equal(result, expected)
 
 
@@ -160,9 +200,10 @@ def test_unary_accumulate_axis():
     tm.assert_frame_equal(result, expected)
 
 
-def test_frame_outer_deprecated():
+def test_frame_outer_disallowed():
     df = pd.DataFrame({"A": [1, 2]})
-    with tm.assert_produces_warning(FutureWarning):
+    with pytest.raises(NotImplementedError, match=""):
+        # deprecation enforced in 2.0
         np.subtract.outer(df, df)
 
 
@@ -213,8 +254,8 @@ def test_alignment_deprecation():
     tm.assert_frame_equal(result, expected)
 
 
-@td.skip_if_no("numba", "0.46.0")
-def test_alignment_deprecation_many_inputs():
+@td.skip_if_no("numba")
+def test_alignment_deprecation_many_inputs(request):
     # https://github.com/pandas-dev/pandas/issues/39184
     # test that the deprecation also works with > 2 inputs -> using a numba
     # written ufunc for this because numpy itself doesn't have such ufuncs
@@ -222,6 +263,12 @@ def test_alignment_deprecation_many_inputs():
         float64,
         vectorize,
     )
+
+    if np_version_gte1p22:
+        mark = pytest.mark.filterwarnings(
+            "ignore:`np.MachAr` is deprecated.*:DeprecationWarning"
+        )
+        request.node.add_marker(mark)
 
     @vectorize([float64(float64, float64, float64)])
     def my_ufunc(x, y, z):
@@ -256,3 +303,24 @@ def test_alignment_deprecation_many_inputs():
         result = my_ufunc(df1.values, df2, df3)
     expected = expected.set_axis(["b", "c"], axis=1)
     tm.assert_frame_equal(result, expected)
+
+
+def test_array_ufuncs_for_many_arguments():
+    # GH39853
+    def add3(x, y, z):
+        return x + y + z
+
+    ufunc = np.frompyfunc(add3, 3, 1)
+    df = pd.DataFrame([[1, 2], [3, 4]])
+
+    result = ufunc(df, df, 1)
+    expected = pd.DataFrame([[3, 5], [7, 9]], dtype=object)
+    tm.assert_frame_equal(result, expected)
+
+    ser = pd.Series([1, 2])
+    msg = (
+        "Cannot apply ufunc <ufunc 'add3 (vectorized)'> "
+        "to mixed DataFrame and Series inputs."
+    )
+    with pytest.raises(NotImplementedError, match=re.escape(msg)):
+        ufunc(df, df, ser)

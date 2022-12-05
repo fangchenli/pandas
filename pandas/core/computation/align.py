@@ -9,19 +9,15 @@ from functools import (
 )
 from typing import (
     TYPE_CHECKING,
-    Dict,
-    Optional,
+    Callable,
     Sequence,
-    Tuple,
-    Type,
-    Union,
 )
 import warnings
 
 import numpy as np
 
-from pandas._typing import FrameOrSeries
 from pandas.errors import PerformanceWarning
+from pandas.util._exceptions import find_stack_level
 
 from pandas.core.dtypes.generic import (
     ABCDataFrame,
@@ -33,15 +29,18 @@ import pandas.core.common as com
 from pandas.core.computation.common import result_type_many
 
 if TYPE_CHECKING:
+    from pandas._typing import F
+
+    from pandas.core.generic import NDFrame
     from pandas.core.indexes.api import Index
 
 
 def _align_core_single_unary_op(
     term,
-) -> Tuple[Union[partial, Type[FrameOrSeries]], Optional[Dict[str, Index]]]:
+) -> tuple[partial | type[NDFrame], dict[str, Index] | None]:
 
-    typ: Union[partial, Type[FrameOrSeries]]
-    axes: Optional[Dict[str, Index]] = None
+    typ: partial | type[NDFrame]
+    axes: dict[str, Index] | None = None
 
     if isinstance(term.value, np.ndarray):
         typ = partial(np.asanyarray, dtype=term.value.dtype)
@@ -54,8 +53,8 @@ def _align_core_single_unary_op(
 
 
 def _zip_axes_from_type(
-    typ: Type[FrameOrSeries], new_axes: Sequence[Index]
-) -> Dict[str, Index]:
+    typ: type[NDFrame], new_axes: Sequence[Index]
+) -> dict[str, Index]:
     return {name: new_axes[i] for i, name in enumerate(typ._AXIS_ORDERS)}
 
 
@@ -66,7 +65,7 @@ def _any_pandas_objects(terms) -> bool:
     return any(isinstance(term.value, PandasObject) for term in terms)
 
 
-def _filter_special_cases(f):
+def _filter_special_cases(f) -> Callable[[F], F]:
     @wraps(f)
     def wrapper(terms):
         # single unary operand
@@ -129,9 +128,11 @@ def _align_core(terms):
                     w = (
                         f"Alignment difference on axis {axis} is larger "
                         f"than an order of magnitude on term {repr(terms[i].name)}, "
-                        f"by more than {ordm:.4g}; performance may suffer"
+                        f"by more than {ordm:.4g}; performance may suffer."
                     )
-                    warnings.warn(w, category=PerformanceWarning, stacklevel=6)
+                    warnings.warn(
+                        w, category=PerformanceWarning, stacklevel=find_stack_level()
+                    )
 
                 f = partial(ti.reindex, reindexer, axis=axis, copy=False)
 

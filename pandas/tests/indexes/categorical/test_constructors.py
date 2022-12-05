@@ -14,6 +14,8 @@ class TestCategoricalIndexConstructors:
     def test_construction_disallows_scalar(self):
         msg = "must be called with a collection of some kind"
         with pytest.raises(TypeError, match=msg):
+            CategoricalIndex(data=1, categories=list("abcd"), ordered=False)
+        with pytest.raises(TypeError, match=msg):
             CategoricalIndex(categories=list("abcd"), ordered=False)
 
     def test_construction(self):
@@ -108,8 +110,8 @@ class TestCategoricalIndexConstructors:
         tm.assert_index_equal(result, ci, exact=True)
 
         # make sure indexes are handled
-        expected = CategoricalIndex([0, 1, 2], categories=[0, 1, 2], ordered=True)
         idx = Index(range(3))
+        expected = CategoricalIndex([0, 1, 2], categories=idx, ordered=True)
         result = CategoricalIndex(idx, categories=idx, ordered=True)
         tm.assert_index_equal(result, expected, exact=True)
 
@@ -139,14 +141,4 @@ class TestCategoricalIndexConstructors:
             CategoricalIndex(data, categories=cats, dtype=dtype)
 
         with pytest.raises(ValueError, match=msg):
-            with tm.assert_produces_warning(FutureWarning):
-                # passing subclass-specific kwargs to pd.Index
-                Index(data, categories=cats, dtype=dtype)
-
-        with pytest.raises(ValueError, match=msg):
             CategoricalIndex(data, ordered=ordered, dtype=dtype)
-
-        with pytest.raises(ValueError, match=msg):
-            with tm.assert_produces_warning(FutureWarning):
-                # passing subclass-specific kwargs to pd.Index
-                Index(data, ordered=ordered, dtype=dtype)

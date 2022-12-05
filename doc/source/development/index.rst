@@ -13,13 +13,14 @@ Development
     :maxdepth: 2
 
     contributing
-    code_style
+    contributing_environment
+    contributing_documentation
+    contributing_codebase
     maintaining
     internals
-    test_writing
     debugging_extensions
     extending
     developer
     policies
     roadmap
-    meeting
+    community

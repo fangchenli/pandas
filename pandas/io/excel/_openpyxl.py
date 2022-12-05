@@ -3,74 +3,116 @@ from __future__ import annotations
 import mmap
 from typing import (
     TYPE_CHECKING,
-    Dict,
-    List,
-    Optional,
+    Any,
+    Tuple,
+    cast,
 )
 
 import numpy as np
 
 from pandas._typing import (
-    FilePathOrBuffer,
+    FilePath,
+    ReadBuffer,
     Scalar,
     StorageOptions,
+    WriteExcelBuffer,
 )
 from pandas.compat._optional import import_optional_dependency
+from pandas.util._decorators import doc
+
+from pandas.core.shared_docs import _shared_docs
 
 from pandas.io.excel._base import (
     BaseExcelReader,
     ExcelWriter,
 )
-from pandas.io.excel._util import validate_freeze_panes
+from pandas.io.excel._util import (
+    combine_kwargs,
+    validate_freeze_panes,
+)
 
 if TYPE_CHECKING:
     from openpyxl.descriptors.serialisable import Serialisable
+    from openpyxl.workbook import Workbook
 
 
 class OpenpyxlWriter(ExcelWriter):
-    engine = "openpyxl"
-    supported_extensions = (".xlsx", ".xlsm")
+    _engine = "openpyxl"
+    _supported_extensions = (".xlsx", ".xlsm")
 
     def __init__(
         self,
-        path,
-        engine=None,
+        path: FilePath | WriteExcelBuffer | ExcelWriter,
+        engine: str | None = None,
+        date_format: str | None = None,
+        datetime_format: str | None = None,
         mode: str = "w",
         storage_options: StorageOptions = None,
-        **engine_kwargs,
-    ):
+        if_sheet_exists: str | None = None,
+        engine_kwargs: dict[str, Any] | None = None,
+        **kwargs,
+    ) -> None:
         # Use the openpyxl module as the Excel writer.
         from openpyxl.workbook import Workbook
 
+        engine_kwargs = combine_kwargs(engine_kwargs, kwargs)
+
         super().__init__(
-            path, mode=mode, storage_options=storage_options, **engine_kwargs
+            path,
+            mode=mode,
+            storage_options=storage_options,
+            if_sheet_exists=if_sheet_exists,
+            engine_kwargs=engine_kwargs,
         )
 
         # ExcelWriter replaced "a" by "r+" to allow us to first read the excel file from
         # the file and later write to it
-        if "r+" in self.mode:  # Load from existing workbook
+        if "r+" in self._mode:  # Load from existing workbook
             from openpyxl import load_workbook
 
-            self.book = load_workbook(self.handles.handle)
-            self.handles.handle.seek(0)
+            self._book = load_workbook(self._handles.handle, **engine_kwargs)
+            self._handles.handle.seek(0)
         else:
             # Create workbook object with default optimized_write=True.
-            self.book = Workbook()
+            self._book = Workbook(**engine_kwargs)
 
             if self.book.worksheets:
                 self.book.remove(self.book.worksheets[0])
 
-    def save(self):
+    @property
+    def book(self) -> Workbook:
+        """
+        Book instance of class openpyxl.workbook.Workbook.
+
+        This attribute can be used to access engine-specific features.
+        """
+        return self._book
+
+    @book.setter
+    def book(self, other: Workbook) -> None:
+        """
+        Set book instance. Class type will depend on the engine used.
+        """
+        self._deprecate_set_book()
+        self._book = other
+
+    @property
+    def sheets(self) -> dict[str, Any]:
+        """Mapping of sheet names to sheet objects."""
+        result = {name: self.book[name] for name in self.book.sheetnames}
+        return result
+
+    def _save(self) -> None:
         """
         Save workbook to disk.
         """
-        self.book.save(self.handles.handle)
-        if "r+" in self.mode and not isinstance(self.handles.handle, mmap.mmap):
+        self.book.save(self._handles.handle)
+        if "r+" in self._mode and not isinstance(self._handles.handle, mmap.mmap):
             # truncate file to the written content
-            self.handles.handle.truncate()
+            self._handles.handle.truncate()
 
     @classmethod
-    def _convert_to_style_kwargs(cls, style_dict: dict) -> Dict[str, Serialisable]:
+    def _convert_to_style_kwargs(cls, style_dict: dict) -> dict[str, Serialisable]:
         """
         Convert a style_dict to a set of kwargs suitable for initializing
         or updating-on-copy an openpyxl v2 style object.
@@ -95,10 +137,9 @@ class OpenpyxlWriter(ExcelWriter):
         """
         _style_key_map = {"borders": "border"}
 
-        style_kwargs: Dict[str, Serialisable] = {}
+        style_kwargs: dict[str, Serialisable] = {}
         for k, v in style_dict.items():
-            if k in _style_key_map:
-                k = _style_key_map[k]
+            k = _style_key_map.get(k, k)
             _conv_to_x = getattr(cls, f"_convert_to_{k}", lambda x: None)
             new_v = _conv_to_x(v)
             if new_v:
@@ -176,8 +217,7 @@ class OpenpyxlWriter(ExcelWriter):
 
         font_kwargs = {}
         for k, v in font_dict.items():
-            if k in _font_key_map:
-                k = _font_key_map[k]
+            k = _font_key_map.get(k, k)
             if k == "color":
                 v = cls._convert_to_color(v)
             font_kwargs[k] = v
@@ -203,7 +243,7 @@ class OpenpyxlWriter(ExcelWriter):
         return map(cls._convert_to_color, stop_seq)
 
     @classmethod
-    def _convert_to_fill(cls, fill_dict):
+    def _convert_to_fill(cls, fill_dict: dict[str, Any]):
         """
         Convert ``fill_dict`` to an openpyxl v2 Fill object.
 
@@ -246,11 +286,8 @@ class OpenpyxlWriter(ExcelWriter):
         pfill_kwargs = {}
         gfill_kwargs = {}
         for k, v in fill_dict.items():
-            pk = gk = None
-            if k in _pattern_fill_key_map:
-                pk = _pattern_fill_key_map[k]
-            if k in _gradient_fill_key_map:
-                gk = _gradient_fill_key_map[k]
+            pk = _pattern_fill_key_map.get(k)
+            gk = _gradient_fill_key_map.get(k)
             if pk in ["start_color", "end_color"]:
                 v = cls._convert_to_color(v)
             if gk == "stop":
@@ -294,8 +331,7 @@ class OpenpyxlWriter(ExcelWriter):
 
         side_kwargs = {}
         for k, v in side_spec.items():
-            if k in _side_key_map:
-                k = _side_key_map[k]
+            k = _side_key_map.get(k, k)
             if k == "color":
                 v = cls._convert_to_color(v)
             side_kwargs[k] = v
@@ -333,8 +369,7 @@ class OpenpyxlWriter(ExcelWriter):
 
         border_kwargs = {}
         for k, v in border_dict.items():
-            if k in _border_key_map:
-                k = _border_key_map[k]
+            k = _border_key_map.get(k, k)
             if k == "color":
                 v = cls._convert_to_color(v)
             if k in ["left", "right", "top", "bottom", "diagonal"]:
@@ -403,22 +438,46 @@ class OpenpyxlWriter(ExcelWriter):
 
         return Protection(**protection_dict)
 
-    def write_cells(
-        self, cells, sheet_name=None, startrow=0, startcol=0, freeze_panes=None
-    ):
+    def _write_cells(
+        self,
+        cells,
+        sheet_name: str | None = None,
+        startrow: int = 0,
+        startcol: int = 0,
+        freeze_panes: tuple[int, int] | None = None,
+    ) -> None:
         # Write the frame cells using openpyxl.
         sheet_name = self._get_sheet_name(sheet_name)
 
-        _style_cache: Dict[str, Dict[str, Serialisable]] = {}
+        _style_cache: dict[str, dict[str, Serialisable]] = {}
 
-        if sheet_name in self.sheets:
-            wks = self.sheets[sheet_name]
+        if sheet_name in self.sheets and self._if_sheet_exists != "new":
+            if "r+" in self._mode:
+                if self._if_sheet_exists == "replace":
+                    old_wks = self.sheets[sheet_name]
+                    target_index = self.book.index(old_wks)
+                    del self.book[sheet_name]
+                    wks = self.book.create_sheet(sheet_name, target_index)
+                elif self._if_sheet_exists == "error":
+                    raise ValueError(
+                        f"Sheet '{sheet_name}' already exists and "
+                        f"if_sheet_exists is set to 'error'."
+                    )
+                elif self._if_sheet_exists == "overlay":
+                    wks = self.sheets[sheet_name]
+                else:
+                    raise ValueError(
+                        f"'{self._if_sheet_exists}' is not valid for if_sheet_exists. "
+                        "Valid options are 'error', 'new', 'replace' and 'overlay'."
+                    )
+            else:
+                wks = self.sheets[sheet_name]
         else:
             wks = self.book.create_sheet()
             wks.title = sheet_name
-            self.sheets[sheet_name] = wks
 
         if validate_freeze_panes(freeze_panes):
+            freeze_panes = cast(Tuple[int, int], freeze_panes)
             wks.freeze_panes = wks.cell(
                 row=freeze_panes[0] + 1, column=freeze_panes[1] + 1
             )
@@ -431,7 +490,7 @@ class OpenpyxlWriter(ExcelWriter):
             if fmt:
                 xcell.number_format = fmt
 
-            style_kwargs: Optional[Dict[str, Serialisable]] = {}
+            style_kwargs: dict[str, Serialisable] | None = {}
             if cell.style:
                 key = str(cell.style)
                 style_kwargs = _style_cache.get(key)
@@ -472,9 +531,10 @@ class OpenpyxlWriter(ExcelWriter):
 
 
 class OpenpyxlReader(BaseExcelReader):
+    @doc(storage_options=_shared_docs["storage_options"])
     def __init__(
         self,
-        filepath_or_buffer: FilePathOrBuffer,
+        filepath_or_buffer: FilePath | ReadBuffer[bytes],
         storage_options: StorageOptions = None,
     ) -> None:
         """
@@ -482,10 +542,9 @@ class OpenpyxlReader(BaseExcelReader):
 
         Parameters
         ----------
-        filepath_or_buffer : string, path object or Workbook
+        filepath_or_buffer : str, path object or Workbook
             Object to be parsed.
-        storage_options : dict, optional
-            passed to fsspec for appropriate URLs (see ``_get_filepath_or_buffer``)
+        {storage_options}
         """
         import_optional_dependency("openpyxl")
         super().__init__(filepath_or_buffer, storage_options=storage_options)
@@ -496,22 +555,16 @@ class OpenpyxlReader(BaseExcelReader):
 
         return Workbook
 
-    def load_workbook(self, filepath_or_buffer: FilePathOrBuffer):
+    def load_workbook(self, filepath_or_buffer: FilePath | ReadBuffer[bytes]):
         from openpyxl import load_workbook
 
         return load_workbook(
             filepath_or_buffer, read_only=True, data_only=True, keep_links=False
         )
 
-    def close(self):
-        # https://stackoverflow.com/questions/31416842/
-        #  openpyxl-does-not-close-excel-workbook-in-read-only-mode
-        self.book.close()
-        super().close()
-
     @property
-    def sheet_names(self) -> List[str]:
-        return self.book.sheetnames
+    def sheet_names(self) -> list[str]:
+        return [sheet.title for sheet in self.book.worksheets]
 
     def get_sheet_by_name(self, name: str):
         self.raise_if_bad_sheet_by_name(name)
@@ -521,7 +574,7 @@ class OpenpyxlReader(BaseExcelReader):
         self.raise_if_bad_sheet_by_index(index)
         return self.book.worksheets[index]
 
-    def _convert_cell(self, cell, convert_float: bool) -> Scalar:
+    def _convert_cell(self, cell) -> Scalar:
 
         from openpyxl.cell.cell import (
             TYPE_ERROR,
@@ -532,32 +585,42 @@ class OpenpyxlReader(BaseExcelReader):
             return ""  # compat with xlrd
         elif cell.data_type == TYPE_ERROR:
             return np.nan
-        elif not convert_float and cell.data_type == TYPE_NUMERIC:
+        elif cell.data_type == TYPE_NUMERIC:
+            val = int(cell.value)
+            if val == cell.value:
+                return val
             return float(cell.value)
 
         return cell.value
 
-    def get_sheet_data(self, sheet, convert_float: bool) -> List[List[Scalar]]:
+    def get_sheet_data(
+        self, sheet, file_rows_needed: int | None = None
+    ) -> list[list[Scalar]]:
 
         if self.book.read_only:
             sheet.reset_dimensions()
 
-        data: List[List[Scalar]] = []
+        data: list[list[Scalar]] = []
         last_row_with_data = -1
         for row_number, row in enumerate(sheet.rows):
-            converted_row = [self._convert_cell(cell, convert_float) for cell in row]
-            if not all(cell == "" for cell in converted_row):
+            converted_row = [self._convert_cell(cell) for cell in row]
+            while converted_row and converted_row[-1] == "":
+                # trim trailing empty elements
+                converted_row.pop()
+            if converted_row:
                 last_row_with_data = row_number
             data.append(converted_row)
+            if file_rows_needed is not None and len(data) >= file_rows_needed:
+                break
 
         # Trim trailing empty rows
         data = data[: last_row_with_data + 1]
 
-        if self.book.read_only and len(data) > 0:
-            # With dimension reset, openpyxl no longer pads rows
+        if len(data) > 0:
+            # extend rows to max width
             max_width = max(len(data_row) for data_row in data)
             if min(len(data_row) for data_row in data) < max_width:
-                empty_cell: List[Scalar] = [""]
+                empty_cell: list[Scalar] = [""]
                 data = [
                     data_row + (max_width - len(data_row)) * empty_cell
                     for data_row in data

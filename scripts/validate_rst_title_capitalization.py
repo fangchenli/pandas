@@ -11,14 +11,12 @@ As pre-commit hook (recommended):
 From the command-line:
     python scripts/validate_rst_title_capitalization.py <rst file>
 """
+from __future__ import annotations
+
 import argparse
 import re
 import sys
-from typing import (
-    Iterable,
-    List,
-    Tuple,
-)
+from typing import Iterable
 
 CAPITALIZATION_EXCEPTIONS = {
     "pandas",
@@ -69,8 +67,9 @@ CAPITALIZATION_EXCEPTIONS = {
     "IntervalIndex",
     "Categorical",
     "CategoricalIndex",
-    "Categorical",
     "GroupBy",
+    "DataFrameGroupBy",
+    "SeriesGroupBy",
     "SPSS",
     "ORC",
     "R",
@@ -145,13 +144,13 @@ CAPITALIZATION_EXCEPTIONS = {
     "False",
     "Styler",
     "os",
-    "UTC",
     "str",
     "msgpack",
     "ExtensionArray",
     "LZMA",
     "Numba",
     "Timestamp",
+    "PyArrow",
 }
 
 CAP_EXCEPTIONS_DICT = {word.lower(): word for word in CAPITALIZATION_EXCEPTIONS}
@@ -201,7 +200,7 @@ def correct_title_capitalization(title: str) -> str:
     return correct_title
 
 
-def find_titles(rst_file: str) -> Iterable[Tuple[str, int]]:
+def find_titles(rst_file: str) -> Iterable[tuple[str, int]]:
     """
     Algorithm to identify particular text that should be considered headings in an
     RST file.
@@ -237,7 +236,7 @@ def find_titles(rst_file: str) -> Iterable[Tuple[str, int]]:
             previous_line = line
 
 
-def main(source_paths: List[str]) -> int:
+def main(source_paths: list[str]) -> int:
     """
     The main method to print all headings with incorrect capitalization.
 

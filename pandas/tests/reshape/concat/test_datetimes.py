@@ -22,8 +22,6 @@ import pandas._testing as tm
 
 class TestDatetimeConcat:
     def test_concat_datetime64_block(self):
-        from pandas.core.indexes.datetimes import date_range
-
         rng = date_range("1/1/2000", periods=10)
 
         df = DataFrame({"time": rng})
@@ -457,7 +455,7 @@ class TestTimezoneConcat:
     )
     def test_concat_tz_NaT(self, t1):
         # GH#22796
-        # Concating tz-aware multicolumn DataFrames
+        # Concatenating tz-aware multicolumn DataFrames
         ts1 = Timestamp(t1, tz="UTC")
         ts2 = Timestamp("2015-01-01", tz="UTC")
         ts3 = Timestamp("2015-01-01", tz="UTC")
@@ -468,6 +466,14 @@ class TestTimezoneConcat:
         result = concat([df1, df2])
         expected = DataFrame([[ts1, ts2], [ts3, pd.NaT]], index=[0, 0])
 
+        tm.assert_frame_equal(result, expected)
+
+    def test_concat_tz_with_empty(self):
+        # GH 9188
+        result = concat(
+            [DataFrame(date_range("2000", periods=1, tz="UTC")), DataFrame()]
+        )
+        expected = DataFrame(date_range("2000", periods=1, tz="UTC"))
         tm.assert_frame_equal(result, expected)
 
 
@@ -519,3 +525,16 @@ def test_concat_timedelta64_block():
     result = concat([df, df])
     tm.assert_frame_equal(result.iloc[:10], df)
     tm.assert_frame_equal(result.iloc[10:], df)
+
+
+def test_concat_multiindex_datetime_nat():
+    # GH#44900
+    left = DataFrame({"a": 1}, index=MultiIndex.from_tuples([(1, pd.NaT)]))
+    right = DataFrame(
+        {"b": 2}, index=MultiIndex.from_tuples([(1, pd.NaT), (2, pd.NaT)])
+    )
+    result = concat([left, right], axis="columns")
+    expected = DataFrame(
+        {"a": [1.0, np.nan], "b": 2}, MultiIndex.from_tuples([(1, pd.NaT), (2, pd.NaT)])
+    )
+    tm.assert_frame_equal(result, expected)

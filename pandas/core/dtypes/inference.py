@@ -1,5 +1,7 @@
 """ basic inference routines """
 
+from __future__ import annotations
+
 from collections import abc
 from numbers import Number
 import re
@@ -314,7 +316,7 @@ def is_named_tuple(obj) -> bool:
     >>> is_named_tuple((1, 2))
     False
     """
-    return isinstance(obj, tuple) and hasattr(obj, "_fields")
+    return isinstance(obj, abc.Sequence) and hasattr(obj, "_fields")
 
 
 def is_hashable(obj) -> bool:
@@ -415,8 +417,8 @@ def is_dataclass(item):
 
     """
     try:
-        from dataclasses import is_dataclass
+        import dataclasses
 
-        return is_dataclass(item) and not isinstance(item, type)
+        return dataclasses.is_dataclass(item) and not isinstance(item, type)
     except ImportError:
         return False

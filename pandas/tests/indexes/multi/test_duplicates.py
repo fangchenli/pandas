@@ -6,8 +6,10 @@ import pytest
 from pandas._libs import hashtable
 
 from pandas import (
+    NA,
     DatetimeIndex,
     MultiIndex,
+    Series,
 )
 import pandas._testing as tm
 
@@ -74,15 +76,6 @@ def test_unique_level(idx, level):
     tm.assert_index_equal(result, expected)
 
 
-def test_get_unique_index(idx):
-    mi = idx[[0, 1, 0, 1, 1, 0, 0]]
-    expected = mi._shallow_copy(mi[[0, 1]])
-
-    result = mi._get_unique_index()
-    assert result.unique
-    tm.assert_index_equal(result, expected)
-
-
 def test_duplicate_multiindex_codes():
     # GH 17464
     # Make sure that a MultiIndex with duplicate levels throws a ValueError
@@ -94,8 +87,7 @@ def test_duplicate_multiindex_codes():
     mi = MultiIndex.from_arrays([["A", "A", "B", "B", "B"], [1, 2, 1, 2, 3]])
     msg = r"Level values must be unique: \[[AB', ]+\] on level 0"
     with pytest.raises(ValueError, match=msg):
-        with tm.assert_produces_warning(FutureWarning):
-            mi.set_levels([["A", "B", "A", "A", "B"], [2, 1, 3, -2, 5]], inplace=True)
+        mi.set_levels([["A", "B", "A", "A", "B"], [2, 1, 3, -2, 5]])
 
 
 @pytest.mark.parametrize("names", [["a", "b", "a"], [1, 1, 2], [1, "a", 1]])
@@ -186,49 +178,44 @@ def test_has_duplicates_from_tuples():
     assert not mi.has_duplicates
 
 
-def test_has_duplicates_overflow():
+@pytest.mark.parametrize("nlevels", [4, 8])
+@pytest.mark.parametrize("with_nulls", [True, False])
+def test_has_duplicates_overflow(nlevels, with_nulls):
     # handle int64 overflow if possible
-    def check(nlevels, with_nulls):
-        codes = np.tile(np.arange(500), 2)
-        level = np.arange(500)
+    # no overflow with 4
+    # overflow possible with 8
+    codes = np.tile(np.arange(500), 2)
+    level = np.arange(500)
 
-        if with_nulls:  # inject some null values
-            codes[500] = -1  # common nan value
-            codes = [codes.copy() for i in range(nlevels)]
-            for i in range(nlevels):
-                codes[i][500 + i - nlevels // 2] = -1
+    if with_nulls:  # inject some null values
+        codes[500] = -1  # common nan value
+        codes = [codes.copy() for i in range(nlevels)]
+        for i in range(nlevels):
+            codes[i][500 + i - nlevels // 2] = -1
 
-            codes += [np.array([-1, 1]).repeat(500)]
-        else:
-            codes = [codes] * nlevels + [np.arange(2).repeat(500)]
+        codes += [np.array([-1, 1]).repeat(500)]
+    else:
+        codes = [codes] * nlevels + [np.arange(2).repeat(500)]
 
-        levels = [level] * nlevels + [[0, 1]]
+    levels = [level] * nlevels + [[0, 1]]
 
-        # no dups
+    # no dups
+    mi = MultiIndex(levels=levels, codes=codes)
+    assert not mi.has_duplicates
+
+    # with a dup
+    if with_nulls:
+
+        def f(a):
+            return np.insert(a, 1000, a[0])
+
+        codes = list(map(f, codes))
         mi = MultiIndex(levels=levels, codes=codes)
-        assert not mi.has_duplicates
+    else:
+        values = mi.values.tolist()
+        mi = MultiIndex.from_tuples(values + [values[0]])
 
-        # with a dup
-        if with_nulls:
-
-            def f(a):
-                return np.insert(a, 1000, a[0])
-
-            codes = list(map(f, codes))
-            mi = MultiIndex(levels=levels, codes=codes)
-        else:
-            values = mi.values.tolist()
-            mi = MultiIndex.from_tuples(values + [values[0]])
-
-        assert mi.has_duplicates
-
-    # no overflow
-    check(4, False)
-    check(4, True)
-
-    # overflow possible
-    check(8, False)
-    check(8, True)
+    assert mi.has_duplicates
 
 
 @pytest.mark.parametrize(
@@ -253,7 +240,7 @@ def test_duplicated_large(keep):
     mi = MultiIndex(levels=levels, codes=codes)
 
     result = mi.duplicated(keep=keep)
-    expected = hashtable.duplicated_object(mi.values, keep=keep)
+    expected = hashtable.duplicated(mi.values, keep=keep)
     tm.assert_numpy_array_equal(result, expected)
 
 
@@ -306,3 +293,47 @@ def test_duplicated_drop_duplicates():
     assert duplicated.dtype == bool
     expected = MultiIndex.from_arrays(([2, 3, 2, 3], [1, 1, 2, 2]))
     tm.assert_index_equal(idx.drop_duplicates(keep=False), expected)
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        np.complex64,
+        np.complex128,
+    ],
+)
+def test_duplicated_series_complex_numbers(dtype):
+    # GH 17927
+    expected = Series(
+        [False, False, False, True, False, False, False, True, False, True],
+        dtype=bool,
+    )
+    result = Series(
+        [
+            np.nan + np.nan * 1j,
+            0,
+            1j,
+            1j,
+            1,
+            1 + 1j,
+            1 + 2j,
+            1 + 1j,
+            np.nan,
+            np.nan + np.nan * 1j,
+        ],
+        dtype=dtype,
+    ).duplicated()
+    tm.assert_series_equal(result, expected)
+
+
+def test_midx_unique_ea_dtype():
+    # GH#48335
+    vals_a = Series([1, 2, NA, NA], dtype="Int64")
+    vals_b = np.array([1, 2, 3, 3])
+    midx = MultiIndex.from_arrays([vals_a, vals_b], names=["a", "b"])
+    result = midx.unique()
+
+    exp_vals_a = Series([1, 2, NA], dtype="Int64")
+    exp_vals_b = np.array([1, 2, 3])
+    expected = MultiIndex.from_arrays([exp_vals_a, exp_vals_b], names=["a", "b"])
+    tm.assert_index_equal(result, expected)

@@ -35,18 +35,6 @@ class TestTimestampRendering:
         assert freq_repr not in repr(date_tz)
         assert date_tz == eval(repr(date_tz))
 
-        date_freq = Timestamp(date, freq=freq)
-        assert date in repr(date_freq)
-        assert tz_repr not in repr(date_freq)
-        assert freq_repr in repr(date_freq)
-        assert date_freq == eval(repr(date_freq))
-
-        date_tz_freq = Timestamp(date, tz=tz, freq=freq)
-        assert date in repr(date_tz_freq)
-        assert tz_repr in repr(date_tz_freq)
-        assert freq_repr in repr(date_tz_freq)
-        assert date_tz_freq == eval(repr(date_tz_freq))
-
     def test_repr_utcoffset(self):
         # This can cause the tz field to be populated, but it's redundant to
         # include this information in the date-string.

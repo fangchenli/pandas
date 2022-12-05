@@ -1,6 +1,7 @@
 """
 Printing tools.
 """
+from __future__ import annotations
 
 import sys
 from typing import (
@@ -8,12 +9,8 @@ from typing import (
     Callable,
     Dict,
     Iterable,
-    List,
     Mapping,
-    Optional,
     Sequence,
-    Sized,
-    Tuple,
     TypeVar,
     Union,
 )
@@ -27,7 +24,7 @@ _KT = TypeVar("_KT")
 _VT = TypeVar("_VT")
 
 
-def adjoin(space: int, *lists: List[str], **kwargs) -> str:
+def adjoin(space: int, *lists: list[str], **kwargs) -> str:
     """
     Glues together two sets of strings using the amount of space requested.
     The idea is to prettify.
@@ -54,7 +51,7 @@ def adjoin(space: int, *lists: List[str], **kwargs) -> str:
     maxLen = max(map(len, lists))
     for i, lst in enumerate(lists):
         nl = justfunc(lst, lengths[i], mode="left")
-        nl.extend([" " * lengths[i]] * (maxLen - len(lst)))
+        nl = ([" " * lengths[i]] * (maxLen - len(lst))) + nl
         newLists.append(nl)
     toJoin = zip(*newLists)
     for lines in toJoin:
@@ -62,7 +59,7 @@ def adjoin(space: int, *lists: List[str], **kwargs) -> str:
     return "\n".join(out_lines)
 
 
-def justify(texts: Iterable[str], max_len: int, mode: str = "right") -> List[str]:
+def justify(texts: Iterable[str], max_len: int, mode: str = "right") -> list[str]:
     """
     Perform ljust, center, rjust against string or list-like
     """
@@ -99,7 +96,7 @@ def justify(texts: Iterable[str], max_len: int, mode: str = "right") -> List[str
 
 
 def _pprint_seq(
-    seq: Sequence, _nest_lvl: int = 0, max_seq_items: Optional[int] = None, **kwds
+    seq: Sequence, _nest_lvl: int = 0, max_seq_items: int | None = None, **kwds
 ) -> str:
     """
     internal. pprinter for iterables. you should probably use pprint_thing()
@@ -134,7 +131,7 @@ def _pprint_seq(
 
 
 def _pprint_dict(
-    seq: Mapping, _nest_lvl: int = 0, max_seq_items: Optional[int] = None, **kwds
+    seq: Mapping, _nest_lvl: int = 0, max_seq_items: int | None = None, **kwds
 ) -> str:
     """
     internal. pprinter for iterables. you should probably use pprint_thing()
@@ -167,10 +164,10 @@ def _pprint_dict(
 def pprint_thing(
     thing: Any,
     _nest_lvl: int = 0,
-    escape_chars: Optional[EscapeChars] = None,
+    escape_chars: EscapeChars | None = None,
     default_escapes: bool = False,
     quote_strings: bool = False,
-    max_seq_items: Optional[int] = None,
+    max_seq_items: int | None = None,
 ) -> str:
     """
     This function is the sanctioned way of converting objects
@@ -196,7 +193,7 @@ def pprint_thing(
     """
 
     def as_escaped_string(
-        thing: Any, escape_chars: Optional[EscapeChars] = escape_chars
+        thing: Any, escape_chars: EscapeChars | None = escape_chars
     ) -> str:
         translate = {"\t": r"\t", "\n": r"\n", "\r": r"\r"}
         if isinstance(escape_chars, dict):
@@ -277,7 +274,7 @@ def enable_data_resource_formatter(enable: bool) -> None:
             formatters[mimetype].enabled = False
 
 
-def default_pprint(thing: Any, max_seq_items: Optional[int] = None) -> str:
+def default_pprint(thing: Any, max_seq_items: int | None = None) -> str:
     return pprint_thing(
         thing,
         escape_chars=("\t", "\r", "\n"),
@@ -290,7 +287,7 @@ def format_object_summary(
     obj,
     formatter: Callable,
     is_justify: bool = True,
-    name: Optional[str] = None,
+    name: str | None = None,
     indent_for_name: bool = True,
     line_break_each_value: bool = False,
 ) -> str:
@@ -303,7 +300,7 @@ def format_object_summary(
         must be iterable and support __getitem__
     formatter : callable
         string formatter for an element
-    is_justify : boolean
+    is_justify : bool
         should justify the display
     name : name, optional
         defaults to the class name of the obj
@@ -314,8 +311,6 @@ def format_object_summary(
         If True, inserts a line break for each value of ``obj``.
         If False, only break lines when the a line of values gets wider
         than the display width.
-
-        .. versionadded:: 0.25.0
 
     Returns
     -------
@@ -355,7 +350,7 @@ def format_object_summary(
 
     def _extend_line(
         s: str, line: str, value: str, display_width: int, next_line_prefix: str
-    ) -> Tuple[str, str]:
+    ) -> tuple[str, str]:
 
         if adj.len(line.rstrip()) + adj.len(value.rstrip()) >= display_width:
             s += line.rstrip()
@@ -363,7 +358,7 @@ def format_object_summary(
         line += value
         return s, line
 
-    def best_len(values: List[str]) -> int:
+    def best_len(values: list[str]) -> int:
         if values:
             return max(adj.len(x) for x in values)
         else:
@@ -429,8 +424,8 @@ def format_object_summary(
         summary = ""
         line = space2
 
-        for max_items in range(len(head)):
-            word = head[max_items] + sep + " "
+        for head_value in head:
+            word = head_value + sep + " "
             summary, line = _extend_line(summary, line, word, display_width, space2)
 
         if is_truncated:
@@ -438,8 +433,8 @@ def format_object_summary(
             summary += line.rstrip() + space2 + "..."
             line = space2
 
-        for max_items in range(len(tail) - 1):
-            word = tail[max_items] + sep + " "
+        for tail_item in tail[:-1]:
+            word = tail_item + sep + " "
             summary, line = _extend_line(summary, line, word, display_width, space2)
 
         # last value: no sep added + 1 space of width used for trailing ','
@@ -463,8 +458,8 @@ def format_object_summary(
 
 
 def _justify(
-    head: List[Sequence[str]], tail: List[Sequence[str]]
-) -> Tuple[List[Tuple[str, ...]], List[Tuple[str, ...]]]:
+    head: list[Sequence[str]], tail: list[Sequence[str]]
+) -> tuple[list[tuple[str, ...]], list[tuple[str, ...]]]:
     """
     Justify items in head and tail, so they are right-aligned when stacked.
 
@@ -494,55 +489,13 @@ def _justify(
         max_length = [max(x, y) for x, y in zip(max_length, length)]
 
     # justify each item in each list-like in head and tail using max_length
-    head = [
+    head_tuples = [
         tuple(x.rjust(max_len) for x, max_len in zip(seq, max_length)) for seq in head
     ]
-    tail = [
+    tail_tuples = [
         tuple(x.rjust(max_len) for x, max_len in zip(seq, max_length)) for seq in tail
     ]
-    # https://github.com/python/mypy/issues/4975
-    # error: Incompatible return value type (got "Tuple[List[Sequence[str]],
-    #  List[Sequence[str]]]", expected "Tuple[List[Tuple[str, ...]],
-    #  List[Tuple[str, ...]]]")
-    return head, tail  # type: ignore[return-value]
-
-
-def format_object_attrs(
-    obj: Sized, include_dtype: bool = True
-) -> List[Tuple[str, Union[str, int]]]:
-    """
-    Return a list of tuples of the (attr, formatted_value)
-    for common attrs, including dtype, name, length
-
-    Parameters
-    ----------
-    obj : object
-        Must be sized.
-    include_dtype : bool
-        If False, dtype won't be in the returned list
-
-    Returns
-    -------
-    list of 2-tuple
-
-    """
-    attrs: List[Tuple[str, Union[str, int]]] = []
-    if hasattr(obj, "dtype") and include_dtype:
-        # error: "Sized" has no attribute "dtype"
-        attrs.append(("dtype", f"'{obj.dtype}'"))  # type: ignore[attr-defined]
-    if getattr(obj, "name", None) is not None:
-        # error: "Sized" has no attribute "name"
-        attrs.append(("name", default_pprint(obj.name)))  # type: ignore[attr-defined]
-    # error: "Sized" has no attribute "names"
-    elif getattr(obj, "names", None) is not None and any(
-        obj.names  # type: ignore[attr-defined]
-    ):
-        # error: "Sized" has no attribute "names"
-        attrs.append(("names", default_pprint(obj.names)))  # type: ignore[attr-defined]
-    max_seq_items = get_option("display.max_seq_items") or len(obj)
-    if len(obj) > max_seq_items:
-        attrs.append(("length", len(obj)))
-    return attrs
+    return head_tuples, tail_tuples
 
 
 class PrettyDict(Dict[_KT, _VT]):

@@ -30,16 +30,18 @@ https://github.com/client9/stringencoders
 Copyright (c) 2007  Nick Galbreath -- nickg [at] modp [dot] com. All rights
 reserved.
 
-Numeric decoder derived from from TCL library
+Numeric decoder derived from TCL library
 https://www.opensource.apple.com/source/tcl/tcl-14/tcl/license.terms
 * Copyright (c) 1988-1993 The Regents of the University of California.
 * Copyright (c) 1994 Sun Microsystems, Inc.
 */
-#define PY_ARRAY_UNIQUE_SYMBOL UJSON_NUMPY
 
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <math.h>
+
+#define NO_IMPORT_ARRAY
+#define PY_ARRAY_UNIQUE_SYMBOL UJSON_NUMPY
 #include <numpy/arrayobject.h>
 #include <numpy/arrayscalars.h>
 #include <numpy/ndarraytypes.h>
@@ -48,18 +50,17 @@ https://www.opensource.apple.com/source/tcl/tcl-14/tcl/license.terms
 #include "date_conversions.h"
 #include "datetime.h"
 
-static PyTypeObject *type_decimal;
-static PyTypeObject *cls_dataframe;
-static PyTypeObject *cls_series;
-static PyTypeObject *cls_index;
-static PyTypeObject *cls_nat;
-static PyTypeObject *cls_na;
-PyObject *cls_timedelta;
-
 npy_int64 get_nat(void) { return NPY_MIN_INT64; }
 
 typedef char *(*PFN_PyTypeToUTF8)(JSOBJ obj, JSONTypeContext *ti,
                                   size_t *_outLen);
+
+int object_is_decimal_type(PyObject *obj);
+int object_is_dataframe_type(PyObject *obj);
+int object_is_series_type(PyObject *obj);
+int object_is_index_type(PyObject *obj);
+int object_is_nat_type(PyObject *obj);
+int object_is_na_type(PyObject *obj);
 
 typedef struct __NpyArrContext {
     PyObject *array;
@@ -83,7 +84,6 @@ typedef struct __PdBlockContext {
     int ncols;
     int transpose;
 
-    int *cindices;             // frame column -> block column map
     NpyArrContext **npyCtxts;  // NpyArrContext for each column
 } PdBlockContext;
 
@@ -145,46 +145,6 @@ enum PANDAS_FORMAT { SPLIT, RECORDS, INDEX, COLUMNS, VALUES };
 
 int PdBlock_iterNext(JSOBJ, JSONTypeContext *);
 
-void *initObjToJSON(void) {
-    PyObject *mod_pandas;
-    PyObject *mod_nattype;
-    PyObject *mod_natype;
-    PyObject *mod_decimal = PyImport_ImportModule("decimal");
-    type_decimal =
-        (PyTypeObject *)PyObject_GetAttrString(mod_decimal, "Decimal");
-    Py_DECREF(mod_decimal);
-
-    PyDateTime_IMPORT;
-
-    mod_pandas = PyImport_ImportModule("pandas");
-    if (mod_pandas) {
-        cls_dataframe =
-            (PyTypeObject *)PyObject_GetAttrString(mod_pandas, "DataFrame");
-        cls_index = (PyTypeObject *)PyObject_GetAttrString(mod_pandas, "Index");
-        cls_series =
-            (PyTypeObject *)PyObject_GetAttrString(mod_pandas, "Series");
-        Py_DECREF(mod_pandas);
-    }
-
-    mod_nattype = PyImport_ImportModule("pandas._libs.tslibs.nattype");
-    if (mod_nattype) {
-        cls_nat =
-            (PyTypeObject *)PyObject_GetAttrString(mod_nattype, "NaTType");
-        Py_DECREF(mod_nattype);
-    }
-
-    mod_natype = PyImport_ImportModule("pandas._libs.missing");
-    if (mod_natype) {
-        cls_na = (PyTypeObject *)PyObject_GetAttrString(mod_natype, "NAType");
-        Py_DECREF(mod_natype);
-    }
-
-    /* Initialise numpy API */
-    import_array();
-    // GH 31463
-    return NULL;
-}
-
 static TypeContext *createTypeContext(void) {
     TypeContext *pc;
 
@@ -217,19 +177,31 @@ static TypeContext *createTypeContext(void) {
 static PyObject *get_values(PyObject *obj) {
     PyObject *values = NULL;
 
-    if (PyObject_TypeCheck(obj, cls_index) ||
-        PyObject_TypeCheck(obj, cls_series)) {
+    if (object_is_index_type(obj) || object_is_series_type(obj)) {
         // The special cases to worry about are dt64tz and category[dt64tz].
         //  In both cases we want the UTC-localized datetime64 ndarray,
         //  without going through and object array of Timestamps.
+        if (PyObject_HasAttrString(obj, "tz")) {
+            PyObject *tz = PyObject_GetAttrString(obj, "tz");
+            if (tz != Py_None) {
+                // Go through object array if we have dt64tz, since tz info will
+                // be lost if values is used directly.
+                Py_DECREF(tz);
+                values = PyObject_CallMethod(obj, "__array__", NULL);
+                return values;
+            }
+            Py_DECREF(tz);
+        }
         values = PyObject_GetAttrString(obj, "values");
-
         if (values == NULL) {
             // Clear so we can subsequently try another method
             PyErr_Clear();
         } else if (PyObject_HasAttrString(values, "__array__")) {
             // We may have gotten a Categorical or Sparse array so call np.array
-            values = PyObject_CallMethod(values, "__array__", NULL);
+            PyObject *array_values = PyObject_CallMethod(values, "__array__",
+                                                         NULL);
+            Py_DECREF(values);
+            values = array_values;
         } else if (!PyArray_CheckExact(values)) {
             // Didn't get a numpy array, so keep trying
             Py_DECREF(values);
@@ -272,18 +244,6 @@ static PyObject *get_sub_attr(PyObject *obj, char *attr, char *subAttr) {
     return ret;
 }
 
-static int is_simple_frame(PyObject *obj) {
-    PyObject *check = get_sub_attr(obj, "_mgr", "is_mixed_type");
-    int ret = (check == Py_False);
-
-    if (!check) {
-        return 0;
-    }
-
-    Py_DECREF(check);
-    return ret;
-}
-
 static Py_ssize_t get_attr_length(PyObject *obj, char *attr) {
     PyObject *tmp = PyObject_GetAttrString(obj, attr);
     Py_ssize_t ret;
@@ -301,12 +261,59 @@ static Py_ssize_t get_attr_length(PyObject *obj, char *attr) {
     return ret;
 }
 
+static int is_simple_frame(PyObject *obj) {
+    PyObject *mgr = PyObject_GetAttrString(obj, "_mgr");
+    if (!mgr) {
+        return 0;
+    }
+    int ret;
+    if (PyObject_HasAttrString(mgr, "blocks")) {
+        ret = (get_attr_length(mgr, "blocks") <= 1);
+    } else {
+        ret = 0;
+    }
+
+    Py_DECREF(mgr);
+    return ret;
+}
+
 static npy_int64 get_long_attr(PyObject *o, const char *attr) {
+    // NB we are implicitly assuming that o is a Timedelta or Timestamp, or NaT
+
     npy_int64 long_val;
     PyObject *value = PyObject_GetAttrString(o, attr);
     long_val =
         (PyLong_Check(value) ? PyLong_AsLongLong(value) : PyLong_AsLong(value));
+
     Py_DECREF(value);
+
+    if (object_is_nat_type(o)) {
+        // i.e. o is NaT, long_val will be NPY_MIN_INT64
+        return long_val;
+    }
+
+    // ensure we are in nanoseconds, similar to Timestamp._as_creso or _as_unit
+    PyObject* reso = PyObject_GetAttrString(o, "_creso");
+    if (!PyLong_Check(reso)) {
+        // https://github.com/pandas-dev/pandas/pull/49034#discussion_r1023165139
+        Py_DECREF(reso);
+        return -1;
+    }
+
+    long cReso = PyLong_AsLong(reso);
+    Py_DECREF(reso);
+    if (cReso == -1 && PyErr_Occurred()) {
+        return -1;
+    }
+
+    if (cReso == NPY_FR_us) {
+        long_val = long_val * 1000L;
+    } else if (cReso == NPY_FR_ms) {
+        long_val = long_val * 1000000L;
+    } else if (cReso == NPY_FR_s) {
+        long_val = long_val * 1000000000L;
+    }
+
     return long_val;
 }
 
@@ -657,16 +664,10 @@ void PdBlockPassThru_iterBegin(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {
 }
 
 void PdBlock_iterBegin(JSOBJ _obj, JSONTypeContext *tc) {
-    PyObject *obj, *blocks, *block, *values, *tmp;
-    PyArrayObject *locs;
+    PyObject *obj, *values, *arrays, *array;
     PdBlockContext *blkCtxt;
     NpyArrContext *npyarr;
     Py_ssize_t i;
-    NpyIter *iter;
-    NpyIter_IterNextFunc *iternext;
-    npy_int64 **dataptr;
-    npy_int64 colIdx;
-    npy_intp idx;
 
     obj = (PyObject *)_obj;
 
@@ -688,7 +689,6 @@ void PdBlock_iterBegin(JSOBJ _obj, JSONTypeContext *tc) {
 
     if (blkCtxt->ncols == 0) {
         blkCtxt->npyCtxts = NULL;
-        blkCtxt->cindices = NULL;
 
         GET_TC(tc)->iterNext = NpyArr_iterNextNone;
         return;
@@ -702,104 +702,45 @@ void PdBlock_iterBegin(JSOBJ _obj, JSONTypeContext *tc) {
         return;
     }
 
-    blkCtxt->cindices = PyObject_Malloc(sizeof(int) * blkCtxt->ncols);
-    if (!blkCtxt->cindices) {
-        PyErr_NoMemory();
+    arrays = get_sub_attr(obj, "_mgr", "column_arrays");
+    if (!arrays) {
         GET_TC(tc)->iterNext = NpyArr_iterNextNone;
         return;
     }
 
-    blocks = get_sub_attr(obj, "_mgr", "blocks");
-    if (!blocks) {
-        GET_TC(tc)->iterNext = NpyArr_iterNextNone;
-        return;
-    } else if (!PyTuple_Check(blocks)) {
-        PyErr_SetString(PyExc_TypeError, "blocks must be a tuple!");
-        goto BLKRET;
-    }
-
-    // force transpose so each NpyArrContext strides down its column
-    GET_TC(tc)->transpose = 1;
-
-    for (i = 0; i < PyObject_Length(blocks); i++) {
-        block = PyTuple_GET_ITEM(blocks, i);
-        if (!block) {
+    for (i = 0; i < PyObject_Length(arrays); i++) {
+        array = PyList_GET_ITEM(arrays, i);
+        if (!array) {
             GET_TC(tc)->iterNext = NpyArr_iterNextNone;
-            goto BLKRET;
+            goto ARR_RET;
         }
 
-        tmp = PyObject_CallMethod(block, "get_block_values_for_json", NULL);
-        if (!tmp) {
+        // ensure we have a numpy array (i.e. np.asarray)
+        values = PyObject_CallMethod(array, "__array__", NULL);
+        if ((!values) || (!PyArray_CheckExact(values))) {
+            // Didn't get a numpy array
             ((JSONObjectEncoder *)tc->encoder)->errorMsg = "";
             GET_TC(tc)->iterNext = NpyArr_iterNextNone;
-            goto BLKRET;
+            goto ARR_RET;
         }
 
-        values = PyArray_Transpose((PyArrayObject *)tmp, NULL);
-        Py_DECREF(tmp);
-        if (!values) {
-            GET_TC(tc)->iterNext = NpyArr_iterNextNone;
-            goto BLKRET;
-        }
+        GET_TC(tc)->newObj = values;
 
-        locs = (PyArrayObject *)get_sub_attr(block, "mgr_locs", "as_array");
-        if (!locs) {
-            Py_DECREF(values);
-            GET_TC(tc)->iterNext = NpyArr_iterNextNone;
-            goto BLKRET;
-        }
+        // init a dedicated context for this column
+        NpyArr_iterBegin(obj, tc);
+        npyarr = GET_TC(tc)->npyarr;
 
-        iter = NpyIter_New(locs, NPY_ITER_READONLY, NPY_KEEPORDER,
-                           NPY_NO_CASTING, NULL);
-        if (!iter) {
-            Py_DECREF(values);
-            Py_DECREF(locs);
-            GET_TC(tc)->iterNext = NpyArr_iterNextNone;
-            goto BLKRET;
-        }
-        iternext = NpyIter_GetIterNext(iter, NULL);
-        if (!iternext) {
-            NpyIter_Deallocate(iter);
-            Py_DECREF(values);
-            Py_DECREF(locs);
-            GET_TC(tc)->iterNext = NpyArr_iterNextNone;
-            goto BLKRET;
-        }
-        dataptr = (npy_int64 **)NpyIter_GetDataPtrArray(iter);
-        do {
-            colIdx = **dataptr;
-            idx = NpyIter_GetIterIndex(iter);
+        GET_TC(tc)->itemValue = NULL;
+        ((PyObjectEncoder *)tc->encoder)->npyCtxtPassthru = NULL;
 
-            blkCtxt->cindices[colIdx] = idx;
-
-            // Reference freed in Pdblock_iterend
-            Py_INCREF(values);
-            GET_TC(tc)->newObj = values;
-
-            // init a dedicated context for this column
-            NpyArr_iterBegin(obj, tc);
-            npyarr = GET_TC(tc)->npyarr;
-
-            // set the dataptr to our desired column and initialise
-            if (npyarr != NULL) {
-                npyarr->dataptr += npyarr->stride * idx;
-                NpyArr_iterNext(obj, tc);
-            }
-            GET_TC(tc)->itemValue = NULL;
-            ((PyObjectEncoder *)tc->encoder)->npyCtxtPassthru = NULL;
-
-            blkCtxt->npyCtxts[colIdx] = npyarr;
-            GET_TC(tc)->newObj = NULL;
-        } while (iternext(iter));
-
-        NpyIter_Deallocate(iter);
-        Py_DECREF(values);
-        Py_DECREF(locs);
+        blkCtxt->npyCtxts[i] = npyarr;
+        GET_TC(tc)->newObj = NULL;
     }
     GET_TC(tc)->npyarr = blkCtxt->npyCtxts[0];
+    goto ARR_RET;
 
-BLKRET:
-    Py_DECREF(blocks);
+ARR_RET:
+    Py_DECREF(arrays);
 }
 
 void PdBlock_iterEnd(JSOBJ obj, JSONTypeContext *tc) {
@@ -830,9 +771,6 @@ void PdBlock_iterEnd(JSOBJ obj, JSONTypeContext *tc) {
 
         if (blkCtxt->npyCtxts) {
             PyObject_Free(blkCtxt->npyCtxts);
-        }
-        if (blkCtxt->cindices) {
-            PyObject_Free(blkCtxt->cindices);
         }
         PyObject_Free(blkCtxt);
     }
@@ -993,7 +931,6 @@ int Dir_iterNext(JSOBJ _obj, JSONTypeContext *tc) {
 
         GET_TC(tc)->itemName = itemName;
         GET_TC(tc)->itemValue = itemValue;
-        GET_TC(tc)->index++;
 
         itemName = attr;
         break;
@@ -1359,6 +1296,7 @@ char **NpyArr_encodeLabels(PyArrayObject *labels, PyObjectEncoder *enc,
         } else if (PyDate_Check(item) || PyDelta_Check(item)) {
             is_datetimelike = 1;
             if (PyObject_HasAttrString(item, "value")) {
+                // see test_date_index_and_values for case with non-nano
                 nanosecVal = get_long_attr(item, "value");
             } else {
                 if (PyDelta_Check(item)) {
@@ -1564,12 +1502,12 @@ void Object_beginTypeContext(JSOBJ _obj, JSONTypeContext *tc) {
         pc->PyTypeToUTF8 = PyUnicodeToUTF8;
         tc->type = JT_UTF8;
         return;
-    } else if (PyObject_TypeCheck(obj, type_decimal)) {
+    } else if (object_is_decimal_type(obj)) {
         GET_TC(tc)->doubleValue = PyFloat_AsDouble(obj);
         tc->type = JT_DOUBLE;
         return;
     } else if (PyDateTime_Check(obj) || PyDate_Check(obj)) {
-        if (PyObject_TypeCheck(obj, cls_nat)) {
+        if (object_is_nat_type(obj)) {
             tc->type = JT_NULL;
             return;
         }
@@ -1660,14 +1598,14 @@ void Object_beginTypeContext(JSOBJ _obj, JSONTypeContext *tc) {
                      "%R (0d array) is not JSON serializable at the moment",
                      obj);
         goto INVALID;
-    } else if (PyObject_TypeCheck(obj, cls_na)) {
+    } else if (object_is_na_type(obj)) {
         tc->type = JT_NULL;
         return;
     }
 
 ISITERABLE:
 
-    if (PyObject_TypeCheck(obj, cls_index)) {
+    if (object_is_index_type(obj)) {
         if (enc->outputFormat == SPLIT) {
             tc->type = JT_OBJECT;
             pc->iterBegin = Index_iterBegin;
@@ -1691,7 +1629,7 @@ ISITERABLE:
         }
 
         return;
-    } else if (PyObject_TypeCheck(obj, cls_series)) {
+    } else if (object_is_series_type(obj)) {
         if (enc->outputFormat == SPLIT) {
             tc->type = JT_OBJECT;
             pc->iterBegin = Series_iterBegin;
@@ -1755,7 +1693,7 @@ ISITERABLE:
         pc->iterGetValue = NpyArr_iterGetValue;
         pc->iterGetName = NpyArr_iterGetName;
         return;
-    } else if (PyObject_TypeCheck(obj, cls_dataframe)) {
+    } else if (object_is_dataframe_type(obj)) {
         if (enc->blkCtxtPassthru) {
             pc->pdblock = enc->blkCtxtPassthru;
             tc->type =
@@ -2023,6 +1961,11 @@ char *Object_iterGetName(JSOBJ obj, JSONTypeContext *tc, size_t *outLen) {
 
 PyObject *objToJSON(PyObject *Py_UNUSED(self), PyObject *args,
                     PyObject *kwargs) {
+    PyDateTime_IMPORT;
+    if (PyDateTimeAPI == NULL) {
+        return NULL;
+    }
+
     static char *kwlist[] = {"obj",
                              "ensure_ascii",
                              "double_precision",

@@ -7,30 +7,26 @@ import contextlib
 import copy
 import io
 import pickle as pkl
-from typing import (
-    TYPE_CHECKING,
-    Optional,
-)
-import warnings
+from typing import Generator
 
+import numpy as np
+
+from pandas._libs.arrays import NDArrayBacked
 from pandas._libs.tslibs import BaseOffset
 
 from pandas import Index
-
-if TYPE_CHECKING:
-    from pandas import (
-        DataFrame,
-        Series,
-    )
+from pandas.core.arrays import (
+    DatetimeArray,
+    PeriodArray,
+    TimedeltaArray,
+)
+from pandas.core.internals import BlockManager
 
 
 def load_reduce(self):
     stack = self.stack
     args = stack.pop()
     func = stack[-1]
-
-    if len(args) and type(args[0]) is type:
-        n = args[0].__name__  # noqa
 
     try:
         stack[-1] = func(*args)
@@ -49,56 +45,17 @@ def load_reduce(self):
                 return
             except TypeError:
                 pass
-        elif args and issubclass(args[0], BaseOffset):
+        elif args and isinstance(args[0], type) and issubclass(args[0], BaseOffset):
             # TypeError: object.__new__(Day) is not safe, use Day.__new__()
             cls = args[0]
             stack[-1] = cls.__new__(*args)
             return
+        elif args and issubclass(args[0], PeriodArray):
+            cls = args[0]
+            stack[-1] = NDArrayBacked.__new__(*args)
+            return
 
         raise
-
-
-_sparse_msg = """\
-
-Loading a saved '{cls}' as a {new} with sparse values.
-'{cls}' is now removed. You should re-save this dataset in its new format.
-"""
-
-
-class _LoadSparseSeries:
-    # To load a SparseSeries as a Series[Sparse]
-
-    # https://github.com/python/mypy/issues/1020
-    # error: Incompatible return type for "__new__" (returns "Series", but must return
-    # a subtype of "_LoadSparseSeries")
-    def __new__(cls) -> Series:  # type: ignore[misc]
-        from pandas import Series
-
-        warnings.warn(
-            _sparse_msg.format(cls="SparseSeries", new="Series"),
-            FutureWarning,
-            stacklevel=6,
-        )
-
-        return Series(dtype=object)
-
-
-class _LoadSparseFrame:
-    # To load a SparseDataFrame as a DataFrame[Sparse]
-
-    # https://github.com/python/mypy/issues/1020
-    # error: Incompatible return type for "__new__" (returns "DataFrame", but must
-    # return a subtype of "_LoadSparseFrame")
-    def __new__(cls) -> DataFrame:  # type: ignore[misc]
-        from pandas import DataFrame
-
-        warnings.warn(
-            _sparse_msg.format(cls="SparseDataFrame", new="DataFrame"),
-            FutureWarning,
-            stacklevel=6,
-        )
-
-        return DataFrame()
 
 
 # If classes are moved, provide compat here.
@@ -134,14 +91,6 @@ _class_locations_map = {
         "pandas.core.arrays.sparse",
         "SparseArray",
     ),
-    ("pandas.sparse.series", "SparseSeries"): (
-        "pandas.compat.pickle_compat",
-        "_LoadSparseSeries",
-    ),
-    ("pandas.sparse.frame", "SparseDataFrame"): (
-        "pandas.core.sparse.frame",
-        "_LoadSparseFrame",
-    ),
     ("pandas.indexes.base", "_new_Index"): ("pandas.core.indexes.base", "_new_Index"),
     ("pandas.indexes.base", "Index"): ("pandas.core.indexes.base", "Index"),
     ("pandas.indexes.numeric", "Int64Index"): (
@@ -173,22 +122,14 @@ _class_locations_map = {
         "pandas.core.indexes.numeric",
         "Float64Index",
     ),
-    ("pandas.core.sparse.series", "SparseSeries"): (
-        "pandas.compat.pickle_compat",
-        "_LoadSparseSeries",
-    ),
-    ("pandas.core.sparse.frame", "SparseDataFrame"): (
-        "pandas.compat.pickle_compat",
-        "_LoadSparseFrame",
-    ),
 }
 
 
 # our Unpickler sub-class to override methods and some dispatcher
 # functions for compat and uses a non-public class of the pickle module.
 
-# error: Name 'pkl._Unpickler' is not defined
-class Unpickler(pkl._Unpickler):  # type: ignore[name-defined]
+
+class Unpickler(pkl._Unpickler):
     def find_class(self, module, name):
         # override superclass
         key = (module, name)
@@ -200,13 +141,21 @@ Unpickler.dispatch = copy.copy(Unpickler.dispatch)
 Unpickler.dispatch[pkl.REDUCE[0]] = load_reduce
 
 
-def load_newobj(self):
+def load_newobj(self) -> None:
     args = self.stack.pop()
     cls = self.stack[-1]
 
     # compat
     if issubclass(cls, Index):
         obj = object.__new__(cls)
+    elif issubclass(cls, DatetimeArray) and not args:
+        arr = np.array([], dtype="M8[ns]")
+        obj = cls.__new__(cls, arr, arr.dtype)
+    elif issubclass(cls, TimedeltaArray) and not args:
+        arr = np.array([], dtype="m8[ns]")
+        obj = cls.__new__(cls, arr, arr.dtype)
+    elif cls is BlockManager and not args:
+        obj = cls.__new__(cls, (), [], None, False)
     else:
         obj = cls.__new__(cls, *args)
 
@@ -216,7 +165,7 @@ def load_newobj(self):
 Unpickler.dispatch[pkl.NEWOBJ[0]] = load_newobj
 
 
-def load_newobj_ex(self):
+def load_newobj_ex(self) -> None:
     kwargs = self.stack.pop()
     args = self.stack.pop()
     cls = self.stack.pop()
@@ -235,7 +184,7 @@ except (AttributeError, KeyError):
     pass
 
 
-def load(fh, encoding: Optional[str] = None, is_verbose: bool = False):
+def load(fh, encoding: str | None = None, is_verbose: bool = False):
     """
     Load a pickle, with a provided encoding,
 
@@ -251,7 +200,8 @@ def load(fh, encoding: Optional[str] = None, is_verbose: bool = False):
             up = Unpickler(fh, encoding=encoding)
         else:
             up = Unpickler(fh)
-        up.is_verbose = is_verbose
+        # "Unpickler" has no attribute "is_verbose"  [attr-defined]
+        up.is_verbose = is_verbose  # type: ignore[attr-defined]
 
         return up.load()
     except (ValueError, TypeError):
@@ -275,7 +225,7 @@ def loads(
 
 
 @contextlib.contextmanager
-def patch_pickle():
+def patch_pickle() -> Generator[None, None, None]:
     """
     Temporarily patch pickle to use our unpickler.
     """

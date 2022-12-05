@@ -3,15 +3,11 @@ from __future__ import annotations
 import random
 from typing import (
     TYPE_CHECKING,
-    Dict,
     Hashable,
-    List,
-    Optional,
-    Set,
 )
 
+from matplotlib import patches
 import matplotlib.lines as mlines
-import matplotlib.patches as patches
 import numpy as np
 
 from pandas.core.dtypes.missing import notna
@@ -31,21 +27,22 @@ if TYPE_CHECKING:
 
     from pandas import (
         DataFrame,
+        Index,
         Series,
     )
 
 
 def scatter_matrix(
     frame: DataFrame,
-    alpha=0.5,
+    alpha: float = 0.5,
     figsize=None,
     ax=None,
-    grid=False,
-    diagonal="hist",
-    marker=".",
+    grid: bool = False,
+    diagonal: str = "hist",
+    marker: str = ".",
     density_kwds=None,
     hist_kwds=None,
-    range_padding=0.05,
+    range_padding: float = 0.05,
     **kwds,
 ):
     df = frame._get_numeric_data()
@@ -141,7 +138,7 @@ def _get_marker_compat(marker):
 def radviz(
     frame: DataFrame,
     class_column,
-    ax: Optional[Axes] = None,
+    ax: Axes | None = None,
     color=None,
     colormap=None,
     **kwds,
@@ -163,7 +160,7 @@ def radviz(
         ax.set_xlim(-1, 1)
         ax.set_ylim(-1, 1)
 
-    to_plot: Dict[Hashable, List[List]] = {}
+    to_plot: dict[Hashable, list[list]] = {}
     colors = get_standard_colors(
         num_colors=len(classes), colormap=colormap, color_type="random", color=color
     )
@@ -204,7 +201,7 @@ def radviz(
             ax.text(
                 xy[0] - 0.025, xy[1] - 0.025, name, ha="right", va="top", size="small"
             )
-        elif xy[0] < 0.0 and xy[1] >= 0.0:
+        elif xy[0] < 0.0 <= xy[1]:
             ax.text(
                 xy[0] - 0.025,
                 xy[1] + 0.025,
@@ -213,7 +210,7 @@ def radviz(
                 va="bottom",
                 size="small",
             )
-        elif xy[0] >= 0.0 and xy[1] < 0.0:
+        elif xy[1] < 0.0 <= xy[0]:
             ax.text(
                 xy[0] + 0.025, xy[1] - 0.025, name, ha="left", va="top", size="small"
             )
@@ -229,7 +226,7 @@ def radviz(
 def andrews_curves(
     frame: DataFrame,
     class_column,
-    ax: Optional[Axes] = None,
+    ax: Axes | None = None,
     samples: int = 200,
     color=None,
     colormap=None,
@@ -246,7 +243,7 @@ def andrews_curves(
             # appropriately. Take a copy of amplitudes as otherwise numpy
             # deletes the element from amplitudes itself.
             coeffs = np.delete(np.copy(amplitudes), 0)
-            coeffs.resize(int((coeffs.size + 1) / 2), 2)
+            coeffs = np.resize(coeffs, (int((coeffs.size + 1) / 2), 2))
 
             # Generate the harmonics and arguments for the sin and cos
             # functions.
@@ -267,7 +264,7 @@ def andrews_curves(
     classes = frame[class_column].drop_duplicates()
     df = frame.drop(class_column, axis=1)
     t = np.linspace(-np.pi, np.pi, samples)
-    used_legends: Set[str] = set()
+    used_legends: set[str] = set()
 
     color_values = get_standard_colors(
         num_colors=len(classes), colormap=colormap, color_type="random", color=color
@@ -295,7 +292,7 @@ def andrews_curves(
 
 def bootstrap_plot(
     series: Series,
-    fig: Optional[Figure] = None,
+    fig: Figure | None = None,
     size: int = 50,
     samples: int = 500,
     **kwds,
@@ -353,9 +350,9 @@ def parallel_coordinates(
     frame: DataFrame,
     class_column,
     cols=None,
-    ax: Optional[Axes] = None,
+    ax: Axes | None = None,
     color=None,
-    use_columns=False,
+    use_columns: bool = False,
     xticks=None,
     colormap=None,
     axvlines: bool = True,
@@ -377,11 +374,12 @@ def parallel_coordinates(
     else:
         df = frame[cols]
 
-    used_legends: Set[str] = set()
+    used_legends: set[str] = set()
 
     ncols = len(df.columns)
 
     # determine values to use for xticks
+    x: list[int] | Index
     if use_columns is True:
         if not np.all(np.isreal(list(df.columns))):
             raise ValueError("Columns must be numeric to be used as xticks")
@@ -389,7 +387,7 @@ def parallel_coordinates(
     elif xticks is not None:
         if not np.all(np.isreal(xticks)):
             raise ValueError("xticks specified must be numeric")
-        elif len(xticks) != ncols:
+        if len(xticks) != ncols:
             raise ValueError("Length of xticks must match number of columns")
         x = xticks
     else:
@@ -429,7 +427,7 @@ def parallel_coordinates(
     return ax
 
 
-def lag_plot(series: Series, lag: int = 1, ax: Optional[Axes] = None, **kwds) -> Axes:
+def lag_plot(series: Series, lag: int = 1, ax: Axes | None = None, **kwds) -> Axes:
     # workaround because `c='b'` is hardcoded in matplotlib's scatter method
     import matplotlib.pyplot as plt
 
@@ -446,7 +444,7 @@ def lag_plot(series: Series, lag: int = 1, ax: Optional[Axes] = None, **kwds) ->
     return ax
 
 
-def autocorrelation_plot(series: Series, ax: Optional[Axes] = None, **kwds) -> Axes:
+def autocorrelation_plot(series: Series, ax: Axes | None = None, **kwds) -> Axes:
     import matplotlib.pyplot as plt
 
     n = len(series)
@@ -477,3 +475,10 @@ def autocorrelation_plot(series: Series, ax: Optional[Axes] = None, **kwds) -> A
         ax.legend()
     ax.grid()
     return ax
+
+
+def unpack_single_str_list(keys):
+    # GH 42795
+    if isinstance(keys, list) and len(keys) == 1:
+        keys = keys[0]
+    return keys

@@ -5,7 +5,11 @@ Tests for DataFrame.mask; tests DataFrame.where as a side-effect.
 import numpy as np
 
 from pandas import (
+    NA,
     DataFrame,
+    Series,
+    StringDtype,
+    Timedelta,
     isna,
 )
 import pandas._testing as tm
@@ -25,6 +29,7 @@ class TestDataFrameMask:
         tm.assert_frame_equal(rs, df.mask(df <= 0, other))
         tm.assert_frame_equal(rs, df.mask(~cond, other))
 
+    def test_mask2(self):
         # see GH#21891
         df = DataFrame([1, 2])
         res = df.mask([[True], [False]])
@@ -88,14 +93,40 @@ class TestDataFrameMask:
         tm.assert_frame_equal(result, expected)
 
 
-def test_mask_try_cast_deprecated(frame_or_series):
+def test_mask_stringdtype(frame_or_series):
+    # GH 40824
+    obj = DataFrame(
+        {"A": ["foo", "bar", "baz", NA]},
+        index=["id1", "id2", "id3", "id4"],
+        dtype=StringDtype(),
+    )
+    filtered_obj = DataFrame(
+        {"A": ["this", "that"]}, index=["id2", "id3"], dtype=StringDtype()
+    )
+    expected = DataFrame(
+        {"A": [NA, "this", "that", NA]},
+        index=["id1", "id2", "id3", "id4"],
+        dtype=StringDtype(),
+    )
+    if frame_or_series is Series:
+        obj = obj["A"]
+        filtered_obj = filtered_obj["A"]
+        expected = expected["A"]
 
-    obj = DataFrame(np.random.randn(4, 3))
-    if frame_or_series is not DataFrame:
-        obj = obj[0]
+    filter_ser = Series([False, True, True, False])
+    result = obj.mask(filter_ser, filtered_obj)
 
-    mask = obj > 0
+    tm.assert_equal(result, expected)
 
-    with tm.assert_produces_warning(FutureWarning):
-        # try_cast keyword deprecated
-        obj.mask(mask, -1, try_cast=True)
+
+def test_mask_where_dtype_timedelta():
+    # https://github.com/pandas-dev/pandas/issues/39548
+    df = DataFrame([Timedelta(i, unit="d") for i in range(5)])
+
+    expected = DataFrame(np.full(5, np.nan, dtype="timedelta64[ns]"))
+    tm.assert_frame_equal(df.mask(df.notna()), expected)
+
+    expected = DataFrame(
+        [np.nan, np.nan, np.nan, Timedelta("3 day"), Timedelta("4 day")]
+    )
+    tm.assert_frame_equal(df.where(df > Timedelta(2, unit="d")), expected)

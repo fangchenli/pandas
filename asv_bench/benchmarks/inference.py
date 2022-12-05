@@ -85,8 +85,8 @@ class MaybeConvertNumeric:
     #  go in benchmarks/libs.py
 
     def setup_cache(self):
-        N = 10 ** 6
-        arr = np.repeat([2 ** 63], N) + np.arange(N).astype("uint64")
+        N = 10**6
+        arr = np.repeat([2**63], N) + np.arange(N).astype("uint64")
         data = arr.astype(object)
         data[1::2] = arr[1::2].astype(str)
         data[-1] = -1
@@ -101,7 +101,7 @@ class MaybeConvertObjects:
     #  does have some run-time imports from outside of _libs
 
     def setup(self):
-        N = 10 ** 5
+        N = 10**5
 
         data = list(range(N))
         data[0] = NaT
@@ -115,18 +115,26 @@ class MaybeConvertObjects:
 class ToDatetimeFromIntsFloats:
     def setup(self):
         self.ts_sec = Series(range(1521080307, 1521685107), dtype="int64")
+        self.ts_sec_uint = Series(range(1521080307, 1521685107), dtype="uint64")
         self.ts_sec_float = self.ts_sec.astype("float64")
 
         self.ts_nanosec = 1_000_000 * self.ts_sec
+        self.ts_nanosec_uint = 1_000_000 * self.ts_sec_uint
         self.ts_nanosec_float = self.ts_nanosec.astype("float64")
 
-    # speed of int64 and float64 paths should be comparable
+    # speed of int64, uint64 and float64 paths should be comparable
 
     def time_nanosec_int64(self):
         to_datetime(self.ts_nanosec, unit="ns")
 
+    def time_nanosec_uint64(self):
+        to_datetime(self.ts_nanosec_uint, unit="ns")
+
     def time_nanosec_float64(self):
         to_datetime(self.ts_nanosec_float, unit="ns")
+
+    def time_sec_uint64(self):
+        to_datetime(self.ts_sec_uint, unit="s")
 
     def time_sec_int64(self):
         to_datetime(self.ts_sec, unit="s")
@@ -165,6 +173,7 @@ class ToDatetimeISO8601:
         self.strings_tz_space = [
             x.strftime("%Y-%m-%d %H:%M:%S") + " -0800" for x in rng
         ]
+        self.strings_zero_tz = [x.strftime("%Y-%m-%d %H:%M:%S") + "Z" for x in rng]
 
     def time_iso8601(self):
         to_datetime(self.strings)
@@ -180,6 +189,10 @@ class ToDatetimeISO8601:
 
     def time_iso8601_tz_spaceformat(self):
         to_datetime(self.strings_tz_space)
+
+    def time_iso8601_infer_zero_tz_fromat(self):
+        # GH 41047
+        to_datetime(self.strings_zero_tz, infer_datetime_format=True)
 
 
 class ToDatetimeNONISO8601:
@@ -210,7 +223,7 @@ class ToDatetimeFormat:
     def setup(self):
         N = 100000
         self.s = Series(["19MAY11", "19MAY11:00:00:00"] * N)
-        self.s2 = self.s.str.replace(":\\S+$", "")
+        self.s2 = self.s.str.replace(":\\S+$", "", regex=True)
 
         self.same_offset = ["10/11/2018 00:00:00.045-07:00"] * N
         self.diff_offset = [
@@ -262,6 +275,16 @@ class ToDatetimeCache:
 
     def time_dup_string_tzoffset_dates(self, cache):
         to_datetime(self.dup_string_with_tz, cache=cache)
+
+
+# GH 43901
+class ToDatetimeInferDatetimeFormat:
+    def setup(self):
+        rng = date_range(start="1/1/2000", periods=100000, freq="H")
+        self.strings = rng.strftime("%Y-%m-%d %H:%M:%S").tolist()
+
+    def time_infer_datetime_format(self):
+        to_datetime(self.strings, infer_datetime_format=True)
 
 
 class ToTimedelta:

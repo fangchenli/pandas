@@ -3,8 +3,7 @@
 Cython implementations of functions resembling the stdlib calendar module
 """
 
-import cython
-
+cimport cython
 from numpy cimport (
     int32_t,
     int64_t,
@@ -30,29 +29,24 @@ cdef int32_t* month_offset = [
     0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335, 366]
 
 # Canonical location for other modules to find name constants
-MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL',
-          'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
+MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL",
+          "AUG", "SEP", "OCT", "NOV", "DEC"]
 # The first blank line is consistent with calendar.month_name in the calendar
 # standard library
-MONTHS_FULL = ['', 'January', 'February', 'March', 'April', 'May', 'June',
-               'July', 'August', 'September', 'October', 'November',
-               'December']
+MONTHS_FULL = ["", "January", "February", "March", "April", "May", "June",
+               "July", "August", "September", "October", "November",
+               "December"]
 MONTH_NUMBERS = {name: num for num, name in enumerate(MONTHS)}
 cdef dict c_MONTH_NUMBERS = MONTH_NUMBERS
 MONTH_ALIASES = {(num + 1): name for num, name in enumerate(MONTHS)}
 MONTH_TO_CAL_NUM = {name: num + 1 for num, name in enumerate(MONTHS)}
 
-DAYS = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN']
-DAYS_FULL = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
-             'Saturday', 'Sunday']
+DAYS = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
+DAYS_FULL = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
+             "Saturday", "Sunday"]
 int_to_weekday = {num: name for num, name in enumerate(DAYS)}
 weekday_to_int = {int_to_weekday[key]: key for key in int_to_weekday}
 
-DAY_SECONDS = 86400
-HOUR_SECONDS = 3600
-
-cdef int64_t DAY_NANOS = DAY_SECONDS * 1_000_000_000
-cdef int64_t HOUR_NANOS = HOUR_SECONDS * 1_000_000_000
 
 # ----------------------------------------------------------------------
 
