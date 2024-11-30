@@ -1,6 +1,7 @@
 from typing import (
     Any,
     Literal,
+    TypeAlias,
 )
 
 import numpy as np
@@ -28,18 +29,17 @@ from pandas.core.tools.datetimes import (
     to_datetime,
 )
 
+DatesParsingArgs: TypeAlias = (
+    list[str] | dict[str, DatetimeScalarOrArrayConvertible | DictConvertible] | None
+)
+
 
 def _process_parse_dates_argument(
-    parse_dates: (
-        list[str]
-        | dict[str, str]
-        | dict[str, DatetimeScalarOrArrayConvertible | DictConvertible]
-        | None
-    ) = None,
+    parse_dates: DatesParsingArgs = None,
 ) -> list[str]:
     """Process parse_dates argument for read_sql functions"""
     # handle non-list entries for parse_dates gracefully
-    if parse_dates is True or parse_dates is None or parse_dates is False:
+    if parse_dates is None:
         parse_dates = []
 
     elif not hasattr(parse_dates, "__iter__"):
@@ -48,7 +48,7 @@ def _process_parse_dates_argument(
 
 
 def _handle_date_column(
-    col: DatetimeScalar, utc: bool = False, format: str | dict[str, Any] | None = None
+    col: Series, utc: bool = False, format: str | dict[str, Any] | None = None
 ) -> DatetimeIndex | Series | DatetimeScalar | NaTType | None:
     if isinstance(format, dict):
         # GH35185 Allow custom error values in parse_dates argument of
@@ -76,12 +76,7 @@ def _handle_date_column(
 
 def _parse_date_columns(
     data_frame: DataFrame,
-    parse_dates: (
-        list[str]
-        | dict[str, str]
-        | dict[str, DatetimeScalarOrArrayConvertible | DictConvertible]
-        | None
-    ) = None,
+    parse_dates: DatesParsingArgs = None,
 ) -> DataFrame:
     """
     Force non-datetime columns to be read as such.
@@ -143,12 +138,7 @@ def wrap_result(
     columns: list[str],
     index_col: str | list[str] | None = None,
     coerce_float: bool = True,
-    parse_dates: (
-        list[str]
-        | dict[str, str]
-        | dict[str, DatetimeScalarOrArrayConvertible | DictConvertible]
-        | None
-    ) = None,
+    parse_dates: DatesParsingArgs = None,
     dtype: DtypeArg | None = None,
     dtype_backend: DtypeBackend | Literal["numpy"] = "numpy",
 ) -> DataFrame:

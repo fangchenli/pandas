@@ -15,12 +15,11 @@ from pandas._typing import (
 )
 
 from pandas.core.api import DataFrame
-from pandas.core.tools.datetimes import (
-    DatetimeScalarOrArrayConvertible,
-    DictConvertible,
-)
 
-from pandas.io._sql.base import wrap_result
+from pandas.io._sql.base import (
+    DatesParsingArgs,
+    wrap_result,
+)
 
 
 class DBAPI2Cursor(Protocol):
@@ -62,12 +61,7 @@ class PandasDBAPI2Interface:
         columns: list[str],
         index_col: str | list[str] | None = None,
         coerce_float: bool = True,
-        parse_dates: (
-            list[str]
-            | dict[str, str]
-            | dict[str, DatetimeScalarOrArrayConvertible | DictConvertible]
-            | None
-        ) = None,
+        parse_dates: DatesParsingArgs = None,
         dtype: DtypeArg | None = None,
         dtype_backend: DtypeBackend | Literal["numpy"] = "numpy",
     ) -> Generator[DataFrame]:
@@ -104,12 +98,7 @@ class PandasDBAPI2Interface:
         params: Sequence | None = None,
         index_col: str | list[str] | None = None,
         coerce_float: bool = True,
-        parse_dates: (
-            list[str]
-            | dict[str, str]
-            | dict[str, DatetimeScalarOrArrayConvertible | DictConvertible]
-            | None
-        ) = None,
+        parse_dates: DatesParsingArgs = None,
         chunksize: int | None = None,
         dtype: DtypeArg | None = None,
         dtype_backend: DtypeBackend | Literal["numpy"] = "numpy",
