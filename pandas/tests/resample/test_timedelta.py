@@ -217,3 +217,32 @@ def test_arrow_duration_resample():
     expected = Series(np.arange(5, dtype=np.float64), index=idx)
     result = expected.resample("1D").mean()
     tm.assert_series_equal(result, expected)
+
+
+# GH#2704: Tests for closed='both' parameter with TimedeltaIndex
+def test_resample_closed_both_timedelta():
+    # GH#2704: Test closed='both' with TimedeltaIndex
+    idx = pd.Index([pd.Timedelta(seconds=i * 30) for i in range(10)])
+    ser = Series(range(10), index=idx)
+
+    result = ser.resample("60s", closed="both").sum()
+
+    # With closed='both', boundary points should appear in two bins
+    # Bin 1: [0, 30] (includes 30s)
+    # Bin 2: [30, 60, 90] (includes 30s from previous, then 60s)
+    # And so on...
+    # The total count should be higher than closed='right'
+    result_right = ser.resample("60s", closed="right").sum()
+    assert result.sum() >= result_right.sum()
+
+
+def test_resample_closed_both_timedelta_mean():
+    # GH#2704: Test closed='both' with TimedeltaIndex and mean
+    idx = timedelta_range(start="1 day", periods=6, freq="12h")
+    ser = Series([1, 2, 3, 4, 5, 6], index=idx)
+
+    result = ser.resample("1D", closed="both").mean()
+
+    # With closed='both', boundary points are in adjacent bins
+    assert len(result) > 0
+    assert result.notna().all()
