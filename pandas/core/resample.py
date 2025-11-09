@@ -2611,7 +2611,6 @@ class TimeGrouper(Grouper):
         )
 
         if self.closed == "right" or self.closed == "both":
-            # For closed='both', treat like closed='right'
             labels = binner
             if self.label == "right":
                 labels = labels[1:]

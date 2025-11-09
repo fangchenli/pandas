@@ -2235,7 +2235,9 @@ def test_resample_closed_both(unit):
     s.index.name = "index"
     s.index = s.index.as_unit(unit)
 
-    # For now, closed='both' behaves the same as closed='right'
+    # NOTE: closed='both' currently behaves like closed='right'
+    # Proper boundary duplication requires changes to groupby machinery
+    # to support overlapping bin assignments
     expected_both = s.resample("5min", closed="right").mean()
 
     result = s.resample("5min", closed="both").mean()
@@ -2245,13 +2247,11 @@ def test_resample_closed_both(unit):
 def test_resample_closed_both_sum():
     # GH#2704: Test closed='both' parameter with sum aggregation
     # NOTE: closed='both' currently behaves like closed='right'
-    # Future enhancement: implement proper boundary duplication
+    # Proper boundary duplication requires changes to groupby machinery
     index = date_range("2000-01-01", periods=10, freq="D")
     s = Series(range(1, 11), index=index)
 
-    # For now, closed='both' behaves the same as closed='right'
     expected_both = s.resample("3D", closed="right").sum()
-
     result = s.resample("3D", closed="both").sum()
     tm.assert_series_equal(result, expected_both)
 
