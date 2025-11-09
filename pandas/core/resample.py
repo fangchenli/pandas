@@ -2090,10 +2090,121 @@ class DatetimeIndexResampler(Resampler):
             assert obj.index.freq == self.freq, (obj.index.freq, self.freq)
             return obj
 
+        # For closed='both', duplicate boundary rows for proper aggregation
+        if self._timegrouper.closed == "both":
+            obj, new_ax = self._duplicate_boundary_rows_with_axis(obj, ax)
+            # The object now has the expanded index. We need to groupby using the
+            # expanded index, not the original ax
+            grouper = self._timegrouper
+            # Get bins for the new_ax instead
+            binner, bins, binlabels = grouper._get_time_bins(new_ax)
+            # Convert bins array to groupby key
+            # bins contains indices where each bin starts
+            # Create an array mapping each position to its bin number
+            import numpy as np
+
+            groupby_key = np.zeros(len(new_ax), dtype=np.int64)
+            for i in range(len(bins)):
+                if i < len(bins) - 1:
+                    groupby_key[bins[i] : bins[i + 1]] = i
+                else:
+                    groupby_key[bins[i] :] = i
+            # Now aggregate using the groupby_key, preserving empty bins
+            from pandas import Categorical
+
+            groupby_key_cat = Categorical(groupby_key, categories=range(len(binlabels)))
+            result = obj.groupby(groupby_key_cat, observed=False).aggregate(
+                how, **kwargs
+            )
+            # Restore the proper index from binlabels
+            result.index = binlabels
+            return self._wrap_result(result)
+
         # we are downsampling
         # we want to call the actual grouper method here
-        result = obj.groupby(self._grouper).aggregate(how, **kwargs)
+        result = obj.groupby(self._timegrouper).aggregate(how, **kwargs)
         return self._wrap_result(result)
+
+    def _duplicate_boundary_rows_with_axis(
+        self, obj: NDFrameT, ax: DatetimeIndex
+    ) -> tuple[NDFrameT, DatetimeIndex]:
+        """
+        Duplicate rows at bin boundaries for closed='both' aggregation.
+
+        When closed='both', boundary values should be included in both
+        adjacent bins. We achieve this by physically duplicating the rows
+        at boundaries, then using the normal left-closed binning.
+
+        Parameters
+        ----------
+        obj : Series or DataFrame
+            The object to resample
+        ax : DatetimeIndex
+            The datetime index
+
+        Returns
+        -------
+        tuple[Series or DataFrame, DatetimeIndex]
+            Object with boundary rows duplicated and expanded index
+        """
+        # Get the bins information
+        binner, bins, binlabels = self._timegrouper._get_time_bins(ax)
+
+        # Find boundary points: values that equal bin edges (except first/last)
+        # We need to find indices in ax that match bin boundaries
+        boundary_indices = []
+
+        # Get the bin edges in the same format as ax
+        bin_edges_set = set(binner[1:-1].asi8)  # Skip first and last edge
+
+        for i, val in enumerate(ax.asi8):
+            if val in bin_edges_set:
+                boundary_indices.append(i)
+
+        if not boundary_indices:
+            # No boundaries found, return original object and axis
+            return obj, ax
+
+        # Duplicate the rows at boundary indices
+        # We create a new index with duplicated values
+        new_index_list = list(range(len(obj)))
+        for idx in sorted(boundary_indices, reverse=True):
+            # Insert after the original to maintain order
+            new_index_list.insert(idx + 1, idx)
+
+        # Reindex to duplicate rows
+        result = obj.iloc[new_index_list].copy()
+
+        # Create the expanded index
+        new_index = ax[new_index_list]
+
+        # Set the new index on the result
+        result.index = new_index
+
+        return result, new_index
+
+    def _duplicate_boundary_rows(self, obj: NDFrameT, ax: DatetimeIndex) -> NDFrameT:
+        """
+        Duplicate rows at bin boundaries for closed='both' aggregation.
+
+        When closed='both', boundary values should be included in both
+        adjacent bins. We achieve this by physically duplicating the rows
+        at boundaries, then using the normal left-closed binning.
+
+        Parameters
+        ----------
+        obj : Series or DataFrame
+            The object to resample
+        ax : DatetimeIndex
+            The datetime index
+
+        Returns
+        -------
+        Series or DataFrame
+            Object with boundary rows duplicated
+        """
+        obj, _ = self._duplicate_boundary_rows_with_axis(obj, ax)
+        return obj
 
     def _adjust_binner_for_upsample(self, binner):
         """
@@ -2606,12 +2717,19 @@ class TimeGrouper(Grouper):
         binner, bin_edges = self._adjust_bin_edges(binner, ax_values)
 
         # general version, knowing nothing about relative frequencies
+        # For closed='both', we use 'left' binning since rows are duplicated
+        closed_for_binning = "left" if self.closed == "both" else self.closed
         bins = lib.generate_bins_dt64(
-            ax_values, bin_edges, self.closed, hasnans=ax.hasnans
+            ax_values, bin_edges, closed_for_binning, hasnans=ax.hasnans
         )
 
-        if self.closed == "right" or self.closed == "both":
+        if self.closed == "right":
             labels = binner
+            if self.label == "right":
+                labels = labels[1:]
+        elif self.closed == "both":
+            # For closed='both', use left edge labels (matching the binning)
+            # but allow label parameter to shift them
             if self.label == "right":
                 labels = labels[1:]
         elif self.label == "right":

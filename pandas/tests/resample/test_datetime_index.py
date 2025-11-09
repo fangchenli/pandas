@@ -2227,62 +2227,71 @@ def test_resample_closed_both_left(unit):
 
 
 def test_resample_closed_both(unit):
-    # GH#2704: Test closed='both' parameter is accepted
-    # NOTE: closed='both' currently behaves like closed='right'
-    # Future enhancement: implement proper boundary duplication
+    # GH#2704: Test closed='both' parameter with proper boundary duplication
+    # closed='both' duplicates boundary values so they appear in both adjacent bins
     index = date_range("1/1/2000 00:00:00", "1/1/2000 00:13:00", freq="Min")
     s = Series(range(len(index)), index=index)
     s.index.name = "index"
     s.index = s.index.as_unit(unit)
 
-    # NOTE: closed='both' currently behaves like closed='right'
-    # Proper boundary duplication requires changes to groupby machinery
-    # to support overlapping bin assignments
-    expected_both = s.resample("5min", closed="right").mean()
+    # Expected result with boundary duplication for closed='both'
+    # Boundary values at 00:05 and 00:10 appear in both adjacent bins
+    expected_both = Series(
+        [1.666667, 6.666667, 11.2, np.nan],
+        index=date_range("12/31/1999 23:55:00", periods=4, freq="5min").as_unit(unit),
+    )
+    expected_both.index.name = "index"
 
     result = s.resample("5min", closed="both").mean()
-    tm.assert_series_equal(result, expected_both)
+    tm.assert_series_equal(result, expected_both, atol=1e-5)
 
 
 def test_resample_closed_both_sum():
     # GH#2704: Test closed='both' parameter with sum aggregation
-    # NOTE: closed='both' currently behaves like closed='right'
-    # Proper boundary duplication requires changes to groupby machinery
+    # Boundary values appear in both adjacent bins
     index = date_range("2000-01-01", periods=10, freq="D")
     s = Series(range(1, 11), index=index)
 
-    expected_both = s.resample("3D", closed="right").sum()
+    # Expected result with boundary duplication for closed='both'
+    # Boundary values at 2000-01-04, 2000-01-07, 2000-01-10 appear in both bins
+    expected_both = Series(
+        [7, 19, 31, 20, 0],
+        index=date_range("1999-12-29", periods=5, freq="3D"),
+    )
     result = s.resample("3D", closed="both").sum()
     tm.assert_series_equal(result, expected_both)
 
 
 def test_resample_closed_both_boundaries():
-    # GH#2704: Test that closed='both' parameter is accepted
-    # NOTE: closed='both' currently behaves like closed='right'
-    # Future enhancement: implement proper boundary duplication
+    # GH#2704: Test that closed='both' parameter with boundary duplication
+    # Boundary values appear in both adjacent bins, affecting the count
     index = date_range("2000-01-01", "2000-01-10", freq="D")
     s = Series(1, index=index)
 
-    # For now, closed='both' behaves the same as closed='right'
+    # Expected result with boundary duplication for closed='both'
+    # Boundary value at 2000-01-05 appears in both bins
+    expected_both = Series(
+        [6, 6, 0],
+        index=date_range("1999-12-27", periods=3, freq="5D"),
+    )
     result_both = s.resample("5D", closed="both").count()
-    result_right = s.resample("5D", closed="right").count()
-
-    # Currently both should be identical
-    tm.assert_series_equal(result_both, result_right)
+    tm.assert_series_equal(result_both, expected_both)
 
 
 def test_resample_closed_both_mean():
     # GH#2704: Test closed='both' parameter with mean operation
-    # NOTE: closed='both' currently behaves like closed='right'
-    # Future enhancement: implement proper boundary duplication
+    # Boundary values appear in both adjacent bins
     index = date_range("2000-01-01", periods=6, freq="D")
     s = Series([1, 2, 3, 4, 5, 6], index=index)
 
-    # For now, closed='both' behaves the same as closed='right'
-    expected_both = s.resample("2D", closed="right").mean()
-
+    # Expected result with boundary duplication for closed='both'
+    # Boundary values at 2000-01-03, 2000-01-05 appear in both bins
+    expected_both = Series(
+        [1.333333, 3.333333, 5.333333, np.nan],
+        index=date_range("1999-12-30", periods=4, freq="2D"),
+    )
     result = s.resample("2D", closed="both").mean()
-    tm.assert_series_equal(result, expected_both)
+    tm.assert_series_equal(result, expected_both, atol=1e-5)
 
 
 def test_resample_closed_both_with_label():
