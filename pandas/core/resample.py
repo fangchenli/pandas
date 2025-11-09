@@ -2610,13 +2610,9 @@ class TimeGrouper(Grouper):
             ax_values, bin_edges, self.closed, hasnans=ax.hasnans
         )
 
-        if self.closed == "right":
+        if self.closed == "right" or self.closed == "both":
+            # For closed='both', treat like closed='right'
             labels = binner
-            if self.label == "right":
-                labels = labels[1:]
-        elif self.closed == "both":
-            # For closed='both', use left edge labels (same as 'left')
-            # but adjust for the label parameter
             if self.label == "right":
                 labels = labels[1:]
         elif self.label == "right":
@@ -2650,8 +2646,9 @@ class TimeGrouper(Grouper):
             # until the last moment of that day. Note that we only do this for offsets
             # which correspond to the end of a super-daily period - "month start", for
             # example, is excluded.
-            if self.closed == "right":
+            if self.closed == "right" or self.closed == "both":
                 # GH 21459, GH 9119: Adjust the bins relative to the wall time
+                # For closed='both', treat like closed='right'
                 edges_dti = binner.tz_localize(None)
                 edges_dti = (
                     edges_dti
@@ -2858,7 +2855,7 @@ def _get_timestamp_range_edges(
     last: Timestamp,
     freq: BaseOffset,
     unit: TimeUnit,
-    closed: Literal["right", "left"] = "left",
+    closed: Literal["right", "left", "both"] = "left",
     origin: TimeGrouperOrigin = "start_day",
     offset: Timedelta | None = None,
 ) -> tuple[Timestamp, Timestamp]:
@@ -3004,7 +3001,7 @@ def _adjust_dates_anchored(
     first: Timestamp,
     last: Timestamp,
     freq: Tick,
-    closed: Literal["right", "left"] = "right",
+    closed: Literal["right", "left", "both"] = "right",
     origin: TimeGrouperOrigin = "start_day",
     offset: Timedelta | None = None,
     unit: TimeUnit = "ns",
@@ -3050,7 +3047,7 @@ def _adjust_dates_anchored(
     foffset = (first._value - origin_timestamp) % freq_value
     loffset = (last._value - origin_timestamp) % freq_value
 
-    if closed == "right":
+    if closed == "right" or closed == "both":
         if foffset > 0:
             # roll back
             fresult_int = first._value - foffset

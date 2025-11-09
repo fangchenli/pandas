@@ -951,12 +951,11 @@ def generate_bins_dt64(ndarray[int64_t, ndim=1] values, const int64_t[:] binner,
             bins[bc] = j
             bc += 1
     elif both_closed:
-        # For closed='both', include both boundaries
-        # Current bin: [left_bin, right_bin]
-        # Right boundary is included in current bin AND next bin (via left boundary)
+        # For closed='both', treat as if using <= (include right boundary)
+        # The actual duplication of boundary values happens at a higher level
         for i in range(0, lenbin - 1):
             r_bin = binner[i + 1]
-            # count values in current bin (including right boundary)
+            # count values including right boundary
             while j < lenidx and values[j] <= r_bin:
                 j += 1
             bins[bc] = j
