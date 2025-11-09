@@ -901,12 +901,21 @@ def generate_bins_dt64(ndarray[int64_t, ndim=1] values, const int64_t[:] binner,
                        object closed="left", bint hasnans=False):
     """
     Int64 (datetime64) version of generic python version in ``groupby.py``.
+
+    Parameters
+    ----------
+    closed : {'left', 'right', 'both'}, default 'left'
+        Which side of bin interval is closed.
+        - 'left': [a, b)
+        - 'right': (a, b]
+        - 'both': [a, b], with right boundary also included in next bin
     """
     cdef:
         Py_ssize_t lenidx, lenbin, i, j, bc
         ndarray[int64_t, ndim=1] bins
         int64_t r_bin, nat_count
         bint right_closed = closed == "right"
+        bint both_closed = closed == "both"
 
     nat_count = 0
     if hasnans:
@@ -941,7 +950,18 @@ def generate_bins_dt64(ndarray[int64_t, ndim=1] values, const int64_t[:] binner,
                 j += 1
             bins[bc] = j
             bc += 1
-    else:
+    elif both_closed:
+        # For closed='both', include both boundaries
+        # Current bin: [left_bin, right_bin]
+        # Right boundary is included in current bin AND next bin (via left boundary)
+        for i in range(0, lenbin - 1):
+            r_bin = binner[i + 1]
+            # count values in current bin (including right boundary)
+            while j < lenidx and values[j] <= r_bin:
+                j += 1
+            bins[bc] = j
+            bc += 1
+    else:  # left_closed
         for i in range(0, lenbin - 1):
             r_bin = binner[i + 1]
             # count values in current bin, advance to next bin

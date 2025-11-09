@@ -2359,7 +2359,7 @@ class TimeGrouper(Grouper):
     Parameters
     ----------
     freq : pandas date offset or offset alias for identifying bin edges
-    closed : closed end of interval; 'left' or 'right'
+    closed : closed end of interval; 'left', 'right', or 'both'
     label : interval boundary to use for labeling; 'left' or 'right'
     convention : {'start', 'end', 'e', 's'}
         If axis is PeriodIndex
@@ -2383,7 +2383,7 @@ class TimeGrouper(Grouper):
         obj: Grouper | None = None,
         freq: Frequency = "Min",
         key: str | None = None,
-        closed: Literal["left", "right"] | None = None,
+        closed: Literal["left", "right", "both"] | None = None,
         label: Literal["left", "right"] | None = None,
         how: str = "mean",
         fill_method=None,
@@ -2401,7 +2401,7 @@ class TimeGrouper(Grouper):
         # otherwise silently use the default if misspelled
         if label not in {None, "left", "right"}:
             raise ValueError(f"Unsupported value {label} for `label`")
-        if closed not in {None, "left", "right"}:
+        if closed not in {None, "left", "right", "both"}:
             raise ValueError(f"Unsupported value {closed} for `closed`")
         if convention not in {None, "start", "end", "e", "s"}:
             raise ValueError(f"Unsupported value {convention} for `convention`")
@@ -2614,6 +2614,11 @@ class TimeGrouper(Grouper):
             labels = binner
             if self.label == "right":
                 labels = labels[1:]
+        elif self.closed == "both":
+            # For closed='both', use left edge labels (same as 'left')
+            # but adjust for the label parameter
+            if self.label == "right":
+                labels = labels[1:]
         elif self.label == "right":
             labels = labels[1:]
 
@@ -2687,6 +2692,9 @@ class TimeGrouper(Grouper):
 
         if self.closed == "right":
             end += self.freq
+        elif self.closed == "both":
+            # For closed='both', include right boundary in current bin
+            end += self.freq
 
         labels = binner = timedelta_range(
             start=start, end=end, freq=self.freq, name=ax.name
@@ -2695,8 +2703,11 @@ class TimeGrouper(Grouper):
         end_stamps = labels
         if self.closed == "left":
             end_stamps += self.freq
+        # For closed='both', end_stamps stays as original (same as 'right')
 
-        bins = ax.searchsorted(end_stamps, side=self.closed)
+        # For closed='both', use 'right' side to include both boundaries
+        side = "right" if self.closed == "both" else self.closed
+        bins = ax.searchsorted(end_stamps, side=side)
 
         if self.offset:
             # GH 10530 & 31809
