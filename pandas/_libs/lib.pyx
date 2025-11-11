@@ -915,7 +915,6 @@ def generate_bins_dt64(ndarray[int64_t, ndim=1] values, const int64_t[:] binner,
         ndarray[int64_t, ndim=1] bins
         int64_t r_bin, nat_count
         bint right_closed = closed == "right"
-        bint both_closed = closed == "both"
 
     nat_count = 0
     if hasnans:
@@ -950,18 +949,10 @@ def generate_bins_dt64(ndarray[int64_t, ndim=1] values, const int64_t[:] binner,
                 j += 1
             bins[bc] = j
             bc += 1
-    elif both_closed:
-        # For closed='both', we use left-closed binning because the data
-        # has been pre-processed to duplicate boundary rows. The boundary
-        # values will appear in both the current and next bin naturally.
-        for i in range(0, lenbin - 1):
-            r_bin = binner[i + 1]
-            # count values in current bin, advance to next bin
-            while j < lenidx and values[j] < r_bin:
-                j += 1
-            bins[bc] = j
-            bc += 1
-    else:  # left_closed
+    else:  # left_closed or both_closed
+        # For closed='both', data is pre-processed to duplicate boundary rows,
+        # so we use left-closed binning. The boundary values will appear in
+        # both the current and next bin naturally.
         for i in range(0, lenbin - 1):
             r_bin = binner[i + 1]
             # count values in current bin, advance to next bin
