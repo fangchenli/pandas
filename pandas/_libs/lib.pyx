@@ -2736,7 +2736,6 @@ def maybe_convert_objects(ndarray[object] objects,
             if convert_non_numeric:
                 if getattr(val, "tzinfo", None) is not None:
                     seen.datetimetz_ = True
-                    break
                 else:
                     seen.datetime_ = True
                     try:
@@ -2744,10 +2743,9 @@ def maybe_convert_objects(ndarray[object] objects,
                     except OutOfBoundsDatetime:
                         # e.g. test_out_of_s_bounds_datetime64
                         seen.object_ = True
-                        break
             else:
                 seen.object_ = True
-                break
+            break
         elif is_period_object(val):
             if convert_non_numeric:
                 seen.period_ = True
