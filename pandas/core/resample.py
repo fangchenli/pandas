@@ -43,7 +43,10 @@ from pandas.core.dtypes.generic import (
 
 import pandas.core.algorithms as algos
 from pandas.core.apply import ResamplerWindowApply
-from pandas.core.arrays import ArrowExtensionArray
+from pandas.core.arrays import (
+    ArrowExtensionArray,
+    Categorical,
+)
 from pandas.core.base import (
     PandasObject,
     SelectionMixin,
@@ -2101,8 +2104,6 @@ class DatetimeIndexResampler(Resampler):
             # Convert bins array to groupby key
             # bins contains indices where each bin starts
             # Create an array mapping each position to its bin number
-            import numpy as np
-
             groupby_key = np.zeros(len(new_ax), dtype=np.int64)
             for i in range(len(bins)):
                 if i < len(bins) - 1:
@@ -2110,8 +2111,6 @@ class DatetimeIndexResampler(Resampler):
                 else:
                     groupby_key[bins[i] :] = i
             # Now aggregate using the groupby_key, preserving empty bins
-            from pandas import Categorical
-
             groupby_key_cat = Categorical(groupby_key, categories=range(len(binlabels)))
             result = obj.groupby(groupby_key_cat, observed=False).aggregate(
                 how, **kwargs
