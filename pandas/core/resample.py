@@ -2110,7 +2110,9 @@ class DatetimeIndexResampler(Resampler):
                     groupby_key[bins[i] : bins[i + 1]] = i
                 else:
                     groupby_key[bins[i] :] = i
-            # Now aggregate using the groupby_key, preserving empty bins
+            # Now aggregate using the groupby_key, preserving empty bins.
+            # We use Categorical with observed=False to ensure empty bins
+            # (bins with no data points) are included in the result with NaN/0 values.
             groupby_key_cat = Categorical(groupby_key, categories=range(len(binlabels)))
             result = obj.groupby(groupby_key_cat, observed=False).aggregate(
                 how, **kwargs
