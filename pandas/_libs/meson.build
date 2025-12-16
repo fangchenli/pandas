@@ -137,6 +137,7 @@ libs_sources = {
     'tslib': {'sources': ['tslib.pyx']},
     'testing': {'sources': ['testing.pyx']},
     'writers': {'sources': ['writers.pyx']},
+    'swisstable': {'sources': ['swisstable.pyx']},
 }
 
 cython_args = [
