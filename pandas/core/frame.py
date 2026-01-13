@@ -15990,6 +15990,95 @@ class DataFrame(NDFrame, OpsMixin):
         """
         return self._mgr.as_array()
 
+    # ----------------------------------------------------------------------
+    # Lazy Query Mode
+
+    def select(self, *exprs):
+        """
+        Enter lazy query mode with optional projection.
+
+        This method is the entry point to pandas' lazy evaluation mode.
+        It returns a LazyDataFrame that builds a query plan which can be
+        optimized before execution.
+
+        Parameters
+        ----------
+        *exprs : Expr or str
+            Column references or expressions. If empty, selects all columns
+            (identity projection). String arguments are converted to column
+            references.
+
+        Returns
+        -------
+        LazyDataFrame
+            A lazy query object supporting chained operations.
+
+        See Also
+        --------
+        LazyDataFrame : The lazy query object returned by this method.
+        LazyDataFrame.collect : Execute the query and return a DataFrame.
+        LazyDataFrame.explain : Show the query plan.
+
+        Notes
+        -----
+        The LazyDataFrame supports method chaining for building queries:
+
+        - ``select(*exprs)`` : Project columns/expressions
+        - ``filter(predicate)`` : Filter rows
+        - ``collect()`` : Execute and return DataFrame
+        - ``explain()`` : Show query plan
+
+        Use ``col("name")`` from ``pandas.lazy`` to reference columns,
+        and ``lit(value)`` for literal values.
+
+        Examples
+        --------
+        >>> import pandas as pd
+        >>> from pandas.lazy import col
+
+        Select all columns (identity projection):
+
+        >>> df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+        >>> ldf = df.select()
+        >>> ldf.columns
+        ['a', 'b']
+
+        Select specific columns:
+
+        >>> ldf = df.select("a", "b")
+        >>> result = ldf.collect()
+
+        Select with column expressions:
+
+        >>> ldf = df.select(col("a"), col("b"))
+
+        Rename columns using alias:
+
+        >>> ldf = df.select(col("a").alias("new_a"))
+        >>> result = ldf.collect()
+        >>> result.columns
+        Index(['new_a'], dtype='object')
+
+        View the query plan:
+
+        >>> print(df.select("a").explain())  # doctest: +SKIP
+        """
+        from pandas.lazy import (
+            LazyDataFrame,
+            col,
+        )
+
+        if not exprs:
+            # Identity projection - all columns
+            exprs = tuple(col(c) for c in self.columns)
+        else:
+            # Normalize string references to col() expressions
+            from pandas.lazy.expr import normalize_exprs
+
+            exprs = normalize_exprs(exprs)
+
+        return LazyDataFrame._from_dataframe(self, exprs)
+
 
 def _from_nested_dict(
     data: Mapping[HashableT, Mapping[HashableT2, T]],

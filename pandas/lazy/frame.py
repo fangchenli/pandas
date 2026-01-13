@@ -1,0 +1,1215 @@
+"""
+LazyDataFrame - the core lazy query object.
+
+This module provides the LazyDataFrame class which represents a lazy
+query that can be optimized and executed.
+"""
+
+from __future__ import annotations
+
+from typing import (
+    TYPE_CHECKING,
+    Literal,
+)
+
+if TYPE_CHECKING:
+    from pandas import DataFrame
+    from pandas.lazy.expr import Expr
+    from pandas.lazy.plan import (
+        Aggregate,
+        Limit,
+        LogicalPlan,
+        Sort,
+    )
+    from pandas.lazy.types import Schema
+
+
+class LazyDataFrame:
+    """
+    Lazy representation of a DataFrame query.
+
+    This object builds an expression graph that is optimized and executed
+    only when collect() is called. It supports method chaining for building
+    complex queries.
+
+    LazyDataFrame should not be instantiated directly. Use DataFrame.select()
+    to enter lazy mode.
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> from pandas.lazy import col
+    >>> df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+    >>> ldf = df.select()  # Enter lazy mode
+    >>> ldf.columns
+    ['a', 'b']
+    >>> result = ldf.collect()  # Execute and return DataFrame
+    """
+
+    __slots__ = ("_plan", "_schema")
+
+    def __init__(self, plan: LogicalPlan, schema: Schema) -> None:
+        """
+        Initialize a LazyDataFrame.
+
+        This constructor is internal. Use DataFrame.select() to create
+        LazyDataFrame instances.
+
+        Parameters
+        ----------
+        plan : LogicalPlan
+            The logical plan representing the query.
+        schema : Schema
+            The output schema of the query.
+        """
+        self._plan = plan
+        self._schema = schema
+
+    @classmethod
+    def _from_dataframe(
+        cls,
+        df: DataFrame,
+        exprs: tuple[Expr, ...],
+    ) -> LazyDataFrame:
+        """
+        Create LazyDataFrame from eager DataFrame with projection.
+
+        Parameters
+        ----------
+        df : DataFrame
+            The source DataFrame.
+        exprs : tuple of Expr
+            The projection expressions.
+
+        Returns
+        -------
+        LazyDataFrame
+            A new lazy query object.
+        """
+        from pandas.lazy.plan import (
+            DataFrameSource,
+            Project,
+        )
+
+        source = DataFrameSource(df)
+        plan = Project(source, exprs)
+        schema = plan.resolve_schema()
+        return cls(plan, schema)
+
+    # --- Properties ---
+
+    @property
+    def schema(self) -> Schema:
+        """
+        Return the output schema (column names and types).
+
+        Returns
+        -------
+        Schema
+            The schema describing output columns and their types.
+        """
+        return self._schema
+
+    @property
+    def columns(self) -> list[str]:
+        """
+        Return column names in output.
+
+        Returns
+        -------
+        list of str
+            The names of columns that will be in the output.
+        """
+        return self._schema.names
+
+    # --- Chainable Operations ---
+
+    def select(self, *exprs: Expr | str) -> LazyDataFrame:
+        """
+        Add projection of columns/expressions.
+
+        Parameters
+        ----------
+        *exprs : Expr or str
+            Column references or expressions to select.
+
+        Returns
+        -------
+        LazyDataFrame
+            A new LazyDataFrame with the projection applied.
+
+        Examples
+        --------
+        >>> ldf.select("a", "b")
+        >>> ldf.select(col("a"), col("b"))
+        """
+        from pandas.lazy.expr import normalize_exprs
+        from pandas.lazy.plan import Project
+
+        if not exprs:
+            raise ValueError("select() requires at least one expression")
+
+        exprs = normalize_exprs(exprs)
+        new_plan = Project(self._plan, exprs)
+        return LazyDataFrame(new_plan, new_plan.resolve_schema())
+
+    def filter(self, predicate: Expr) -> LazyDataFrame:
+        """
+        Filter rows by boolean predicate.
+
+        Parameters
+        ----------
+        predicate : Expr
+            A boolean expression to filter rows.
+
+        Returns
+        -------
+        LazyDataFrame
+            A new LazyDataFrame with the filter applied.
+
+        Examples
+        --------
+        >>> from pandas.lazy import col
+        >>> ldf.filter(col("a") > 0)
+        """
+        from pandas.lazy.expr import Expr
+        from pandas.lazy.plan import Filter
+
+        if not isinstance(predicate, Expr):
+            raise TypeError(
+                f"predicate must be an Expr, got {type(predicate).__name__}"
+            )
+
+        new_plan = Filter(self._plan, predicate)
+        return LazyDataFrame(new_plan, self._schema)
+
+    def with_columns(self, *exprs: Expr) -> LazyDataFrame:
+        """
+        Add or replace columns with computed expressions.
+
+        Parameters
+        ----------
+        *exprs : Expr
+            Expressions to add as columns. Each expression must have
+            an alias (use .alias("name")) to specify the output column name.
+
+        Returns
+        -------
+        LazyDataFrame
+            A new LazyDataFrame with the new columns added.
+
+        Examples
+        --------
+        >>> from pandas.lazy import col
+        >>> ldf.with_columns((col("a") + col("b")).alias("sum"))
+        >>> ldf.with_columns(
+        ...     (col("price") * col("qty")).alias("total"),
+        ...     (col("a") > 0).alias("is_positive"),
+        ... )
+        """
+        from pandas.lazy.expr import (
+            Expr,
+            col,
+            extract_output_name,
+        )
+        from pandas.lazy.plan import Project
+
+        if not exprs:
+            raise ValueError("with_columns() requires at least one expression")
+
+        for e in exprs:
+            if not isinstance(e, Expr):
+                raise TypeError(
+                    f"Expected Expr, got {type(e).__name__}. "
+                    f"Use col('name') or (expr).alias('name')."
+                )
+
+        # Build expression list: all existing columns + new columns
+        # New columns can replace existing ones with the same name
+        existing_names = self._schema.names
+        new_names = set()
+        for e in exprs:
+            name = extract_output_name(e)
+            new_names.add(name)
+
+        # Keep existing columns that aren't being replaced
+        all_exprs = [col(name) for name in existing_names if name not in new_names]
+
+        # Add new columns
+        all_exprs.extend(exprs)
+
+        new_plan = Project(self._plan, tuple(all_exprs))
+        return LazyDataFrame(new_plan, new_plan.resolve_schema())
+
+    def group_by(self, *by: Expr | str) -> LazyGroupBy:
+        """
+        Group by one or more columns for aggregation.
+
+        Parameters
+        ----------
+        *by : Expr or str
+            Columns to group by. Can be column names or expressions.
+
+        Returns
+        -------
+        LazyGroupBy
+            A grouped lazy dataframe for aggregation operations.
+
+        Examples
+        --------
+        >>> from pandas.lazy import col
+        >>> ldf.group_by("category").agg(col("value").sum().alias("total"))
+        >>> ldf.group_by(col("a"), col("b")).agg(
+        ...     col("x").mean().alias("avg_x"),
+        ...     col("y").max().alias("max_y"),
+        ... )
+        """
+        from pandas.lazy.expr import normalize_exprs
+
+        if not by:
+            raise ValueError("group_by() requires at least one column")
+
+        group_exprs = normalize_exprs(by)
+        return LazyGroupBy(self._plan, group_exprs, self._schema)
+
+    def sort(
+        self,
+        *by: Expr | str,
+        descending: bool | list[bool] = False,
+    ) -> LazyDataFrame:
+        """
+        Sort by one or more columns.
+
+        Parameters
+        ----------
+        *by : Expr or str
+            Columns to sort by. Can be column names or expressions.
+        descending : bool or list of bool, default False
+            Sort descending. If a list, must match the number of sort keys.
+
+        Returns
+        -------
+        LazyDataFrame
+            A new LazyDataFrame with sort applied.
+
+        Examples
+        --------
+        >>> from pandas.lazy import col
+        >>> ldf.sort("a")
+        >>> ldf.sort("a", descending=True)
+        >>> ldf.sort("a", "b", descending=[True, False])
+        >>> ldf.sort(col("a") + col("b"))
+        """
+        from pandas.lazy.expr import normalize_exprs
+        from pandas.lazy.plan import Sort
+
+        if not by:
+            raise ValueError("sort() requires at least one column")
+
+        sort_exprs = normalize_exprs(by)
+
+        # Normalize descending to tuple
+        if isinstance(descending, bool):
+            desc_tuple = tuple(descending for _ in sort_exprs)
+        else:
+            if len(descending) != len(sort_exprs):
+                raise ValueError(
+                    f"Length of descending ({len(descending)}) must match "
+                    f"number of sort keys ({len(sort_exprs)})"
+                )
+            desc_tuple = tuple(descending)
+
+        new_plan = Sort(self._plan, sort_exprs, desc_tuple)
+        return LazyDataFrame(new_plan, self._schema)
+
+    def head(self, n: int = 5) -> LazyDataFrame:
+        """
+        Get the first n rows.
+
+        Parameters
+        ----------
+        n : int, default 5
+            Number of rows to return.
+
+        Returns
+        -------
+        LazyDataFrame
+            A new LazyDataFrame limited to first n rows.
+
+        Examples
+        --------
+        >>> ldf.head()
+        >>> ldf.head(10)
+        """
+        from pandas.lazy.plan import Limit
+
+        if n < 0:
+            raise ValueError(f"n must be non-negative, got {n}")
+
+        new_plan = Limit(self._plan, n)
+        return LazyDataFrame(new_plan, self._schema)
+
+    def tail(self, n: int = 5) -> LazyDataFrame:
+        """
+        Get the last n rows.
+
+        Note: This operation requires materializing the input to determine
+        the total row count, which may be expensive for large datasets.
+
+        Parameters
+        ----------
+        n : int, default 5
+            Number of rows to return.
+
+        Returns
+        -------
+        LazyDataFrame
+            A new LazyDataFrame limited to last n rows.
+
+        Examples
+        --------
+        >>> ldf.tail()
+        >>> ldf.tail(10)
+        """
+        from pandas.lazy.plan import Limit
+
+        if n < 0:
+            raise ValueError(f"n must be non-negative, got {n}")
+
+        # Use negative offset to indicate "from end"
+        # The evaluator will handle this specially
+        new_plan = Limit(self._plan, n, offset=-1)
+        return LazyDataFrame(new_plan, self._schema)
+
+    def limit(self, n: int) -> LazyDataFrame:
+        """
+        Limit to at most n rows.
+
+        Alias for head(n).
+
+        Parameters
+        ----------
+        n : int
+            Maximum number of rows to return.
+
+        Returns
+        -------
+        LazyDataFrame
+            A new LazyDataFrame limited to at most n rows.
+
+        Examples
+        --------
+        >>> ldf.limit(100)
+        """
+        return self.head(n)
+
+    def distinct(self, *subset: str) -> LazyDataFrame:
+        """
+        Remove duplicate rows.
+
+        Parameters
+        ----------
+        *subset : str
+            Column names to consider for identifying duplicates.
+            If not provided, all columns are used.
+
+        Returns
+        -------
+        LazyDataFrame
+            A new LazyDataFrame with duplicate rows removed.
+
+        Examples
+        --------
+        >>> ldf.distinct()  # All columns
+        >>> ldf.distinct("a", "b")  # Only consider columns a and b
+        """
+        from pandas.lazy.plan import Distinct
+
+        subset_tuple = subset if subset else None
+        new_plan = Distinct(self._plan, subset_tuple)
+        return LazyDataFrame(new_plan, self._schema)
+
+    def join(
+        self,
+        other: LazyDataFrame | DataFrame,
+        on: str | list[str] | None = None,
+        left_on: str | list[str] | None = None,
+        right_on: str | list[str] | None = None,
+        how: Literal["inner", "left", "right", "outer", "cross"] = "inner",
+        suffix: tuple[str, str] = ("_x", "_y"),
+    ) -> LazyDataFrame:
+        """
+        Join with another LazyDataFrame or DataFrame.
+
+        Parameters
+        ----------
+        other : LazyDataFrame or DataFrame
+            The right DataFrame to join with. If a regular DataFrame is
+            provided, it will be automatically converted to a LazyDataFrame.
+        on : str or list of str, optional
+            Column(s) to join on. Must exist in both DataFrames.
+        left_on : str or list of str, optional
+            Column(s) from the left DataFrame to join on.
+        right_on : str or list of str, optional
+            Column(s) from the right DataFrame to join on.
+        how : {"inner", "left", "right", "outer", "cross"}, default "inner"
+            Type of join to perform.
+        suffix : tuple of str, default ("_x", "_y")
+            Suffixes to apply to overlapping column names.
+
+        Returns
+        -------
+        LazyDataFrame
+            A new LazyDataFrame with the join result.
+
+        Examples
+        --------
+        >>> ldf1.join(ldf2, on="id")
+        >>> ldf1.join(df2, on="id")  # Also accepts regular DataFrame
+        >>> ldf1.join(ldf2, left_on="id1", right_on="id2")
+        >>> ldf1.join(ldf2, on="id", how="left")
+        """
+        from pandas import DataFrame
+        from pandas.lazy.plan import (
+            DataFrameSource,
+            Join,
+        )
+
+        # Convert DataFrame to LazyDataFrame if needed
+        if isinstance(other, DataFrame):
+            from pandas.lazy.expr import col
+
+            # Create a simple projection that selects all columns
+            other_exprs = tuple(col(c) for c in other.columns)
+            other_source = DataFrameSource(other)
+            from pandas.lazy.plan import Project
+
+            other_plan = Project(other_source, other_exprs)
+            other_schema = other_plan.resolve_schema()
+            other = LazyDataFrame(other_plan, other_schema)
+
+        # Normalize on/left_on/right_on to tuples
+        if on is not None:
+            on_tuple = (on,) if isinstance(on, str) else tuple(on)
+            left_on_tuple = None
+            right_on_tuple = None
+        elif left_on is not None and right_on is not None:
+            on_tuple = None
+            left_on_tuple = (left_on,) if isinstance(left_on, str) else tuple(left_on)
+            right_on_tuple = (
+                (right_on,) if isinstance(right_on, str) else tuple(right_on)
+            )
+            if len(left_on_tuple) != len(right_on_tuple):
+                raise ValueError(
+                    f"left_on and right_on must have same length, "
+                    f"got {len(left_on_tuple)} and {len(right_on_tuple)}"
+                )
+        elif how == "cross":
+            on_tuple = None
+            left_on_tuple = None
+            right_on_tuple = None
+        else:
+            raise ValueError(
+                "Must provide either 'on' or both 'left_on' and 'right_on' "
+                "(unless how='cross')"
+            )
+
+        new_plan = Join(
+            self._plan,
+            other._plan,
+            on=on_tuple,
+            left_on=left_on_tuple,
+            right_on=right_on_tuple,
+            how=how,
+            suffix=suffix,
+        )
+        new_schema = new_plan.resolve_schema()
+        return LazyDataFrame(new_plan, new_schema)
+
+    # --- Terminal Operations ---
+
+    def collect(
+        self,
+        *,
+        optimize: bool = True,
+        strict: bool = False,
+        engine: Literal["auto", "arrow", "numpy"] = "auto",
+        use_physical_planner: bool = False,
+    ) -> DataFrame:
+        """
+        Execute the query and return a pandas DataFrame.
+
+        Parameters
+        ----------
+        optimize : bool, default True
+            If True, apply query optimization passes before execution.
+            Set to False for debugging or when optimization causes issues.
+        strict : bool, default False
+            If True, error if any engine fallback or implicit conversion
+            is required. All operations must run in their preferred engine
+            without crossing boundaries.
+        engine : {"auto", "arrow", "numpy"}, default "auto"
+            Preferred execution engine. "auto" selects based on data types
+            and operation support.
+        use_physical_planner : bool, default False
+            If True, use the physical planner for execution. The physical
+            planner converts the logical plan to a physical plan with
+            concrete execution strategies (algorithm selection, backend
+            choice). If False, use direct eager evaluation with pandas
+            native operations.
+
+        Returns
+        -------
+        DataFrame
+            The materialized result.
+
+        Raises
+        ------
+        StrictModeError
+            If strict=True and fallback/conversion would be required.
+
+        Examples
+        --------
+        >>> result = ldf.collect()
+        >>> result = ldf.collect(optimize=False)  # Skip optimization
+        >>> result = ldf.collect(use_physical_planner=True)  # Use physical planner
+        """
+        if use_physical_planner:
+            return self._collect_physical(
+                optimize=optimize, strict=strict, engine=engine
+            )
+        else:
+            return self._collect_eager(optimize=optimize)
+
+    def _collect_eager(self, optimize: bool = True) -> DataFrame:
+        """
+        Eager execution that evaluates the plan.
+
+        Parameters
+        ----------
+        optimize : bool, default True
+            If True, apply query optimization passes before execution.
+        """
+        from pandas import DataFrame as PdDataFrame
+        from pandas.lazy.eval import Evaluator
+        from pandas.lazy.expr import extract_output_name
+        from pandas.lazy.plan import (
+            Aggregate,
+            Convert,
+            DataFrameSource,
+            Distinct,
+            Filter,
+            Join,
+            Limit,
+            Project,
+            Sort,
+            TopK,
+        )
+
+        # Apply optimization if requested
+        plan = self._plan
+        if optimize:
+            from pandas.lazy.optimize import Optimizer
+
+            plan = Optimizer().optimize(plan)
+
+        def evaluate(plan: LogicalPlan) -> DataFrame:
+            """Evaluate a plan node."""
+            if isinstance(plan, DataFrameSource):
+                return plan.df.copy()
+
+            elif isinstance(plan, Project):
+                input_df = evaluate(plan.input)
+                evaluator = Evaluator(input_df)
+                result = {}
+                for expr in plan.exprs:
+                    name = extract_output_name(expr)
+                    value = evaluator.evaluate(expr._ir)
+                    result[name] = value
+                return PdDataFrame(result)
+
+            elif isinstance(plan, Filter):
+                input_df = evaluate(plan.input)
+                evaluator = Evaluator(input_df)
+                mask = evaluator.evaluate(plan.predicate._ir)
+                return input_df.loc[mask].reset_index(drop=True)
+
+            elif isinstance(plan, Aggregate):
+                input_df = evaluate(plan.input)
+                return _evaluate_aggregate(input_df, plan)
+
+            elif isinstance(plan, Sort):
+                input_df = evaluate(plan.input)
+                return _evaluate_sort(input_df, plan)
+
+            elif isinstance(plan, Limit):
+                input_df = evaluate(plan.input)
+                return _evaluate_limit(input_df, plan)
+
+            elif isinstance(plan, Distinct):
+                input_df = evaluate(plan.input)
+                return _evaluate_distinct(input_df, plan)
+
+            elif isinstance(plan, Join):
+                left_df = evaluate(plan.left)
+                right_df = evaluate(plan.right)
+                return _evaluate_join(left_df, right_df, plan)
+
+            elif isinstance(plan, Convert):
+                # Convert node handles backend conversion (Arrow <-> NumPy)
+                # For now, this is a no-op pass-through since pandas handles
+                # conversion automatically. In the future, this could be used
+                # to optimize backend-specific operations.
+                return evaluate(plan.input)
+
+            elif isinstance(plan, TopK):
+                input_df = evaluate(plan.input)
+                return _evaluate_topk(input_df, plan)
+
+            else:
+                raise NotImplementedError(f"Unknown plan type: {type(plan)}")
+
+        return evaluate(plan)
+
+    def _collect_physical(
+        self,
+        optimize: bool = True,
+        strict: bool = False,
+        engine: Literal["auto", "arrow", "numpy"] = "auto",
+    ) -> DataFrame:
+        """
+        Execute the query using the physical planner.
+
+        This method converts the logical plan to a physical plan and
+        executes it. The physical planner makes execution decisions
+        based on data characteristics and user preferences.
+
+        Parameters
+        ----------
+        optimize : bool, default True
+            If True, apply query optimization passes before execution.
+        strict : bool, default False
+            If True, fail on backend fallbacks.
+        engine : {"auto", "arrow", "numpy"}, default "auto"
+            Preferred execution backend.
+
+        Returns
+        -------
+        DataFrame
+            The execution result.
+        """
+        from pandas.lazy.physical import (
+            PhysicalPlanner,
+            execute_physical_plan,
+        )
+
+        # Apply optimization if requested
+        plan = self._plan
+        if optimize:
+            from pandas.lazy.optimize import Optimizer
+
+            plan = Optimizer().optimize(plan)
+
+        # Convert logical plan to physical plan
+        planner = PhysicalPlanner(preferred_backend=engine)
+        physical_plan = planner.plan(plan)
+
+        # Execute physical plan
+        return execute_physical_plan(
+            physical_plan,
+            preferred_backend=engine,
+            strict=strict,
+        )
+
+    def explain(
+        self,
+        *,
+        optimized: bool = True,
+        format: Literal["text", "tree", "json"] = "text",
+    ) -> str:
+        """
+        Show the query plan.
+
+        Parameters
+        ----------
+        optimized : bool, default True
+            Show optimized plan. If False, shows raw logical plan.
+        format : {"text", "tree", "json"}, default "text"
+            Output format.
+
+        Returns
+        -------
+        str
+            Human-readable plan representation.
+
+        Examples
+        --------
+        >>> print(ldf.explain())  # Show optimized plan
+        >>> print(ldf.explain(optimized=False))  # Show unoptimized plan
+        """
+        return self._explain_simple(optimized=optimized)
+
+    def _explain_simple(self, optimized: bool = True) -> str:
+        """Simple explain output."""
+        plan = self._plan
+
+        if optimized:
+            from pandas.lazy.optimize import Optimizer
+
+            plan = Optimizer().optimize(plan)
+            plan_type = "optimized"
+        else:
+            plan_type = "unoptimized"
+
+        lines = []
+        lines.append("=" * 50)
+        lines.append(f"LAZY PANDAS QUERY PLAN ({plan_type})")
+        lines.append("=" * 50)
+        lines.append("")
+        lines.append(f"Output columns: {self.columns}")
+        lines.append("")
+        lines.append("Plan tree:")
+        lines.append("-" * 30)
+
+        def format_plan(plan_node: LogicalPlan, indent: int = 0) -> None:
+            prefix = "  " * indent
+            lines.append(f"{prefix}{plan_node!r}")
+            for child in plan_node.children():
+                format_plan(child, indent + 1)
+
+        format_plan(plan)
+
+        lines.append("")
+        lines.append("=" * 50)
+        return "\n".join(lines)
+
+    def __repr__(self) -> str:
+        return f"LazyDataFrame(columns={self.columns})"
+
+
+class LazyGroupBy:
+    """
+    Grouped LazyDataFrame for aggregation operations.
+
+    This class is returned by LazyDataFrame.group_by() and provides
+    the agg() method for specifying aggregation expressions.
+
+    Examples
+    --------
+    >>> from pandas.lazy import col
+    >>> ldf.group_by("category").agg(col("value").sum().alias("total"))
+    """
+
+    __slots__ = ("_group_by", "_plan", "_schema")
+
+    def __init__(
+        self,
+        plan: LogicalPlan,
+        group_by: tuple[Expr, ...],
+        schema: Schema,
+    ) -> None:
+        self._plan = plan
+        self._group_by = group_by
+        self._schema = schema
+
+    def agg(self, *exprs: Expr) -> LazyDataFrame:
+        """
+        Specify aggregation expressions.
+
+        Parameters
+        ----------
+        *exprs : Expr
+            Aggregation expressions. Each expression should be an
+            aggregation (sum, mean, etc.) with an alias for the output
+            column name.
+
+        Returns
+        -------
+        LazyDataFrame
+            A LazyDataFrame with the aggregation results.
+
+        Examples
+        --------
+        >>> from pandas.lazy import col
+        >>> ldf.group_by("category").agg(
+        ...     col("value").sum().alias("total"),
+        ...     col("value").mean().alias("average"),
+        ... )
+        """
+        from pandas.lazy.expr import Expr
+        from pandas.lazy.plan import Aggregate
+
+        if not exprs:
+            raise ValueError("agg() requires at least one expression")
+
+        for e in exprs:
+            if not isinstance(e, Expr):
+                raise TypeError(
+                    f"Expected Expr, got {type(e).__name__}. "
+                    f"Use col('name').sum().alias('result_name')."
+                )
+
+        new_plan = Aggregate(self._plan, self._group_by, exprs)
+        return LazyDataFrame(new_plan, new_plan.resolve_schema())
+
+    def __repr__(self) -> str:
+        from pandas.lazy.expr import extract_output_name
+
+        try:
+            group_names = [extract_output_name(e) for e in self._group_by]
+        except ValueError:
+            group_names = [repr(e) for e in self._group_by]
+        return f"LazyGroupBy(by={group_names})"
+
+
+def _evaluate_aggregate(df: DataFrame, plan: Aggregate) -> DataFrame:
+    """
+    Evaluate an Aggregate plan node.
+
+    Parameters
+    ----------
+    df : DataFrame
+        The input DataFrame.
+    plan : Aggregate
+        The aggregation plan.
+
+    Returns
+    -------
+    DataFrame
+        The aggregated result.
+    """
+    from pandas import DataFrame as PdDataFrame
+    from pandas.lazy.eval import Evaluator
+    from pandas.lazy.expr import extract_output_name
+    from pandas.lazy.ir import (
+        Alias,
+        Call,
+        FieldRef,
+    )
+
+    # Get group-by column names
+    group_names = [extract_output_name(e) for e in plan.group_by]
+
+    if not group_names:
+        # Global aggregation (no group-by)
+        evaluator = Evaluator(df)
+        result = {}
+        for expr in plan.agg_exprs:
+            name = extract_output_name(expr)
+            value = evaluator.evaluate(expr._ir)
+            result[name] = [value]  # Wrap scalar in list for DataFrame
+        return PdDataFrame(result)
+
+    # Group-by aggregation
+    # Build aggregation dict for pandas
+    # We need to map our IR to pandas agg functions
+    agg_dict: dict[str, list] = {}
+    result_names: list[tuple[str, str]] = []  # (col, output_name)
+
+    for expr in plan.agg_exprs:
+        output_name = extract_output_name(expr)
+        ir = expr._ir
+
+        # Unwrap Alias if present
+        if isinstance(ir, Alias):
+            ir = ir.arg
+
+        if isinstance(ir, Call) and ir.is_aggregate:
+            # Get the column being aggregated
+            if ir.args and isinstance(ir.args[0], FieldRef):
+                col_name = ir.args[0].name
+            else:
+                raise ValueError(f"Aggregation must be on a column, got: {ir.args[0]}")
+
+            # Map function name to pandas agg function
+            func_map = {
+                "sum": "sum",
+                "mean": "mean",
+                "min": "min",
+                "max": "max",
+                "count": "count",
+                "std": "std",
+                "var": "var",
+                "first": "first",
+                "last": "last",
+                "n_unique": "nunique",
+            }
+
+            if ir.function not in func_map:
+                raise NotImplementedError(
+                    f"Aggregation function not supported: {ir.function}"
+                )
+
+            pandas_func = func_map[ir.function]
+
+            # Handle ddof for std/var
+            if ir.function in ("std", "var") and ir.kwargs.get("ddof", 1) != 1:
+                ddof = ir.kwargs["ddof"]
+                # Use lambda to capture ddof
+                if ir.function == "std":
+                    pandas_func = lambda x, d=ddof: x.std(ddof=d)
+                else:
+                    pandas_func = lambda x, d=ddof: x.var(ddof=d)
+
+            if col_name not in agg_dict:
+                agg_dict[col_name] = []
+            agg_dict[col_name].append((pandas_func, output_name))
+            result_names.append((col_name, output_name))
+        else:
+            raise ValueError(f"Expected aggregation expression, got: {ir}")
+
+    # Perform aggregation
+    # Build result starting with group keys
+    result_data = {name: [] for name in group_names}
+    for _, name in result_names:
+        result_data[name] = []
+
+    # Get unique group combinations
+    if len(group_names) == 1:
+        unique_groups = [(g,) for g in df[group_names[0]].unique()]
+    else:
+        unique_groups = df[group_names].drop_duplicates().values.tolist()
+        unique_groups = [tuple(g) for g in unique_groups]
+
+    # For each group, compute all aggregations
+    from pandas import Series
+
+    for group_vals in unique_groups:
+        # Build mask for this group
+        if len(group_names) == 1:
+            mask = df[group_names[0]] == group_vals[0]
+        else:
+            mask = Series(True, index=df.index)
+            for gname, gval in zip(group_names, group_vals, strict=True):
+                mask = mask & (df[gname] == gval)
+
+        group_df = df[mask]
+
+        # Add group key values
+        for gname, gval in zip(group_names, group_vals, strict=True):
+            result_data[gname].append(gval)
+
+        # Compute aggregations
+        for col_name, aggs in agg_dict.items():
+            for pandas_func, output_name in aggs:
+                series = group_df[col_name]
+                if callable(pandas_func):
+                    value = pandas_func(series)
+                else:
+                    value = getattr(series, pandas_func)()
+                result_data[output_name].append(value)
+
+    # Build result DataFrame with correct column order
+    ordered_cols = group_names + [name for _, name in result_names]
+    return PdDataFrame({col: result_data[col] for col in ordered_cols})
+
+
+def _evaluate_sort(df: DataFrame, plan: Sort) -> DataFrame:
+    """
+    Evaluate a Sort plan node.
+
+    Parameters
+    ----------
+    df : DataFrame
+        The input DataFrame.
+    plan : Sort
+        The sort plan.
+
+    Returns
+    -------
+    DataFrame
+        The sorted result.
+    """
+    from pandas.lazy.eval import Evaluator
+    from pandas.lazy.ir import FieldRef
+
+    # For simple column references, use column names directly
+    # For complex expressions, evaluate them first
+    sort_keys = []
+    temp_cols = []
+
+    evaluator = Evaluator(df)
+
+    for i, expr in enumerate(plan.by):
+        ir = expr._ir
+        if isinstance(ir, FieldRef):
+            # Simple column reference
+            sort_keys.append(ir.name)
+        else:
+            # Complex expression - evaluate and add as temp column
+            temp_name = f"__sort_key_{i}__"
+            df = df.copy()
+            df[temp_name] = evaluator.evaluate(ir)
+            sort_keys.append(temp_name)
+            temp_cols.append(temp_name)
+
+    # Perform sort
+    ascending = [not d for d in plan.descending]
+    result = df.sort_values(by=sort_keys, ascending=ascending).reset_index(drop=True)
+
+    # Remove temporary columns
+    if temp_cols:
+        result = result.drop(columns=temp_cols)
+
+    return result
+
+
+def _evaluate_limit(df: DataFrame, plan: Limit) -> DataFrame:
+    """
+    Evaluate a Limit plan node.
+
+    Parameters
+    ----------
+    df : DataFrame
+        The input DataFrame.
+    plan : Limit
+        The limit plan.
+
+    Returns
+    -------
+    DataFrame
+        The limited result.
+    """
+    if plan.offset == -1:
+        # Tail operation
+        return df.tail(plan.n).reset_index(drop=True)
+    elif plan.offset > 0:
+        # Skip + limit
+        return df.iloc[plan.offset : plan.offset + plan.n].reset_index(drop=True)
+    else:
+        # Simple head/limit
+        return df.head(plan.n).reset_index(drop=True)
+
+
+def _evaluate_distinct(df: DataFrame, plan) -> DataFrame:
+    """
+    Evaluate a Distinct plan node.
+
+    Parameters
+    ----------
+    df : DataFrame
+        The input DataFrame.
+    plan : Distinct
+        The distinct plan.
+
+    Returns
+    -------
+    DataFrame
+        The deduplicated result.
+    """
+    subset = list(plan.subset) if plan.subset else None
+    return df.drop_duplicates(subset=subset).reset_index(drop=True)
+
+
+def _evaluate_topk(df: DataFrame, plan) -> DataFrame:
+    """
+    Evaluate a TopK plan node.
+
+    TopK is an optimization of Sort + Limit that uses nsmallest/nlargest
+    for efficient partial sorting when k is small relative to n.
+
+    Parameters
+    ----------
+    df : DataFrame
+        The input DataFrame.
+    plan : TopK
+        The TopK plan.
+
+    Returns
+    -------
+    DataFrame
+        The top K rows by sort criteria.
+    """
+    from pandas.lazy.eval import Evaluator
+    from pandas.lazy.ir import FieldRef
+
+    # For simple column references, use column names directly
+    # For complex expressions, evaluate them first
+    sort_keys = []
+    temp_cols = []
+
+    evaluator = Evaluator(df)
+
+    for i, expr in enumerate(plan.by):
+        ir = expr._ir
+        if isinstance(ir, FieldRef):
+            # Simple column reference
+            sort_keys.append(ir.name)
+        else:
+            # Complex expression - evaluate and add as temp column
+            temp_name = f"__sort_key_{i}__"
+            df = df.copy()
+            df[temp_name] = evaluator.evaluate(ir)
+            sort_keys.append(temp_name)
+            temp_cols.append(temp_name)
+
+    # Use nlargest/nsmallest for efficiency when possible
+    # This is more efficient than full sort + head for small k
+    k = min(plan.k, len(df))
+
+    if k == 0:
+        # Return empty DataFrame with same columns
+        result = df.head(0)
+    elif len(sort_keys) == 1 and len(plan.descending) == 1:
+        # Single sort key - can use nlargest/nsmallest
+        key = sort_keys[0]
+        if plan.descending[0]:
+            result = df.nlargest(k, key)
+        else:
+            result = df.nsmallest(k, key)
+    else:
+        # Multiple keys or mixed directions - fall back to sort + head
+        ascending = [not d for d in plan.descending]
+        result = df.sort_values(by=sort_keys, ascending=ascending).head(k)
+
+    result = result.reset_index(drop=True)
+
+    # Remove temporary columns
+    if temp_cols:
+        result = result.drop(columns=temp_cols)
+
+    return result
+
+
+def _evaluate_join(left_df: DataFrame, right_df: DataFrame, plan) -> DataFrame:
+    """
+    Evaluate a Join plan node.
+
+    Parameters
+    ----------
+    left_df : DataFrame
+        The left input DataFrame.
+    right_df : DataFrame
+        The right input DataFrame.
+    plan : Join
+        The join plan.
+
+    Returns
+    -------
+    DataFrame
+        The joined result.
+    """
+    if plan.on is not None:
+        # Same column name(s) in both DataFrames
+        result = left_df.merge(
+            right_df,
+            on=list(plan.on),
+            how=plan.how,
+            suffixes=plan.suffix,
+        )
+    elif plan.left_on is not None and plan.right_on is not None:
+        # Different column names
+        result = left_df.merge(
+            right_df,
+            left_on=list(plan.left_on),
+            right_on=list(plan.right_on),
+            how=plan.how,
+            suffixes=plan.suffix,
+        )
+    elif plan.how == "cross":
+        # Cross join
+        result = left_df.merge(right_df, how="cross", suffixes=plan.suffix)
+    else:
+        raise ValueError("Invalid join parameters")
+
+    return result.reset_index(drop=True)

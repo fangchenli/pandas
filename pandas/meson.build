@@ -34,6 +34,7 @@ subdirs_list = [
     'core',
     'errors',
     'io',
+    'lazy',
     'plotting',
     'tests',
     'tseries',
