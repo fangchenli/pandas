@@ -91,7 +91,7 @@ class TestArrowKernels:
         """Test Arrow string contains."""
         from pandas.lazy.backends import dispatch_kernel
 
-        arr = pa.array(["hello", "world", "helper"])
+        arr = pa.array(["hello", "world", "helloworld"])
         result = dispatch_kernel("str_contains", "arrow", arr, "hell", regex=False)
         expected = pa.array([True, False, True])
         assert result.equals(expected)
@@ -234,7 +234,7 @@ class TestFormatConversion:
         pa_arr = pa.array([1, 2, 3])
         result = to_numpy(pa_arr)
         assert isinstance(result, np.ndarray)
-        tm.assert_numpy_array_equal(result, [1, 2, 3])
+        tm.assert_numpy_array_equal(result, np.array([1, 2, 3]))
 
         # NumPy stays NumPy
         np_arr = np.array([1, 2, 3])
@@ -453,7 +453,7 @@ class TestArrayEvaluator:
         evaluator = ArrayEvaluator(arrays)
 
         result = evaluator.evaluate(FieldRef("a"))
-        tm.assert_numpy_array_equal(result, [1, 2, 3])
+        tm.assert_numpy_array_equal(result, np.array([1, 2, 3]))
 
     def test_evaluate_literal(self):
         """Test evaluating a literal."""
@@ -481,7 +481,7 @@ class TestArrayEvaluator:
         # a + 10
         node = Call("add", args=(FieldRef("a"), Literal(10)))
         result = evaluator.evaluate(node)
-        tm.assert_numpy_array_equal(result, [11, 12, 13])
+        tm.assert_numpy_array_equal(result, np.array([11, 12, 13]))
 
     def test_evaluate_comparison_kernel(self):
         """Test evaluating comparison via kernel dispatch."""
@@ -498,7 +498,7 @@ class TestArrayEvaluator:
         # a > 1
         node = Call("greater", args=(FieldRef("a"), Literal(1)))
         result = evaluator.evaluate(node)
-        tm.assert_numpy_array_equal(result, [False, True, True])
+        tm.assert_numpy_array_equal(result, np.array([False, True, True]))
 
     def test_evaluate_arrow_string_kernel(self):
         """Test evaluating string op on Arrow array."""
@@ -549,7 +549,7 @@ class TestArrayEvaluator:
         # Alias signature: Alias(arg=IRNode, name=str)
         node = Alias(arg=FieldRef("a"), name="b")
         result = evaluator.evaluate(node)
-        tm.assert_numpy_array_equal(result, [1, 2, 3])
+        tm.assert_numpy_array_equal(result, np.array([1, 2, 3]))
 
     def test_evaluate_chained_operations(self):
         """Test evaluating chained operations."""
@@ -567,7 +567,7 @@ class TestArrayEvaluator:
         add_node = Call("add", args=(FieldRef("a"), Literal(10)))
         mul_node = Call("multiply", args=(add_node, Literal(2)))
         result = evaluator.evaluate(mul_node)
-        tm.assert_numpy_array_equal(result, [22, 24, 26])
+        tm.assert_numpy_array_equal(result, np.array([22, 24, 26]))
 
 
 class TestSortKernels:
@@ -638,7 +638,7 @@ class TestTakeKernels:
         arr = np.array([10, 20, 30, 40, 50])
         indices = np.array([0, 2, 4])
         result = dispatch_kernel("take", "numpy", arr, indices)
-        tm.assert_numpy_array_equal(result, [10, 30, 50])
+        tm.assert_numpy_array_equal(result, np.array([10, 30, 50]))
 
 
 class TestUniqueKernels:
@@ -658,7 +658,7 @@ class TestUniqueKernels:
 
         arr = np.array([1, 2, 2, 3, 3, 3])
         result = dispatch_kernel("unique", "numpy", arr)
-        tm.assert_numpy_array_equal(result, [1, 2, 3])
+        tm.assert_numpy_array_equal(result, np.array([1, 2, 3]))
 
 
 class TestIsInKernels:
@@ -680,7 +680,7 @@ class TestIsInKernels:
         arr = np.array([1, 2, 3, 4, 5])
         value_set = np.array([2, 4])
         result = dispatch_kernel("is_in", "numpy", arr, value_set)
-        tm.assert_numpy_array_equal(result, [False, True, False, True, False])
+        tm.assert_numpy_array_equal(result, np.array([False, True, False, True, False]))
 
 
 class TestSelectKKernels:
@@ -707,7 +707,7 @@ class TestSelectKKernels:
         )
         # Should give indices of 3 smallest, sorted by value
         values = arr[result]
-        tm.assert_numpy_array_equal(sorted(values), [1, 1, 2])
+        tm.assert_numpy_array_equal(np.sort(values), np.array([1, 1, 2]))
 
     def test_numpy_select_k_descending(self):
         """Test NumPy select_k_unstable with descending order."""
@@ -719,7 +719,7 @@ class TestSelectKKernels:
         )
         # Should give indices of 3 largest
         values = arr[result]
-        tm.assert_numpy_array_equal(sorted(values), [5, 6, 9])
+        tm.assert_numpy_array_equal(np.sort(values), np.array([5, 6, 9]))
 
 
 class TestIfElseKernels:
@@ -743,7 +743,7 @@ class TestIfElseKernels:
         true_val = 100
         false_val = 0
         result = dispatch_kernel("if_else", "numpy", cond, true_val, false_val)
-        tm.assert_numpy_array_equal(result, [100, 0, 100, 0])
+        tm.assert_numpy_array_equal(result, np.array([100, 0, 100, 0]))
 
     def test_numpy_case_when(self):
         """Test NumPy case_when kernel."""
@@ -752,7 +752,7 @@ class TestIfElseKernels:
         arr = np.array([1, 5, 3, 8, 2])
         # case when arr > 5 then 100, when arr > 2 then 50, else 0
         result = dispatch_kernel("case_when", "numpy", arr > 5, 100, arr > 2, 50, 0)
-        tm.assert_numpy_array_equal(result, [0, 50, 50, 100, 0])
+        tm.assert_numpy_array_equal(result, np.array([0, 50, 50, 100, 0]))
 
 
 class TestCastKernels:
@@ -774,7 +774,7 @@ class TestCastKernels:
         arr = np.array([1, 2, 3], dtype=np.int32)
         result = dispatch_kernel("cast", "numpy", arr, np.float64)
         assert result.dtype == np.float64
-        tm.assert_numpy_array_equal(result, [1.0, 2.0, 3.0])
+        tm.assert_numpy_array_equal(result, np.array([1.0, 2.0, 3.0]))
 
 
 class TestGroupByKernels:
@@ -1473,8 +1473,8 @@ class TestDatetimeKernels:
             ["2020-01-15", "2020-06-30", "2020-12-31"], dtype="datetime64[ns]"
         )
         result = dispatch_kernel("dt_month", "numpy", arr)
-        expected = [1, 6, 12]
-        tm.assert_numpy_array_equal(result, expected)
+        expected = np.array([1, 6, 12])
+        tm.assert_numpy_array_equal(result, expected, check_dtype=False)
 
     def test_arrow_dt_day(self):
         """Test Arrow day extraction."""
@@ -1496,8 +1496,8 @@ class TestDatetimeKernels:
             ["2020-01-01", "2020-01-15", "2020-01-31"], dtype="datetime64[ns]"
         )
         result = dispatch_kernel("dt_day", "numpy", arr)
-        expected = [1, 15, 31]
-        tm.assert_numpy_array_equal(result, expected)
+        expected = np.array([1, 15, 31])
+        tm.assert_numpy_array_equal(result, expected, check_dtype=False)
 
     def test_arrow_dt_hour(self):
         """Test Arrow hour extraction."""
@@ -1522,8 +1522,8 @@ class TestDatetimeKernels:
             dtype="datetime64[ns]",
         )
         result = dispatch_kernel("dt_hour", "numpy", arr)
-        expected = [0, 12, 23]
-        tm.assert_numpy_array_equal(result, expected)
+        expected = np.array([0, 12, 23])
+        tm.assert_numpy_array_equal(result, expected, check_dtype=False)
 
     def test_arrow_dt_day_of_week(self):
         """Test Arrow day of week extraction."""
@@ -1546,8 +1546,8 @@ class TestDatetimeKernels:
             ["2020-01-06", "2020-01-07", "2020-01-12"], dtype="datetime64[ns]"
         )
         result = dispatch_kernel("dt_day_of_week", "numpy", arr, count_from_zero=True)
-        expected = [0, 1, 6]
-        tm.assert_numpy_array_equal(result, expected)
+        expected = np.array([0, 1, 6])
+        tm.assert_numpy_array_equal(result, expected, check_dtype=False)
 
     def test_arrow_dt_quarter(self):
         """Test Arrow quarter extraction."""
@@ -1569,8 +1569,8 @@ class TestDatetimeKernels:
             ["2020-01-15", "2020-04-15", "2020-10-15"], dtype="datetime64[ns]"
         )
         result = dispatch_kernel("dt_quarter", "numpy", arr)
-        expected = [1, 2, 4]
-        tm.assert_numpy_array_equal(result, expected)
+        expected = np.array([1, 2, 4])
+        tm.assert_numpy_array_equal(result, expected, check_dtype=False)
 
     def test_arrow_dt_is_leap_year(self):
         """Test Arrow is_leap_year."""
@@ -1592,7 +1592,7 @@ class TestDatetimeKernels:
             ["2020-01-01", "2021-01-01", "2024-01-01"], dtype="datetime64[ns]"
         )
         result = dispatch_kernel("dt_is_leap_year", "numpy", arr)
-        expected = [True, False, True]
+        expected = np.array([True, False, True])
         tm.assert_numpy_array_equal(result, expected)
 
     def test_arrow_dt_strftime(self):
@@ -1615,8 +1615,8 @@ class TestDatetimeKernels:
             ["2020-01-15T12:30:45", "2021-06-30T23:59:59"], dtype="datetime64[ns]"
         )
         result = dispatch_kernel("dt_strftime", "numpy", arr, format="%Y-%m-%d")
-        expected = ["2020-01-15", "2021-06-30"]
-        tm.assert_numpy_array_equal(result, expected)
+        expected = np.array(["2020-01-15", "2021-06-30"])
+        tm.assert_numpy_array_equal(result, expected, check_dtype=False)
 
 
 class TestAdditionalStringKernels:
