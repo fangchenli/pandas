@@ -29,7 +29,11 @@ from pandas.lazy.backends.convert import (
     ensure_backend,
     is_arrow_backed,
 )
-from pandas.lazy.backends.memory_pool import PoolingStrategy
+from pandas.lazy.backends.memory_pool import (
+    ArrowPoolBackend,
+    PoolingStrategy,
+    get_arrow_memory_pool,
+)
 from pandas.lazy.backends.router import (
     decide_expr_backend,
 )
@@ -59,6 +63,7 @@ class ArrayEvaluator:
         preferred_backend: Literal["auto", "arrow", "numpy"] = "auto",
         use_numexpr: bool = True,
         pooling_strategy: PoolingStrategy | str = PoolingStrategy.SCRATCH,
+        arrow_pool: ArrowPoolBackend | str = ArrowPoolBackend.DEFAULT,
     ) -> None:
         """
         Initialize evaluator with arrays.
@@ -76,20 +81,29 @@ class ArrayEvaluator:
             - "scratch" / SCRATCH: Rotating scratch buffers (~3x speedup)
             - "none" / NONE: No pooling (allocate new arrays)
             - "acquire_release" / ACQUIRE_RELEASE: Explicit pool
-
-            Note: This only affects NumPy operations. Arrow operations use
-            PyArrow's built-in memory pools automatically.
+        arrow_pool : ArrowPoolBackend or str, default DEFAULT
+            Arrow memory pool backend for Arrow operations:
+            - "default" / DEFAULT: PyArrow's default (usually mimalloc)
+            - "mimalloc" / MIMALLOC: Microsoft's fast allocator
+            - "jemalloc" / JEMALLOC: Facebook's allocator
+            - "system" / SYSTEM: System malloc
         """
         self._arrays = arrays
         self._preferred_backend = preferred_backend
         self._use_numexpr = use_numexpr
 
-        # Normalize pooling strategy
+        # Normalize pooling strategy for NumPy
         if isinstance(pooling_strategy, str):
             pooling_strategy = PoolingStrategy(pooling_strategy)
         self._pooling_strategy = pooling_strategy
         self._scratch_pool = None  # Lazy init for scratch buffers
         self._array_pool = None  # Lazy init for acquire/release pool
+
+        # Arrow memory pool (lazy init)
+        if isinstance(arrow_pool, str):
+            arrow_pool = ArrowPoolBackend(arrow_pool)
+        self._arrow_pool_backend = arrow_pool
+        self._arrow_pool = None  # Lazy init
 
         # Determine array size for NumExpr threshold check
         self._array_size = 0
@@ -488,6 +502,16 @@ class ArrayEvaluator:
             return np.maximum.accumulate(arr)
 
     # =========================================================================
+    # Arrow Memory Pool
+    # =========================================================================
+
+    def _get_arrow_pool(self):
+        """Get the Arrow memory pool for this evaluator."""
+        if self._arrow_pool is None:
+            self._arrow_pool = get_arrow_memory_pool(self._arrow_pool_backend)
+        return self._arrow_pool
+
+    # =========================================================================
     # Arrow Cached Function Calls
     # =========================================================================
 
@@ -497,12 +521,13 @@ class ArrayEvaluator:
         """
         Try to evaluate using cached Arrow function reference.
 
-        This provides ~10% speedup by avoiding repeated function lookups.
+        This provides ~10% speedup by avoiding repeated function lookups,
+        and uses the configured memory pool for allocations.
 
         Returns None if the function is not available in Arrow.
         """
         try:
-            from pandas.lazy.backends.numexpr_fusion import call_arrow_function
+            from pandas.lazy.backends.numexpr_fusion import get_arrow_function
         except ImportError:
             return None
 
@@ -510,8 +535,13 @@ class ArrayEvaluator:
         if kwargs:
             return None
 
+        fn = get_arrow_function(func)
+        if fn is None:
+            return None
+
         try:
-            return call_arrow_function(func, *args)
+            # Use configured memory pool for allocation
+            return fn.call(list(args), memory_pool=self._get_arrow_pool())
         except (ValueError, TypeError, pa.ArrowInvalid):
             # Function not available or incompatible args
             return None

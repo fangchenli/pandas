@@ -105,6 +105,76 @@ class PoolingStrategy(Enum):
 # Default pooling strategy
 DEFAULT_POOLING_STRATEGY = PoolingStrategy.SCRATCH
 
+
+class ArrowPoolBackend(Enum):
+    """
+    Arrow memory pool backend selection.
+
+    PyArrow provides several memory allocator backends. The choice affects
+    allocation speed and memory fragmentation characteristics.
+
+    Attributes
+    ----------
+    DEFAULT : Use PyArrow's default pool
+        Usually mimalloc on systems where it's available.
+        Best for most workloads.
+
+    MIMALLOC : Microsoft's mimalloc allocator
+        Fast, low fragmentation. Default on most systems.
+        Best for general-purpose workloads.
+
+    JEMALLOC : Facebook's jemalloc allocator
+        Good for long-running processes with varied allocation patterns.
+        May have higher overhead for short-lived operations.
+
+    SYSTEM : System malloc
+        Uses the system's default allocator (malloc/free).
+        Baseline for comparison; usually slower than specialized allocators.
+    """
+
+    DEFAULT = "default"
+    MIMALLOC = "mimalloc"
+    JEMALLOC = "jemalloc"
+    SYSTEM = "system"
+
+
+def get_arrow_memory_pool(backend: ArrowPoolBackend | str = ArrowPoolBackend.DEFAULT):
+    """
+    Get a PyArrow memory pool for the specified backend.
+
+    Parameters
+    ----------
+    backend : ArrowPoolBackend or str, default DEFAULT
+        Which memory pool backend to use.
+
+    Returns
+    -------
+    pyarrow.MemoryPool
+        The memory pool instance.
+
+    Examples
+    --------
+    >>> pool = get_arrow_memory_pool("mimalloc")
+    >>> pool.backend_name
+    'mimalloc'
+    """
+    import pyarrow as pa
+
+    if isinstance(backend, str):
+        backend = ArrowPoolBackend(backend)
+
+    if backend == ArrowPoolBackend.DEFAULT:
+        return pa.default_memory_pool()
+    elif backend == ArrowPoolBackend.MIMALLOC:
+        return pa.mimalloc_memory_pool()
+    elif backend == ArrowPoolBackend.JEMALLOC:
+        return pa.jemalloc_memory_pool()
+    elif backend == ArrowPoolBackend.SYSTEM:
+        return pa.system_memory_pool()
+    else:
+        raise ValueError(f"Unknown Arrow pool backend: {backend}")
+
+
 # Minimum array size to benefit from pooling
 # Below this, allocation overhead is negligible
 MIN_POOL_SIZE = 10_000
