@@ -69,6 +69,24 @@ class LazyDtype:
         if isinstance(dtype, pd.StringDtype):
             return cls("string", None, None, has_nulls)
 
+        # Handle nullable extension dtypes (Int64, Float64, boolean, etc.)
+        # These must be checked before the standard is_*_dtype checks because
+        # is_integer_dtype(Int64Dtype()) returns True but np.dtype() fails on it
+        if isinstance(dtype, pd.api.extensions.ExtensionDtype):
+            # Get the underlying numpy dtype if available
+            numpy_dtype = getattr(dtype, "numpy_dtype", None)
+            if numpy_dtype is not None:
+                numpy_dtype = np.dtype(numpy_dtype)
+
+            if pd.api.types.is_integer_dtype(dtype):
+                return cls("numeric", numpy_dtype, None, True)  # nullable ints
+            elif pd.api.types.is_float_dtype(dtype):
+                return cls("numeric", numpy_dtype, None, True)
+            elif pd.api.types.is_bool_dtype(dtype):
+                return cls("boolean", numpy_dtype, None, True)
+            else:
+                return cls("object", np.dtype("object"), None, True)
+
         # Handle numpy/pandas numeric types
         if pd.api.types.is_integer_dtype(dtype):
             return cls("numeric", np.dtype(dtype), None, has_nulls)

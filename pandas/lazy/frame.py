@@ -590,6 +590,8 @@ class LazyDataFrame:
         optimize : bool, default True
             If True, apply query optimization passes before execution.
         """
+        import numpy as np
+
         from pandas import DataFrame as PdDataFrame
         from pandas.lazy.eval import Evaluator
         from pandas.lazy.expr import extract_output_name
@@ -632,6 +634,12 @@ class LazyDataFrame:
                 input_df = evaluate(plan.input)
                 evaluator = Evaluator(input_df)
                 mask = evaluator.evaluate(plan.predicate._ir)
+                # Handle scalar boolean masks (e.g., lit(True) or lit(False))
+                if isinstance(mask, (bool, np.bool_)):
+                    if mask:
+                        return input_df.copy()
+                    else:
+                        return input_df.iloc[:0].copy()
                 return input_df.loc[mask].reset_index(drop=True)
 
             elif isinstance(plan, Aggregate):
@@ -900,11 +908,10 @@ def _evaluate_aggregate(df: DataFrame, plan: Aggregate) -> DataFrame:
             result[name] = [value]  # Wrap scalar in list for DataFrame
         return PdDataFrame(result)
 
-    # Group-by aggregation
-    # Build aggregation dict for pandas
-    # We need to map our IR to pandas agg functions
-    agg_dict: dict[str, list] = {}
-    result_names: list[tuple[str, str]] = []  # (col, output_name)
+    # Group-by aggregation using pandas native groupby for performance
+    # Build aggregation spec: {input_col: [(pandas_func, output_name), ...]}
+    agg_spec: dict[str, list[tuple[str | callable, str]]] = {}
+    result_names: list[tuple[str, str]] = []  # (input_col, output_name)
 
     for expr in plan.agg_exprs:
         output_name = extract_output_name(expr)
@@ -940,7 +947,7 @@ def _evaluate_aggregate(df: DataFrame, plan: Aggregate) -> DataFrame:
                     f"Aggregation function not supported: {ir.function}"
                 )
 
-            pandas_func = func_map[ir.function]
+            pandas_func: str | callable = func_map[ir.function]
 
             # Handle ddof for std/var
             if ir.function in ("std", "var") and ir.kwargs.get("ddof", 1) != 1:
@@ -951,57 +958,32 @@ def _evaluate_aggregate(df: DataFrame, plan: Aggregate) -> DataFrame:
                 else:
                     pandas_func = lambda x, d=ddof: x.var(ddof=d)
 
-            if col_name not in agg_dict:
-                agg_dict[col_name] = []
-            agg_dict[col_name].append((pandas_func, output_name))
+            if col_name not in agg_spec:
+                agg_spec[col_name] = []
+            agg_spec[col_name].append((pandas_func, output_name))
             result_names.append((col_name, output_name))
         else:
             raise ValueError(f"Expected aggregation expression, got: {ir}")
 
-    # Perform aggregation
-    # Build result starting with group keys
-    result_data = {name: [] for name in group_names}
-    for _, name in result_names:
-        result_data[name] = []
+    # Use pandas native groupby for efficient hash-based grouping
+    grouped = df.groupby(group_names, sort=False)
 
-    # Get unique group combinations
-    if len(group_names) == 1:
-        unique_groups = [(g,) for g in df[group_names[0]].unique()]
-    else:
-        unique_groups = df[group_names].drop_duplicates().values.tolist()
-        unique_groups = [tuple(g) for g in unique_groups]
+    # Use pandas named aggregation for clean output names
+    # Format: output_name=(col, func)
+    named_agg = {}
+    for col_name, aggs in agg_spec.items():
+        for pandas_func, output_name in aggs:
+            named_agg[output_name] = (col_name, pandas_func)
 
-    # For each group, compute all aggregations
-    from pandas import Series
+    # Perform the aggregation with named output columns
+    result = grouped.agg(**named_agg)
 
-    for group_vals in unique_groups:
-        # Build mask for this group
-        if len(group_names) == 1:
-            mask = df[group_names[0]] == group_vals[0]
-        else:
-            mask = Series(True, index=df.index)
-            for gname, gval in zip(group_names, group_vals, strict=True):
-                mask = mask & (df[gname] == gval)
+    # Reset index to get group columns as regular columns
+    result = result.reset_index()
 
-        group_df = df[mask]
-
-        # Add group key values
-        for gname, gval in zip(group_names, group_vals, strict=True):
-            result_data[gname].append(gval)
-
-        # Compute aggregations
-        for col_name, aggs in agg_dict.items():
-            for pandas_func, output_name in aggs:
-                series = group_df[col_name]
-                if callable(pandas_func):
-                    value = pandas_func(series)
-                else:
-                    value = getattr(series, pandas_func)()
-                result_data[output_name].append(value)
-
-    # Build result DataFrame with correct column order
+    # Ensure correct column order
     ordered_cols = group_names + [name for _, name in result_names]
-    return PdDataFrame({col: result_data[col] for col in ordered_cols})
+    return result[ordered_cols]
 
 
 def _evaluate_sort(df: DataFrame, plan: Sort) -> DataFrame:

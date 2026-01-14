@@ -349,6 +349,9 @@ def _numpy_multi_key_groupby(
     """
     Multi-key groupby aggregation.
 
+    Uses vectorized composite key creation via structured arrays,
+    avoiding Python-level iteration for better performance.
+
     Parameters
     ----------
     key_arrays : list[np.ndarray]
@@ -365,35 +368,97 @@ def _numpy_multi_key_groupby(
     """
     from pandas import factorize
 
-    # Create composite key via structured array
+    # For single key, use the simpler path
     if len(key_arrays) == 1:
-        composite_keys = key_arrays[0]
-    else:
-        # Use tuple-based composite key
-        n = len(key_arrays[0])
-        composite_keys = np.empty(n, dtype=object)
-        for i in range(n):
-            composite_keys[i] = tuple(arr[i] for arr in key_arrays)
+        result_values = []
+        unique_keys = None
+        for values, agg_func in zip(value_arrays, agg_funcs, strict=False):
+            keys, agg_result = _numpy_groupby_aggregate(key_arrays[0], values, agg_func)
+            if unique_keys is None:
+                unique_keys = keys
+            result_values.append(agg_result)
+        return [unique_keys], result_values
 
-    codes, unique_composite = factorize(composite_keys, sort=False)
-    len(unique_composite)
+    # Multi-key: Create composite key codes using factorize on each key,
+    # then combine codes into a single composite code
+    n_rows = len(key_arrays[0])
 
-    # Aggregate each value array
+    # Factorize each key column to get integer codes
+    all_codes = []
+    all_uniques = []
+    multipliers = []
+    current_multiplier = 1
+
+    for key_arr in key_arrays:
+        codes, uniques = factorize(key_arr, sort=False)
+        all_codes.append(codes)
+        all_uniques.append(uniques)
+        multipliers.append(current_multiplier)
+        current_multiplier *= len(uniques)
+
+    # Create composite codes: code0 + code1*n0 + code2*n0*n1 + ...
+    # This creates a unique integer for each unique combination
+    composite_codes = np.zeros(n_rows, dtype=np.int64)
+    for codes, mult in zip(all_codes, multipliers, strict=False):
+        composite_codes += codes.astype(np.int64) * mult
+
+    # Factorize the composite codes to get contiguous group indices
+    group_codes, unique_composites = factorize(composite_codes, sort=False)
+    n_groups = len(unique_composites)
+
+    # Aggregate each value array using the group codes
     result_values = []
     for values, agg_func in zip(value_arrays, agg_funcs, strict=False):
-        _, agg_result = _numpy_groupby_aggregate(composite_keys, values, agg_func)
-        result_values.append(agg_result)
-
-    # Decompose unique composite keys back to individual arrays
-    if len(key_arrays) == 1:
-        result_keys = [unique_composite]
-    else:
-        result_keys = []
-        for i in range(len(key_arrays)):
-            key_vals = np.array(
-                [k[i] for k in unique_composite], dtype=key_arrays[i].dtype
+        # Use the core aggregation logic with group_codes
+        if agg_func == "sum":
+            if np.issubdtype(values.dtype, np.floating):
+                result = np.bincount(group_codes, weights=values, minlength=n_groups)
+            else:
+                result = np.zeros(n_groups, dtype=np.float64)
+                np.add.at(result, group_codes, values.astype(np.float64))
+        elif agg_func == "count":
+            result = np.bincount(group_codes, minlength=n_groups)
+        elif agg_func == "mean":
+            sums = np.bincount(
+                group_codes, weights=values.astype(float), minlength=n_groups
             )
-            result_keys.append(key_vals)
+            counts = np.bincount(group_codes, minlength=n_groups)
+            result = sums / counts
+        elif agg_func == "min":
+            result = np.empty(n_groups, dtype=values.dtype)
+            result[:] = (
+                np.iinfo(values.dtype).max
+                if np.issubdtype(values.dtype, np.integer)
+                else np.inf
+            )
+            np.minimum.at(result, group_codes, values)
+        elif agg_func == "max":
+            result = np.empty(n_groups, dtype=values.dtype)
+            result[:] = (
+                np.iinfo(values.dtype).min
+                if np.issubdtype(values.dtype, np.integer)
+                else -np.inf
+            )
+            np.maximum.at(result, group_codes, values)
+        else:
+            # Fallback for other aggregations
+            _, result = _numpy_groupby_aggregate(composite_codes, values, agg_func)
+        result_values.append(result)
+
+    # Decompose the unique composite codes back to individual key values
+    result_keys = []
+    for i, (uniques, mult) in enumerate(zip(all_uniques, multipliers, strict=False)):
+        # Extract the code for this key from the composite
+        if i == len(key_arrays) - 1:
+            # Last key: just divide
+            key_codes = unique_composites // mult
+        else:
+            # Extract using modulo with the next multiplier
+            next_mult = multipliers[i + 1]
+            key_codes = (unique_composites % next_mult) // mult
+        # Map codes back to original values
+        key_codes = key_codes.astype(np.intp)
+        result_keys.append(uniques[key_codes])
 
     return result_keys, result_values
 
