@@ -19,6 +19,118 @@ from pandas.lazy.backends import register_kernel
 # =============================================================================
 
 
+def _rolling_sum_cumsum(arr: np.ndarray, window: int, min_periods: int) -> np.ndarray:
+    """
+    Rolling sum using cumsum difference - O(n) time complexity.
+
+    This is much faster than sliding_window_view + nansum approach.
+    """
+    n = len(arr)
+    result = np.full(n, np.nan)
+
+    if n == 0 or window <= 0:
+        return result
+
+    # Replace NaN with 0 for cumsum, track valid counts separately
+    is_nan = np.isnan(arr)
+    arr_filled = np.where(is_nan, 0.0, arr)
+
+    # Compute cumsum of values and valid counts
+    cumsum = np.cumsum(arr_filled)
+    valid_cumsum = np.cumsum(~is_nan)
+
+    # Rolling sum = cumsum[i] - cumsum[i - window]
+    # For indices >= window: sum = cumsum[i] - cumsum[i - window]
+    # For indices < window: sum = cumsum[i] (partial window)
+
+    # Full windows (indices >= window - 1)
+    if n >= window:
+        # Prepend 0 to handle the subtraction cleanly
+        cumsum_padded = np.concatenate([[0], cumsum])
+        valid_padded = np.concatenate([[0], valid_cumsum])
+
+        rolling_sums = cumsum_padded[window:] - cumsum_padded[:-window]
+        valid_counts = valid_padded[window:] - valid_padded[:-window]
+
+        # Apply min_periods mask
+        mask = valid_counts >= min_periods
+        result[window - 1 :] = np.where(mask, rolling_sums, np.nan)
+
+    # Partial windows (ramp-up period)
+    for i in range(min(window - 1, n)):
+        valid_count = valid_cumsum[i]
+        if valid_count >= min_periods:
+            result[i] = cumsum[i]
+
+    return result
+
+
+def _rolling_mean_cumsum(arr: np.ndarray, window: int, min_periods: int) -> np.ndarray:
+    """
+    Rolling mean using cumsum difference - O(n) time complexity.
+    """
+    n = len(arr)
+    result = np.full(n, np.nan)
+
+    if n == 0 or window <= 0:
+        return result
+
+    is_nan = np.isnan(arr)
+    arr_filled = np.where(is_nan, 0.0, arr)
+
+    cumsum = np.cumsum(arr_filled)
+    valid_cumsum = np.cumsum(~is_nan)
+
+    if n >= window:
+        cumsum_padded = np.concatenate([[0], cumsum])
+        valid_padded = np.concatenate([[0], valid_cumsum])
+
+        rolling_sums = cumsum_padded[window:] - cumsum_padded[:-window]
+        valid_counts = valid_padded[window:] - valid_padded[:-window]
+
+        # Mean = sum / count (avoiding division by zero)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            rolling_means = rolling_sums / valid_counts
+
+        mask = valid_counts >= min_periods
+        result[window - 1 :] = np.where(mask, rolling_means, np.nan)
+
+    # Partial windows
+    for i in range(min(window - 1, n)):
+        valid_count = valid_cumsum[i]
+        if valid_count >= min_periods:
+            result[i] = cumsum[i] / valid_count
+
+    return result
+
+
+def _get_rolling_valid_counts(arr: np.ndarray, window: int) -> np.ndarray:
+    """
+    Compute rolling count of valid (non-NaN) values using O(n) cumsum.
+
+    Returns array of length n with valid counts for each position.
+    """
+    n = len(arr)
+    is_valid = ~np.isnan(arr)
+    valid_cumsum = np.cumsum(is_valid)
+
+    # For positions < window, the count is just cumsum up to that point
+    # For positions >= window, count = cumsum[i] - cumsum[i - window]
+    counts = np.zeros(n, dtype=np.int64)
+
+    # Ramp-up: counts[i] = valid_cumsum[i]
+    ramp_up_end = min(window - 1, n)
+    counts[:ramp_up_end] = valid_cumsum[:ramp_up_end]
+
+    # Main: counts[i] = valid_cumsum[i] - valid_cumsum[i - window]
+    if n >= window:
+        counts[window - 1 :] = valid_cumsum[window - 1 :] - np.concatenate(
+            [[0], valid_cumsum[: n - window]]
+        )
+
+    return counts
+
+
 def _rolling_apply_vectorized(
     arr: np.ndarray,
     window: int,
@@ -27,9 +139,9 @@ def _rolling_apply_vectorized(
     handle_nan: bool = True,
 ) -> np.ndarray:
     """
-    Vectorized rolling window aggregation.
+    Vectorized rolling window aggregation using sliding_window_view.
 
-    Uses sliding_window_view for O(n) performance instead of O(n*window).
+    Used for min/max where cumsum trick doesn't apply.
     """
     n = len(arr)
     arr = arr.astype(float)
@@ -38,32 +150,29 @@ def _rolling_apply_vectorized(
     if n == 0 or window <= 0:
         return result
 
+    # Compute valid counts using O(n) cumsum method
+    if handle_nan:
+        valid_counts = _get_rolling_valid_counts(arr, window)
+
     # For the "ramp-up" period (first window-1 elements), we need special handling
-    # Handle the initial ramp-up period where window is not full
     for i in range(min(window - 1, n)):
         window_data = arr[: i + 1]
         if handle_nan:
-            valid_count = np.sum(~np.isnan(window_data))
-            if valid_count >= min_periods:
+            if valid_counts[i] >= min_periods:
                 result[i] = agg_func(window_data)
         elif len(window_data) >= min_periods:
             result[i] = agg_func(window_data)
 
-    # For the main portion, use sliding_window_view for vectorization
+    # For the main portion, use sliding_window_view
     if n >= window:
         windows = sliding_window_view(arr, window)
-        # windows.shape is (n - window + 1, window)
+        agg_values = agg_func(windows, axis=1)
 
         if handle_nan:
-            # Count valid values per window
-            valid_counts = np.sum(~np.isnan(windows), axis=1)
-            # Compute aggregation for all windows
-            agg_values = agg_func(windows, axis=1)
-            # Apply min_periods mask
-            mask = valid_counts >= min_periods
+            mask = valid_counts[window - 1 :] >= min_periods
             result[window - 1 :] = np.where(mask, agg_values, np.nan)
         else:
-            result[window - 1 :] = agg_func(windows, axis=1)
+            result[window - 1 :] = agg_values
 
     return result
 
@@ -78,6 +187,8 @@ def numpy_rolling_sum(
 ) -> np.ndarray:
     """
     Calculate rolling sum over a window.
+
+    Uses O(n) cumsum-based algorithm for performance.
 
     Parameters
     ----------
@@ -95,7 +206,8 @@ def numpy_rolling_sum(
     """
     if min_periods is None:
         min_periods = window
-    return _rolling_apply_vectorized(arr, window, min_periods, np.nansum)
+    arr = arr.astype(float)
+    return _rolling_sum_cumsum(arr, window, min_periods)
 
 
 @register_kernel("rolling_mean", "numpy")
@@ -104,6 +216,8 @@ def numpy_rolling_mean(
 ) -> np.ndarray:
     """
     Calculate rolling mean over a window.
+
+    Uses O(n) cumsum-based algorithm for performance.
 
     Parameters
     ----------
@@ -121,7 +235,8 @@ def numpy_rolling_mean(
     """
     if min_periods is None:
         min_periods = window
-    return _rolling_apply_vectorized(arr, window, min_periods, np.nanmean)
+    arr = arr.astype(float)
+    return _rolling_mean_cumsum(arr, window, min_periods)
 
 
 @register_kernel("rolling_min", "numpy")
@@ -176,12 +291,79 @@ def numpy_rolling_max(
     return _rolling_apply_vectorized(arr, window, min_periods, np.nanmax)
 
 
+def _rolling_var_cumsum(
+    arr: np.ndarray, window: int, min_periods: int, ddof: int = 1
+) -> np.ndarray:
+    """
+    Rolling variance using cumsum - O(n) time complexity.
+
+    Uses the formula: Var(X) = E[X²] - E[X]²
+    Adjusted for sample variance with ddof.
+    """
+    n = len(arr)
+    result = np.full(n, np.nan)
+
+    if n == 0 or window <= 0:
+        return result
+
+    # Replace NaN with 0 for cumsum, track valid counts separately
+    is_nan = np.isnan(arr)
+    arr_filled = np.where(is_nan, 0.0, arr)
+    arr_sq_filled = np.where(is_nan, 0.0, arr**2)
+
+    # Cumulative sums
+    cumsum = np.cumsum(arr_filled)
+    cumsum_sq = np.cumsum(arr_sq_filled)
+    valid_cumsum = np.cumsum(~is_nan)
+
+    # Full windows (indices >= window - 1)
+    if n >= window:
+        # Prepend 0 to handle the subtraction cleanly
+        cumsum_padded = np.concatenate([[0], cumsum])
+        cumsum_sq_padded = np.concatenate([[0], cumsum_sq])
+        valid_padded = np.concatenate([[0], valid_cumsum])
+
+        rolling_sums = cumsum_padded[window:] - cumsum_padded[:-window]
+        rolling_sums_sq = cumsum_sq_padded[window:] - cumsum_sq_padded[:-window]
+        valid_counts = valid_padded[window:] - valid_padded[:-window]
+
+        # Variance = (sum_sq - sum² / n) / (n - ddof)
+        # This is the sample variance formula
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mean_sq = (rolling_sums / valid_counts) ** 2
+            mean_of_sq = rolling_sums_sq / valid_counts
+            # Var = E[X²] - E[X]² adjusted for sample variance
+            # sample_var = n / (n - ddof) * (E[X²] - E[X]²)
+            variance = (valid_counts / (valid_counts - ddof)) * (mean_of_sq - mean_sq)
+            # Ensure non-negative (numerical precision issues)
+            variance = np.maximum(variance, 0.0)
+
+        # Apply min_periods mask and ddof requirement
+        mask = (valid_counts >= min_periods) & (valid_counts > ddof)
+        result[window - 1 :] = np.where(mask, variance, np.nan)
+
+    # Partial windows (ramp-up period)
+    for i in range(min(window - 1, n)):
+        valid_count = valid_cumsum[i]
+        if valid_count >= min_periods and valid_count > ddof:
+            sum_val = cumsum[i]
+            sum_sq_val = cumsum_sq[i]
+            mean_sq = (sum_val / valid_count) ** 2
+            mean_of_sq = sum_sq_val / valid_count
+            var = (valid_count / (valid_count - ddof)) * (mean_of_sq - mean_sq)
+            result[i] = max(var, 0.0)
+
+    return result
+
+
 @register_kernel("rolling_std", "numpy")
 def numpy_rolling_std(
     arr: np.ndarray, window: int, min_periods: int | None = None, ddof: int = 1
 ) -> np.ndarray:
     """
     Calculate rolling standard deviation over a window.
+
+    Uses O(n) cumsum-based algorithm for performance.
 
     Parameters
     ----------
@@ -201,42 +383,9 @@ def numpy_rolling_std(
     """
     if min_periods is None:
         min_periods = window
-
-    n = len(arr)
     arr = arr.astype(float)
-    result = np.full(n, np.nan)
-
-    if n == 0 or window <= 0:
-        return result
-
-    # Handle ramp-up period
-    for i in range(min(window - 1, n)):
-        window_data = arr[: i + 1]
-        valid_data = window_data[~np.isnan(window_data)]
-        if len(valid_data) >= min_periods and len(valid_data) > ddof:
-            result[i] = np.std(valid_data, ddof=ddof)
-
-    # Main vectorized portion using sliding_window_view
-    if n >= window:
-        windows = sliding_window_view(arr, window)
-        # For std, we need to handle ddof properly
-        # Count valid values per window
-        valid_counts = np.sum(~np.isnan(windows), axis=1)
-        # Compute std with ddof (nanstd doesn't support axis+ddof well, so use formula)
-        # std = sqrt(var) where var = sum((x - mean)^2) / (n - ddof)
-        with np.errstate(invalid="ignore"):
-            means = np.nanmean(windows, axis=1, keepdims=True)
-            squared_diff = (windows - means) ** 2
-            sum_sq = np.nansum(squared_diff, axis=1)
-            # variance = sum_sq / (valid_counts - ddof)
-            variance = sum_sq / (valid_counts - ddof)
-            std_values = np.sqrt(variance)
-
-        # Apply min_periods mask and ddof requirement
-        mask = (valid_counts >= min_periods) & (valid_counts > ddof)
-        result[window - 1 :] = np.where(mask, std_values, np.nan)
-
-    return result
+    variance = _rolling_var_cumsum(arr, window, min_periods, ddof)
+    return np.sqrt(variance)
 
 
 @register_kernel("rolling_var", "numpy")
@@ -245,6 +394,8 @@ def numpy_rolling_var(
 ) -> np.ndarray:
     """
     Calculate rolling variance over a window.
+
+    Uses O(n) cumsum-based algorithm for performance.
 
     Parameters
     ----------
@@ -264,36 +415,8 @@ def numpy_rolling_var(
     """
     if min_periods is None:
         min_periods = window
-
-    n = len(arr)
     arr = arr.astype(float)
-    result = np.full(n, np.nan)
-
-    if n == 0 or window <= 0:
-        return result
-
-    # Handle ramp-up period
-    for i in range(min(window - 1, n)):
-        window_data = arr[: i + 1]
-        valid_data = window_data[~np.isnan(window_data)]
-        if len(valid_data) >= min_periods and len(valid_data) > ddof:
-            result[i] = np.var(valid_data, ddof=ddof)
-
-    # Main vectorized portion using sliding_window_view
-    if n >= window:
-        windows = sliding_window_view(arr, window)
-        valid_counts = np.sum(~np.isnan(windows), axis=1)
-
-        with np.errstate(invalid="ignore"):
-            means = np.nanmean(windows, axis=1, keepdims=True)
-            squared_diff = (windows - means) ** 2
-            sum_sq = np.nansum(squared_diff, axis=1)
-            variance = sum_sq / (valid_counts - ddof)
-
-        mask = (valid_counts >= min_periods) & (valid_counts > ddof)
-        result[window - 1 :] = np.where(mask, variance, np.nan)
-
-    return result
+    return _rolling_var_cumsum(arr, window, min_periods, ddof)
 
 
 # =============================================================================
@@ -412,6 +535,8 @@ def numpy_ffill(arr: np.ndarray, limit: int | None = None) -> np.ndarray:
     """
     Forward fill missing values.
 
+    Uses O(n) vectorized algorithm with np.maximum.accumulate.
+
     Parameters
     ----------
     arr : np.ndarray
@@ -424,23 +549,26 @@ def numpy_ffill(arr: np.ndarray, limit: int | None = None) -> np.ndarray:
     np.ndarray
         Array with forward-filled values.
     """
-    result = arr.copy().astype(float)
-    n = len(result)
+    # Convert to float for NaN support
+    if not np.issubdtype(arr.dtype, np.floating):
+        arr = arr.astype(np.float64)
 
+    n = len(arr)
     if n == 0:
-        return result
+        return arr.copy()
+
+    # Check for NaN - if none, return copy
+    mask = np.isnan(arr)
+    if not mask.any():
+        return arr.copy()
 
     # Vectorized forward fill using maximum.accumulate trick
-    mask = np.isnan(result)
-    if not mask.any():
-        return result
-
     # Create index array where valid values have their own index, NaN have 0
     idx = np.where(~mask, np.arange(n), 0)
     # Use maximum.accumulate to propagate valid indices forward
-    idx = np.maximum.accumulate(idx)
+    np.maximum.accumulate(idx, out=idx)
     # Use the propagated indices to fill values
-    result = result[idx]
+    result = arr[idx]
 
     # Handle limit if specified
     if limit is not None:
@@ -449,10 +577,13 @@ def numpy_ffill(arr: np.ndarray, limit: int | None = None) -> np.ndarray:
         # At each position, count consecutive NaNs = cumsum_nan - cumsum_nan[last_valid]
         # Find the cumsum at last valid index for each position
         last_valid_cumsum = np.where(~mask, cumsum_nan, 0)
-        last_valid_cumsum = np.maximum.accumulate(last_valid_cumsum)
+        np.maximum.accumulate(last_valid_cumsum, out=last_valid_cumsum)
         consecutive_nans = cumsum_nan - last_valid_cumsum
         # Reset values that exceed limit
-        result = np.where(consecutive_nans > limit, np.nan, result)
+        exceed_mask = consecutive_nans > limit
+        if exceed_mask.any():
+            result = result.copy()  # Only copy if we need to modify
+            result[exceed_mask] = np.nan
 
     return result
 
@@ -461,6 +592,8 @@ def numpy_ffill(arr: np.ndarray, limit: int | None = None) -> np.ndarray:
 def numpy_bfill(arr: np.ndarray, limit: int | None = None) -> np.ndarray:
     """
     Backward fill missing values.
+
+    Uses O(n) vectorized algorithm with np.maximum.accumulate on reversed array.
 
     Parameters
     ----------
@@ -474,36 +607,42 @@ def numpy_bfill(arr: np.ndarray, limit: int | None = None) -> np.ndarray:
     np.ndarray
         Array with backward-filled values.
     """
-    result = arr.copy().astype(float)
-    n = len(result)
+    # Convert to float for NaN support
+    if not np.issubdtype(arr.dtype, np.floating):
+        arr = arr.astype(np.float64)
 
+    n = len(arr)
     if n == 0:
-        return result
+        return arr.copy()
 
-    # Vectorized backward fill: reverse, ffill, reverse back
-    mask = np.isnan(result)
+    # Check for NaN - if none, return copy
+    mask = np.isnan(arr)
     if not mask.any():
-        return result
+        return arr.copy()
 
-    # Reverse the array
-    result_rev = result[::-1]
+    # Vectorized backward fill: work on reversed views
+    # Create reversed view (no copy)
+    arr_rev = arr[::-1]
     mask_rev = mask[::-1]
 
     # Create index array for reversed data
     idx = np.where(~mask_rev, np.arange(n), 0)
-    idx = np.maximum.accumulate(idx)
-    result_rev = result_rev[idx]
+    np.maximum.accumulate(idx, out=idx)
+    result_rev = arr_rev[idx]
 
     # Handle limit if specified
     if limit is not None:
         cumsum_nan = np.cumsum(mask_rev)
         last_valid_cumsum = np.where(~mask_rev, cumsum_nan, 0)
-        last_valid_cumsum = np.maximum.accumulate(last_valid_cumsum)
+        np.maximum.accumulate(last_valid_cumsum, out=last_valid_cumsum)
         consecutive_nans = cumsum_nan - last_valid_cumsum
-        result_rev = np.where(consecutive_nans > limit, np.nan, result_rev)
+        exceed_mask = consecutive_nans > limit
+        if exceed_mask.any():
+            result_rev = result_rev.copy()
+            result_rev[exceed_mask] = np.nan
 
-    # Reverse back
-    return result_rev[::-1]
+    # Reverse back (copy to ensure contiguous memory)
+    return result_rev[::-1].copy()
 
 
 @register_kernel("interpolate_linear", "numpy")
