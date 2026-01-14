@@ -216,6 +216,6 @@ __all__ = [
 # Import kernel modules to register the kernels
 # This must be done after the registry functions are defined
 from pandas.lazy.backends import (  # noqa: F401
-    arrow_kernels,
-    numpy_kernels,
+    arrow,
+    numpy,
 )
