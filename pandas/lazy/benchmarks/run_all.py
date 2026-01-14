@@ -23,6 +23,8 @@ BENCHMARKS = [
     "bench_expressions.py",
     "bench_aggregations.py",
     "bench_pipelines.py",
+    "bench_advanced_ops.py",
+    "bench_kernels.py",
 ]
 
 
