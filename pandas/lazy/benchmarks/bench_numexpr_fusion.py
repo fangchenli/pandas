@@ -285,8 +285,88 @@ def benchmark_size_threshold(sizes: list[int] | None = None):
         print(f"{n:>12,} {np_time:>12.2f} {ne_time:>14.2f} {speedup:>10.2f}x")
 
 
+def benchmark_arrow_cached_functions(n_rows: int = 1_000_000):
+    """Benchmark Arrow cached function calls vs direct calls."""
+    print("\n" + "=" * 70)
+    print(f"ARROW CACHED FUNCTION BENCHMARKS (n={n_rows:,})")
+    print("=" * 70)
+
+    import pyarrow as pa
+    import pyarrow.compute as pc
+
+    rng = np.random.default_rng(42)
+    a = pa.array(rng.random(n_rows))
+    b = pa.array(rng.random(n_rows))
+    c = pa.array(rng.random(n_rows))
+    d = pa.array(rng.random(n_rows) + 0.1)
+
+    n_iterations = 50
+
+    # Direct pc.add/multiply/divide calls
+    start = time.perf_counter()
+    for _ in range(n_iterations):
+        t1 = pc.add(a, b)
+        t2 = pc.multiply(t1, c)
+        _ = pc.divide(t2, d)
+    direct_time = (time.perf_counter() - start) / n_iterations * 1000
+
+    # Cached function references
+    add_fn = pc.get_function("add")
+    mul_fn = pc.get_function("multiply")
+    div_fn = pc.get_function("divide")
+
+    start = time.perf_counter()
+    for _ in range(n_iterations):
+        t1 = add_fn.call([a, b])
+        t2 = mul_fn.call([t1, c])
+        _ = div_fn.call([t2, d])
+    cached_time = (time.perf_counter() - start) / n_iterations * 1000
+
+    print("\nExpression: (a + b) * c / d")
+    print(f"  Direct pc.* calls:  {direct_time:.2f}ms")
+    print(f"  Cached fn.call():   {cached_time:.2f}ms")
+    print(f"  Speedup:            {direct_time / cached_time:.2f}x")
+
+    # Test with ArrayEvaluator
+    try:
+        from pandas.lazy.backends.array_eval import ArrayEvaluator
+        from pandas.lazy.ir import (
+            Call,
+            FieldRef,
+        )
+
+        arrays = {"a": a, "b": b, "c": c, "d": d}
+
+        # Build IR for (a + b) * c / d
+        expr = Call(
+            "divide",
+            (
+                Call(
+                    "multiply",
+                    (Call("add", (FieldRef("a"), FieldRef("b")), {}), FieldRef("c")),
+                    {},
+                ),
+                FieldRef("d"),
+            ),
+            {},
+        )
+
+        evaluator = ArrayEvaluator(arrays, preferred_backend="arrow")
+        start = time.perf_counter()
+        for _ in range(n_iterations):
+            evaluator.evaluate(expr)
+        eval_time = (time.perf_counter() - start) / n_iterations * 1000
+
+        print(f"\nArrayEvaluator (Arrow): {eval_time:.2f}ms")
+        print(f"  vs direct calls:      {direct_time / eval_time:.2f}x")
+
+    except ImportError as e:
+        print(f"\nArrayEvaluator test skipped: {e}")
+
+
 if __name__ == "__main__":
     benchmark_raw_operations()
     benchmark_fusion_module()
+    benchmark_arrow_cached_functions()
     benchmark_lazy_evaluation()
     benchmark_size_threshold()
