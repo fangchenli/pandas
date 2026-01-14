@@ -2,10 +2,16 @@
 NumPy miscellaneous kernel implementations.
 
 This module contains:
-- Rolling window operations (vectorized using sliding_window_view)
+- Rolling window operations (with optional Bottleneck acceleration)
 - Shift/Lag/Lead operations
 - Fill NA variants (vectorized)
+
+When Bottleneck is installed and enabled via pd.set_option("compute.use_bottleneck"),
+rolling window and fill operations use Bottleneck's C-optimized implementations
+for significantly better performance.
 """
+
+from __future__ import annotations
 
 from typing import Any
 
@@ -13,6 +19,10 @@ import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
 from pandas.lazy.backends import register_kernel
+from pandas.lazy.backends._bottleneck import (
+    bn,
+    use_bottleneck,
+)
 
 # =============================================================================
 # Rolling Window Helper Functions (Vectorized)
@@ -188,7 +198,7 @@ def numpy_rolling_sum(
     """
     Calculate rolling sum over a window.
 
-    Uses O(n) cumsum-based algorithm for performance.
+    Uses Bottleneck's move_sum when available, otherwise O(n) cumsum-based algorithm.
 
     Parameters
     ----------
@@ -206,6 +216,16 @@ def numpy_rolling_sum(
     """
     if min_periods is None:
         min_periods = window
+
+    # Try Bottleneck fast path
+    if use_bottleneck() and arr.dtype != object:
+        try:
+            arr_float = arr.astype(np.float64, copy=False)
+            return bn.move_sum(arr_float, window, min_count=min_periods)
+        except (TypeError, ValueError):
+            pass  # Fall through to NumPy implementation
+
+    # NumPy fallback
     arr = arr.astype(float)
     return _rolling_sum_cumsum(arr, window, min_periods)
 
@@ -217,7 +237,7 @@ def numpy_rolling_mean(
     """
     Calculate rolling mean over a window.
 
-    Uses O(n) cumsum-based algorithm for performance.
+    Uses Bottleneck's move_mean when available, otherwise O(n) cumsum-based algorithm.
 
     Parameters
     ----------
@@ -235,6 +255,16 @@ def numpy_rolling_mean(
     """
     if min_periods is None:
         min_periods = window
+
+    # Try Bottleneck fast path
+    if use_bottleneck() and arr.dtype != object:
+        try:
+            arr_float = arr.astype(np.float64, copy=False)
+            return bn.move_mean(arr_float, window, min_count=min_periods)
+        except (TypeError, ValueError):
+            pass  # Fall through to NumPy implementation
+
+    # NumPy fallback
     arr = arr.astype(float)
     return _rolling_mean_cumsum(arr, window, min_periods)
 
@@ -245,6 +275,8 @@ def numpy_rolling_min(
 ) -> np.ndarray:
     """
     Calculate rolling minimum over a window.
+
+    Uses Bottleneck's move_min when available.
 
     Parameters
     ----------
@@ -262,6 +294,16 @@ def numpy_rolling_min(
     """
     if min_periods is None:
         min_periods = window
+
+    # Try Bottleneck fast path
+    if use_bottleneck() and arr.dtype != object:
+        try:
+            arr_float = arr.astype(np.float64, copy=False)
+            return bn.move_min(arr_float, window, min_count=min_periods)
+        except (TypeError, ValueError):
+            pass  # Fall through to NumPy implementation
+
+    # NumPy fallback
     return _rolling_apply_vectorized(arr, window, min_periods, np.nanmin)
 
 
@@ -271,6 +313,8 @@ def numpy_rolling_max(
 ) -> np.ndarray:
     """
     Calculate rolling maximum over a window.
+
+    Uses Bottleneck's move_max when available.
 
     Parameters
     ----------
@@ -288,6 +332,16 @@ def numpy_rolling_max(
     """
     if min_periods is None:
         min_periods = window
+
+    # Try Bottleneck fast path
+    if use_bottleneck() and arr.dtype != object:
+        try:
+            arr_float = arr.astype(np.float64, copy=False)
+            return bn.move_max(arr_float, window, min_count=min_periods)
+        except (TypeError, ValueError):
+            pass  # Fall through to NumPy implementation
+
+    # NumPy fallback
     return _rolling_apply_vectorized(arr, window, min_periods, np.nanmax)
 
 
@@ -363,7 +417,7 @@ def numpy_rolling_std(
     """
     Calculate rolling standard deviation over a window.
 
-    Uses O(n) cumsum-based algorithm for performance.
+    Uses Bottleneck's move_std when available, otherwise O(n) cumsum-based algorithm.
 
     Parameters
     ----------
@@ -383,6 +437,17 @@ def numpy_rolling_std(
     """
     if min_periods is None:
         min_periods = window
+
+    # Try Bottleneck fast path
+    # Note: Bottleneck defaults to ddof=0, so we must pass ddof explicitly
+    if use_bottleneck() and arr.dtype != object:
+        try:
+            arr_float = arr.astype(np.float64, copy=False)
+            return bn.move_std(arr_float, window, min_count=min_periods, ddof=ddof)
+        except (TypeError, ValueError):
+            pass  # Fall through to NumPy implementation
+
+    # NumPy fallback
     arr = arr.astype(float)
     variance = _rolling_var_cumsum(arr, window, min_periods, ddof)
     return np.sqrt(variance)
@@ -395,7 +460,7 @@ def numpy_rolling_var(
     """
     Calculate rolling variance over a window.
 
-    Uses O(n) cumsum-based algorithm for performance.
+    Uses Bottleneck's move_var when available, otherwise O(n) cumsum-based algorithm.
 
     Parameters
     ----------
@@ -415,8 +480,178 @@ def numpy_rolling_var(
     """
     if min_periods is None:
         min_periods = window
+
+    # Try Bottleneck fast path
+    # Note: Bottleneck defaults to ddof=0, so we must pass ddof explicitly
+    if use_bottleneck() and arr.dtype != object:
+        try:
+            arr_float = arr.astype(np.float64, copy=False)
+            return bn.move_var(arr_float, window, min_count=min_periods, ddof=ddof)
+        except (TypeError, ValueError):
+            pass  # Fall through to NumPy implementation
+
+    # NumPy fallback
     arr = arr.astype(float)
     return _rolling_var_cumsum(arr, window, min_periods, ddof)
+
+
+@register_kernel("rolling_median", "numpy")
+def numpy_rolling_median(
+    arr: np.ndarray, window: int, min_periods: int | None = None
+) -> np.ndarray:
+    """
+    Calculate rolling median over a window.
+
+    Uses Bottleneck's move_median when available (much faster).
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input numeric array.
+    window : int
+        Size of the rolling window.
+    min_periods : int or None
+        Minimum number of observations required. Defaults to window size.
+
+    Returns
+    -------
+    np.ndarray
+        Rolling median values.
+    """
+    if min_periods is None:
+        min_periods = window
+
+    # Try Bottleneck fast path
+    if use_bottleneck() and arr.dtype != object:
+        try:
+            arr_float = arr.astype(np.float64, copy=False)
+            return bn.move_median(arr_float, window, min_count=min_periods)
+        except (TypeError, ValueError):
+            pass  # Fall through to NumPy implementation
+
+    # NumPy fallback using sliding_window_view + np.nanmedian
+    return _rolling_apply_vectorized(arr, window, min_periods, np.nanmedian)
+
+
+@register_kernel("rolling_argmin", "numpy")
+def numpy_rolling_argmin(
+    arr: np.ndarray, window: int, min_periods: int | None = None
+) -> np.ndarray:
+    """
+    Calculate rolling argmin - index of minimum value in each window.
+
+    Uses Bottleneck's move_argmin when available.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input numeric array.
+    window : int
+        Size of the rolling window.
+    min_periods : int or None
+        Minimum number of observations required. Defaults to window size.
+
+    Returns
+    -------
+    np.ndarray
+        Rolling argmin values (index within window).
+    """
+    if min_periods is None:
+        min_periods = window
+
+    # Try Bottleneck fast path
+    if use_bottleneck() and arr.dtype != object:
+        try:
+            arr_float = arr.astype(np.float64, copy=False)
+            return bn.move_argmin(arr_float, window, min_count=min_periods)
+        except (TypeError, ValueError):
+            pass  # Fall through to NumPy implementation
+
+    # NumPy fallback
+    return _rolling_apply_vectorized(arr, window, min_periods, np.nanargmin)
+
+
+@register_kernel("rolling_argmax", "numpy")
+def numpy_rolling_argmax(
+    arr: np.ndarray, window: int, min_periods: int | None = None
+) -> np.ndarray:
+    """
+    Calculate rolling argmax - index of maximum value in each window.
+
+    Uses Bottleneck's move_argmax when available.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input numeric array.
+    window : int
+        Size of the rolling window.
+    min_periods : int or None
+        Minimum number of observations required. Defaults to window size.
+
+    Returns
+    -------
+    np.ndarray
+        Rolling argmax values (index within window).
+    """
+    if min_periods is None:
+        min_periods = window
+
+    # Try Bottleneck fast path
+    if use_bottleneck() and arr.dtype != object:
+        try:
+            arr_float = arr.astype(np.float64, copy=False)
+            return bn.move_argmax(arr_float, window, min_count=min_periods)
+        except (TypeError, ValueError):
+            pass  # Fall through to NumPy implementation
+
+    # NumPy fallback
+    return _rolling_apply_vectorized(arr, window, min_periods, np.nanargmax)
+
+
+@register_kernel("rolling_rank", "numpy")
+def numpy_rolling_rank(
+    arr: np.ndarray, window: int, min_periods: int | None = None
+) -> np.ndarray:
+    """
+    Calculate rolling rank of each value within its window.
+
+    Requires Bottleneck's move_rank for efficient implementation.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input numeric array.
+    window : int
+        Size of the rolling window.
+    min_periods : int or None
+        Minimum number of observations required. Defaults to window size.
+
+    Returns
+    -------
+    np.ndarray
+        Rolling rank values.
+
+    Raises
+    ------
+    NotImplementedError
+        If Bottleneck is not installed.
+    """
+    if min_periods is None:
+        min_periods = window
+
+    # Try Bottleneck fast path
+    if use_bottleneck() and arr.dtype != object:
+        try:
+            arr_float = arr.astype(np.float64, copy=False)
+            return bn.move_rank(arr_float, window, min_count=min_periods)
+        except (TypeError, ValueError):
+            pass
+
+    # No pure NumPy fallback - require Bottleneck
+    raise NotImplementedError(
+        "rolling_rank requires Bottleneck. Install with: pip install bottleneck"
+    )
 
 
 # =============================================================================
@@ -535,7 +770,7 @@ def numpy_ffill(arr: np.ndarray, limit: int | None = None) -> np.ndarray:
     """
     Forward fill missing values.
 
-    Uses O(n) vectorized algorithm with np.maximum.accumulate.
+    Uses Bottleneck's push when available, otherwise O(n) vectorized algorithm.
 
     Parameters
     ----------
@@ -556,6 +791,14 @@ def numpy_ffill(arr: np.ndarray, limit: int | None = None) -> np.ndarray:
     n = len(arr)
     if n == 0:
         return arr.copy()
+
+    # Try Bottleneck fast path
+    # bn.push: n parameter is the fill limit (None = fill all)
+    if use_bottleneck():
+        try:
+            return bn.push(arr, n=limit)
+        except (TypeError, ValueError):
+            pass  # Fall through to NumPy implementation
 
     # Check for NaN - if none, return copy
     mask = np.isnan(arr)
@@ -593,7 +836,7 @@ def numpy_bfill(arr: np.ndarray, limit: int | None = None) -> np.ndarray:
     """
     Backward fill missing values.
 
-    Uses O(n) vectorized algorithm with np.maximum.accumulate on reversed array.
+    Uses Bottleneck's push on reversed array when available.
 
     Parameters
     ----------
@@ -614,6 +857,14 @@ def numpy_bfill(arr: np.ndarray, limit: int | None = None) -> np.ndarray:
     n = len(arr)
     if n == 0:
         return arr.copy()
+
+    # Try Bottleneck fast path (push on reversed, then reverse back)
+    if use_bottleneck():
+        try:
+            result = bn.push(arr[::-1], n=limit)[::-1].copy()
+            return result
+        except (TypeError, ValueError):
+            pass  # Fall through to NumPy implementation
 
     # Check for NaN - if none, return copy
     mask = np.isnan(arr)
