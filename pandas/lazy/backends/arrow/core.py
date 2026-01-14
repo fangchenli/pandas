@@ -143,9 +143,83 @@ def arrow_coalesce(*arrays: PyArrowArray) -> PyArrowArray:
 # =============================================================================
 
 
+def _is_string_type(val) -> bool:
+    """Check if value is a string type (Arrow array, scalar, or Python str)."""
+    if isinstance(val, str):
+        return True
+    if isinstance(val, (pa.Array, pa.ChunkedArray)):
+        return pa.types.is_string(val.type) or pa.types.is_large_string(val.type)
+    if isinstance(val, pa.Scalar):
+        return pa.types.is_string(val.type) or pa.types.is_large_string(val.type)
+    return False
+
+
+def _get_string_type(val) -> pa.DataType | None:
+    """Get the string type of a value, or None if not string."""
+    if isinstance(val, (pa.Array, pa.ChunkedArray)):
+        if pa.types.is_large_string(val.type):
+            return pa.large_string()
+        if pa.types.is_string(val.type):
+            return pa.string()
+    if isinstance(val, pa.Scalar):
+        if pa.types.is_large_string(val.type):
+            return pa.large_string()
+        if pa.types.is_string(val.type):
+            return pa.string()
+    return None
+
+
+def _to_string_scalar(val, target_type: pa.DataType):
+    """Convert a value to a string scalar of the target type."""
+    if isinstance(val, str):
+        return pa.scalar(val, type=target_type)
+    if isinstance(val, pa.Scalar):
+        if val.type == target_type:
+            return val
+        return val.cast(target_type)
+    if isinstance(val, (pa.Array, pa.ChunkedArray)):
+        if val.type == target_type:
+            return val
+        return val.cast(target_type)
+    # Try to create a scalar from the value
+    return pa.scalar(str(val), type=target_type)
+
+
 @register_kernel("add", "arrow")
 def arrow_add(left: PyArrowArray, right: PyArrowArray | float | int) -> PyArrowArray:
-    """Add two arrays or array and scalar."""
+    """Add two arrays or array and scalar.
+
+    For string types, performs concatenation using binary_join_element_wise.
+    """
+    # Check if either operand is a string type
+    left_is_string = _is_string_type(left)
+    right_is_string = _is_string_type(right)
+
+    if left_is_string or right_is_string:
+        # String concatenation
+        # Determine target type (prefer large_string if either uses it)
+        left_type = _get_string_type(left)
+        right_type = _get_string_type(right)
+
+        # Default to large_string (pandas Arrow strings use this)
+        if left_type == pa.large_string() or right_type == pa.large_string():
+            target_type = pa.large_string()
+        elif left_type == pa.string() or right_type == pa.string():
+            target_type = pa.string()
+        else:
+            # Both are Python strings, use large_string by default
+            target_type = pa.large_string()
+
+        # Convert both to target type
+        left_conv = _to_string_scalar(left, target_type)
+        right_conv = _to_string_scalar(right, target_type)
+
+        # Empty separator for concatenation
+        sep = pa.scalar("", type=target_type)
+
+        return pc.binary_join_element_wise(left_conv, right_conv, sep)
+
+    # Numeric addition
     return pc.add(left, right)
 
 

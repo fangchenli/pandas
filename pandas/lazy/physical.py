@@ -241,6 +241,7 @@ class PhysicalFilter(PhysicalPlan):
         from pandas.lazy.backends import dispatch_kernel
         from pandas.lazy.backends.array_eval import ArrayEvaluator
         from pandas.lazy.backends.convert import get_array_backend
+        from pandas.lazy.backends.types import is_index_col
 
         input_arrays = self.input.execute(context)
 
@@ -248,18 +249,48 @@ class PhysicalFilter(PhysicalPlan):
         evaluator = ArrayEvaluator(input_arrays, preferred_backend=self.backend)
         mask = evaluator.evaluate(self.predicate._ir)
 
-        # Ensure mask is a proper array
+        # Separate data columns from index columns
+        data_arrays = {k: v for k, v in input_arrays.items() if not is_index_col(k)}
+        index_arrays = {k: v for k, v in input_arrays.items() if is_index_col(k)}
+
+        # Check if all data arrays are Arrow-backed for batch filtering
+        all_data_arrow = len(data_arrays) > 0 and all(
+            isinstance(arr, (pa.Array, pa.ChunkedArray)) for arr in data_arrays.values()
+        )
+
+        # Ensure mask is a proper array for filtering
         if isinstance(mask, (pa.Array, pa.ChunkedArray)):
-            # Arrow mask - convert to numpy for consistent filtering
             mask_arr = mask.to_numpy(zero_copy_only=False)
+            pa_mask = mask
         elif isinstance(mask, np.ndarray):
             mask_arr = mask
+            pa_mask = None
         else:
             mask_arr = np.asarray(mask)
+            pa_mask = None
 
-        # Filter all arrays using the mask via kernel dispatch
         result: ArrayDict = {}
-        for name, arr in input_arrays.items():
+
+        if all_data_arrow:
+            # Batch filter data columns using Arrow Table for efficiency
+            if pa_mask is None:
+                pa_mask = pa.array(mask_arr)
+
+            # Build table and filter in one operation
+            table = pa.table(data_arrays)
+            filtered_table = table.filter(pa_mask)
+
+            # Extract result arrays
+            for name in data_arrays.keys():
+                result[name] = filtered_table.column(name).combine_chunks()
+        else:
+            # Filter data arrays individually
+            for name, arr in data_arrays.items():
+                backend = get_array_backend(arr)
+                result[name] = dispatch_kernel("filter", backend, arr, mask_arr)
+
+        # Always filter index columns with numpy (they're typically numpy arrays)
+        for name, arr in index_arrays.items():
             backend = get_array_backend(arr)
             result[name] = dispatch_kernel("filter", backend, arr, mask_arr)
 

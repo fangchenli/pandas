@@ -137,6 +137,12 @@ class ArrayEvaluator:
         # Determine backend
         backend = self._get_backend_for_func(func, args)
 
+        # Some functions have special kwargs structure and need custom handling
+        # rather than direct kernel dispatch
+        special_functions = {"case_when"}
+        if func in special_functions:
+            return self._fallback_evaluate_call(node, args, backend)
+
         # Check if we have a kernel for this function
         if has_kernel(func, backend):
             # Convert inputs to target backend if needed

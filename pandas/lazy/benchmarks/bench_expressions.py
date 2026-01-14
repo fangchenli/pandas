@@ -77,7 +77,9 @@ def eager_nested_arithmetic(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def lazy_nested_arithmetic(df: pd.DataFrame) -> pd.DataFrame:
+def lazy_nested_arithmetic(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: Deeply nested arithmetic expression."""
     from pandas.lazy import col
 
@@ -87,7 +89,7 @@ def lazy_nested_arithmetic(df: pd.DataFrame) -> pd.DataFrame:
         / ((col("e") + 1) * (col("a") * col("b") + col("c") * col("d")))
     ) * 100
     lf = lf.with_columns(expr.alias("nested"))
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 # =============================================================================
@@ -103,7 +105,9 @@ def eager_polynomial(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def lazy_polynomial(df: pd.DataFrame) -> pd.DataFrame:
+def lazy_polynomial(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: Polynomial expression."""
     from pandas.lazy import col
 
@@ -111,7 +115,7 @@ def lazy_polynomial(df: pd.DataFrame) -> pd.DataFrame:
     x = col("a")
     poly = col("b") * x**3 + col("c") * x**2 + col("d") * x + col("e")
     lf = lf.with_columns(poly.alias("poly"))
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 # =============================================================================
@@ -128,7 +132,9 @@ def eager_mixed_types(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def lazy_mixed_types(df: pd.DataFrame) -> pd.DataFrame:
+def lazy_mixed_types(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: Mixed integer and float operations."""
     from pandas.lazy import col
 
@@ -137,7 +143,7 @@ def lazy_mixed_types(df: pd.DataFrame) -> pd.DataFrame:
         col("x") - col("y")
     )
     lf = lf.with_columns(expr.alias("mixed"))
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 # =============================================================================
@@ -156,7 +162,9 @@ def eager_complex_boolean(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def lazy_complex_boolean(df: pd.DataFrame) -> pd.DataFrame:
+def lazy_complex_boolean(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: Complex boolean expression."""
     from pandas.lazy import col
 
@@ -167,7 +175,7 @@ def lazy_complex_boolean(df: pd.DataFrame) -> pd.DataFrame:
         | ((col("x") > 50) & (col("y") < 50))
     )
     lf = lf.with_columns(expr.alias("bool_result"))
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 # =============================================================================
@@ -186,7 +194,9 @@ def eager_interdependent(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def lazy_interdependent(df: pd.DataFrame) -> pd.DataFrame:
+def lazy_interdependent(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: Expressions that depend on each other."""
     from pandas.lazy import col
 
@@ -204,7 +214,7 @@ def lazy_interdependent(df: pd.DataFrame) -> pd.DataFrame:
         step4.alias("step4"),
         final.alias("final"),
     )
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 # =============================================================================
@@ -226,7 +236,9 @@ def eager_comparison_chain(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def lazy_comparison_chain(df: pd.DataFrame) -> pd.DataFrame:
+def lazy_comparison_chain(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: Chained comparisons using when/then/otherwise."""
     from pandas.lazy import (
         col,
@@ -247,7 +259,7 @@ def lazy_comparison_chain(df: pd.DataFrame) -> pd.DataFrame:
         .otherwise(lit(5))
     )
     lf = lf.with_columns(bin_expr.alias("bin"))
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 # =============================================================================
@@ -273,7 +285,9 @@ def eager_wide_expression(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def lazy_wide_expression(df: pd.DataFrame) -> pd.DataFrame:
+def lazy_wide_expression(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: Single expression with many operations."""
     from pandas.lazy import col
 
@@ -294,7 +308,7 @@ def lazy_wide_expression(df: pd.DataFrame) -> pd.DataFrame:
         + (c - d) * (c - d)  # squared instead of abs
     )
     lf = lf.with_columns(expr.alias("wide"))
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 def run_benchmarks():
@@ -318,106 +332,172 @@ def run_benchmarks():
         print("\n--- Deeply nested arithmetic ---")
 
         mean, std = timeit(lambda: eager_nested_arithmetic(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_nested_arithmetic(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_nested_arithmetic(df_numpy, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: eager_nested_arithmetic(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_nested_arithmetic(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_nested_arithmetic(df_arrow, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
         # Polynomial
         print("\n--- Polynomial (ax³ + bx² + cx + d) ---")
 
         mean, std = timeit(lambda: eager_polynomial(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_polynomial(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(lambda: lazy_polynomial(df_numpy, use_physical_planner=True))
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: eager_polynomial(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_polynomial(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(lambda: lazy_polynomial(df_arrow, use_physical_planner=True))
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
         # Mixed types
         print("\n--- Mixed int/float operations ---")
 
         mean, std = timeit(lambda: eager_mixed_types(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_mixed_types(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_mixed_types(df_numpy, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: eager_mixed_types(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_mixed_types(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_mixed_types(df_arrow, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
         # Complex boolean
         print("\n--- Complex boolean expression ---")
 
         mean, std = timeit(lambda: eager_complex_boolean(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_complex_boolean(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_complex_boolean(df_numpy, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: eager_complex_boolean(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_complex_boolean(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_complex_boolean(df_arrow, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
         # Interdependent expressions
         print("\n--- 5 interdependent expressions ---")
 
         mean, std = timeit(lambda: eager_interdependent(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_interdependent(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_interdependent(df_numpy, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: eager_interdependent(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_interdependent(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_interdependent(df_arrow, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
         # Case when / comparison chain
         print("\n--- Case-when binning (5 bins) ---")
 
         mean, std = timeit(lambda: eager_comparison_chain(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_comparison_chain(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_comparison_chain(df_numpy, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: eager_comparison_chain(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_comparison_chain(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_comparison_chain(df_arrow, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
         # Wide expression
         print("\n--- Wide expression (12+ operations) ---")
 
         mean, std = timeit(lambda: eager_wide_expression(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_wide_expression(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_wide_expression(df_numpy, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: eager_wide_expression(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_wide_expression(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_wide_expression(df_arrow, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
 
 if __name__ == "__main__":

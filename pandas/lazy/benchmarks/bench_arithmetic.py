@@ -62,13 +62,15 @@ def bench_eager_simple_add(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def bench_lazy_simple_add(df: pd.DataFrame) -> pd.DataFrame:
+def bench_lazy_simple_add(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: simple addition."""
     from pandas.lazy import col
 
     lf = df.select()
     lf = lf.with_columns((col("a") + col("b")).alias("sum_ab"))
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 def bench_eager_chained_arithmetic(df: pd.DataFrame) -> pd.DataFrame:
@@ -78,13 +80,15 @@ def bench_eager_chained_arithmetic(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def bench_lazy_chained_arithmetic(df: pd.DataFrame) -> pd.DataFrame:
+def bench_lazy_chained_arithmetic(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: chained arithmetic (a + b) * c."""
     from pandas.lazy import col
 
     lf = df.select()
     lf = lf.with_columns(((col("a") + col("b")) * col("c")).alias("result"))
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 def bench_eager_complex_expression(df: pd.DataFrame) -> pd.DataFrame:
@@ -94,14 +98,16 @@ def bench_eager_complex_expression(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def bench_lazy_complex_expression(df: pd.DataFrame) -> pd.DataFrame:
+def bench_lazy_complex_expression(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: complex expression with multiple operations."""
     from pandas.lazy import col
 
     lf = df.select()
     expr = (col("a") * 2 + col("b") ** 2 - col("c") / col("d")) * 100
     lf = lf.with_columns(expr.alias("complex"))
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 def bench_eager_multiple_expressions(df: pd.DataFrame) -> pd.DataFrame:
@@ -114,7 +120,9 @@ def bench_eager_multiple_expressions(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def bench_lazy_multiple_expressions(df: pd.DataFrame) -> pd.DataFrame:
+def bench_lazy_multiple_expressions(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: multiple expressions (can be computed in parallel)."""
     from pandas.lazy import col
 
@@ -125,7 +133,7 @@ def bench_lazy_multiple_expressions(df: pd.DataFrame) -> pd.DataFrame:
         (col("a") * col("b")).alias("expr3"),
         (col("a") / (col("b") + 0.001)).alias("expr4"),
     )
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 def bench_eager_filter_then_compute(df: pd.DataFrame) -> pd.DataFrame:
@@ -136,14 +144,16 @@ def bench_eager_filter_then_compute(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def bench_lazy_filter_then_compute(df: pd.DataFrame) -> pd.DataFrame:
+def bench_lazy_filter_then_compute(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: filter then compute (predicate pushdown)."""
     from pandas.lazy import col
 
     lf = df.select()
     lf = lf.filter(col("a") > 0.5)
     lf = lf.with_columns((col("b") * 2).alias("computed"))
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 def bench_eager_compute_then_filter(df: pd.DataFrame) -> pd.DataFrame:
@@ -153,14 +163,16 @@ def bench_eager_compute_then_filter(df: pd.DataFrame) -> pd.DataFrame:
     return result[result["computed"] > 1.0]
 
 
-def bench_lazy_compute_then_filter(df: pd.DataFrame) -> pd.DataFrame:
+def bench_lazy_compute_then_filter(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: compute then filter on computed value."""
     from pandas.lazy import col
 
     lf = df.select()
     lf = lf.with_columns((col("a") + col("b")).alias("computed"))
     lf = lf.filter(col("computed") > 1.0)
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 def run_benchmarks():
@@ -183,76 +195,126 @@ def run_benchmarks():
         print("\n--- Simple addition (a + b) ---")
 
         mean, std = timeit(lambda: bench_eager_simple_add(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_lazy_simple_add(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: bench_lazy_simple_add(df_numpy, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_eager_simple_add(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_lazy_simple_add(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: bench_lazy_simple_add(df_arrow, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
         # Chained arithmetic
         print("\n--- Chained arithmetic ((a + b) * c) ---")
 
         mean, std = timeit(lambda: bench_eager_chained_arithmetic(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_lazy_chained_arithmetic(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: bench_lazy_chained_arithmetic(df_numpy, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_eager_chained_arithmetic(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_lazy_chained_arithmetic(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: bench_lazy_chained_arithmetic(df_arrow, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
         # Complex expression
         print("\n--- Complex expression (a*2 + b**2 - c/d) * 100 ---")
 
         mean, std = timeit(lambda: bench_eager_complex_expression(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_lazy_complex_expression(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: bench_lazy_complex_expression(df_numpy, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_eager_complex_expression(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_lazy_complex_expression(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: bench_lazy_complex_expression(df_arrow, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
         # Multiple expressions
         print("\n--- Multiple expressions (4 computed columns) ---")
 
         mean, std = timeit(lambda: bench_eager_multiple_expressions(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_lazy_multiple_expressions(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: bench_lazy_multiple_expressions(df_numpy, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_eager_multiple_expressions(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_lazy_multiple_expressions(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: bench_lazy_multiple_expressions(df_arrow, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
         # Filter then compute
         print("\n--- Filter (a > 0.5) then compute (b * 2) ---")
 
         mean, std = timeit(lambda: bench_eager_filter_then_compute(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_lazy_filter_then_compute(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: bench_lazy_filter_then_compute(df_numpy, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_eager_filter_then_compute(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_lazy_filter_then_compute(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: bench_lazy_filter_then_compute(df_arrow, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
 
 if __name__ == "__main__":

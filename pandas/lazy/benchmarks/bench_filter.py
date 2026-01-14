@@ -59,13 +59,15 @@ def bench_eager_filter(df: pd.DataFrame) -> pd.DataFrame:
     return df[df["a"] > 50]
 
 
-def bench_lazy_filter(df: pd.DataFrame) -> pd.DataFrame:
+def bench_lazy_filter(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy filter: build plan, then execute."""
     from pandas.lazy import col
 
     lf = df.select()  # Enter lazy mode
     lf = lf.filter(col("a") > 50)
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 def bench_eager_chained_filter(df: pd.DataFrame) -> pd.DataFrame:
@@ -75,14 +77,16 @@ def bench_eager_chained_filter(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def bench_lazy_chained_filter(df: pd.DataFrame) -> pd.DataFrame:
+def bench_lazy_chained_filter(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy chained filters (should be optimized to single filter)."""
     from pandas.lazy import col
 
     lf = df.select()
     lf = lf.filter(col("a") > 50)
     lf = lf.filter(col("b") < 0.5)
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 def run_benchmarks():
@@ -109,31 +113,51 @@ def run_benchmarks():
         print("\n--- Simple Filter (a > 50) ---")
 
         mean, std = timeit(lambda: bench_eager_filter(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_lazy_filter(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: bench_lazy_filter(df_numpy, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_eager_filter(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_lazy_filter(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: bench_lazy_filter(df_arrow, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
         # Chained filters
         print("\n--- Chained Filters (a > 50 AND b < 0.5) ---")
 
         mean, std = timeit(lambda: bench_eager_chained_filter(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_lazy_chained_filter(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: bench_lazy_chained_filter(df_numpy, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_eager_chained_filter(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_lazy_chained_filter(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: bench_lazy_chained_filter(df_arrow, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
 
 if __name__ == "__main__":

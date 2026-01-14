@@ -85,7 +85,9 @@ def eager_pipeline_filter_compute_filter(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def lazy_pipeline_filter_compute_filter(df: pd.DataFrame) -> pd.DataFrame:
+def lazy_pipeline_filter_compute_filter(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: Filter by region, compute total, filter by amount."""
     from pandas.lazy import col
 
@@ -98,7 +100,7 @@ def lazy_pipeline_filter_compute_filter(df: pd.DataFrame) -> pd.DataFrame:
     )
     # Step 3: Filter high-value orders
     lf = lf.filter(col("total") > 1000)
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 # =============================================================================
@@ -116,7 +118,9 @@ def eager_pipeline_complex_filter(df: pd.DataFrame) -> pd.DataFrame:
     return df[mask]
 
 
-def lazy_pipeline_complex_filter(df: pd.DataFrame) -> pd.DataFrame:
+def lazy_pipeline_complex_filter(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: Complex filter with multiple conditions."""
     from pandas.lazy import col
 
@@ -127,7 +131,7 @@ def lazy_pipeline_complex_filter(df: pd.DataFrame) -> pd.DataFrame:
         | ((col("year") == 2024) & (col("quantity") > 50))
     )
     lf = lf.filter(condition)
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 # =============================================================================
@@ -146,7 +150,9 @@ def eager_pipeline_multi_compute(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def lazy_pipeline_multi_compute(df: pd.DataFrame) -> pd.DataFrame:
+def lazy_pipeline_multi_compute(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: Compute multiple derived columns."""
     from pandas.lazy import col
 
@@ -162,7 +168,7 @@ def lazy_pipeline_multi_compute(df: pd.DataFrame) -> pd.DataFrame:
         (net / col("quantity")).alias("avg_unit_net"),
         (net > 500).alias("is_high_value"),
     )
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 # =============================================================================
@@ -184,7 +190,9 @@ def eager_pipeline_filter_select_compute(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def lazy_pipeline_filter_select_compute(df: pd.DataFrame) -> pd.DataFrame:
+def lazy_pipeline_filter_select_compute(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: Filter, select columns, then compute."""
     from pandas.lazy import col
 
@@ -194,7 +202,7 @@ def lazy_pipeline_filter_select_compute(df: pd.DataFrame) -> pd.DataFrame:
     lf = lf.with_columns(
         (col("quantity") * col("unit_price") * (1 - col("discount"))).alias("revenue")
     )
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 # =============================================================================
@@ -217,7 +225,9 @@ def eager_pipeline_string_ops(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def lazy_pipeline_string_ops(df: pd.DataFrame) -> pd.DataFrame:
+def lazy_pipeline_string_ops(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: String operations with filtering."""
     from pandas.lazy import col
 
@@ -230,7 +240,7 @@ def lazy_pipeline_string_ops(df: pd.DataFrame) -> pd.DataFrame:
     lf = lf.with_columns(
         (col("region_upper") + "_" + col("category")).alias("region_cat")
     )
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 # =============================================================================
@@ -248,7 +258,9 @@ def eager_pipeline_sequential_filters(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def lazy_pipeline_sequential_filters(df: pd.DataFrame) -> pd.DataFrame:
+def lazy_pipeline_sequential_filters(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: Multiple sequential filters (fusion opportunity)."""
     from pandas.lazy import col
 
@@ -258,7 +270,7 @@ def lazy_pipeline_sequential_filters(df: pd.DataFrame) -> pd.DataFrame:
     lf = lf.filter(col("quantity") > 20)
     lf = lf.filter(col("unit_price") > 100)
     lf = lf.filter(col("discount") < 0.2)
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 # =============================================================================
@@ -288,14 +300,16 @@ def eager_pipeline_wide_to_narrow(df: pd.DataFrame) -> pd.DataFrame:
     return result[["col_0", "col_1", "col_2"]]
 
 
-def lazy_pipeline_wide_to_narrow(df: pd.DataFrame) -> pd.DataFrame:
+def lazy_pipeline_wide_to_narrow(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: Filter wide DataFrame, select few columns (projection pushdown)."""
     from pandas.lazy import col
 
     lf = df.select()
     lf = lf.filter(col("filter_col") > 0.5)
     lf = lf.select("col_0", "col_1", "col_2")
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 def run_benchmarks():
@@ -321,91 +335,163 @@ def run_benchmarks():
         print("\n--- Pipeline 1: Filter → Compute → Filter ---")
 
         mean, std = timeit(lambda: eager_pipeline_filter_compute_filter(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_pipeline_filter_compute_filter(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_pipeline_filter_compute_filter(
+                df_numpy, use_physical_planner=True
+            )
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: eager_pipeline_filter_compute_filter(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_pipeline_filter_compute_filter(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_pipeline_filter_compute_filter(
+                df_arrow, use_physical_planner=True
+            )
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
         # Pipeline 2: Complex filter
         print("\n--- Pipeline 2: Complex OR filter ---")
 
         mean, std = timeit(lambda: eager_pipeline_complex_filter(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_pipeline_complex_filter(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_pipeline_complex_filter(df_numpy, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: eager_pipeline_complex_filter(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_pipeline_complex_filter(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_pipeline_complex_filter(df_arrow, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
         # Pipeline 3: Multiple computed columns
         print("\n--- Pipeline 3: 5 computed columns ---")
 
         mean, std = timeit(lambda: eager_pipeline_multi_compute(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_pipeline_multi_compute(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_pipeline_multi_compute(df_numpy, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: eager_pipeline_multi_compute(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_pipeline_multi_compute(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_pipeline_multi_compute(df_arrow, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
         # Pipeline 4: Filter -> Select -> Compute
         print("\n--- Pipeline 4: Filter → Select → Compute ---")
 
         mean, std = timeit(lambda: eager_pipeline_filter_select_compute(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_pipeline_filter_select_compute(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_pipeline_filter_select_compute(
+                df_numpy, use_physical_planner=True
+            )
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: eager_pipeline_filter_select_compute(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_pipeline_filter_select_compute(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_pipeline_filter_select_compute(
+                df_arrow, use_physical_planner=True
+            )
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
         # Pipeline 5: String operations
         print("\n--- Pipeline 5: String ops + filter ---")
 
         mean, std = timeit(lambda: eager_pipeline_string_ops(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_pipeline_string_ops(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_pipeline_string_ops(df_numpy, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: eager_pipeline_string_ops(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_pipeline_string_ops(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_pipeline_string_ops(df_arrow, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
         # Pipeline 6: Sequential filters
         print("\n--- Pipeline 6: 5 sequential filters (fusion) ---")
 
         mean, std = timeit(lambda: eager_pipeline_sequential_filters(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_pipeline_sequential_filters(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_pipeline_sequential_filters(
+                df_numpy, use_physical_planner=True
+            )
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: eager_pipeline_sequential_filters(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_pipeline_sequential_filters(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_pipeline_sequential_filters(
+                df_arrow, use_physical_planner=True
+            )
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
         # Pipeline 7: Wide to narrow
         print("\n--- Pipeline 7: Wide (50 cols) → Filter → Select 3 ---")
@@ -414,16 +500,30 @@ def run_benchmarks():
         df_wide_arrow = create_wide_data(n_rows, n_cols=50, use_arrow=True)
 
         mean, std = timeit(lambda: eager_pipeline_wide_to_narrow(df_wide_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_pipeline_wide_to_narrow(df_wide_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_pipeline_wide_to_narrow(
+                df_wide_numpy, use_physical_planner=True
+            )
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: eager_pipeline_wide_to_narrow(df_wide_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: lazy_pipeline_wide_to_narrow(df_wide_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: lazy_pipeline_wide_to_narrow(
+                df_wide_arrow, use_physical_planner=True
+            )
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
 
 if __name__ == "__main__":

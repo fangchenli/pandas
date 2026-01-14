@@ -48,10 +48,12 @@ def bench_eager_select_few(df: pd.DataFrame) -> pd.DataFrame:
     return df[["col_0", "col_1", "col_2"]]
 
 
-def bench_lazy_select_few(df: pd.DataFrame) -> pd.DataFrame:
+def bench_lazy_select_few(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: select 3 columns from 10."""
     lf = df.select("col_0", "col_1", "col_2")
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 def bench_eager_computed_column(df: pd.DataFrame) -> pd.DataFrame:
@@ -61,13 +63,15 @@ def bench_eager_computed_column(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def bench_lazy_computed_column(df: pd.DataFrame) -> pd.DataFrame:
+def bench_lazy_computed_column(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: add computed column."""
     from pandas.lazy import col
 
     lf = df.select()
     lf = lf.with_columns((col("col_0") + col("col_1") * 2).alias("computed"))
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 def bench_eager_multiple_computed(df: pd.DataFrame) -> pd.DataFrame:
@@ -79,7 +83,9 @@ def bench_eager_multiple_computed(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def bench_lazy_multiple_computed(df: pd.DataFrame) -> pd.DataFrame:
+def bench_lazy_multiple_computed(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: add multiple computed columns."""
     from pandas.lazy import col
 
@@ -89,7 +95,7 @@ def bench_lazy_multiple_computed(df: pd.DataFrame) -> pd.DataFrame:
         (col("col_2") - col("col_3")).alias("diff_23"),
         (col("col_4") * col("col_5")).alias("prod_45"),
     )
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 def bench_eager_filter_then_select(df: pd.DataFrame) -> pd.DataFrame:
@@ -98,14 +104,16 @@ def bench_eager_filter_then_select(df: pd.DataFrame) -> pd.DataFrame:
     return result[["col_0", "col_1", "col_2"]]
 
 
-def bench_lazy_filter_then_select(df: pd.DataFrame) -> pd.DataFrame:
+def bench_lazy_filter_then_select(
+    df: pd.DataFrame, use_physical_planner: bool = False
+) -> pd.DataFrame:
     """Lazy: filter then select (projection pushdown possible)."""
     from pandas.lazy import col
 
     lf = df.select()
     lf = lf.filter(col("col_0") > 0.5)
     lf = lf.select("col_0", "col_1", "col_2")
-    return lf.collect()
+    return lf.collect(use_physical_planner=use_physical_planner)
 
 
 def run_benchmarks():
@@ -128,61 +136,101 @@ def run_benchmarks():
         print("\n--- Select 3 columns from 10 ---")
 
         mean, std = timeit(lambda: bench_eager_select_few(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_lazy_select_few(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: bench_lazy_select_few(df_numpy, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_eager_select_few(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_lazy_select_few(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: bench_lazy_select_few(df_arrow, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
         # Single computed column
         print("\n--- Add computed column (col_0 + col_1 * 2) ---")
 
         mean, std = timeit(lambda: bench_eager_computed_column(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_lazy_computed_column(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: bench_lazy_computed_column(df_numpy, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_eager_computed_column(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_lazy_computed_column(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: bench_lazy_computed_column(df_arrow, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
         # Multiple computed columns
         print("\n--- Add 3 computed columns ---")
 
         mean, std = timeit(lambda: bench_eager_multiple_computed(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_lazy_multiple_computed(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: bench_lazy_multiple_computed(df_numpy, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_eager_multiple_computed(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_lazy_multiple_computed(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: bench_lazy_multiple_computed(df_arrow, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
         # Filter then select
         print("\n--- Filter then select (col_0 > 0.5, select 3 cols) ---")
 
         mean, std = timeit(lambda: bench_eager_filter_then_select(df_numpy))
-        print(f"Eager (NumPy):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_lazy_filter_then_select(df_numpy))
-        print(f"Lazy (NumPy):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: bench_lazy_filter_then_select(df_numpy, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_eager_filter_then_select(df_arrow))
-        print(f"Eager (Arrow):  {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
 
         mean, std = timeit(lambda: bench_lazy_filter_then_select(df_arrow))
-        print(f"Lazy (Arrow):   {mean:8.2f} ms ± {std:.2f} ms")
+        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
+
+        mean, std = timeit(
+            lambda: bench_lazy_filter_then_select(df_arrow, use_physical_planner=True)
+        )
+        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
 
 
 if __name__ == "__main__":

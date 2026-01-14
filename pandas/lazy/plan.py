@@ -16,14 +16,36 @@ if TYPE_CHECKING:
     from pandas.lazy.types import Schema
 
 
-@dataclass
 class LogicalPlan:
-    """Base class for logical plan nodes."""
+    """
+    Base class for logical plan nodes.
+
+    Note: This is not a dataclass to avoid inheritance issues with
+    the schema cache field.
+    """
+
+    # Cache for resolved schema
+    __slots__ = ("_cached_schema",)
+
+    def __init__(self) -> None:
+        self._cached_schema: Schema | None = None
 
     def resolve_schema(self) -> Schema:
-        """Resolve output schema for this plan node."""
+        """
+        Resolve output schema for this plan node.
+
+        Results are cached to avoid repeated computation during
+        physical planning.
+        """
+        if self._cached_schema is not None:
+            return self._cached_schema
+        self._cached_schema = self._resolve_schema_impl()
+        return self._cached_schema
+
+    def _resolve_schema_impl(self) -> Schema:
+        """Actual schema resolution - override in subclasses."""
         raise NotImplementedError(
-            f"{type(self).__name__} must implement resolve_schema()"
+            f"{type(self).__name__} must implement _resolve_schema_impl()"
         )
 
     def children(self) -> list[LogicalPlan]:
@@ -37,7 +59,10 @@ class DataFrameSource(LogicalPlan):
 
     df: DataFrame
 
-    def resolve_schema(self) -> Schema:
+    def __post_init__(self) -> None:
+        self._cached_schema = None
+
+    def _resolve_schema_impl(self) -> Schema:
         from pandas.lazy.types import Schema
 
         return Schema.from_dataframe(self.df)
@@ -57,7 +82,10 @@ class Project(LogicalPlan):
     input: LogicalPlan
     exprs: tuple[Expr, ...]
 
-    def resolve_schema(self) -> Schema:
+    def __post_init__(self) -> None:
+        self._cached_schema = None
+
+    def _resolve_schema_impl(self) -> Schema:
         from pandas.lazy.types import Schema
 
         input_schema = self.input.resolve_schema()
@@ -83,7 +111,10 @@ class Filter(LogicalPlan):
     input: LogicalPlan
     predicate: Expr
 
-    def resolve_schema(self) -> Schema:
+    def __post_init__(self) -> None:
+        self._cached_schema = None
+
+    def _resolve_schema_impl(self) -> Schema:
         return self.input.resolve_schema()
 
     def children(self) -> list[LogicalPlan]:
@@ -101,7 +132,10 @@ class Aggregate(LogicalPlan):
     group_by: tuple[Expr, ...]  # Grouping columns (empty for global agg)
     agg_exprs: tuple[Expr, ...]  # Aggregation expressions
 
-    def resolve_schema(self) -> Schema:
+    def __post_init__(self) -> None:
+        self._cached_schema = None
+
+    def _resolve_schema_impl(self) -> Schema:
         from pandas.lazy.expr import extract_output_name
         from pandas.lazy.types import (
             LazyDtype,
@@ -147,7 +181,10 @@ class Sort(LogicalPlan):
     by: tuple[Expr, ...]  # Sort keys
     descending: tuple[bool, ...]  # Descending flags for each key
 
-    def resolve_schema(self) -> Schema:
+    def __post_init__(self) -> None:
+        self._cached_schema = None
+
+    def _resolve_schema_impl(self) -> Schema:
         return self.input.resolve_schema()
 
     def children(self) -> list[LogicalPlan]:
@@ -173,7 +210,10 @@ class Limit(LogicalPlan):
     n: int
     offset: int = 0  # For skip/offset functionality
 
-    def resolve_schema(self) -> Schema:
+    def __post_init__(self) -> None:
+        self._cached_schema = None
+
+    def _resolve_schema_impl(self) -> Schema:
         return self.input.resolve_schema()
 
     def children(self) -> list[LogicalPlan]:
@@ -192,7 +232,10 @@ class Distinct(LogicalPlan):
     input: LogicalPlan
     subset: tuple[str, ...] | None = None  # Columns to consider for uniqueness
 
-    def resolve_schema(self) -> Schema:
+    def __post_init__(self) -> None:
+        self._cached_schema = None
+
+    def _resolve_schema_impl(self) -> Schema:
         return self.input.resolve_schema()
 
     def children(self) -> list[LogicalPlan]:
@@ -219,7 +262,10 @@ class Convert(LogicalPlan):
     input: LogicalPlan
     target_backend: str  # "arrow" | "numpy"
 
-    def resolve_schema(self) -> Schema:
+    def __post_init__(self) -> None:
+        self._cached_schema = None
+
+    def _resolve_schema_impl(self) -> Schema:
         # Schema unchanged, only backend representation changes
         return self.input.resolve_schema()
 
@@ -245,7 +291,10 @@ class TopK(LogicalPlan):
     by: tuple[Expr, ...]  # Sort keys
     descending: tuple[bool, ...]  # Descending flags for each key
 
-    def resolve_schema(self) -> Schema:
+    def __post_init__(self) -> None:
+        self._cached_schema = None
+
+    def _resolve_schema_impl(self) -> Schema:
         return self.input.resolve_schema()
 
     def children(self) -> list[LogicalPlan]:
@@ -275,7 +324,10 @@ class Join(LogicalPlan):
     how: str = "inner"  # inner, left, right, outer, cross
     suffix: tuple[str, str] = ("_x", "_y")  # Suffixes for overlapping columns
 
-    def resolve_schema(self) -> Schema:
+    def __post_init__(self) -> None:
+        self._cached_schema = None
+
+    def _resolve_schema_impl(self) -> Schema:
         from pandas.lazy.types import (
             LazyDtype,
             Schema,
