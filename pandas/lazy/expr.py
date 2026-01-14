@@ -274,6 +274,35 @@ class Expr:
         """Check if values are not null/NA: col("a").is_not_null()"""
         return Expr(Call("is_not_null", (self._node,)))
 
+    def isin(self, values: list | tuple | set) -> Expr:
+        """
+        Check if values are contained in a set of values.
+
+        Parameters
+        ----------
+        values : list, tuple, or set
+            The set of values to check membership against.
+
+        Returns
+        -------
+        Expr
+            Boolean expression indicating membership.
+
+        Examples
+        --------
+        >>> col("payment_type").isin([1, 2])
+        >>> col("region").isin(["North", "South", "East"])
+        """
+        # Convert to list for consistent handling
+        if isinstance(values, (set, tuple)):
+            values = list(values)
+        if not isinstance(values, list):
+            raise TypeError(
+                f"values must be a list, tuple, or set, got {type(values).__name__}"
+            )
+        # Pass values as a kwarg since it's a set, not a column reference
+        return Expr(Call("isin", (self._node,), {"values": values}))
+
     def fill_null(self, value: Any) -> Expr:
         """
         Fill null values with a replacement value.
@@ -676,6 +705,214 @@ class Expr:
         >>> col("value").cum_max().over("group")
         """
         return Expr(Call("cum_max", (self._node,)))
+
+    # -------------------------------------------------------------------------
+    # Rolling Window Operations
+    # -------------------------------------------------------------------------
+
+    def rolling_sum(self, window: int, min_periods: int | None = None) -> Expr:
+        """
+        Compute rolling sum over a window.
+
+        Parameters
+        ----------
+        window : int
+            Size of the rolling window.
+        min_periods : int or None, default None
+            Minimum number of observations required. Defaults to window size.
+
+        Returns
+        -------
+        Expr
+            Expression with rolling sums.
+
+        Examples
+        --------
+        >>> col("value").rolling_sum(window=5)
+        """
+        return Expr(
+            Call(
+                "rolling_sum",
+                (self._node,),
+                {"window": window, "min_periods": min_periods},
+            )
+        )
+
+    def rolling_mean(self, window: int, min_periods: int | None = None) -> Expr:
+        """
+        Compute rolling mean over a window.
+
+        Parameters
+        ----------
+        window : int
+            Size of the rolling window.
+        min_periods : int or None, default None
+            Minimum number of observations required. Defaults to window size.
+
+        Returns
+        -------
+        Expr
+            Expression with rolling means.
+
+        Examples
+        --------
+        >>> col("value").rolling_mean(window=5)
+        """
+        return Expr(
+            Call(
+                "rolling_mean",
+                (self._node,),
+                {"window": window, "min_periods": min_periods},
+            )
+        )
+
+    def rolling_min(self, window: int, min_periods: int | None = None) -> Expr:
+        """
+        Compute rolling minimum over a window.
+
+        Parameters
+        ----------
+        window : int
+            Size of the rolling window.
+        min_periods : int or None, default None
+            Minimum number of observations required. Defaults to window size.
+
+        Returns
+        -------
+        Expr
+            Expression with rolling minimums.
+
+        Examples
+        --------
+        >>> col("value").rolling_min(window=5)
+        """
+        return Expr(
+            Call(
+                "rolling_min",
+                (self._node,),
+                {"window": window, "min_periods": min_periods},
+            )
+        )
+
+    def rolling_max(self, window: int, min_periods: int | None = None) -> Expr:
+        """
+        Compute rolling maximum over a window.
+
+        Parameters
+        ----------
+        window : int
+            Size of the rolling window.
+        min_periods : int or None, default None
+            Minimum number of observations required. Defaults to window size.
+
+        Returns
+        -------
+        Expr
+            Expression with rolling maximums.
+
+        Examples
+        --------
+        >>> col("value").rolling_max(window=5)
+        """
+        return Expr(
+            Call(
+                "rolling_max",
+                (self._node,),
+                {"window": window, "min_periods": min_periods},
+            )
+        )
+
+    def rolling_std(
+        self, window: int, min_periods: int | None = None, ddof: int = 1
+    ) -> Expr:
+        """
+        Compute rolling standard deviation over a window.
+
+        Parameters
+        ----------
+        window : int
+            Size of the rolling window.
+        min_periods : int or None, default None
+            Minimum number of observations required. Defaults to window size.
+        ddof : int, default 1
+            Delta degrees of freedom.
+
+        Returns
+        -------
+        Expr
+            Expression with rolling standard deviations.
+
+        Examples
+        --------
+        >>> col("value").rolling_std(window=5)
+        """
+        return Expr(
+            Call(
+                "rolling_std",
+                (self._node,),
+                {"window": window, "min_periods": min_periods, "ddof": ddof},
+            )
+        )
+
+    def rolling_var(
+        self, window: int, min_periods: int | None = None, ddof: int = 1
+    ) -> Expr:
+        """
+        Compute rolling variance over a window.
+
+        Parameters
+        ----------
+        window : int
+            Size of the rolling window.
+        min_periods : int or None, default None
+            Minimum number of observations required. Defaults to window size.
+        ddof : int, default 1
+            Delta degrees of freedom.
+
+        Returns
+        -------
+        Expr
+            Expression with rolling variances.
+
+        Examples
+        --------
+        >>> col("value").rolling_var(window=5)
+        """
+        return Expr(
+            Call(
+                "rolling_var",
+                (self._node,),
+                {"window": window, "min_periods": min_periods, "ddof": ddof},
+            )
+        )
+
+    def rolling_median(self, window: int, min_periods: int | None = None) -> Expr:
+        """
+        Compute rolling median over a window.
+
+        Parameters
+        ----------
+        window : int
+            Size of the rolling window.
+        min_periods : int or None, default None
+            Minimum number of observations required. Defaults to window size.
+
+        Returns
+        -------
+        Expr
+            Expression with rolling medians.
+
+        Examples
+        --------
+        >>> col("value").rolling_median(window=5)
+        """
+        return Expr(
+            Call(
+                "rolling_median",
+                (self._node,),
+                {"window": window, "min_periods": min_periods},
+            )
+        )
 
     # -------------------------------------------------------------------------
     # Accessors

@@ -144,6 +144,10 @@ class Evaluator:
 
             return pd.notna(args[0])
 
+        elif func == "isin":
+            values = node.kwargs.get("values", [])
+            return args[0].isin(values)
+
         # String operations
         elif func == "str_lower":
             return args[0].str.lower()
@@ -284,6 +288,44 @@ class Evaluator:
 
         elif func == "cum_max":
             return args[0].cummax()
+
+        # Rolling window operations
+        elif func == "rolling_sum":
+            window = node.kwargs.get("window")
+            min_periods = node.kwargs.get("min_periods")
+            return args[0].rolling(window, min_periods=min_periods).sum()
+
+        elif func == "rolling_mean":
+            window = node.kwargs.get("window")
+            min_periods = node.kwargs.get("min_periods")
+            return args[0].rolling(window, min_periods=min_periods).mean()
+
+        elif func == "rolling_min":
+            window = node.kwargs.get("window")
+            min_periods = node.kwargs.get("min_periods")
+            return args[0].rolling(window, min_periods=min_periods).min()
+
+        elif func == "rolling_max":
+            window = node.kwargs.get("window")
+            min_periods = node.kwargs.get("min_periods")
+            return args[0].rolling(window, min_periods=min_periods).max()
+
+        elif func == "rolling_std":
+            window = node.kwargs.get("window")
+            min_periods = node.kwargs.get("min_periods")
+            ddof = node.kwargs.get("ddof", 1)
+            return args[0].rolling(window, min_periods=min_periods).std(ddof=ddof)
+
+        elif func == "rolling_var":
+            window = node.kwargs.get("window")
+            min_periods = node.kwargs.get("min_periods")
+            ddof = node.kwargs.get("ddof", 1)
+            return args[0].rolling(window, min_periods=min_periods).var(ddof=ddof)
+
+        elif func == "rolling_median":
+            window = node.kwargs.get("window")
+            min_periods = node.kwargs.get("min_periods")
+            return args[0].rolling(window, min_periods=min_periods).median()
 
         else:
             raise NotImplementedError(f"Function not implemented: {func}")

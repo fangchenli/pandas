@@ -224,6 +224,25 @@ class ArrayEvaluator:
             # Call kernel directly
             return kernel(*converted_args, **node.kwargs)
 
+        # If Arrow backend doesn't have kernel, try NumPy kernel with conversion
+        if backend == "arrow":
+            numpy_kernel = get_kernel(func, "numpy")
+            if numpy_kernel is not None:
+                # Convert Arrow inputs to NumPy, call kernel, convert back to Arrow
+                converted_args = []
+                for arg in args:
+                    if isinstance(arg, (pa.Array, pa.ChunkedArray)):
+                        converted_args.append(ensure_backend(arg, "numpy"))
+                    elif isinstance(arg, np.ndarray):
+                        converted_args.append(arg)
+                    else:
+                        # Scalar - keep as is
+                        converted_args.append(arg)
+
+                result = numpy_kernel(*converted_args, **node.kwargs)
+                # Convert result back to Arrow
+                return pa.array(result)
+
         # Fall back to manual implementation for unsupported operations
         return self._fallback_evaluate_call(node, args, backend)
 

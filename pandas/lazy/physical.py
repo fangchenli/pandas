@@ -106,6 +106,14 @@ class ExecutionContext:
     index_names: list[str | None] = field(default_factory=list)
     index_is_multi: bool = False
 
+    # Parallelism configuration
+    # Number of workers for parallel execution (None = auto based on CPU count)
+    n_workers: int | None = None
+    # Minimum number of expressions before parallelizing (overhead threshold)
+    # ThreadPoolExecutor has ~1-2ms overhead per submission, so only parallelize
+    # when there are enough heavy expressions to amortize this cost
+    parallel_threshold: int = 8
+
 
 # =============================================================================
 # Scan Nodes (Data Sources)
@@ -179,15 +187,41 @@ class PhysicalProject(PhysicalPlan):
         import numpy as np
         import pyarrow as pa
 
-        from pandas.lazy.backends.array_eval import ArrayEvaluator
         from pandas.lazy.backends.types import is_index_col
-        from pandas.lazy.expr import extract_output_name
 
         input_arrays = self.input.execute(context)
 
-        # Use ArrayEvaluator for direct array-based evaluation
-        # Note: pooling_strategy only affects NumPy ops; Arrow uses its own memory pools
+        result: ArrayDict = {}
+
+        # Preserve index columns
+        for name, arr in input_arrays.items():
+            if is_index_col(name):
+                result[name] = arr
+
+        # Determine if we should parallelize
+        n_exprs = len(self.exprs)
+        use_parallel = n_exprs >= context.parallel_threshold
+
+        if use_parallel:
+            # Parallel expression evaluation using ThreadPoolExecutor
+            result.update(self._evaluate_parallel(input_arrays, context, np, pa))
+        else:
+            # Sequential evaluation for small number of expressions
+            result.update(self._evaluate_sequential(input_arrays, context, np, pa))
+
+        return result
+
+    def _evaluate_sequential(
+        self,
+        input_arrays: ArrayDict,
+        context: ExecutionContext,
+        np,
+        pa,
+    ) -> ArrayDict:
+        """Evaluate expressions sequentially."""
+        from pandas.lazy.backends.array_eval import ArrayEvaluator
         from pandas.lazy.backends.memory_pool import PoolingStrategy
+        from pandas.lazy.expr import extract_output_name
 
         evaluator = ArrayEvaluator(
             input_arrays,
@@ -200,22 +234,67 @@ class PhysicalProject(PhysicalPlan):
         )
 
         result: ArrayDict = {}
+        arr_len = len(next(iter(input_arrays.values()))) if input_arrays else 0
 
-        # Preserve index columns
-        for name, arr in input_arrays.items():
-            if is_index_col(name):
-                result[name] = arr
-
-        # Evaluate expressions
         for expr in self.exprs:
             name = extract_output_name(expr)
             value = evaluator.evaluate(expr._ir)
             # Ensure result is an array (not scalar for column expressions)
             if not isinstance(value, (np.ndarray, pa.Array, pa.ChunkedArray)):
-                # Scalar result - broadcast to array length
-                arr_len = len(next(iter(input_arrays.values())))
                 value = np.full(arr_len, value)
             result[name] = value
+
+        return result
+
+    def _evaluate_parallel(
+        self,
+        input_arrays: ArrayDict,
+        context: ExecutionContext,
+        np,
+        pa,
+    ) -> ArrayDict:
+        """Evaluate expressions in parallel using ThreadPoolExecutor."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        from pandas.lazy.backends.array_eval import ArrayEvaluator
+        from pandas.lazy.backends.memory_pool import PoolingStrategy
+        from pandas.lazy.expr import extract_output_name
+
+        arr_len = len(next(iter(input_arrays.values()))) if input_arrays else 0
+
+        def evaluate_expr(expr):
+            """Evaluate a single expression (thread worker function)."""
+            # Each thread gets its own evaluator to avoid contention
+            evaluator = ArrayEvaluator(
+                input_arrays,
+                preferred_backend=self.backend,
+                pooling_strategy=(
+                    PoolingStrategy.SCRATCH
+                    if self.backend != "arrow"
+                    else PoolingStrategy.NONE
+                ),
+            )
+            name = extract_output_name(expr)
+            value = evaluator.evaluate(expr._ir)
+            # Ensure result is an array
+            if not isinstance(value, (np.ndarray, pa.Array, pa.ChunkedArray)):
+                value = np.full(arr_len, value)
+            return name, value
+
+        # Determine worker count
+        import os
+
+        n_workers = context.n_workers
+        if n_workers is None:
+            # Use CPU count but cap at number of expressions
+            n_workers = min(os.cpu_count() or 4, len(self.exprs))
+
+        result: ArrayDict = {}
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            futures = [executor.submit(evaluate_expr, expr) for expr in self.exprs]
+            for future in futures:
+                name, value = future.result()
+                result[name] = value
 
         return result
 
@@ -1131,8 +1210,8 @@ class PhysicalHashJoin(PhysicalPlan):
         )
         from pandas.lazy.backends.types import is_index_col
 
-        left_arrays = self.left.execute(context)
-        right_arrays = self.right.execute(context)
+        # Execute left and right sides in parallel
+        left_arrays, right_arrays = self._execute_sides_parallel(context)
 
         # Exclude index columns from join
         left_data = {k: v for k, v in left_arrays.items() if not is_index_col(k)}
@@ -1316,6 +1395,33 @@ class PhysicalHashJoin(PhysicalPlan):
         result_df = left_df.merge(right_df, how="cross", suffixes=self.suffix)
         arrays, _, _ = dataframe_to_arrays(result_df)
         return {k: v for k, v in arrays.items() if not is_index_col(k)}
+
+    def _execute_sides_parallel(
+        self, context: ExecutionContext
+    ) -> tuple[ArrayDict, ArrayDict]:
+        """
+        Execute left and right sides of join in parallel.
+
+        For large plans, this can provide significant speedup by overlapping
+        the execution of independent subplans.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        def execute_left():
+            return self.left.execute(context)
+
+        def execute_right():
+            return self.right.execute(context)
+
+        # Use ThreadPoolExecutor with 2 workers for left and right
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            left_future = executor.submit(execute_left)
+            right_future = executor.submit(execute_right)
+
+            left_arrays = left_future.result()
+            right_arrays = right_future.result()
+
+        return left_arrays, right_arrays
 
     def children(self) -> list[PhysicalPlan]:
         return [self.left, self.right]

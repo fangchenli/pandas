@@ -138,6 +138,28 @@ def arrow_coalesce(*arrays: PyArrowArray) -> PyArrowArray:
     return pc.coalesce(*arrays)
 
 
+@register_kernel("isin", "arrow")
+def arrow_isin(arr: PyArrowArray, *, values: list) -> PyArrowArray:
+    """
+    Check if values are contained in a set of values.
+
+    Parameters
+    ----------
+    arr : PyArrowArray
+        Input array.
+    values : list
+        Set of values to check membership against.
+
+    Returns
+    -------
+    PyArrowArray
+        Boolean array indicating membership.
+    """
+    # Convert values list to Arrow array for is_in
+    value_set = pa.array(values)
+    return pc.is_in(arr, value_set)
+
+
 # =============================================================================
 # Arithmetic Operations
 # =============================================================================

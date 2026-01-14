@@ -487,22 +487,38 @@ class Optimizer:
             SortLimitToTopK(),
         ]
 
-    def optimize(self, plan: LogicalPlan) -> LogicalPlan:
+    def optimize(self, plan: LogicalPlan, max_iterations: int = 3) -> LogicalPlan:
         """
-        Apply all optimization passes.
+        Apply all optimization passes iteratively until fixpoint.
+
+        The optimizer runs passes multiple times because one pass may create
+        new optimization opportunities for another. For example:
+        - PredicatePushdown may expose new opportunities for ProjectionPruning
+        - FilterFusion after pushdown may enable SortLimitToTopK
 
         Parameters
         ----------
         plan : LogicalPlan
             The plan to optimize.
+        max_iterations : int, default 3
+            Maximum number of optimization iterations. Each iteration runs
+            all passes once. Stops early if no changes are made.
 
         Returns
         -------
         LogicalPlan
             The optimized plan.
         """
-        for pass_ in self.passes:
-            plan = pass_.optimize(plan)
+        for _ in range(max_iterations):
+            prev_plan = plan
+            for pass_ in self.passes:
+                plan = pass_.optimize(plan)
+
+            # Check if plan changed (simple equality check on repr)
+            # This is a heuristic - full structural equality would be more robust
+            if repr(plan) == repr(prev_plan):
+                break
+
         return plan
 
 

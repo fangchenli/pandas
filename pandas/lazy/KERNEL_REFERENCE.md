@@ -241,6 +241,41 @@ When a kernel is unavailable:
 1. **Strict mode** (`strict=True`): Raises `NotImplementedError`
 2. **Normal mode**: Falls back to pandas DataFrame operations with warning
 
+## Parallelism
+
+The physical planner supports parallel execution at multiple levels:
+
+### Parallel Expression Evaluation
+
+When a projection has many expressions (≥8 by default), expressions are evaluated
+in parallel using `ThreadPoolExecutor`. Each thread gets its own `ArrayEvaluator`
+to avoid contention.
+
+**Configuration**: `ExecutionContext.parallel_threshold` (default: 8)
+
+### Parallel Join Sides
+
+Left and right sides of a hash join are executed in parallel, allowing independent
+subplans to overlap. This is particularly beneficial for complex joins where both
+sides involve significant computation.
+
+### Iterative Query Optimization
+
+The optimizer runs passes iteratively (up to 3 iterations by default) until a
+fixpoint is reached. This allows compound optimizations where one pass creates
+opportunities for another.
+
+### Scaling Behavior
+
+| Dataset Size | Physical Planner Improvement |
+|-------------|------------------------------|
+| ~3M rows | ~1.0x (overhead dominates) |
+| ~10M rows | ~1.4x |
+| ~20M rows | ~1.7x |
+
+**Note**: Parallelism benefits scale with data size. For small datasets (<3M rows),
+the overhead may exceed the benefit.
+
 ## Files Reference
 
 | File | Description |

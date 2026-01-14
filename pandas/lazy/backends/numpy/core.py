@@ -182,6 +182,26 @@ def numpy_fill_null(arr: np.ndarray, fill_value) -> np.ndarray:
     return result
 
 
+@register_kernel("isin", "numpy")
+def numpy_isin(arr: np.ndarray, *, values: list) -> np.ndarray:
+    """
+    Check if values are contained in a set of values.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input array.
+    values : list
+        Set of values to check membership against.
+
+    Returns
+    -------
+    np.ndarray
+        Boolean array indicating membership.
+    """
+    return np.isin(arr, values)
+
+
 # =============================================================================
 # Aggregation Operations
 # =============================================================================
