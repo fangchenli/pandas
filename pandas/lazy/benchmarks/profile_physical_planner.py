@@ -214,7 +214,7 @@ def profile_backend_selection():
     print("BACKEND SELECTION PROFILING")
     print("=" * 70)
 
-    from pandas.lazy.optimize.engine import decide_expr_backend
+    from pandas.lazy.backends.router import decide_expr_backend
 
     # Simulate many backend decisions
     funcs = ["add", "multiply", "divide", "filter", "str_lower", "sum", "mean"]

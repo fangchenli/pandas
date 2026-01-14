@@ -381,17 +381,29 @@ def arrays_to_dataframe(
     # Separate index columns from data columns
     data_cols = {name: arr for name, arr in arrays.items() if not is_index_col(name)}
 
-    # Convert arrays to pandas-compatible format
-    def to_pandas_array(arr):
-        """Convert array to pandas-compatible format."""
-        if isinstance(arr, (pa.Array, pa.ChunkedArray)):
-            # Arrow to pandas - use zero_copy_only=False for safety
-            return arr.to_pandas()
-        return arr
+    if not data_cols:
+        # Empty DataFrame
+        return pd.DataFrame()
 
-    # Build DataFrame from data columns
-    pandas_data = {name: to_pandas_array(arr) for name, arr in data_cols.items()}
-    df = pd.DataFrame(pandas_data)
+    # Check if all data columns are Arrow-backed for batch conversion
+    all_arrow = all(
+        isinstance(arr, (pa.Array, pa.ChunkedArray)) for arr in data_cols.values()
+    )
+
+    if all_arrow:
+        # Batch convert using Arrow Table - more efficient than per-column
+        table = pa.table(data_cols)
+        df = table.to_pandas()
+    else:
+        # Mixed or NumPy arrays - convert individually
+        def to_pandas_array(arr):
+            """Convert array to pandas-compatible format."""
+            if isinstance(arr, (pa.Array, pa.ChunkedArray)):
+                return arr.to_pandas()
+            return arr
+
+        pandas_data = {name: to_pandas_array(arr) for name, arr in data_cols.items()}
+        df = pd.DataFrame(pandas_data)
 
     # Always use fresh RangeIndex for lazy execution results
     # This matches the expected behavior where filter/sort/distinct reset the index
