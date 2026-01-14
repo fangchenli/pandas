@@ -186,7 +186,18 @@ class PhysicalProject(PhysicalPlan):
         input_arrays = self.input.execute(context)
 
         # Use ArrayEvaluator for direct array-based evaluation
-        evaluator = ArrayEvaluator(input_arrays, preferred_backend=self.backend)
+        # Note: pooling_strategy only affects NumPy ops; Arrow uses its own memory pools
+        from pandas.lazy.backends.memory_pool import PoolingStrategy
+
+        evaluator = ArrayEvaluator(
+            input_arrays,
+            preferred_backend=self.backend,
+            pooling_strategy=(
+                PoolingStrategy.SCRATCH
+                if self.backend != "arrow"
+                else PoolingStrategy.NONE
+            ),
+        )
 
         result: ArrayDict = {}
 
