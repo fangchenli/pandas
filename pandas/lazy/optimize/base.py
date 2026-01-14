@@ -58,16 +58,23 @@ class Optimizer:
         IMPORTANT: Order matters! Rationale for each position:
 
         1. ConstantFolding - Evaluate constants first to simplify expressions
-        2. FilterFusion - Combine filters first so pushdown sees single filters
-        3. PredicatePushdown - Push filters down while plan is still wide
+        2. DeadCodeElimination - Remove no-op nodes early (Filter(True), etc.)
+        3. FilterFusion - Combine filters first so pushdown sees single filters
+        4. PredicatePushdown - Push filters down while plan is still wide
            (before projection pruning removes columns that filters might need)
-        4. ProjectionPruning - After pushdown, so we don't prune filter-needed cols
-        5. LimitPushdown - After pruning; push limits toward sources
-        6. SortLimitToTopK - After limit pushdown, combine Sort+Limit into TopK
+        5. AggregatePushdown - Push aggregates through pass-through projects
+        6. ProjectionPruning - After pushdown, so we don't prune needed columns
+        7. LimitPushdown - After pruning; push limits toward sources
+        8. SortLimitToTopK - After limit pushdown, combine Sort+Limit into TopK
+
+        Note: CommonSubexpressionElimination is available but not in default
+        passes because it requires evaluator support for intermediate columns.
         """
         # Import here to avoid circular imports
         from pandas.lazy.optimize.passes import (
+            AggregatePushdown,
             ConstantFolding,
+            DeadCodeElimination,
             FilterFusion,
             LimitPushdown,
             PredicatePushdown,
@@ -77,8 +84,10 @@ class Optimizer:
 
         return [
             ConstantFolding(),
+            DeadCodeElimination(),
             FilterFusion(),
             PredicatePushdown(),
+            AggregatePushdown(),
             ProjectionPruning(),
             LimitPushdown(),
             SortLimitToTopK(),

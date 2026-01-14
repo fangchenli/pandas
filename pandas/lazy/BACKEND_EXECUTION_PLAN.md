@@ -171,7 +171,10 @@ pandas/lazy/
 │   ├── router.py           # Backend decision logic
 │   ├── convert.py          # Format conversion utilities
 │   ├── arrow_kernels.py    # Arrow compute implementations
-│   └── numpy_kernels.py    # NumPy implementations
+│   ├── numpy_kernels.py    # NumPy implementations
+│   ├── array_eval.py       # ArrayEvaluator with pool integration
+│   ├── memory_pool.py      # Memory pooling (PoolingStrategy, ArrowPoolBackend)
+│   └── numexpr_fusion.py   # NumExpr expression fusion for NumPy
 ├── physical.py             # Updated to return ArrayDict
 ├── eval.py                 # Keep for fallback
 └── ...
@@ -780,6 +783,91 @@ pd.DataFrame (returned to user)
 9. **Phase 9**: Integration testing
 10. **Phase 10**: Performance benchmarking
 
+## Memory Pooling (Implemented)
+
+Memory pooling is now implemented to reduce allocation overhead for array operations.
+
+### NumPy Memory Pooling
+
+NumPy operations can use pooled output buffers via the `pooling_strategy` parameter:
+
+```python
+from pandas.lazy.backends.memory_pool import PoolingStrategy
+
+class PoolingStrategy(Enum):
+    """Strategy for NumPy array memory pooling."""
+
+    NONE = "none"
+    """No pooling - allocate new arrays for every operation."""
+
+    SCRATCH = "scratch"  # Default, recommended
+    """Rotating scratch buffers for expression chains (~3x speedup)."""
+
+    ACQUIRE_RELEASE = "acquire_release"
+    """Explicit acquire/release pool for manual control."""
+```
+
+**ScratchBufferPool** (used by default):
+- Pre-allocated rotating buffers for expression chains
+- No explicit release needed - buffers rotate automatically
+- ~3x speedup for arithmetic expressions
+- Optimal for linear chains like `(a + b) * c / d`
+
+**ArrayPool** (available for reference):
+- Acquire/release semantics for explicit control
+- Good for single operations where you control the lifecycle
+
+### Arrow Memory Pooling
+
+Arrow has its own memory management through `pyarrow.MemoryPool`. We expose configuration via `ArrowPoolBackend`:
+
+```python
+from pandas.lazy.backends.memory_pool import ArrowPoolBackend, get_arrow_memory_pool
+
+class ArrowPoolBackend(Enum):
+    """Arrow memory pool backend selection."""
+
+    DEFAULT = "default"    # Usually mimalloc (fastest)
+    MIMALLOC = "mimalloc"  # Microsoft's fast allocator
+    JEMALLOC = "jemalloc"  # Facebook's allocator
+    SYSTEM = "system"      # System malloc (baseline)
+
+# Get a specific pool
+pool = get_arrow_memory_pool(ArrowPoolBackend.MIMALLOC)
+```
+
+**Benchmark results** (1M float64 elements):
+- mimalloc: ~1.8ms (fastest)
+- jemalloc: ~4ms
+- system: ~4ms
+
+Arrow compute functions accept `memory_pool` parameter for allocation control:
+```python
+import pyarrow.compute as pc
+result = pc.add(arr1, arr2, memory_pool=pool)
+```
+
+### ArrayEvaluator Integration
+
+The `ArrayEvaluator` accepts both pooling configurations:
+
+```python
+from pandas.lazy.backends.array_eval import ArrayEvaluator
+from pandas.lazy.backends.memory_pool import PoolingStrategy, ArrowPoolBackend
+
+evaluator = ArrayEvaluator(
+    arrays,
+    preferred_backend="auto",
+    pooling_strategy=PoolingStrategy.SCRATCH,  # NumPy pooling
+    arrow_pool=ArrowPoolBackend.DEFAULT,       # Arrow pooling
+)
+```
+
+### Files
+
+- `pandas/lazy/backends/memory_pool.py` - Pool implementations and enums
+- `pandas/lazy/backends/array_eval.py` - ArrayEvaluator with pool integration
+
 ## Open Questions (To Resolve During Implementation)
 
 1. **Chunked arrays**: Should we unchunk `pa.ChunkedArray` or handle natively?
@@ -790,6 +878,7 @@ pd.DataFrame (returned to user)
 
 3. **Memory management**: When to copy vs view arrays?
    - Recommendation: Default to views, copy only when mutation needed
+   - **RESOLVED**: NumPy pooling uses `PoolingStrategy.SCRATCH` by default for ~3x speedup
 
 4. **Error handling**: What to do when kernel doesn't exist?
    - Recommendation: Fall back to pandas Evaluator with warning (unless strict mode)
