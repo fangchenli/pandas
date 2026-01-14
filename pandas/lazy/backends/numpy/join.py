@@ -2,44 +2,24 @@
 NumPy Join kernel implementations.
 
 This module contains join operations (inner, left, right, outer, cross).
+
+Uses vectorized factorize-based composite key creation for performance.
 """
 
 import numpy as np
 
+from pandas import factorize
 from pandas.lazy.backends import register_kernel
 
 # Join Operations
 # =============================================================================
 
 
-def _build_hash_index(keys: np.ndarray) -> dict:
+def _create_composite_key_vectorized(arrays: list[np.ndarray]) -> np.ndarray:
     """
-    Build a hash index mapping key values to row indices.
+    Create composite key codes from multiple arrays using vectorized factorize.
 
-    Parameters
-    ----------
-    keys : np.ndarray
-        Array of keys (can be object array for composite keys).
-
-    Returns
-    -------
-    dict
-        Mapping from key value to list of row indices.
-    """
-    index = {}
-    for i, key in enumerate(keys):
-        # Make hashable
-        if isinstance(key, np.ndarray):
-            key = tuple(key)
-        if key not in index:
-            index[key] = []
-        index[key].append(i)
-    return index
-
-
-def _create_composite_key(arrays: list[np.ndarray]) -> np.ndarray:
-    """
-    Create a composite key from multiple arrays.
+    This is O(n) per column with no Python loops over rows.
 
     Parameters
     ----------
@@ -49,16 +29,253 @@ def _create_composite_key(arrays: list[np.ndarray]) -> np.ndarray:
     Returns
     -------
     np.ndarray
-        Object array of tuples representing composite keys.
+        Integer array of composite key codes.
     """
-    if len(arrays) == 1:
-        return arrays[0]
+    if len(arrays) == 0:
+        return np.array([], dtype=np.int64)
 
     n = len(arrays[0])
-    composite = np.empty(n, dtype=object)
-    for i in range(n):
-        composite[i] = tuple(arr[i] for arr in arrays)
+    if n == 0:
+        return np.array([], dtype=np.int64)
+
+    if len(arrays) == 1:
+        # Single key - just factorize it
+        codes, _ = factorize(arrays[0], sort=False)
+        return codes.astype(np.int64)
+
+    # Multiple keys - create composite codes using factorize
+    # Similar to groupby: code0 + code1*n0 + code2*n0*n1 + ...
+    all_codes = []
+    multipliers = []
+    current_multiplier = 1
+
+    for arr in arrays:
+        codes, uniques = factorize(arr, sort=False)
+        all_codes.append(codes)
+        multipliers.append(current_multiplier)
+        current_multiplier *= len(uniques) + 1  # +1 for potential -1 codes (NA)
+
+    # Create composite codes vectorized
+    composite = np.zeros(n, dtype=np.int64)
+    for codes, mult in zip(all_codes, multipliers, strict=False):
+        # Handle -1 codes (NA values) by shifting to positive
+        shifted_codes = (codes + 1).astype(np.int64)
+        composite += shifted_codes * mult
+
     return composite
+
+
+def _build_right_index_vectorized(
+    right_codes: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Build index structures for right table using vectorized operations.
+
+    Returns
+    -------
+    tuple
+        (unique_codes, code_starts, code_counts) for O(1) lookup
+    """
+    if len(right_codes) == 0:
+        return (
+            np.array([], dtype=np.int64),
+            np.array([], dtype=np.int64),
+            np.array([], dtype=np.int64),
+        )
+
+    # Sort right codes to group identical keys together
+    sort_indices = np.argsort(right_codes)
+    sorted_codes = right_codes[sort_indices]
+
+    # Find unique codes and their positions
+    unique_mask = np.concatenate([[True], sorted_codes[1:] != sorted_codes[:-1]])
+    unique_codes = sorted_codes[unique_mask]
+    unique_positions = np.where(unique_mask)[0]
+
+    # Count occurrences of each unique code
+    counts = np.diff(np.concatenate([unique_positions, [len(sorted_codes)]]))
+
+    return unique_codes, sort_indices, unique_positions, counts
+
+
+def _vectorized_inner_join(
+    left_codes: np.ndarray,
+    right_codes: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Perform inner join matching using vectorized operations.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        (left_indices, right_indices) for matched rows
+    """
+    n_left = len(left_codes)
+    n_right = len(right_codes)
+
+    if n_left == 0 or n_right == 0:
+        return np.array([], dtype=np.intp), np.array([], dtype=np.intp)
+
+    # Build index on right table
+    unique_codes, right_sort_idx, unique_pos, counts = _build_right_index_vectorized(
+        right_codes
+    )
+
+    if len(unique_codes) == 0:
+        return np.array([], dtype=np.intp), np.array([], dtype=np.intp)
+
+    # For each left code, find matching right codes using searchsorted
+    # searchsorted gives us the position in unique_codes where left_code would go
+    insert_pos = np.searchsorted(unique_codes, left_codes)
+
+    # Check which left codes actually match
+    valid_match = (insert_pos < len(unique_codes)) & (
+        unique_codes[np.minimum(insert_pos, len(unique_codes) - 1)] == left_codes
+    )
+
+    # For matched codes, we need to expand based on counts
+    matched_left_idx = np.where(valid_match)[0]
+    if len(matched_left_idx) == 0:
+        return np.array([], dtype=np.intp), np.array([], dtype=np.intp)
+
+    matched_insert_pos = insert_pos[valid_match]
+    matched_counts = counts[matched_insert_pos]
+    matched_starts = unique_pos[matched_insert_pos]
+
+    # Total result size
+    total_matches = matched_counts.sum()
+
+    # Build result indices
+    left_indices = np.repeat(matched_left_idx, matched_counts)
+
+    # Build right indices - need to expand ranges
+    right_indices = np.empty(total_matches, dtype=np.intp)
+    pos = 0
+    for i, (start, count) in enumerate(
+        zip(matched_starts, matched_counts, strict=False)
+    ):
+        right_indices[pos : pos + count] = right_sort_idx[start : start + count]
+        pos += count
+
+    return left_indices, right_indices
+
+
+def _vectorized_left_join(
+    left_codes: np.ndarray,
+    right_codes: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Perform left join matching using vectorized operations.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        (left_indices, right_indices) where right_indices=-1 means no match
+    """
+    n_left = len(left_codes)
+
+    if n_left == 0:
+        return np.array([], dtype=np.intp), np.array([], dtype=np.intp)
+
+    if len(right_codes) == 0:
+        # All left rows, no matches
+        return np.arange(n_left, dtype=np.intp), np.full(n_left, -1, dtype=np.intp)
+
+    # Build index on right table
+    unique_codes, right_sort_idx, unique_pos, counts = _build_right_index_vectorized(
+        right_codes
+    )
+
+    # Find matches
+    insert_pos = np.searchsorted(unique_codes, left_codes)
+    valid_match = (insert_pos < len(unique_codes)) & (
+        unique_codes[np.minimum(insert_pos, len(unique_codes) - 1)] == left_codes
+    )
+
+    # Separate matched and unmatched
+    matched_mask = valid_match
+    unmatched_mask = ~valid_match
+
+    # For matched: expand based on counts
+    matched_left_idx = np.where(matched_mask)[0]
+    unmatched_left_idx = np.where(unmatched_mask)[0]
+
+    if len(matched_left_idx) == 0:
+        # No matches - all left rows with -1 right
+        return np.arange(n_left, dtype=np.intp), np.full(n_left, -1, dtype=np.intp)
+
+    matched_insert_pos = insert_pos[matched_mask]
+    matched_counts = counts[matched_insert_pos]
+    matched_starts = unique_pos[matched_insert_pos]
+
+    # Build matched indices
+    total_matched = matched_counts.sum()
+    matched_left = np.repeat(matched_left_idx, matched_counts)
+    matched_right = np.empty(total_matched, dtype=np.intp)
+    pos = 0
+    for start, count in zip(matched_starts, matched_counts, strict=False):
+        matched_right[pos : pos + count] = right_sort_idx[start : start + count]
+        pos += count
+
+    # Combine matched and unmatched
+    n_unmatched = len(unmatched_left_idx)
+    total_rows = total_matched + n_unmatched
+
+    left_indices = np.empty(total_rows, dtype=np.intp)
+    right_indices = np.empty(total_rows, dtype=np.intp)
+
+    left_indices[:total_matched] = matched_left
+    right_indices[:total_matched] = matched_right
+    left_indices[total_matched:] = unmatched_left_idx
+    right_indices[total_matched:] = -1
+
+    # Sort by left index to maintain order
+    sort_order = np.argsort(left_indices)
+    return left_indices[sort_order], right_indices[sort_order]
+
+
+def _vectorized_outer_join(
+    left_codes: np.ndarray,
+    right_codes: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Perform full outer join matching using vectorized operations.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        (left_indices, right_indices) where -1 means no match
+    """
+    n_left = len(left_codes)
+    n_right = len(right_codes)
+
+    if n_left == 0 and n_right == 0:
+        return np.array([], dtype=np.intp), np.array([], dtype=np.intp)
+
+    if n_left == 0:
+        return np.full(n_right, -1, dtype=np.intp), np.arange(n_right, dtype=np.intp)
+
+    if n_right == 0:
+        return np.arange(n_left, dtype=np.intp), np.full(n_left, -1, dtype=np.intp)
+
+    # Get left join results
+    left_indices, right_indices = _vectorized_left_join(left_codes, right_codes)
+
+    # Find right rows that weren't matched
+    matched_right = set(right_indices[right_indices >= 0])
+    unmatched_right = np.array(
+        [i for i in range(n_right) if i not in matched_right], dtype=np.intp
+    )
+
+    if len(unmatched_right) == 0:
+        return left_indices, right_indices
+
+    # Add unmatched right rows
+    n_unmatched = len(unmatched_right)
+    full_left = np.concatenate([left_indices, np.full(n_unmatched, -1, dtype=np.intp)])
+    full_right = np.concatenate([right_indices, unmatched_right])
+
+    return full_left, full_right
 
 
 @register_kernel("hash_join", "numpy")
@@ -75,6 +292,8 @@ def numpy_hash_join(
 ) -> dict[str, np.ndarray]:
     """
     Perform a hash join between two sets of NumPy arrays.
+
+    Uses vectorized factorize-based key matching for performance.
 
     Parameters
     ----------
@@ -108,85 +327,42 @@ def numpy_hash_join(
         left_key_cols = left_keys or []
         right_key_cols = right_keys or []
 
-    # Create composite keys
+    # Create composite keys using vectorized factorize
     left_key_arrays = [left_arrays[k] for k in left_key_cols]
     right_key_arrays = [right_arrays[k] for k in right_key_cols]
 
-    left_keys_composite = _create_composite_key(left_key_arrays)
-    right_keys_composite = _create_composite_key(right_key_arrays)
+    # For join, we need to factorize both sides together to get consistent codes
+    # Concatenate and factorize, then split
+    if len(left_key_arrays) > 0 and len(right_key_arrays) > 0:
+        n_left = len(left_key_arrays[0]) if left_key_arrays else 0
 
-    # Build hash index on right table
-    right_index = _build_hash_index(right_keys_composite)
+        # Concatenate corresponding key columns
+        combined_arrays = []
+        for left_arr, right_arr in zip(left_key_arrays, right_key_arrays, strict=False):
+            combined_arrays.append(np.concatenate([left_arr, right_arr]))
 
-    # Perform join
-    left_indices = []
-    right_indices = []
+        # Create composite codes for combined data
+        combined_codes = _create_composite_key_vectorized(combined_arrays)
 
-    if join_type in ("inner", "left"):
-        # Iterate through left, find matches in right
-        for i, key in enumerate(left_keys_composite):
-            if isinstance(key, np.ndarray):
-                key = tuple(key)
-            if key in right_index:
-                for j in right_index[key]:
-                    left_indices.append(i)
-                    right_indices.append(j)
-            elif join_type == "left":
-                left_indices.append(i)
-                right_indices.append(-1)  # No match
+        # Split back
+        left_codes = combined_codes[:n_left]
+        right_codes = combined_codes[n_left:]
+    else:
+        left_codes = _create_composite_key_vectorized(left_key_arrays)
+        right_codes = _create_composite_key_vectorized(right_key_arrays)
 
+    # Perform join using vectorized matching
+    if join_type == "inner":
+        left_indices, right_indices = _vectorized_inner_join(left_codes, right_codes)
+    elif join_type == "left":
+        left_indices, right_indices = _vectorized_left_join(left_codes, right_codes)
     elif join_type == "right":
-        # Build left index instead
-        left_index = _build_hash_index(left_keys_composite)
-        for j, key in enumerate(right_keys_composite):
-            if isinstance(key, np.ndarray):
-                key = tuple(key)
-            if key in left_index:
-                for i in left_index[key]:
-                    left_indices.append(i)
-                    right_indices.append(j)
-            else:
-                left_indices.append(-1)
-                right_indices.append(j)
-
+        # Right join = swap and do left join
+        right_indices, left_indices = _vectorized_left_join(right_codes, left_codes)
     elif join_type == "outer":
-        # Full outer join
-        left_matched = set()
-        for i, key in enumerate(left_keys_composite):
-            if isinstance(key, np.ndarray):
-                key = tuple(key)
-            if key in right_index:
-                for j in right_index[key]:
-                    left_indices.append(i)
-                    right_indices.append(j)
-                    left_matched.add(i)
-            else:
-                left_indices.append(i)
-                right_indices.append(-1)
-                left_matched.add(i)
-
-        # Add unmatched from right
-        right_matched = set()
-        for j, key in enumerate(right_keys_composite):
-            if isinstance(key, np.ndarray):
-                key = tuple(key)
-            found = False
-            for i, lkey in enumerate(left_keys_composite):
-                if isinstance(lkey, np.ndarray):
-                    lkey = tuple(lkey)
-                if lkey == key:
-                    right_matched.add(j)
-                    found = True
-                    break
-            if not found and j not in right_matched:
-                left_indices.append(-1)
-                right_indices.append(j)
-
+        left_indices, right_indices = _vectorized_outer_join(left_codes, right_codes)
     else:
         raise ValueError(f"Unsupported join type: {join_type}")
-
-    left_indices = np.array(left_indices, dtype=np.intp)
-    right_indices = np.array(right_indices, dtype=np.intp)
 
     # Build result arrays
     result = {}
@@ -203,28 +379,13 @@ def numpy_hash_join(
             out_col = col + left_suffix
 
         if col in left_key_cols:
-            # Key column - take from left (or coalesce for outer)
-            result_arr = np.empty(len(left_indices), dtype=arr.dtype)
-            indices_iter = zip(left_indices, right_indices, strict=True)
-            for idx, (li, ri) in enumerate(indices_iter):
-                if li >= 0:
-                    result_arr[idx] = arr[li]
-                elif ri >= 0 and col in right_key_cols:
-                    # Get from right for outer join
-                    right_col_idx = (
-                        right_key_cols.index(col) if col in right_key_cols else -1
-                    )
-                    if right_col_idx >= 0:
-                        rcol = right_key_cols[right_col_idx]
-                        result_arr[idx] = right_arrays[rcol][ri]
-                    else:
-                        result_arr[idx] = (
-                            np.nan if np.issubdtype(arr.dtype, np.floating) else 0
-                        )
-                else:
-                    result_arr[idx] = (
-                        np.nan if np.issubdtype(arr.dtype, np.floating) else 0
-                    )
+            # Key column - coalesce from left and right for outer join
+            result_arr = _take_key_column_coalesced(
+                arr,
+                left_indices,
+                right_arrays.get(col, None) if col in right_key_cols else None,
+                right_indices,
+            )
             result[col] = result_arr
         else:
             # Non-key column from left
@@ -242,6 +403,46 @@ def numpy_hash_join(
 
         result_arr = _take_with_missing(arr, right_indices)
         result[out_col] = result_arr
+
+    return result
+
+
+def _take_key_column_coalesced(
+    left_arr: np.ndarray,
+    left_indices: np.ndarray,
+    right_arr: np.ndarray | None,
+    right_indices: np.ndarray,
+) -> np.ndarray:
+    """
+    Take key column values, coalescing from right when left is missing.
+
+    This is vectorized - no Python loops.
+    """
+    n = len(left_indices)
+    if n == 0:
+        return np.array([], dtype=left_arr.dtype)
+
+    # Start with left values where available
+    left_valid = left_indices >= 0
+    right_valid = right_indices >= 0
+
+    # Determine output dtype
+    if np.issubdtype(left_arr.dtype, np.floating):
+        result = np.full(n, np.nan, dtype=left_arr.dtype)
+    elif np.issubdtype(left_arr.dtype, np.integer):
+        # Need float to handle NaN
+        result = np.full(n, np.nan, dtype=np.float64)
+    else:
+        result = np.empty(n, dtype=object)
+        result[:] = None
+
+    # Fill from left where valid
+    result[left_valid] = left_arr[left_indices[left_valid]]
+
+    # Fill from right where left is missing but right is valid
+    if right_arr is not None:
+        need_right = ~left_valid & right_valid
+        result[need_right] = right_arr[right_indices[need_right]]
 
     return result
 
