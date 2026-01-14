@@ -27,6 +27,7 @@ The routing system is designed to be extensible for additional backends:
    - Call directly: from pandas._libs import algos
 """
 
+from functools import lru_cache
 from typing import Literal
 
 from pandas.lazy.backends.types import ArrayDict
@@ -117,6 +118,7 @@ def is_null_op(func_name: str) -> bool:
     return func_name in {"is_null", "is_not_null", "fill_null", "coalesce"}
 
 
+@lru_cache(maxsize=128)
 def should_use_arrow(func_name: str) -> bool:
     """
     Check if an operation should use Arrow backend.
@@ -134,6 +136,7 @@ def should_use_arrow(func_name: str) -> bool:
     return func_name in ARROW_PREFERRED_OPS
 
 
+@lru_cache(maxsize=128)
 def should_use_numpy(func_name: str) -> bool:
     """
     Check if an operation should use NumPy backend.
@@ -189,6 +192,7 @@ def infer_backend_from_arrays(
     return "arrow" if arrow_count >= numpy_count else "numpy"
 
 
+@lru_cache(maxsize=256)
 def decide_expr_backend(
     func_name: str,
     input_backend: Literal["arrow", "numpy", "auto"],
@@ -216,6 +220,12 @@ def decide_expr_backend(
     -------
     {"arrow", "numpy"}
         The backend to use.
+
+    Notes
+    -----
+    This function is cached with lru_cache for performance since
+    the same (func_name, input_backend, preferred_backend) combinations
+    are called repeatedly during expression evaluation.
     """
     # 1. Check operation preferences (overrides)
     if should_use_arrow(func_name):

@@ -22,12 +22,10 @@ import numpy as np
 import pyarrow as pa
 
 from pandas.lazy.backends import (
-    dispatch_kernel,
-    has_kernel,
+    get_kernel,
 )
 from pandas.lazy.backends.convert import (
     ensure_backend,
-    get_array_backend,
     is_arrow_backed,
 )
 from pandas.lazy.backends.router import (
@@ -113,19 +111,16 @@ class ArrayEvaluator:
         self, func: str, input_arrays: list[ArrayLike]
     ) -> Literal["arrow", "numpy"]:
         """Determine which backend to use for a function."""
-        # Check if any input is an array (vs scalar)
-        array_inputs = [
-            a
-            for a in input_arrays
-            if isinstance(a, (np.ndarray, pa.Array, pa.ChunkedArray))
-        ]
-
-        if not array_inputs:
-            # All scalars - use numpy
-            return "numpy"
-
-        # Get current backend of inputs
-        input_backend = get_array_backend(array_inputs[0])
+        # Find first array input to determine backend
+        input_backend: Literal["arrow", "numpy"] = "numpy"
+        for a in input_arrays:
+            if isinstance(a, (pa.Array, pa.ChunkedArray)):
+                input_backend = "arrow"
+                break
+            elif isinstance(a, np.ndarray):
+                input_backend = "numpy"
+                break
+        # If no array inputs found, input_backend stays "numpy"
 
         return decide_expr_backend(func, input_backend, self._preferred_backend)
 
@@ -143,8 +138,9 @@ class ArrayEvaluator:
         if func in special_functions:
             return self._fallback_evaluate_call(node, args, backend)
 
-        # Check if we have a kernel for this function
-        if has_kernel(func, backend):
+        # Get kernel directly (single lookup instead of has_kernel + dispatch_kernel)
+        kernel = get_kernel(func, backend)
+        if kernel is not None:
             # Convert inputs to target backend if needed
             converted_args = []
             for arg in args:
@@ -154,8 +150,8 @@ class ArrayEvaluator:
                     # Scalar - keep as is
                     converted_args.append(arg)
 
-            # Dispatch to kernel
-            return dispatch_kernel(func, backend, *converted_args, **node.kwargs)
+            # Call kernel directly
+            return kernel(*converted_args, **node.kwargs)
 
         # Fall back to manual implementation for unsupported operations
         return self._fallback_evaluate_call(node, args, backend)
