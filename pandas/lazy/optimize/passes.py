@@ -36,6 +36,7 @@ from pandas.lazy.optimize.utils import (
     extract_output_name,
     get_referenced_columns,
     get_source_column_name,
+    rewrite_predicate_through_project,
     substitute_columns,
 )
 from pandas.lazy.plan import (
@@ -335,11 +336,24 @@ class PredicatePushdown(PlanVisitor):
             )
 
             if can_push:
+                # Simple case: all predicate columns are pass-through
                 # Rewrite predicate with input column names
                 new_pred_ir = substitute_columns(predicate._ir, col_mapping)
                 new_pred = Expr(new_pred_ir)
 
                 # Recursively try to push further
+                new_input = self._push_filter(input_plan.input, new_pred)
+                return Project(new_input, input_plan.exprs)
+
+            # Advanced case: try expression rewriting for computed columns
+            # This enables pushing filters like `filter(a_plus_b > 10)` through
+            # `with_columns(a_plus_b = col("a") + col("b"))`
+            rewritten_ir = rewrite_predicate_through_project(
+                predicate._ir, lineage, max_complexity=20
+            )
+            if rewritten_ir is not None:
+                new_pred = Expr(rewritten_ir)
+                # Recursively try to push the rewritten predicate further
                 new_input = self._push_filter(input_plan.input, new_pred)
                 return Project(new_input, input_plan.exprs)
 
@@ -971,3 +985,205 @@ class AggregatePushdown(PlanVisitor):
             return Project(pushed_agg, tuple(output_exprs))
         else:
             return pushed_agg
+
+
+# =============================================================================
+# ExpressionSimplification Pass
+# =============================================================================
+
+
+class ExpressionSimplification(PlanVisitor):
+    """
+    Simplify algebraic expressions to reduce runtime computation.
+
+    Transformations:
+        x * 1 -> x           x * 0 -> 0
+        x / 1 -> x           x + 0 -> x
+        x - 0 -> x           x ** 1 -> x
+        x ** 0 -> 1          x & True -> x
+        x | False -> x       x & False -> False
+        x | True -> True     !!x -> x (double negation)
+
+    This pass complements ConstantFolding, which only handles
+    expressions where ALL operands are constants.
+    """
+
+    def visit_project(self, plan: Project) -> LogicalPlan:
+        new_input = self.visit(plan.input)
+        new_exprs = tuple(self._simplify_expr(e) for e in plan.exprs)
+        if new_input is not plan.input or new_exprs != plan.exprs:
+            return Project(new_input, new_exprs)
+        return plan
+
+    def visit_filter(self, plan: Filter) -> LogicalPlan:
+        new_input = self.visit(plan.input)
+        new_pred = self._simplify_expr(plan.predicate)
+        if new_input is not plan.input or new_pred is not plan.predicate:
+            return Filter(new_input, new_pred)
+        return plan
+
+    def visit_aggregate(self, plan: Aggregate) -> LogicalPlan:
+        new_input = self.visit(plan.input)
+        new_group_by = tuple(self._simplify_expr(e) for e in plan.group_by)
+        new_agg_exprs = tuple(self._simplify_expr(e) for e in plan.agg_exprs)
+        if (
+            new_input is not plan.input
+            or new_group_by != plan.group_by
+            or new_agg_exprs != plan.agg_exprs
+        ):
+            return Aggregate(new_input, new_group_by, new_agg_exprs)
+        return plan
+
+    def visit_sort(self, plan: Sort) -> LogicalPlan:
+        new_input = self.visit(plan.input)
+        new_by = tuple(self._simplify_expr(e) for e in plan.by)
+        if new_input is not plan.input or new_by != plan.by:
+            return Sort(new_input, new_by, plan.descending)
+        return plan
+
+    def visit_topk(self, plan: TopK) -> LogicalPlan:
+        new_input = self.visit(plan.input)
+        new_by = tuple(self._simplify_expr(e) for e in plan.by)
+        if new_input is not plan.input or new_by != plan.by:
+            return TopK(new_input, plan.k, new_by, plan.descending)
+        return plan
+
+    def _simplify_expr(self, expr: Expr) -> Expr:
+        """Simplify an expression."""
+        from pandas.lazy.expr import Expr
+
+        new_ir = self._simplify_ir(expr._ir)
+        if new_ir is not expr._ir:
+            return Expr(new_ir)
+        return expr
+
+    def _simplify_ir(self, node: IRNode) -> IRNode:
+        """Recursively simplify an IR node."""
+        if isinstance(node, (Literal, FieldRef)):
+            return node
+
+        elif isinstance(node, Alias):
+            new_arg = self._simplify_ir(node.arg)
+            if new_arg is not node.arg:
+                return Alias(new_arg, node.name)
+            return node
+
+        elif isinstance(node, Cast):
+            new_arg = self._simplify_ir(node.arg)
+            if new_arg is not node.arg:
+                return Cast(new_arg, node.target_dtype)
+            return node
+
+        elif isinstance(node, Call):
+            # First, simplify children
+            new_args = tuple(self._simplify_ir(arg) for arg in node.args)
+
+            # Try algebraic simplification
+            simplified = self._simplify_call(node.function, new_args, node.kwargs)
+            if simplified is not None:
+                return simplified
+
+            if new_args != node.args:
+                return Call(node.function, new_args, node.kwargs, node.is_aggregate)
+            return node
+
+        return node
+
+    def _simplify_call(
+        self, function: str, args: tuple[IRNode, ...], kwargs: dict
+    ) -> IRNode | None:
+        """Try to simplify a function call algebraically."""
+        if len(args) != 2:
+            # Also handle unary simplifications
+            if len(args) == 1:
+                return self._simplify_unary(function, args[0])
+            return None
+
+        left, right = args
+
+        # Check for identity patterns with literals
+        left_is_lit = isinstance(left, Literal)
+        right_is_lit = isinstance(right, Literal)
+
+        if not (left_is_lit or right_is_lit):
+            return None
+
+        # Multiplication simplifications
+        if function == "multiply":
+            if right_is_lit:
+                if right.value == 1:
+                    return left  # x * 1 -> x
+                if right.value == 0:
+                    return Literal(0)  # x * 0 -> 0
+            if left_is_lit:
+                if left.value == 1:
+                    return right  # 1 * x -> x
+                if left.value == 0:
+                    return Literal(0)  # 0 * x -> 0
+
+        # Division simplifications
+        elif function == "divide":
+            if right_is_lit and right.value == 1:
+                return left  # x / 1 -> x
+
+        # Addition simplifications
+        elif function == "add":
+            if right_is_lit and right.value == 0:
+                return left  # x + 0 -> x
+            if left_is_lit and left.value == 0:
+                return right  # 0 + x -> x
+
+        # Subtraction simplifications
+        elif function == "subtract":
+            if right_is_lit and right.value == 0:
+                return left  # x - 0 -> x
+
+        # Power simplifications
+        elif function == "power":
+            if right_is_lit:
+                if right.value == 1:
+                    return left  # x ** 1 -> x
+                if right.value == 0:
+                    return Literal(1)  # x ** 0 -> 1
+
+        # Logical AND simplifications
+        elif function == "and_":
+            if right_is_lit:
+                if right.value is True:
+                    return left  # x & True -> x
+                if right.value is False:
+                    return Literal(False)  # x & False -> False
+            if left_is_lit:
+                if left.value is True:
+                    return right  # True & x -> x
+                if left.value is False:
+                    return Literal(False)  # False & x -> False
+
+        # Logical OR simplifications
+        elif function == "or_":
+            if right_is_lit:
+                if right.value is False:
+                    return left  # x | False -> x
+                if right.value is True:
+                    return Literal(True)  # x | True -> True
+            if left_is_lit:
+                if left.value is False:
+                    return right  # False | x -> x
+                if left.value is True:
+                    return Literal(True)  # True | x -> True
+
+        return None
+
+    def _simplify_unary(self, function: str, arg: IRNode) -> IRNode | None:
+        """Simplify unary operations."""
+        # Double negation elimination: !!x -> x
+        if function == "invert":
+            if isinstance(arg, Call) and arg.function == "invert" and len(arg.args) == 1:
+                return arg.args[0]
+
+        # Double negate elimination: --x -> x
+        elif function == "negate":
+            if isinstance(arg, Call) and arg.function == "negate" and len(arg.args) == 1:
+                return arg.args[0]
+
+        return None

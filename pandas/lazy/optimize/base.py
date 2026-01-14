@@ -245,23 +245,31 @@ class Optimizer:
         IMPORTANT: Order matters! Rationale for each position:
 
         1. ConstantFolding - Evaluate constants first to simplify expressions
-        2. DeadCodeElimination - Remove no-op nodes early (Filter(True), etc.)
-        3. FilterFusion - Combine filters first so pushdown sees single filters
-        4. PredicatePushdown - Push filters down while plan is still wide
+        2. ExpressionSimplification - Algebraic simplifications (x*1->x, etc.)
+        3. DeadCodeElimination - Remove no-op nodes early (Filter(True), etc.)
+        4. FilterFusion - Combine filters first so pushdown sees single filters
+        5. PredicatePushdown - Push filters down while plan is still wide
            (before projection pruning removes columns that filters might need)
-        5. AggregatePushdown - Push aggregates through pass-through projects
-        6. ProjectionPruning - After pushdown, so we don't prune needed columns
-        7. LimitPushdown - After pruning; push limits toward sources
-        8. SortLimitToTopK - After limit pushdown, combine Sort+Limit into TopK
+        6. AggregatePushdown - Push aggregates through pass-through projects
+        7. ProjectionPruning - After pushdown, so we don't prune needed columns
+        8. LimitPushdown - After pruning; push limits toward sources
+        9. SortLimitToTopK - After limit pushdown, combine Sort+Limit into TopK
+        10. EngineSelection - Analyze backend requirements, insert Convert nodes
+        11. ConversionElimination - Remove redundant/unnecessary conversions
 
         Note: CommonSubexpressionElimination is available but not in default
         passes because it requires evaluator support for intermediate columns.
         """
         # Import here to avoid circular imports
+        from pandas.lazy.optimize.engine import (
+            ConversionElimination,
+            EngineSelection,
+        )
         from pandas.lazy.optimize.passes import (
             AggregatePushdown,
             ConstantFolding,
             DeadCodeElimination,
+            ExpressionSimplification,
             FilterFusion,
             LimitPushdown,
             PredicatePushdown,
@@ -271,6 +279,7 @@ class Optimizer:
 
         return [
             ConstantFolding(),
+            ExpressionSimplification(),
             DeadCodeElimination(),
             FilterFusion(),
             PredicatePushdown(),
@@ -278,6 +287,8 @@ class Optimizer:
             ProjectionPruning(),
             LimitPushdown(),
             SortLimitToTopK(),
+            EngineSelection(),
+            ConversionElimination(),
         ]
 
     def optimize(self, plan: LogicalPlan) -> LogicalPlan:

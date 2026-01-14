@@ -305,6 +305,113 @@ def can_push_predicate_through_project(
     return True, column_mapping
 
 
+def rewrite_predicate_through_project(
+    predicate_ir: IRNode,
+    lineage: dict[str, IRNode],
+    max_complexity: int = 20,
+) -> IRNode | None:
+    """
+    Rewrite a predicate by substituting computed column references with their expressions.
+
+    This enables pushing predicates through Projects even when columns are computed.
+    For example:
+        Project: a_plus_b = col("a") + col("b")
+        Filter: a_plus_b > 10
+    Becomes:
+        Filter: col("a") + col("b") > 10
+        Project: a_plus_b = col("a") + col("b")
+
+    Parameters
+    ----------
+    predicate_ir : IRNode
+        The predicate to rewrite.
+    lineage : dict[str, IRNode]
+        Lineage mapping from build_project_lineage.
+    max_complexity : int, default 20
+        Maximum number of nodes in the rewritten predicate.
+        This prevents expression blowup.
+
+    Returns
+    -------
+    IRNode or None
+        The rewritten predicate, or None if:
+        - Complexity exceeds limit
+        - Column references an aggregate or window function
+        - Any other reason rewriting isn't safe
+    """
+    # Count the complexity (number of nodes)
+    complexity = [0]  # Use list for mutable counter in nested function
+
+    def rewrite_node(node: IRNode) -> IRNode | None:
+        complexity[0] += 1
+        if complexity[0] > max_complexity:
+            return None
+
+        if isinstance(node, Literal):
+            return node
+
+        elif isinstance(node, FieldRef):
+            # This is the key substitution
+            if node.name in lineage:
+                source_expr = lineage[node.name]
+                # Don't substitute aggregates or complex functions
+                if _contains_aggregate(source_expr):
+                    return None
+                # Recursively rewrite the source expression
+                return rewrite_node(source_expr)
+            # Column not in lineage - must come from input directly
+            return node
+
+        elif isinstance(node, Alias):
+            new_arg = rewrite_node(node.arg)
+            if new_arg is None:
+                return None
+            if new_arg is not node.arg:
+                return Alias(new_arg, node.name)
+            return node
+
+        elif isinstance(node, Cast):
+            new_arg = rewrite_node(node.arg)
+            if new_arg is None:
+                return None
+            if new_arg is not node.arg:
+                return Cast(new_arg, node.target_dtype)
+            return node
+
+        elif isinstance(node, Call):
+            # Don't rewrite through aggregates
+            if node.is_aggregate:
+                return None
+
+            new_args = []
+            for arg in node.args:
+                new_arg = rewrite_node(arg)
+                if new_arg is None:
+                    return None
+                new_args.append(new_arg)
+
+            if tuple(new_args) != node.args:
+                return Call(node.function, tuple(new_args), node.kwargs, node.is_aggregate)
+            return node
+
+        return node
+
+    return rewrite_node(predicate_ir)
+
+
+def _contains_aggregate(node: IRNode) -> bool:
+    """Check if an IR node contains any aggregate functions."""
+    if isinstance(node, Call):
+        if node.is_aggregate:
+            return True
+        return any(_contains_aggregate(arg) for arg in node.args)
+    elif isinstance(node, Alias):
+        return _contains_aggregate(node.arg)
+    elif isinstance(node, Cast):
+        return _contains_aggregate(node.arg)
+    return False
+
+
 # =============================================================================
 # Join Column Mapping (for predicate pushdown through joins)
 # =============================================================================

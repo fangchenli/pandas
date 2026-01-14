@@ -31,6 +31,7 @@ from pandas.lazy.optimize.passes import (
     CommonSubexpressionElimination,
     ConstantFolding,
     DeadCodeElimination,
+    ExpressionSimplification,
     FilterFusion,
     LimitPushdown,
     PredicatePushdown,
@@ -47,6 +48,7 @@ from pandas.lazy.optimize.utils import (
     get_referenced_columns,
     get_source_column_name,
     is_pass_through_column,
+    rewrite_predicate_through_project,
     substitute_columns,
 )
 
@@ -58,6 +60,7 @@ __all__ = [
     "ConversionElimination",
     "DeadCodeElimination",
     "EngineSelection",
+    "ExpressionSimplification",
     "FilterFusion",
     "JoinColumnMapping",
     "LimitPushdown",
@@ -76,5 +79,6 @@ __all__ = [
     "get_referenced_columns",
     "get_source_column_name",
     "is_pass_through_column",
+    "rewrite_predicate_through_project",
     "substitute_columns",
 ]
