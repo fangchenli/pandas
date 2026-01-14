@@ -55,6 +55,8 @@ from typing import (
     Literal,
 )
 
+from pandas._typing import F
+
 from pandas.lazy.backends.types import (
     ArrayDict,
     ArrayLike,
@@ -69,7 +71,9 @@ from pandas.lazy.backends.types import (
 _KERNELS: dict[tuple[str, str], Callable[..., Any]] = {}
 
 
-def register_kernel(func_name: str, backend: Literal["arrow", "numpy"]) -> Callable:
+def register_kernel(
+    func_name: str, backend: Literal["arrow", "numpy"]
+) -> Callable[[F], F]:
     """
     Decorator to register a kernel implementation.
 
@@ -82,8 +86,8 @@ def register_kernel(func_name: str, backend: Literal["arrow", "numpy"]) -> Calla
 
     Returns
     -------
-    Callable
-        Decorator function.
+    Callable[[F], F]
+        Decorator function that preserves the function signature.
 
     Examples
     --------
@@ -92,7 +96,7 @@ def register_kernel(func_name: str, backend: Literal["arrow", "numpy"]) -> Calla
     ...     return pc.utf8_lower(arr)
     """
 
-    def decorator(fn: Callable) -> Callable:
+    def decorator(fn: F) -> F:
         _KERNELS[(func_name, backend)] = fn
         return fn
 
