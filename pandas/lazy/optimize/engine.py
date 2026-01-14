@@ -19,18 +19,13 @@ from pandas.lazy.ir import (
     IRNode,
     Literal,
 )
-from pandas.lazy.optimize.base import OptimizationPass
+from pandas.lazy.optimize.base import PlanVisitor
 from pandas.lazy.plan import (
-    Aggregate,
     Convert,
     DataFrameSource,
-    Distinct,
     Filter,
-    Join,
-    Limit,
     LogicalPlan,
     Project,
-    Sort,
 )
 
 # =============================================================================
@@ -289,7 +284,7 @@ def _combine_requirements(
 # =============================================================================
 
 
-class EngineSelection(OptimizationPass):
+class EngineSelection(PlanVisitor):
     """
     Analyze expression backend requirements and insert explicit Convert nodes.
 
@@ -303,76 +298,19 @@ class EngineSelection(OptimizationPass):
     3. Insert Convert nodes at boundaries where backend changes
     """
 
-    def optimize(self, plan: LogicalPlan) -> LogicalPlan:
-        return self._transform(plan)
+    def visit_project(self, plan: Project) -> LogicalPlan:
+        new_input = self.visit(plan.input)
+        new_plan = (
+            Project(new_input, plan.exprs) if new_input is not plan.input else plan
+        )
+        return self._select_project_engine(new_plan)
 
-    def _transform(self, plan: LogicalPlan) -> LogicalPlan:
-        """Recursively transform the plan, inserting Convert nodes."""
-
-        if isinstance(plan, DataFrameSource):
-            return plan
-
-        elif isinstance(plan, Project):
-            new_input = self._transform(plan.input)
-            return self._select_project_engine(
-                Project(new_input, plan.exprs) if new_input is not plan.input else plan
-            )
-
-        elif isinstance(plan, Filter):
-            new_input = self._transform(plan.input)
-            return self._select_filter_engine(
-                Filter(new_input, plan.predicate)
-                if new_input is not plan.input
-                else plan
-            )
-
-        elif isinstance(plan, Aggregate):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Aggregate(new_input, plan.group_by, plan.agg_exprs)
-            return plan
-
-        elif isinstance(plan, Sort):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Sort(new_input, plan.by, plan.descending)
-            return plan
-
-        elif isinstance(plan, Limit):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Limit(new_input, plan.n, plan.offset)
-            return plan
-
-        elif isinstance(plan, Distinct):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Distinct(new_input, plan.subset)
-            return plan
-
-        elif isinstance(plan, Join):
-            new_left = self._transform(plan.left)
-            new_right = self._transform(plan.right)
-            if new_left is not plan.left or new_right is not plan.right:
-                return Join(
-                    new_left,
-                    new_right,
-                    plan.on,
-                    plan.left_on,
-                    plan.right_on,
-                    plan.how,
-                    plan.suffix,
-                )
-            return plan
-
-        elif isinstance(plan, Convert):
-            # Already has conversion
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Convert(new_input, plan.target_backend)
-            return plan
-
-        return plan
+    def visit_filter(self, plan: Filter) -> LogicalPlan:
+        new_input = self.visit(plan.input)
+        new_plan = (
+            Filter(new_input, plan.predicate) if new_input is not plan.input else plan
+        )
+        return self._select_filter_engine(new_plan)
 
     def _select_project_engine(self, project: Project) -> LogicalPlan:
         """Determine backend for Project and insert conversion if needed."""
@@ -459,7 +397,7 @@ class EngineSelection(OptimizationPass):
 # =============================================================================
 
 
-class ConversionElimination(OptimizationPass):
+class ConversionElimination(PlanVisitor):
     """
     Eliminate redundant or unnecessary Convert nodes.
 
@@ -469,92 +407,29 @@ class ConversionElimination(OptimizationPass):
     3. Back-to-back converts: Convert(Convert(x, A), B) -> Convert(x, B)
     """
 
-    def optimize(self, plan: LogicalPlan) -> LogicalPlan:
-        return self._transform(plan)
+    def visit_convert(self, plan: Convert) -> LogicalPlan:
+        new_input = self.visit(plan.input)
 
-    def _transform(self, plan: LogicalPlan) -> LogicalPlan:
-        """Recursively transform the plan, eliminating redundant converts."""
+        # Pattern 1 & 3: Nested converts
+        if isinstance(new_input, Convert):
+            if new_input.target_backend == plan.target_backend:
+                # Convert(Convert(x, A), A) -> Convert(x, A)
+                return Convert(new_input.input, plan.target_backend)
+            else:
+                # Convert(Convert(x, A), B) -> Convert(x, B)
+                return Convert(new_input.input, plan.target_backend)
 
-        if isinstance(plan, DataFrameSource):
-            return plan
+        # Pattern 2: Unnecessary convert
+        input_backend = self._get_plan_backend(new_input)
+        if input_backend == plan.target_backend:
+            return new_input
 
-        elif isinstance(plan, Convert):
-            new_input = self._transform(plan.input)
-
-            # Pattern 1 & 3: Nested converts
-            if isinstance(new_input, Convert):
-                if new_input.target_backend == plan.target_backend:
-                    # Convert(Convert(x, A), A) -> Convert(x, A)
-                    return Convert(new_input.input, plan.target_backend)
-                else:
-                    # Convert(Convert(x, A), B) -> Convert(x, B)
-                    return Convert(new_input.input, plan.target_backend)
-
-            # Pattern 2: Unnecessary convert
-            input_backend = self._get_plan_backend(new_input)
-            if input_backend == plan.target_backend:
-                return new_input
-
-            if new_input is not plan.input:
-                return Convert(new_input, plan.target_backend)
-            return plan
-
-        elif isinstance(plan, Project):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Project(new_input, plan.exprs)
-            return plan
-
-        elif isinstance(plan, Filter):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Filter(new_input, plan.predicate)
-            return plan
-
-        elif isinstance(plan, Aggregate):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Aggregate(new_input, plan.group_by, plan.agg_exprs)
-            return plan
-
-        elif isinstance(plan, Sort):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Sort(new_input, plan.by, plan.descending)
-            return plan
-
-        elif isinstance(plan, Limit):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Limit(new_input, plan.n, plan.offset)
-            return plan
-
-        elif isinstance(plan, Distinct):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Distinct(new_input, plan.subset)
-            return plan
-
-        elif isinstance(plan, Join):
-            new_left = self._transform(plan.left)
-            new_right = self._transform(plan.right)
-            if new_left is not plan.left or new_right is not plan.right:
-                return Join(
-                    new_left,
-                    new_right,
-                    plan.on,
-                    plan.left_on,
-                    plan.right_on,
-                    plan.how,
-                    plan.suffix,
-                )
-            return plan
-
+        if new_input is not plan.input:
+            return Convert(new_input, plan.target_backend)
         return plan
 
     def _get_plan_backend(self, plan: LogicalPlan) -> str:
         """Determine the output backend of a plan node."""
-
         if isinstance(plan, Convert):
             return plan.target_backend
         elif isinstance(plan, DataFrameSource):

@@ -11,6 +11,8 @@ This module contains all the optimization pass implementations:
 - CommonSubexpressionElimination: Eliminate duplicate computations
 - DeadCodeElimination: Remove identity projections
 - AggregatePushdown: Push aggregations through projections
+
+All passes use PlanVisitor base class to reduce boilerplate.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from pandas.lazy.ir import (
     IRNode,
     Literal,
 )
-from pandas.lazy.optimize.base import OptimizationPass
+from pandas.lazy.optimize.base import PlanVisitor
 from pandas.lazy.optimize.utils import (
     build_join_column_mapping,
     build_project_lineage,
@@ -38,7 +40,6 @@ from pandas.lazy.optimize.utils import (
 )
 from pandas.lazy.plan import (
     Aggregate,
-    DataFrameSource,
     Distinct,
     Filter,
     Join,
@@ -53,7 +54,12 @@ if TYPE_CHECKING:
     from pandas.lazy.expr import Expr
 
 
-class ConstantFolding(OptimizationPass):
+# =============================================================================
+# ConstantFolding Pass
+# =============================================================================
+
+
+class ConstantFolding(PlanVisitor):
     """
     Evaluate constant expressions at optimization time.
 
@@ -65,81 +71,44 @@ class ConstantFolding(OptimizationPass):
     This reduces runtime computation and enables further optimizations.
     """
 
-    def optimize(self, plan: LogicalPlan) -> LogicalPlan:
-        return self._transform_plan(plan)
+    def visit_project(self, plan: Project) -> LogicalPlan:
+        new_input = self.visit(plan.input)
+        new_exprs = tuple(self._fold_expr(e) for e in plan.exprs)
+        if new_input is not plan.input or new_exprs != plan.exprs:
+            return Project(new_input, new_exprs)
+        return plan
 
-    def _transform_plan(self, plan: LogicalPlan) -> LogicalPlan:
-        """Recursively transform the plan, folding constants in expressions."""
-        if isinstance(plan, DataFrameSource):
-            return plan
+    def visit_filter(self, plan: Filter) -> LogicalPlan:
+        new_input = self.visit(plan.input)
+        new_pred = self._fold_expr(plan.predicate)
+        if new_input is not plan.input or new_pred is not plan.predicate:
+            return Filter(new_input, new_pred)
+        return plan
 
-        elif isinstance(plan, Project):
-            new_input = self._transform_plan(plan.input)
-            new_exprs = tuple(self._fold_expr(e) for e in plan.exprs)
-            if new_input is not plan.input or new_exprs != plan.exprs:
-                return Project(new_input, new_exprs)
-            return plan
+    def visit_aggregate(self, plan: Aggregate) -> LogicalPlan:
+        new_input = self.visit(plan.input)
+        new_group_by = tuple(self._fold_expr(e) for e in plan.group_by)
+        new_agg_exprs = tuple(self._fold_expr(e) for e in plan.agg_exprs)
+        if (
+            new_input is not plan.input
+            or new_group_by != plan.group_by
+            or new_agg_exprs != plan.agg_exprs
+        ):
+            return Aggregate(new_input, new_group_by, new_agg_exprs)
+        return plan
 
-        elif isinstance(plan, Filter):
-            new_input = self._transform_plan(plan.input)
-            new_pred = self._fold_expr(plan.predicate)
-            if new_input is not plan.input or new_pred is not plan.predicate:
-                return Filter(new_input, new_pred)
-            return plan
+    def visit_sort(self, plan: Sort) -> LogicalPlan:
+        new_input = self.visit(plan.input)
+        new_by = tuple(self._fold_expr(e) for e in plan.by)
+        if new_input is not plan.input or new_by != plan.by:
+            return Sort(new_input, new_by, plan.descending)
+        return plan
 
-        elif isinstance(plan, Aggregate):
-            new_input = self._transform_plan(plan.input)
-            new_group_by = tuple(self._fold_expr(e) for e in plan.group_by)
-            new_agg_exprs = tuple(self._fold_expr(e) for e in plan.agg_exprs)
-            if (
-                new_input is not plan.input
-                or new_group_by != plan.group_by
-                or new_agg_exprs != plan.agg_exprs
-            ):
-                return Aggregate(new_input, new_group_by, new_agg_exprs)
-            return plan
-
-        elif isinstance(plan, Sort):
-            new_input = self._transform_plan(plan.input)
-            new_by = tuple(self._fold_expr(e) for e in plan.by)
-            if new_input is not plan.input or new_by != plan.by:
-                return Sort(new_input, new_by, plan.descending)
-            return plan
-
-        elif isinstance(plan, Limit):
-            new_input = self._transform_plan(plan.input)
-            if new_input is not plan.input:
-                return Limit(new_input, plan.n, plan.offset)
-            return plan
-
-        elif isinstance(plan, Distinct):
-            new_input = self._transform_plan(plan.input)
-            if new_input is not plan.input:
-                return Distinct(new_input, plan.subset)
-            return plan
-
-        elif isinstance(plan, Join):
-            new_left = self._transform_plan(plan.left)
-            new_right = self._transform_plan(plan.right)
-            if new_left is not plan.left or new_right is not plan.right:
-                return Join(
-                    new_left,
-                    new_right,
-                    plan.on,
-                    plan.left_on,
-                    plan.right_on,
-                    plan.how,
-                    plan.suffix,
-                )
-            return plan
-
-        elif isinstance(plan, TopK):
-            new_input = self._transform_plan(plan.input)
-            new_by = tuple(self._fold_expr(e) for e in plan.by)
-            if new_input is not plan.input or new_by != plan.by:
-                return TopK(new_input, plan.k, new_by, plan.descending)
-            return plan
-
+    def visit_topk(self, plan: TopK) -> LogicalPlan:
+        new_input = self.visit(plan.input)
+        new_by = tuple(self._fold_expr(e) for e in plan.by)
+        if new_input is not plan.input or new_by != plan.by:
+            return TopK(new_input, plan.k, new_by, plan.descending)
         return plan
 
     def _fold_expr(self, expr: Expr) -> Expr:
@@ -153,10 +122,7 @@ class ConstantFolding(OptimizationPass):
 
     def _fold_ir(self, node: IRNode) -> IRNode:
         """Recursively fold constants in an IR node."""
-        if isinstance(node, Literal):
-            return node
-
-        elif isinstance(node, FieldRef):
+        if isinstance(node, (Literal, FieldRef)):
             return node
 
         elif isinstance(node, Alias):
@@ -292,7 +258,7 @@ class ConstantFolding(OptimizationPass):
 # =============================================================================
 
 
-class FilterFusion(OptimizationPass):
+class FilterFusion(PlanVisitor):
     """
     Combine consecutive Filter nodes into a single filter.
 
@@ -302,81 +268,26 @@ class FilterFusion(OptimizationPass):
     This simplifies the plan and makes subsequent optimizations easier.
     """
 
-    def optimize(self, plan: LogicalPlan) -> LogicalPlan:
-        return self._transform(plan)
+    def visit_filter(self, plan: Filter) -> LogicalPlan:
+        # First, transform the input
+        new_input = self.visit(plan.input)
 
-    def _transform(self, plan: LogicalPlan) -> LogicalPlan:
-        """Recursively transform the plan."""
-        if isinstance(plan, Filter):
-            # First, transform the input
-            new_input = self._transform(plan.input)
+        # Check if input is also a Filter
+        if isinstance(new_input, Filter):
+            # Combine predicates with AND
+            from pandas.lazy.expr import Expr
 
-            # Check if input is also a Filter
-            if isinstance(new_input, Filter):
-                # Combine predicates with AND
-                from pandas.lazy.expr import Expr
-
-                combined_predicate = Expr(
-                    Call(
-                        "and_",
-                        (new_input.predicate._ir, plan.predicate._ir),
-                    )
+            combined_predicate = Expr(
+                Call(
+                    "and_",
+                    (new_input.predicate._ir, plan.predicate._ir),
                 )
-                return Filter(new_input.input, combined_predicate)
+            )
+            return Filter(new_input.input, combined_predicate)
 
-            # Input changed but isn't a Filter
-            if new_input is not plan.input:
-                return Filter(new_input, plan.predicate)
-            return plan
-
-        elif isinstance(plan, Project):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Project(new_input, plan.exprs)
-            return plan
-
-        elif isinstance(plan, Aggregate):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Aggregate(new_input, plan.group_by, plan.agg_exprs)
-            return plan
-
-        elif isinstance(plan, Sort):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Sort(new_input, plan.by, plan.descending)
-            return plan
-
-        elif isinstance(plan, Limit):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Limit(new_input, plan.n, plan.offset)
-            return plan
-
-        elif isinstance(plan, Distinct):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Distinct(new_input, plan.subset)
-            return plan
-
-        elif isinstance(plan, Join):
-            new_left = self._transform(plan.left)
-            new_right = self._transform(plan.right)
-            if new_left is not plan.left or new_right is not plan.right:
-                return Join(
-                    new_left,
-                    new_right,
-                    plan.on,
-                    plan.left_on,
-                    plan.right_on,
-                    plan.how,
-                    plan.suffix,
-                )
-            return plan
-
-        elif isinstance(plan, DataFrameSource):
-            return plan
-
+        # Input changed but isn't a Filter
+        if new_input is not plan.input:
+            return Filter(new_input, plan.predicate)
         return plan
 
 
@@ -385,7 +296,7 @@ class FilterFusion(OptimizationPass):
 # =============================================================================
 
 
-class PredicatePushdown(OptimizationPass):
+class PredicatePushdown(PlanVisitor):
     """
     Push Filter nodes closer to data sources.
 
@@ -398,67 +309,12 @@ class PredicatePushdown(OptimizationPass):
     - Pushes through Join to appropriate side when possible
     """
 
-    def optimize(self, plan: LogicalPlan) -> LogicalPlan:
-        return self._transform(plan)
+    def visit_filter(self, plan: Filter) -> LogicalPlan:
+        # First transform the input
+        new_input = self.visit(plan.input)
 
-    def _transform(self, plan: LogicalPlan) -> LogicalPlan:
-        """Recursively transform the plan, pushing filters down."""
-        if isinstance(plan, Filter):
-            # First transform the input
-            new_input = self._transform(plan.input)
-
-            # Try to push the filter down
-            return self._push_filter(new_input, plan.predicate)
-
-        elif isinstance(plan, Project):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Project(new_input, plan.exprs)
-            return plan
-
-        elif isinstance(plan, Aggregate):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Aggregate(new_input, plan.group_by, plan.agg_exprs)
-            return plan
-
-        elif isinstance(plan, Sort):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Sort(new_input, plan.by, plan.descending)
-            return plan
-
-        elif isinstance(plan, Limit):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Limit(new_input, plan.n, plan.offset)
-            return plan
-
-        elif isinstance(plan, Distinct):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Distinct(new_input, plan.subset)
-            return plan
-
-        elif isinstance(plan, Join):
-            new_left = self._transform(plan.left)
-            new_right = self._transform(plan.right)
-            if new_left is not plan.left or new_right is not plan.right:
-                return Join(
-                    new_left,
-                    new_right,
-                    plan.on,
-                    plan.left_on,
-                    plan.right_on,
-                    plan.how,
-                    plan.suffix,
-                )
-            return plan
-
-        elif isinstance(plan, DataFrameSource):
-            return plan
-
-        return plan
+        # Try to push the filter down
+        return self._push_filter(new_input, plan.predicate)
 
     def _push_filter(self, input_plan: LogicalPlan, predicate: Expr) -> LogicalPlan:
         """
@@ -523,7 +379,6 @@ class PredicatePushdown(OptimizationPass):
 
             if can_left and not can_right:
                 # Push to left side only
-                # Build column mapping for predicate rewrite
                 col_mapping = {
                     out: inp
                     for out, inp in join_mapping.left_columns.items()
@@ -567,11 +422,11 @@ class PredicatePushdown(OptimizationPass):
             # Cannot push through Join
             return Filter(input_plan, predicate)
 
-        elif isinstance(input_plan, DataFrameSource):
-            # Cannot push below source
+        elif isinstance(input_plan, TopK):
+            # Cannot push filter below TopK (would change which rows are selected)
             return Filter(input_plan, predicate)
 
-        # Unknown node type, don't push
+        # Cannot push below source or unknown node type
         return Filter(input_plan, predicate)
 
 
@@ -580,7 +435,7 @@ class PredicatePushdown(OptimizationPass):
 # =============================================================================
 
 
-class ProjectionPruning(OptimizationPass):
+class ProjectionPruning(PlanVisitor):
     """
     Remove unnecessary columns from projections.
 
@@ -597,6 +452,8 @@ class ProjectionPruning(OptimizationPass):
 
     def _prune(self, plan: LogicalPlan, needed: set[str]) -> LogicalPlan:
         """Recursively prune the plan."""
+        from pandas.lazy.plan import DataFrameSource
+
         if isinstance(plan, DataFrameSource):
             # Can't prune source in logical plan
             return plan
@@ -692,6 +549,17 @@ class ProjectionPruning(OptimizationPass):
                 )
             return plan
 
+        elif isinstance(plan, TopK):
+            sort_cols: set[str] = set()
+            for expr in plan.by:
+                sort_cols |= get_referenced_columns(expr)
+            child_needed = needed | sort_cols
+
+            new_input = self._prune(plan.input, child_needed)
+            if new_input is not plan.input:
+                return TopK(new_input, plan.k, plan.by, plan.descending)
+            return plan
+
         return plan
 
     def _compute_join_required(
@@ -741,7 +609,7 @@ class ProjectionPruning(OptimizationPass):
 # =============================================================================
 
 
-class LimitPushdown(OptimizationPass):
+class LimitPushdown(PlanVisitor):
     """
     Push Limit nodes closer to data sources where safe.
 
@@ -754,69 +622,11 @@ class LimitPushdown(OptimizationPass):
     - Sort (need all rows to sort before limiting)
     - Join (would change join results)
     - Distinct (need all rows to find unique ones)
-
-    Special case: Sort followed by Limit could become top-k optimization
-    (not implemented in this MVP).
     """
 
-    def optimize(self, plan: LogicalPlan) -> LogicalPlan:
-        return self._transform(plan)
-
-    def _transform(self, plan: LogicalPlan) -> LogicalPlan:
-        """Recursively transform the plan."""
-        if isinstance(plan, Limit):
-            new_input = self._transform(plan.input)
-            return self._push_limit(new_input, plan.n, plan.offset)
-
-        elif isinstance(plan, Filter):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Filter(new_input, plan.predicate)
-            return plan
-
-        elif isinstance(plan, Project):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Project(new_input, plan.exprs)
-            return plan
-
-        elif isinstance(plan, Aggregate):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Aggregate(new_input, plan.group_by, plan.agg_exprs)
-            return plan
-
-        elif isinstance(plan, Sort):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Sort(new_input, plan.by, plan.descending)
-            return plan
-
-        elif isinstance(plan, Distinct):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Distinct(new_input, plan.subset)
-            return plan
-
-        elif isinstance(plan, Join):
-            new_left = self._transform(plan.left)
-            new_right = self._transform(plan.right)
-            if new_left is not plan.left or new_right is not plan.right:
-                return Join(
-                    new_left,
-                    new_right,
-                    plan.on,
-                    plan.left_on,
-                    plan.right_on,
-                    plan.how,
-                    plan.suffix,
-                )
-            return plan
-
-        elif isinstance(plan, DataFrameSource):
-            return plan
-
-        return plan
+    def visit_limit(self, plan: Limit) -> LogicalPlan:
+        new_input = self.visit(plan.input)
+        return self._push_limit(new_input, plan.n, plan.offset)
 
     def _push_limit(self, input_plan: LogicalPlan, n: int, offset: int) -> LogicalPlan:
         """Try to push a limit down through the input plan."""
@@ -844,7 +654,7 @@ class LimitPushdown(OptimizationPass):
 # =============================================================================
 
 
-class SortLimitToTopK(OptimizationPass):
+class SortLimitToTopK(PlanVisitor):
     """
     Combine Sort followed by Limit into a TopK operation.
 
@@ -855,88 +665,23 @@ class SortLimitToTopK(OptimizationPass):
     - Uses heap-based selection: O(n log k) vs O(n log n)
     - Lower memory usage: only keep k elements in memory
     - Better cache behavior for large datasets
-
-    This pass runs AFTER LimitPushdown so that limits have been
-    pushed as close to sorts as possible.
     """
 
-    def optimize(self, plan: LogicalPlan) -> LogicalPlan:
-        return self._transform(plan)
+    def visit_limit(self, plan: Limit) -> LogicalPlan:
+        new_input = self.visit(plan.input)
 
-    def _transform(self, plan: LogicalPlan) -> LogicalPlan:
-        """Recursively transform the plan, combining Sort+Limit into TopK."""
-        if isinstance(plan, Limit):
-            new_input = self._transform(plan.input)
+        # Check if input is a Sort (the pattern we're looking for)
+        if isinstance(new_input, Sort) and plan.offset == 0:
+            # Transform Sort + Limit -> TopK
+            return TopK(
+                new_input.input,
+                plan.n,
+                new_input.by,
+                new_input.descending,
+            )
 
-            # Check if input is a Sort (the pattern we're looking for)
-            if isinstance(new_input, Sort) and plan.offset == 0:
-                # Transform Sort + Limit -> TopK
-                return TopK(
-                    new_input.input,
-                    plan.n,
-                    new_input.by,
-                    new_input.descending,
-                )
-
-            if new_input is not plan.input:
-                return Limit(new_input, plan.n, plan.offset)
-            return plan
-
-        elif isinstance(plan, Filter):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Filter(new_input, plan.predicate)
-            return plan
-
-        elif isinstance(plan, Project):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Project(new_input, plan.exprs)
-            return plan
-
-        elif isinstance(plan, Aggregate):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Aggregate(new_input, plan.group_by, plan.agg_exprs)
-            return plan
-
-        elif isinstance(plan, Sort):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Sort(new_input, plan.by, plan.descending)
-            return plan
-
-        elif isinstance(plan, Distinct):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Distinct(new_input, plan.subset)
-            return plan
-
-        elif isinstance(plan, Join):
-            new_left = self._transform(plan.left)
-            new_right = self._transform(plan.right)
-            if new_left is not plan.left or new_right is not plan.right:
-                return Join(
-                    new_left,
-                    new_right,
-                    plan.on,
-                    plan.left_on,
-                    plan.right_on,
-                    plan.how,
-                    plan.suffix,
-                )
-            return plan
-
-        elif isinstance(plan, TopK):
-            # Already a TopK, just recurse
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return TopK(new_input, plan.k, plan.by, plan.descending)
-            return plan
-
-        elif isinstance(plan, DataFrameSource):
-            return plan
-
+        if new_input is not plan.input:
+            return Limit(new_input, plan.n, plan.offset)
         return plan
 
 
@@ -945,21 +690,12 @@ class SortLimitToTopK(OptimizationPass):
 # =============================================================================
 
 
-class CommonSubexpressionElimination(OptimizationPass):
+class CommonSubexpressionElimination(PlanVisitor):
     """
     Identify and eliminate common subexpressions.
 
     When the same expression appears multiple times in a Project node,
-    we can compute it once and reuse the result. This is particularly
-    useful for expensive computations like string operations.
-
-    Transforms:
-        Project([col("a").str.upper().alias("x"),
-                 col("a").str.upper().alias("y")])
-        ->
-        Project([col("a").str.upper().alias("__cse_0"),
-                 col("__cse_0").alias("x"),
-                 col("__cse_0").alias("y")])
+    we can compute it once and reuse the result.
 
     Note: This is a simplified CSE that works within a single Project node.
     A more sophisticated version could track expressions across nodes.
@@ -976,94 +712,30 @@ class CommonSubexpressionElimination(OptimizationPass):
 
     def optimize(self, plan: LogicalPlan) -> LogicalPlan:
         self._cse_counter = 0  # Reset counter for each optimization run
-        return self._transform(plan)
+        return self.visit(plan)
 
-    def _transform(self, plan: LogicalPlan) -> LogicalPlan:
-        """Recursively transform the plan, eliminating common subexpressions."""
-        if isinstance(plan, DataFrameSource):
-            return plan
-
-        elif isinstance(plan, Project):
-            new_input = self._transform(plan.input)
-            new_exprs = self._eliminate_cse_in_project(plan.exprs)
-            if new_input is not plan.input or new_exprs != plan.exprs:
-                return Project(new_input, new_exprs)
-            return plan
-
-        elif isinstance(plan, Filter):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Filter(new_input, plan.predicate)
-            return plan
-
-        elif isinstance(plan, Aggregate):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Aggregate(new_input, plan.group_by, plan.agg_exprs)
-            return plan
-
-        elif isinstance(plan, Sort):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Sort(new_input, plan.by, plan.descending)
-            return plan
-
-        elif isinstance(plan, Limit):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Limit(new_input, plan.n, plan.offset)
-            return plan
-
-        elif isinstance(plan, Distinct):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Distinct(new_input, plan.subset)
-            return plan
-
-        elif isinstance(plan, Join):
-            new_left = self._transform(plan.left)
-            new_right = self._transform(plan.right)
-            if new_left is not plan.left or new_right is not plan.right:
-                return Join(
-                    new_left,
-                    new_right,
-                    plan.on,
-                    plan.left_on,
-                    plan.right_on,
-                    plan.how,
-                    plan.suffix,
-                )
-            return plan
-
-        elif isinstance(plan, TopK):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return TopK(new_input, plan.k, plan.by, plan.descending)
-            return plan
-
+    def visit_project(self, plan: Project) -> LogicalPlan:
+        new_input = self.visit(plan.input)
+        new_exprs = self._eliminate_cse_in_project(plan.exprs)
+        if new_input is not plan.input or new_exprs != plan.exprs:
+            return Project(new_input, new_exprs)
         return plan
 
     def _eliminate_cse_in_project(self, exprs: tuple[Expr, ...]) -> tuple[Expr, ...]:
-        """
-        Find and eliminate common subexpressions within a Project.
-
-        Returns the potentially modified tuple of expressions.
-        """
+        """Find and eliminate common subexpressions within a Project."""
         from pandas.lazy.expr import Expr
 
         # Build a map of IR node fingerprints to their occurrences
-        # We use a string representation as a simple fingerprint
         ir_to_exprs: dict[str, list[tuple[int, Expr]]] = {}
 
         for i, expr in enumerate(exprs):
-            # Get the core IR (unwrap alias)
             ir = expr._ir
             if isinstance(ir, Alias):
                 core_ir = ir.arg
             else:
                 core_ir = ir
 
-            # Only consider non-trivial expressions (not simple FieldRefs or Literals)
+            # Only consider non-trivial expressions
             if isinstance(core_ir, (FieldRef, Literal)):
                 continue
 
@@ -1072,7 +744,7 @@ class CommonSubexpressionElimination(OptimizationPass):
                 ir_to_exprs[fingerprint] = []
             ir_to_exprs[fingerprint].append((i, expr))
 
-        # Find duplicates (fingerprints with multiple occurrences)
+        # Find duplicates
         duplicates = {
             fp: indices for fp, indices in ir_to_exprs.items() if len(indices) > 1
         }
@@ -1082,13 +754,11 @@ class CommonSubexpressionElimination(OptimizationPass):
 
         # Build the new expression list
         new_exprs = list(exprs)
-        cse_exprs: list[Expr] = []  # CSE definitions to prepend
+        cse_exprs: list[Expr] = []
 
         for fingerprint, occurrences in duplicates.items():
-            # Create a CSE temp column
             cse_name = self._next_cse_name()
 
-            # First occurrence: compute and store
             first_idx, first_expr = occurrences[0]
             first_ir = first_expr._ir
             if isinstance(first_ir, Alias):
@@ -1096,32 +766,20 @@ class CommonSubexpressionElimination(OptimizationPass):
             else:
                 core_ir = first_ir
 
-            # Create the CSE definition: expr.alias(__cse_N)
             cse_def = Expr(Alias(core_ir, cse_name))
             cse_exprs.append(cse_def)
 
-            # Replace all occurrences with references to CSE column
             for idx, expr in occurrences:
                 ir = expr._ir
                 if isinstance(ir, Alias):
-                    # Keep the original alias name, but reference CSE column
                     new_exprs[idx] = Expr(Alias(FieldRef(cse_name), ir.name))
                 else:
-                    # This shouldn't happen for our case, but handle it
                     new_exprs[idx] = Expr(FieldRef(cse_name))
 
-        # Return CSE definitions followed by modified expressions
-        # But we need to remove the CSE temp columns from final output
-        # Actually, for this simple implementation, we'll keep them
-        # A more sophisticated version would add a cleanup projection
         return tuple(cse_exprs) + tuple(new_exprs)
 
     def _fingerprint_ir(self, ir: IRNode) -> str:
-        """
-        Create a fingerprint string for an IR node.
-
-        This is used to identify identical expressions.
-        """
+        """Create a fingerprint string for an IR node."""
         if isinstance(ir, FieldRef):
             return f"FieldRef({ir.name})"
         elif isinstance(ir, Literal):
@@ -1142,126 +800,61 @@ class CommonSubexpressionElimination(OptimizationPass):
 # =============================================================================
 
 
-class DeadCodeElimination(OptimizationPass):
+class DeadCodeElimination(PlanVisitor):
     """
     Remove unreachable or useless code from the plan.
 
     This pass identifies and removes:
     1. Filter nodes with constant True predicate (no filtering needed)
     2. Project nodes that don't change anything (identity projections)
-    3. Limit nodes with n >= input row count (when statically known)
-
-    Note: This is complementary to ProjectionPruning, which removes
-    unused columns. DeadCodeElimination removes entire nodes.
+    3. Sort nodes with zero columns (no-op)
     """
 
-    def optimize(self, plan: LogicalPlan) -> LogicalPlan:
-        return self._transform(plan)
+    def visit_filter(self, plan: Filter) -> LogicalPlan:
+        new_input = self.visit(plan.input)
 
-    def _transform(self, plan: LogicalPlan) -> LogicalPlan:
-        """Recursively transform the plan, eliminating dead code."""
-        if isinstance(plan, DataFrameSource):
-            return plan
+        # Check if predicate is constant True
+        pred_ir = plan.predicate._ir
+        if isinstance(pred_ir, Literal) and pred_ir.value is True:
+            # Filter with True predicate is dead code
+            return new_input
 
-        elif isinstance(plan, Filter):
-            new_input = self._transform(plan.input)
+        if new_input is not plan.input:
+            return Filter(new_input, plan.predicate)
+        return plan
 
-            # Check if predicate is constant True
-            pred_ir = plan.predicate._ir
-            if isinstance(pred_ir, Literal) and pred_ir.value is True:
-                # Filter with True predicate is dead code
-                return new_input
+    def visit_project(self, plan: Project) -> LogicalPlan:
+        new_input = self.visit(plan.input)
 
-            # Check if predicate is constant False
-            # Note: This removes all rows - could be intentional, but unusual
-            # We leave this case alone for now
+        # Check if this is an identity projection
+        if self._is_identity_projection(plan):
+            return new_input
 
-            if new_input is not plan.input:
-                return Filter(new_input, plan.predicate)
-            return plan
+        if new_input is not plan.input:
+            return Project(new_input, plan.exprs)
+        return plan
 
-        elif isinstance(plan, Project):
-            new_input = self._transform(plan.input)
+    def visit_sort(self, plan: Sort) -> LogicalPlan:
+        new_input = self.visit(plan.input)
 
-            # Check if this is an identity projection
-            if self._is_identity_projection(plan):
-                return new_input
+        # Check if sorting by zero columns (no-op)
+        if len(plan.by) == 0:
+            return new_input
 
-            if new_input is not plan.input:
-                return Project(new_input, plan.exprs)
-            return plan
-
-        elif isinstance(plan, Aggregate):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Aggregate(new_input, plan.group_by, plan.agg_exprs)
-            return plan
-
-        elif isinstance(plan, Sort):
-            new_input = self._transform(plan.input)
-
-            # Check if sorting by zero columns (no-op)
-            if len(plan.by) == 0:
-                return new_input
-
-            if new_input is not plan.input:
-                return Sort(new_input, plan.by, plan.descending)
-            return plan
-
-        elif isinstance(plan, Limit):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Limit(new_input, plan.n, plan.offset)
-            return plan
-
-        elif isinstance(plan, Distinct):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Distinct(new_input, plan.subset)
-            return plan
-
-        elif isinstance(plan, Join):
-            new_left = self._transform(plan.left)
-            new_right = self._transform(plan.right)
-            if new_left is not plan.left or new_right is not plan.right:
-                return Join(
-                    new_left,
-                    new_right,
-                    plan.on,
-                    plan.left_on,
-                    plan.right_on,
-                    plan.how,
-                    plan.suffix,
-                )
-            return plan
-
-        elif isinstance(plan, TopK):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return TopK(new_input, plan.k, plan.by, plan.descending)
-            return plan
-
+        if new_input is not plan.input:
+            return Sort(new_input, plan.by, plan.descending)
         return plan
 
     def _is_identity_projection(self, project: Project) -> bool:
-        """
-        Check if a Project is an identity transformation.
-
-        An identity projection:
-        - Has the same columns as input (in same order)
-        - Each column is a simple pass-through (FieldRef with same name)
-        """
+        """Check if a Project is an identity transformation."""
         input_schema = project.input.resolve_schema()
         input_names = input_schema.names
 
-        # Must have same number of columns
         if len(project.exprs) != len(input_names):
             return False
 
-        # Each expression must be a simple pass-through
         for expr, expected_name in zip(project.exprs, input_names, strict=False):
             ir = expr._ir
-            # Handle both FieldRef and Alias(FieldRef, same_name)
             if isinstance(ir, FieldRef):
                 if ir.name != expected_name:
                     return False
@@ -1283,102 +876,29 @@ class DeadCodeElimination(OptimizationPass):
 # =============================================================================
 
 
-class AggregatePushdown(OptimizationPass):
+class AggregatePushdown(PlanVisitor):
     """
     Push aggregations closer to data sources where safe.
-
-    This optimization:
-    1. Pushes Aggregate through Project when the projection doesn't affect
-       the columns needed for aggregation
-    2. Combines Aggregate with Filter below it (pre-aggregation filtering)
-
-    Benefits:
-    - Reduces data volume before expensive grouping operations
-    - Enables better column pruning before aggregation
 
     Transforms:
         Aggregate(Project(source, exprs), group_by, aggs)
         -> Project(Aggregate(source, group_by', aggs'), exprs')
         (when group_by and agg columns are pass-through in Project)
-
-        Aggregate(Filter(source, pred), group_by, aggs)
-        -> stays as is (filter before aggregate is already optimal)
     """
 
-    def optimize(self, plan: LogicalPlan) -> LogicalPlan:
-        return self._transform(plan)
+    def visit_aggregate(self, plan: Aggregate) -> LogicalPlan:
+        new_input = self.visit(plan.input)
 
-    def _transform(self, plan: LogicalPlan) -> LogicalPlan:
-        """Recursively transform the plan, pushing aggregates down."""
-        if isinstance(plan, DataFrameSource):
-            return plan
+        # Try to push aggregate through Project
+        if isinstance(new_input, Project):
+            pushed = self._push_aggregate_through_project(
+                new_input, plan.group_by, plan.agg_exprs
+            )
+            if pushed is not None:
+                return pushed
 
-        elif isinstance(plan, Aggregate):
-            new_input = self._transform(plan.input)
-
-            # Try to push aggregate through Project
-            if isinstance(new_input, Project):
-                pushed = self._push_aggregate_through_project(
-                    new_input, plan.group_by, plan.agg_exprs
-                )
-                if pushed is not None:
-                    return pushed
-
-            if new_input is not plan.input:
-                return Aggregate(new_input, plan.group_by, plan.agg_exprs)
-            return plan
-
-        elif isinstance(plan, Project):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Project(new_input, plan.exprs)
-            return plan
-
-        elif isinstance(plan, Filter):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Filter(new_input, plan.predicate)
-            return plan
-
-        elif isinstance(plan, Sort):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Sort(new_input, plan.by, plan.descending)
-            return plan
-
-        elif isinstance(plan, Limit):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Limit(new_input, plan.n, plan.offset)
-            return plan
-
-        elif isinstance(plan, Distinct):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return Distinct(new_input, plan.subset)
-            return plan
-
-        elif isinstance(plan, Join):
-            new_left = self._transform(plan.left)
-            new_right = self._transform(plan.right)
-            if new_left is not plan.left or new_right is not plan.right:
-                return Join(
-                    new_left,
-                    new_right,
-                    plan.on,
-                    plan.left_on,
-                    plan.right_on,
-                    plan.how,
-                    plan.suffix,
-                )
-            return plan
-
-        elif isinstance(plan, TopK):
-            new_input = self._transform(plan.input)
-            if new_input is not plan.input:
-                return TopK(new_input, plan.k, plan.by, plan.descending)
-            return plan
-
+        if new_input is not plan.input:
+            return Aggregate(new_input, plan.group_by, plan.agg_exprs)
         return plan
 
     def _push_aggregate_through_project(
@@ -1387,25 +907,14 @@ class AggregatePushdown(OptimizationPass):
         group_by: tuple[Expr, ...],
         agg_exprs: tuple[Expr, ...],
     ) -> LogicalPlan | None:
-        """
-        Try to push an Aggregate through a Project.
-
-        This is valid when:
-        1. All group_by columns are pass-through or simple renames in the Project
-        2. All columns referenced by agg_exprs are pass-through or simple renames
-
-        Returns the pushed plan or None if not possible.
-        """
-        from pandas.lazy.expr import (
-            Expr,
-            extract_output_name,
-        )
+        """Try to push an Aggregate through a Project."""
+        from pandas.lazy.expr import Expr
 
         lineage = build_project_lineage(project)
 
         # Collect all columns needed by group_by and agg_exprs
         needed_cols: set[str] = set()
-        col_mapping: dict[str, str] = {}  # output_name -> input_name
+        col_mapping: dict[str, str] = {}
 
         # Check group_by columns
         for expr in group_by:
@@ -1413,7 +922,6 @@ class AggregatePushdown(OptimizationPass):
             for col_name in cols:
                 source_name = get_source_column_name(lineage, col_name)
                 if source_name is None:
-                    # Column is computed, cannot push
                     return None
                 col_mapping[col_name] = source_name
                 needed_cols.add(source_name)
@@ -1424,46 +932,35 @@ class AggregatePushdown(OptimizationPass):
             for col_name in cols:
                 source_name = get_source_column_name(lineage, col_name)
                 if source_name is None:
-                    # Column is computed, cannot push
                     return None
                 col_mapping[col_name] = source_name
                 needed_cols.add(source_name)
 
         # All columns are pass-through or simple renames - we can push!
-        # Rewrite group_by expressions with source column names
         new_group_by = tuple(
             Expr(substitute_columns(e._ir, col_mapping)) for e in group_by
         )
-
-        # Rewrite agg_exprs with source column names
         new_agg_exprs = tuple(
             Expr(substitute_columns(e._ir, col_mapping)) for e in agg_exprs
         )
 
-        # Create the pushed Aggregate
         pushed_agg = Aggregate(project.input, new_group_by, new_agg_exprs)
 
-        # We need to preserve the original output column names
-        # Build a Project on top to rename back if needed
+        # Build output Project for renaming
         output_exprs: list[Expr] = []
 
-        # Add group_by columns (may need renaming)
         for orig_expr in group_by:
             orig_name = extract_output_name(orig_expr)
             source_name = col_mapping.get(orig_name, orig_name)
             if orig_name != source_name:
-                # Need to rename back
                 output_exprs.append(Expr(Alias(FieldRef(source_name), orig_name)))
             else:
                 output_exprs.append(Expr(FieldRef(orig_name)))
 
-        # Add agg columns (keep original names from aliases)
         for orig_expr in agg_exprs:
             orig_name = extract_output_name(orig_expr)
-            # Agg expressions keep their alias names
             output_exprs.append(Expr(FieldRef(orig_name)))
 
-        # Check if we need the renaming Project
         needs_rename = any(
             col_mapping.get(extract_output_name(e), extract_output_name(e))
             != extract_output_name(e)
@@ -1474,8 +971,3 @@ class AggregatePushdown(OptimizationPass):
             return Project(pushed_agg, tuple(output_exprs))
         else:
             return pushed_agg
-
-
-# =============================================================================
-# Backend Requirements Analysis
-# =============================================================================

@@ -18,6 +18,7 @@ Pass Ordering (critical for correctness):
 from pandas.lazy.optimize.base import (
     OptimizationPass,
     Optimizer,
+    PlanVisitor,
 )
 from pandas.lazy.optimize.engine import (
     BackendRequirements,
@@ -62,6 +63,7 @@ __all__ = [
     "LimitPushdown",
     "OptimizationPass",
     "Optimizer",
+    "PlanVisitor",
     "PredicatePushdown",
     "ProjectionPruning",
     "SortLimitToTopK",
