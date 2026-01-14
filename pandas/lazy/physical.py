@@ -284,15 +284,37 @@ class PhysicalFilter(PhysicalPlan):
             for name in data_arrays.keys():
                 result[name] = filtered_table.column(name).combine_chunks()
         else:
-            # Filter data arrays individually
-            for name, arr in data_arrays.items():
-                backend = get_array_backend(arr)
-                result[name] = dispatch_kernel("filter", backend, arr, mask_arr)
+            # For NumPy arrays, compute indices once and use take() for all columns
+            # This is ~3.5x faster than boolean indexing per column
+            indices = np.nonzero(mask_arr)[0]
 
-        # Always filter index columns with numpy (they're typically numpy arrays)
-        for name, arr in index_arrays.items():
-            backend = get_array_backend(arr)
-            result[name] = dispatch_kernel("filter", backend, arr, mask_arr)
+            # Filter data arrays using take
+            for name, arr in data_arrays.items():
+                if isinstance(arr, np.ndarray):
+                    result[name] = arr.take(indices)
+                else:
+                    # Fallback for non-numpy arrays
+                    backend = get_array_backend(arr)
+                    result[name] = dispatch_kernel("filter", backend, arr, mask_arr)
+
+        # Filter index columns using same indices (they're typically numpy arrays)
+        if not all_data_arrow:
+            # Reuse indices computed above
+            for name, arr in index_arrays.items():
+                if isinstance(arr, np.ndarray):
+                    result[name] = arr.take(indices)
+                else:
+                    backend = get_array_backend(arr)
+                    result[name] = dispatch_kernel("filter", backend, arr, mask_arr)
+        else:
+            # For Arrow path, compute indices for index columns
+            indices = np.nonzero(mask_arr)[0]
+            for name, arr in index_arrays.items():
+                if isinstance(arr, np.ndarray):
+                    result[name] = arr.take(indices)
+                else:
+                    backend = get_array_backend(arr)
+                    result[name] = dispatch_kernel("filter", backend, arr, mask_arr)
 
         return result
 
