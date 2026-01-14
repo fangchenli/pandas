@@ -426,7 +426,13 @@ def _take_key_column_coalesced(
     left_valid = left_indices >= 0
     right_valid = right_indices >= 0
 
-    # Determine output dtype
+    # Check if we have any missing values
+    all_left_valid = left_valid.all()
+    if all_left_valid:
+        # No missing values - simple take, preserve dtype
+        return left_arr[left_indices]
+
+    # Has missing values - need to handle NaN/None
     if np.issubdtype(left_arr.dtype, np.floating):
         result = np.full(n, np.nan, dtype=left_arr.dtype)
     elif np.issubdtype(left_arr.dtype, np.integer):
@@ -463,22 +469,26 @@ def _take_with_missing(arr: np.ndarray, indices: np.ndarray) -> np.ndarray:
     np.ndarray
         Result array with NaN/None for missing values.
     """
-    # Determine output dtype
+    mask = indices >= 0
+    has_missing = not mask.all()
+
+    if not has_missing:
+        # No missing values - simple take, preserve dtype
+        return arr[indices]
+
+    # Has missing values - need to handle NaN/None
     if np.issubdtype(arr.dtype, np.floating):
         result = np.empty(len(indices), dtype=arr.dtype)
-        mask = indices >= 0
         result[mask] = arr[indices[mask]]
         result[~mask] = np.nan
     elif np.issubdtype(arr.dtype, np.integer):
         # Convert to float to handle NaN
         result = np.empty(len(indices), dtype=np.float64)
-        mask = indices >= 0
         result[mask] = arr[indices[mask]]
         result[~mask] = np.nan
     else:
         # Object dtype
         result = np.empty(len(indices), dtype=object)
-        mask = indices >= 0
         result[mask] = arr[indices[mask]]
         result[~mask] = None
 

@@ -1150,6 +1150,10 @@ class PhysicalHashJoin(PhysicalPlan):
         if backend == "arrow" and has_kernel("hash_join", "arrow"):
             return self._execute_arrow_join(left_data, right_data)
 
+        # Try NumPy kernel for NumPy backend
+        if backend == "numpy" and has_kernel("hash_join", "numpy"):
+            return self._execute_numpy_join(left_data, right_data)
+
         # Fallback to DataFrame-based join
         return self._execute_dataframe_join(left_arrays, right_arrays, context)
 
@@ -1195,6 +1199,50 @@ class PhysicalHashJoin(PhysicalPlan):
         result: ArrayDict = {}
         for col_name in result_table.column_names:
             result[col_name] = result_table.column(col_name)
+
+        return result
+
+    def _execute_numpy_join(
+        self,
+        left_data: ArrayDict,
+        right_data: ArrayDict,
+    ) -> ArrayDict:
+        """Execute join using NumPy kernel."""
+        import numpy as np
+
+        from pandas.lazy.backends import dispatch_kernel
+
+        # Convert to dict[str, np.ndarray]
+        left_arrays: dict[str, np.ndarray] = {
+            k: np.asarray(v) for k, v in left_data.items()
+        }
+        right_arrays: dict[str, np.ndarray] = {
+            k: np.asarray(v) for k, v in right_data.items()
+        }
+
+        # Determine keys
+        if self.on is not None:
+            keys = list(self.on)
+            left_keys = None
+            right_keys = None
+        else:
+            keys = None
+            left_keys = list(self.left_on) if self.left_on else None
+            right_keys = list(self.right_on) if self.right_on else None
+
+        # Execute join
+        result = dispatch_kernel(
+            "hash_join",
+            "numpy",
+            left_arrays,
+            right_arrays,
+            keys=keys,
+            left_keys=left_keys,
+            right_keys=right_keys,
+            join_type=self.how,
+            left_suffix=self.suffix[0],
+            right_suffix=self.suffix[1],
+        )
 
         return result
 
