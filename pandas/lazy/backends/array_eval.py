@@ -8,6 +8,7 @@ Unlike the DataFrame-based Evaluator, this evaluator:
 - Works directly on ArrayDict (dict of arrays)
 - Dispatches to registered kernels (Arrow or NumPy)
 - Avoids pandas overhead for supported operations
+- Uses NumExpr expression fusion for large NumPy arrays
 """
 
 from __future__ import annotations
@@ -39,6 +40,9 @@ if TYPE_CHECKING:
     )
     from pandas.lazy.ir import IRNode
 
+# Minimum elements for NumExpr to be beneficial
+_NUMEXPR_MIN_ELEMENTS = 100_000
+
 
 class ArrayEvaluator:
     """
@@ -52,6 +56,7 @@ class ArrayEvaluator:
         self,
         arrays: ArrayDict,
         preferred_backend: Literal["auto", "arrow", "numpy"] = "auto",
+        use_numexpr: bool = True,
     ) -> None:
         """
         Initialize evaluator with arrays.
@@ -62,9 +67,22 @@ class ArrayEvaluator:
             Dictionary mapping column names to arrays.
         preferred_backend : {"auto", "arrow", "numpy"}
             Preferred execution backend.
+        use_numexpr : bool, default True
+            Whether to use NumExpr for expression fusion when beneficial.
         """
         self._arrays = arrays
         self._preferred_backend = preferred_backend
+        self._use_numexpr = use_numexpr
+
+        # Determine array size for NumExpr threshold check
+        self._array_size = 0
+        for arr in arrays.values():
+            if isinstance(arr, np.ndarray):
+                self._array_size = len(arr)
+                break
+            elif isinstance(arr, (pa.Array, pa.ChunkedArray)):
+                self._array_size = len(arr)
+                break
 
     def evaluate(self, node: IRNode) -> ArrayLike | Any:
         """
@@ -98,6 +116,11 @@ class ArrayEvaluator:
             return self.evaluate(node.arg)
 
         elif isinstance(node, Call):
+            # Try NumExpr fusion for complex arithmetic on large NumPy arrays
+            if self._should_try_numexpr(node):
+                result = self._try_numexpr_fusion(node)
+                if result is not None:
+                    return result
             return self._evaluate_call(node)
 
         elif isinstance(node, Cast):
@@ -429,3 +452,56 @@ class ArrayEvaluator:
             return np.minimum.accumulate(arr)
         elif agg == "max":
             return np.maximum.accumulate(arr)
+
+    # =========================================================================
+    # NumExpr Expression Fusion
+    # =========================================================================
+
+    def _should_try_numexpr(self, node) -> bool:
+        """Check if NumExpr fusion should be attempted for this node."""
+        if not self._use_numexpr:
+            return False
+
+        # Only worthwhile for large arrays
+        if self._array_size < _NUMEXPR_MIN_ELEMENTS:
+            return False
+
+        # Check if preferred backend is numpy (or auto with numpy data)
+        if self._preferred_backend == "arrow":
+            return False
+
+        # Check if arrays are NumPy (not Arrow)
+        has_numpy = False
+        for arr in self._arrays.values():
+            if isinstance(arr, np.ndarray):
+                has_numpy = True
+                break
+            elif isinstance(arr, (pa.Array, pa.ChunkedArray)):
+                # Has Arrow data - NumExpr won't help
+                return False
+
+        return has_numpy
+
+    def _try_numexpr_fusion(self, node) -> ArrayLike | None:
+        """
+        Try to evaluate expression using NumExpr fusion.
+
+        Returns None if fusion is not possible or not beneficial.
+        """
+        try:
+            from pandas.lazy.backends.numexpr_fusion import (
+                can_fuse_expression,
+                fuse_expression,
+            )
+        except ImportError:
+            return None
+
+        # Check if expression can be fused
+        if not can_fuse_expression(node, self._arrays):
+            return None
+
+        try:
+            return fuse_expression(node, self._arrays)
+        except (ValueError, TypeError, KeyError):
+            # Fusion failed - fall back to regular evaluation
+            return None
