@@ -2,6 +2,8 @@
 NumPy Window/Cumulative kernel implementations.
 
 This module contains cumulative and window operations.
+
+All functions are vectorized for performance.
 """
 
 import numpy as np
@@ -30,16 +32,9 @@ def numpy_cumulative_sum(arr: np.ndarray, skip_nulls: bool = True) -> np.ndarray
         Cumulative sum array.
     """
     if skip_nulls and np.issubdtype(arr.dtype, np.floating):
-        # Handle NaN values - use pandas-style cumsum that skips NaN
-        result = np.empty_like(arr)
-        mask = ~np.isnan(arr)
-        # Fill with cumsum of non-NaN values
-        cum = 0.0
-        for i in range(len(arr)):
-            if mask[i]:
-                cum += arr[i]
-            result[i] = cum
-        return result
+        # Vectorized: replace NaN with 0 for cumsum, then forward-fill result
+        filled = np.where(np.isnan(arr), 0.0, arr)
+        return np.cumsum(filled)
     return np.cumsum(arr)
 
 
@@ -61,13 +56,11 @@ def numpy_cumulative_max(arr: np.ndarray, skip_nulls: bool = True) -> np.ndarray
         Cumulative max array.
     """
     if skip_nulls and np.issubdtype(arr.dtype, np.floating):
-        result = np.empty_like(arr)
-        mask = ~np.isnan(arr)
-        cur_max = -np.inf
-        for i in range(len(arr)):
-            if mask[i]:
-                cur_max = max(cur_max, arr[i])
-            result[i] = cur_max if cur_max != -np.inf else np.nan
+        # Vectorized: replace NaN with -inf, then accumulate max
+        filled = np.where(np.isnan(arr), -np.inf, arr)
+        result = np.maximum.accumulate(filled)
+        # Replace -inf (meaning no valid values seen yet) with NaN
+        result = np.where(result == -np.inf, np.nan, result)
         return result
     return np.maximum.accumulate(arr)
 
@@ -90,13 +83,11 @@ def numpy_cumulative_min(arr: np.ndarray, skip_nulls: bool = True) -> np.ndarray
         Cumulative min array.
     """
     if skip_nulls and np.issubdtype(arr.dtype, np.floating):
-        result = np.empty_like(arr)
-        mask = ~np.isnan(arr)
-        cur_min = np.inf
-        for i in range(len(arr)):
-            if mask[i]:
-                cur_min = min(cur_min, arr[i])
-            result[i] = cur_min if cur_min != np.inf else np.nan
+        # Vectorized: replace NaN with inf, then accumulate min
+        filled = np.where(np.isnan(arr), np.inf, arr)
+        result = np.minimum.accumulate(filled)
+        # Replace inf (meaning no valid values seen yet) with NaN
+        result = np.where(result == np.inf, np.nan, result)
         return result
     return np.minimum.accumulate(arr)
 
@@ -119,14 +110,9 @@ def numpy_cumulative_prod(arr: np.ndarray, skip_nulls: bool = True) -> np.ndarra
         Cumulative product array.
     """
     if skip_nulls and np.issubdtype(arr.dtype, np.floating):
-        result = np.empty_like(arr)
-        mask = ~np.isnan(arr)
-        cum = 1.0
-        for i in range(len(arr)):
-            if mask[i]:
-                cum *= arr[i]
-            result[i] = cum
-        return result
+        # Vectorized: replace NaN with 1 for cumprod (identity for multiplication)
+        filled = np.where(np.isnan(arr), 1.0, arr)
+        return np.cumprod(filled)
     return np.cumprod(arr)
 
 
@@ -148,21 +134,18 @@ def numpy_cumulative_mean(arr: np.ndarray, skip_nulls: bool = True) -> np.ndarra
         Cumulative mean array.
     """
     if skip_nulls and np.issubdtype(arr.dtype, np.floating):
-        result = np.empty_like(arr, dtype=np.float64)
+        # Vectorized: cumsum of values / cumsum of counts
         mask = ~np.isnan(arr)
-        cum_sum = 0.0
-        cum_count = 0
-        for i in range(len(arr)):
-            if mask[i]:
-                cum_sum += arr[i]
-                cum_count += 1
-            result[i] = cum_sum / cum_count if cum_count > 0 else np.nan
+        filled = np.where(mask, arr, 0.0)
+        cum_sum = np.cumsum(filled)
+        cum_count = np.cumsum(mask.astype(np.float64))
+        # Avoid division by zero
+        result = np.where(cum_count > 0, cum_sum / cum_count, np.nan)
         return result
-    # For non-floating point or no skip_nulls
-    result = np.empty(len(arr), dtype=np.float64)
-    for i in range(len(arr)):
-        result[i] = np.mean(arr[: i + 1])
-    return result
+    # For non-floating point or no skip_nulls: cumsum / position
+    cum_sum = np.cumsum(arr.astype(np.float64))
+    positions = np.arange(1, len(arr) + 1, dtype=np.float64)
+    return cum_sum / positions
 
 
 # =============================================================================
