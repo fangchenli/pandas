@@ -20,6 +20,7 @@ import pandas._config.config as cf
 from pandas._config.config import (
     is_bool,
     is_callable,
+    is_float,
     is_instance_factory,
     is_int,
     is_nonnegative_int,
@@ -127,6 +128,34 @@ lazy_numexpr_min_elements_doc = """
     Valid values: positive integers
 """
 
+lazy_numexpr_min_operations_doc = """
+: int
+    Minimum number of fusible operations for NumExpr to be beneficial.
+    Fusion only helps when there are multiple operations to combine.
+    Valid values: positive integers
+"""
+
+lazy_numexpr_large_array_threshold_doc = """
+: int
+    Array size threshold where memory bandwidth becomes the bottleneck.
+    Above this size, NumExpr benefit increases due to cache efficiency.
+    Valid values: positive integers
+"""
+
+lazy_parallel_chunk_size_doc = """
+: int
+    Batch size for streaming execution. 64K is L3 cache friendly.
+    Used for chunked/streaming processing of large datasets.
+    Valid values: positive integers
+"""
+
+lazy_arrow_majority_fraction_doc = """
+: float
+    Fraction of Arrow columns needed to prefer Arrow backend for neutral ops.
+    Used in backend voting when data is mixed Arrow/NumPy format.
+    Valid values: floats between 0.0 and 1.0
+"""
+
 
 def _lazy_threshold_cb(key: str) -> None:
     """Callback to sync pandas options with ThresholdConfig."""
@@ -148,7 +177,15 @@ def _lazy_threshold_cb(key: str) -> None:
             parallel_expr_threshold=cf.get_option(
                 "compute.lazy.parallel_expr_threshold"
             ),
+            parallel_chunk_size=cf.get_option("compute.lazy.parallel_chunk_size"),
             numexpr_min_elements=cf.get_option("compute.lazy.numexpr_min_elements"),
+            numexpr_min_operations=cf.get_option("compute.lazy.numexpr_min_operations"),
+            numexpr_large_array_threshold=cf.get_option(
+                "compute.lazy.numexpr_large_array_threshold"
+            ),
+            arrow_majority_fraction=cf.get_option(
+                "compute.lazy.arrow_majority_fraction"
+            ),
         )
         set_threshold_config(config)
     except ImportError:
@@ -190,6 +227,34 @@ with cf.config_prefix("compute.lazy"):
         100_000,
         lazy_numexpr_min_elements_doc,
         validator=is_nonnegative_int,
+        cb=_lazy_threshold_cb,
+    )
+    cf.register_option(
+        "numexpr_min_operations",
+        2,
+        lazy_numexpr_min_operations_doc,
+        validator=is_nonnegative_int,
+        cb=_lazy_threshold_cb,
+    )
+    cf.register_option(
+        "numexpr_large_array_threshold",
+        1_000_000,
+        lazy_numexpr_large_array_threshold_doc,
+        validator=is_nonnegative_int,
+        cb=_lazy_threshold_cb,
+    )
+    cf.register_option(
+        "parallel_chunk_size",
+        65_536,
+        lazy_parallel_chunk_size_doc,
+        validator=is_nonnegative_int,
+        cb=_lazy_threshold_cb,
+    )
+    cf.register_option(
+        "arrow_majority_fraction",
+        0.5,
+        lazy_arrow_majority_fraction_doc,
+        validator=is_float,
         cb=_lazy_threshold_cb,
     )
 

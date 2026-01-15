@@ -294,7 +294,11 @@ class TestPandasOptionsIntegration:
         pd.reset_option("compute.lazy.groupby_arrow_row_threshold")
         pd.reset_option("compute.lazy.groupby_arrow_cardinality_threshold")
         pd.reset_option("compute.lazy.parallel_expr_threshold")
+        pd.reset_option("compute.lazy.parallel_chunk_size")
         pd.reset_option("compute.lazy.numexpr_min_elements")
+        pd.reset_option("compute.lazy.numexpr_min_operations")
+        pd.reset_option("compute.lazy.numexpr_large_array_threshold")
+        pd.reset_option("compute.lazy.arrow_majority_fraction")
 
     def teardown_method(self):
         """Reset config and options after each test."""
@@ -305,7 +309,11 @@ class TestPandasOptionsIntegration:
         pd.reset_option("compute.lazy.groupby_arrow_row_threshold")
         pd.reset_option("compute.lazy.groupby_arrow_cardinality_threshold")
         pd.reset_option("compute.lazy.parallel_expr_threshold")
+        pd.reset_option("compute.lazy.parallel_chunk_size")
         pd.reset_option("compute.lazy.numexpr_min_elements")
+        pd.reset_option("compute.lazy.numexpr_min_operations")
+        pd.reset_option("compute.lazy.numexpr_large_array_threshold")
+        pd.reset_option("compute.lazy.arrow_majority_fraction")
 
     def test_get_option_defaults(self):
         """Test that pandas options have correct defaults."""
@@ -315,7 +323,11 @@ class TestPandasOptionsIntegration:
         assert pd.get_option("compute.lazy.groupby_arrow_row_threshold") == 100_000
         assert pd.get_option("compute.lazy.groupby_arrow_cardinality_threshold") == 100
         assert pd.get_option("compute.lazy.parallel_expr_threshold") == 8
+        assert pd.get_option("compute.lazy.parallel_chunk_size") == 65_536
         assert pd.get_option("compute.lazy.numexpr_min_elements") == 100_000
+        assert pd.get_option("compute.lazy.numexpr_min_operations") == 2
+        assert pd.get_option("compute.lazy.numexpr_large_array_threshold") == 1_000_000
+        assert pd.get_option("compute.lazy.arrow_majority_fraction") == 0.5
 
     def test_set_option_updates_threshold_config(self):
         """Test that pd.set_option updates ThresholdConfig."""
@@ -404,3 +416,25 @@ class TestPandasOptionsIntegration:
 
         with pytest.raises(ValueError, match="Value must be a nonnegative integer"):
             pd.set_option("compute.lazy.filter_arrow_threshold", "not an int")
+
+    @pytest.mark.parametrize(
+        "option_name,test_value",
+        [
+            ("filter_arrow_threshold", 75_000),
+            ("groupby_arrow_row_threshold", 200_000),
+            ("groupby_arrow_cardinality_threshold", 150),
+            ("parallel_expr_threshold", 12),
+            ("parallel_chunk_size", 32_768),
+            ("numexpr_min_elements", 50_000),
+            ("numexpr_min_operations", 3),
+            ("numexpr_large_array_threshold", 500_000),
+            ("arrow_majority_fraction", 0.7),
+        ],
+    )
+    def test_all_threshold_options(self, option_name, test_value):
+        """Test all threshold options can be set and retrieved."""
+        import pandas as pd
+
+        pd.set_option(f"compute.lazy.{option_name}", test_value)
+        config = get_threshold_config()
+        assert getattr(config, option_name) == test_value

@@ -379,7 +379,13 @@ def _get_config_from_pandas_options() -> ThresholdConfig | None:
                 "compute.lazy.groupby_arrow_cardinality_threshold"
             ),
             parallel_expr_threshold=get_option("compute.lazy.parallel_expr_threshold"),
+            parallel_chunk_size=get_option("compute.lazy.parallel_chunk_size"),
             numexpr_min_elements=get_option("compute.lazy.numexpr_min_elements"),
+            numexpr_min_operations=get_option("compute.lazy.numexpr_min_operations"),
+            numexpr_large_array_threshold=get_option(
+                "compute.lazy.numexpr_large_array_threshold"
+            ),
+            arrow_majority_fraction=get_option("compute.lazy.arrow_majority_fraction"),
         )
     except (ImportError, KeyError):
         # pandas not fully initialized or options not registered yet
