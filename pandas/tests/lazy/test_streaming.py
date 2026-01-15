@@ -432,3 +432,317 @@ class TestStreamingComplexQueries:
             result = ldf.collect(use_physical_planner=True)
 
             assert len(result) == 150
+
+
+class TestRowGroupStatistics:
+    """Tests for row group statistics predicate pushdown.
+
+    PyArrow Dataset API automatically uses row group min/max statistics
+    to skip irrelevant row groups when filtering. These tests verify
+    that this optimization works correctly with our predicate pushdown.
+    """
+
+    def test_row_group_skipping_with_filter(self):
+        """Test that row groups are skipped based on min/max statistics."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        # Create data with distinct ranges in each row group
+        # Row group 0: values 0-999
+        # Row group 1: values 1000-1999
+        # Row group 2: values 2000-2999
+        df = pd.DataFrame({"a": range(3000), "b": range(3000, 6000)})
+
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+            # Write with small row group size to create multiple row groups
+            table = pa.Table.from_pandas(df, preserve_index=False)
+            pq.write_table(table, f.name, row_group_size=1000)
+
+            try:
+                # Filter for values only in the last row group
+                # This should skip the first two row groups
+                ldf = scan(f.name).filter(col("a") >= 2500)
+                result = ldf.collect(use_physical_planner=True)
+
+                # Should get values 2500-2999 (500 rows)
+                assert len(result) == 500
+                assert result["a"].min() == 2500
+                assert result["a"].max() == 2999
+            finally:
+                os.unlink(f.name)
+
+    def test_row_group_statistics_with_equality(self):
+        """Test equality predicate can use row group statistics."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        # Create data where specific values are in specific row groups
+        df = pd.DataFrame({"category": ["A"] * 1000 + ["B"] * 1000 + ["C"] * 1000})
+
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+            table = pa.Table.from_pandas(df, preserve_index=False)
+            pq.write_table(table, f.name, row_group_size=1000)
+
+            try:
+                # Filter for category "C" - should skip first two row groups
+                ldf = scan(f.name).filter(col("category") == "C")
+                result = ldf.collect(use_physical_planner=True)
+
+                assert len(result) == 1000
+                assert (result["category"] == "C").all()
+            finally:
+                os.unlink(f.name)
+
+    def test_row_group_statistics_with_range_filter(self):
+        """Test range predicates use row group statistics efficiently."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        # Create monotonically increasing data
+        df = pd.DataFrame({"value": range(10000)})
+
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+            table = pa.Table.from_pandas(df, preserve_index=False)
+            pq.write_table(table, f.name, row_group_size=1000)
+
+            try:
+                # Range that spans only middle row groups
+                # value >= 3500 AND value < 6500 should hit row groups 3, 4, 5, 6
+                ldf = scan(f.name).filter(
+                    (col("value") >= 3500) & (col("value") < 6500)
+                )
+                result = ldf.collect(use_physical_planner=True)
+
+                assert len(result) == 3000
+                assert result["value"].min() == 3500
+                assert result["value"].max() == 6499
+            finally:
+                os.unlink(f.name)
+
+    def test_row_group_statistics_no_matching_groups(self):
+        """Test filter that matches no row groups returns empty result."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        df = pd.DataFrame({"a": range(3000)})
+
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+            table = pa.Table.from_pandas(df, preserve_index=False)
+            pq.write_table(table, f.name, row_group_size=1000)
+
+            try:
+                # Filter for values that don't exist
+                ldf = scan(f.name).filter(col("a") > 10000)
+                result = ldf.collect(use_physical_planner=True)
+
+                assert len(result) == 0
+            finally:
+                os.unlink(f.name)
+
+    def test_row_group_statistics_with_limit(self):
+        """Test that limit + row group skipping work together."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        df = pd.DataFrame({"a": range(10000)})
+
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+            table = pa.Table.from_pandas(df, preserve_index=False)
+            pq.write_table(table, f.name, row_group_size=1000)
+
+            try:
+                # Filter for high values (last row groups) and take only a few
+                ldf = scan(f.name).filter(col("a") >= 8000).head(10)
+                result = ldf.collect(use_physical_planner=True)
+
+                assert len(result) == 10
+                assert result["a"].min() == 8000
+                assert result["a"].max() == 8009
+            finally:
+                os.unlink(f.name)
+
+    def test_multiple_columns_row_group_statistics(self):
+        """Test row group statistics with multi-column predicates."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        # Create data with correlated columns
+        df = pd.DataFrame(
+            {
+                "x": list(range(1000)) * 3,
+                "y": [0] * 1000 + [1] * 1000 + [2] * 1000,
+            }
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+            table = pa.Table.from_pandas(df, preserve_index=False)
+            pq.write_table(table, f.name, row_group_size=1000)
+
+            try:
+                # Filter on y column which has distinct values per row group
+                ldf = scan(f.name).filter(col("y") == 2)
+                result = ldf.collect(use_physical_planner=True)
+
+                assert len(result) == 1000
+                assert (result["y"] == 2).all()
+            finally:
+                os.unlink(f.name)
+
+    def test_is_null_predicate_pushdown(self):
+        """Test is_null predicate pushdown to row group filtering."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        # Create data with nulls only in certain row groups
+        # Row group 0: no nulls (values 0-999)
+        # Row group 1: all nulls
+        # Row group 2: no nulls (values 2000-2999)
+        values = list(range(1000)) + [None] * 1000 + list(range(2000, 3000))
+        df = pd.DataFrame({"a": values})
+
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+            table = pa.Table.from_pandas(df, preserve_index=False)
+            pq.write_table(table, f.name, row_group_size=1000)
+
+            try:
+                # Filter for null values - should only need row group 1
+                ldf = scan(f.name).filter(col("a").is_null())
+                result = ldf.collect(use_physical_planner=True)
+
+                assert len(result) == 1000
+                assert result["a"].isna().all()
+            finally:
+                os.unlink(f.name)
+
+    def test_is_not_null_predicate_pushdown(self):
+        """Test is_not_null predicate pushdown to row group filtering."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        # Create data with nulls only in certain row groups
+        values = list(range(1000)) + [None] * 1000 + list(range(2000, 3000))
+        df = pd.DataFrame({"a": values})
+
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+            table = pa.Table.from_pandas(df, preserve_index=False)
+            pq.write_table(table, f.name, row_group_size=1000)
+
+            try:
+                # Filter for non-null values - should skip row group 1
+                ldf = scan(f.name).filter(col("a").is_not_null())
+                result = ldf.collect(use_physical_planner=True)
+
+                assert len(result) == 2000
+                assert result["a"].notna().all()
+            finally:
+                os.unlink(f.name)
+
+    def test_compound_null_and_value_filter(self):
+        """Test compound predicate with null check and value comparison."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        # Create data with some nulls
+        values = list(range(1000)) + [None] * 500 + list(range(500, 1000))
+        df = pd.DataFrame({"a": values})
+
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+            table = pa.Table.from_pandas(df, preserve_index=False)
+            pq.write_table(table, f.name, row_group_size=500)
+
+            try:
+                # Filter for non-null values > 800
+                ldf = scan(f.name).filter(col("a").is_not_null() & (col("a") > 800))
+                result = ldf.collect(use_physical_planner=True)
+
+                # Should get values 801-999 from both occurrences
+                assert len(result) == 398  # 199 + 199 (801-999 twice)
+                assert result["a"].notna().all()
+                assert (result["a"] > 800).all()
+            finally:
+                os.unlink(f.name)
+
+    def test_row_group_stats_api(self):
+        """Test row_group_stats() API returns metadata."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        df = pd.DataFrame({"a": range(3000), "b": range(3000, 6000)})
+
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+            table = pa.Table.from_pandas(df, preserve_index=False)
+            pq.write_table(table, f.name, row_group_size=1000)
+
+            try:
+                ldf = scan(f.name)
+                stats = ldf.row_group_stats()
+
+                # Should have metadata
+                assert stats is not None
+                assert len(stats) > 0
+
+                # Check expected columns
+                assert "file" in stats.columns
+                assert "row_group" in stats.columns
+                assert "column" in stats.columns
+                assert "min" in stats.columns
+                assert "max" in stats.columns
+                assert "null_count" in stats.columns
+                assert "num_rows" in stats.columns
+
+                # Should have 3 row groups x 2 columns = 6 rows
+                assert len(stats) == 6
+
+                # Check row group stats for column 'a'
+                a_stats = stats[stats["column"] == "a"]
+                assert len(a_stats) == 3
+
+                # Row group 0 should have min=0, max=999
+                rg0 = a_stats[a_stats["row_group"] == 0].iloc[0]
+                assert rg0["min"] == 0
+                assert rg0["max"] == 999
+                assert rg0["num_rows"] == 1000
+
+                # Row group 2 should have min=2000, max=2999
+                rg2 = a_stats[a_stats["row_group"] == 2].iloc[0]
+                assert rg2["min"] == 2000
+                assert rg2["max"] == 2999
+            finally:
+                os.unlink(f.name)
+
+    def test_row_group_stats_with_glob(self):
+        """Test row_group_stats() with multiple files."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        df1 = pd.DataFrame({"a": range(1000)})
+        df2 = pd.DataFrame({"a": range(1000, 2000)})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path1 = os.path.join(tmpdir, "part1.parquet")
+            path2 = os.path.join(tmpdir, "part2.parquet")
+
+            table1 = pa.Table.from_pandas(df1, preserve_index=False)
+            table2 = pa.Table.from_pandas(df2, preserve_index=False)
+            pq.write_table(table1, path1, row_group_size=500)
+            pq.write_table(table2, path2, row_group_size=500)
+
+            pattern = os.path.join(tmpdir, "*.parquet")
+            ldf = scan(pattern)
+            stats = ldf.row_group_stats()
+
+            # Should have stats from both files
+            assert stats is not None
+            assert len(stats["file"].unique()) == 2
+
+    def test_row_group_stats_returns_none_for_non_parquet(self):
+        """Test row_group_stats() returns None for non-Parquet sources."""
+        from pandas.lazy.frame import LazyDataFrame
+        from pandas.lazy.plan import DataFrameSource
+
+        df = pd.DataFrame({"a": [1, 2, 3]})
+        source = DataFrameSource(df)
+        ldf = LazyDataFrame(source, source.resolve_schema())
+
+        stats = ldf.row_group_stats()
+        assert stats is None

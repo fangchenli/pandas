@@ -892,8 +892,125 @@ class LazyDataFrame:
         lines.append("=" * 50)
         return "\n".join(lines)
 
+    def row_group_stats(self) -> DataFrame | None:
+        """
+        Get row group statistics for the underlying Parquet file(s).
+
+        This method returns metadata about row groups in Parquet files,
+        including min/max values for each column. This information helps
+        understand how predicate pushdown will filter row groups.
+
+        Returns
+        -------
+        DataFrame or None
+            DataFrame with columns: file, row_group, column, min, max,
+            null_count, num_rows. Returns None if the source is not a
+            Parquet file or glob pattern.
+
+        Notes
+        -----
+        Row group statistics are used by PyArrow to skip reading row
+        groups that cannot match filter predicates. Understanding these
+        statistics helps write efficient queries.
+
+        Examples
+        --------
+        >>> ldf = pd.lazy.scan("data.parquet")
+        >>> stats = ldf.row_group_stats()
+        >>> print(stats)  # Shows min/max for each column per row group
+        """
+
+        from pandas.lazy.plan import ParquetSource
+
+        # Find the source node
+        source = self._find_source_node(self._plan)
+        if source is None or not isinstance(source, ParquetSource):
+            return None
+
+        return _get_parquet_row_group_stats(source.path)
+
+    def _find_source_node(self, plan: LogicalPlan):
+        """Recursively find the source node in the plan tree."""
+        from pandas.lazy.plan import ParquetSource
+
+        if isinstance(plan, ParquetSource):
+            return plan
+
+        children = plan.children()
+        if children:
+            return self._find_source_node(children[0])
+        return None
+
     def __repr__(self) -> str:
         return f"LazyDataFrame(columns={self.columns})"
+
+
+def _get_parquet_row_group_stats(path: str) -> DataFrame:
+    """
+    Extract row group statistics from a Parquet file.
+
+    Parameters
+    ----------
+    path : str
+        Path to Parquet file or glob pattern.
+
+    Returns
+    -------
+    DataFrame
+        Statistics for each row group and column.
+    """
+    import glob
+
+    import pyarrow.parquet as pq
+
+    from pandas import DataFrame as PdDataFrame
+
+    records: list[dict] = []
+
+    # Resolve glob patterns
+    if "*" in path or "?" in path:
+        files = sorted(glob.glob(path))
+    else:
+        files = [path]
+
+    for file_path in files:
+        pf = pq.ParquetFile(file_path)
+        metadata = pf.metadata
+
+        for rg_idx in range(metadata.num_row_groups):
+            rg = metadata.row_group(rg_idx)
+
+            for col_idx in range(rg.num_columns):
+                col = rg.column(col_idx)
+                col_path = col.path_in_schema
+
+                stats = col.statistics
+                if stats is not None:
+                    records.append(
+                        {
+                            "file": file_path,
+                            "row_group": rg_idx,
+                            "column": col_path,
+                            "min": stats.min if stats.has_min_max else None,
+                            "max": stats.max if stats.has_min_max else None,
+                            "null_count": stats.null_count,
+                            "num_rows": rg.num_rows,
+                        }
+                    )
+                else:
+                    records.append(
+                        {
+                            "file": file_path,
+                            "row_group": rg_idx,
+                            "column": col_path,
+                            "min": None,
+                            "max": None,
+                            "null_count": None,
+                            "num_rows": rg.num_rows,
+                        }
+                    )
+
+    return PdDataFrame(records)
 
 
 class LazyGroupBy:

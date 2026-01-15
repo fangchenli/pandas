@@ -402,7 +402,7 @@ class PhysicalParquetScan(PhysicalPlan):
         if not batches:
             # Return empty ArrayDict with correct schema
             arrays: ArrayDict = {}
-            for col_name in self.schema:
+            for col_name in self.schema.fields:
                 arrays[col_name] = pa.array([])
             arrays[INDEX_COL_NAME] = pa.array([], type=pa.int64())
             return arrays
@@ -501,22 +501,34 @@ class PhysicalParquetScan(PhysicalPlan):
                     return pc.not_equal(left, right)
 
             # Logical operators
+            # Use and_kleene/or_kleene which handle expression types correctly
             elif ir.function == "and_" and len(ir.args) == 2:
                 left = self._ir_to_arrow_expr(ir.args[0])
                 right = self._ir_to_arrow_expr(ir.args[1])
                 if left is not None and right is not None:
-                    return pc.and_(left, right)
+                    return pc.and_kleene(left, right)
 
             elif ir.function == "or_" and len(ir.args) == 2:
                 left = self._ir_to_arrow_expr(ir.args[0])
                 right = self._ir_to_arrow_expr(ir.args[1])
                 if left is not None and right is not None:
-                    return pc.or_(left, right)
+                    return pc.or_kleene(left, right)
 
             elif ir.function == "invert" and len(ir.args) == 1:
                 arg = self._ir_to_arrow_expr(ir.args[0])
                 if arg is not None:
                     return pc.invert(arg)
+
+            # Null-checking operators - can use row group null_count statistics
+            elif ir.function == "is_null" and len(ir.args) == 1:
+                arg = self._ir_to_arrow_expr(ir.args[0])
+                if arg is not None:
+                    return pc.is_null(arg)
+
+            elif ir.function == "is_not_null" and len(ir.args) == 1:
+                arg = self._ir_to_arrow_expr(ir.args[0])
+                if arg is not None:
+                    return pc.is_valid(arg)
 
         # Cannot convert this expression
         return None
