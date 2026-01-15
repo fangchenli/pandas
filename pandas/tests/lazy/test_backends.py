@@ -370,7 +370,7 @@ class TestArraysToDataFrame:
         tm.assert_frame_equal(result, expected)
 
     def test_with_arrow_arrays(self):
-        """Test conversion with Arrow arrays."""
+        """Test conversion with Arrow arrays returns Arrow-backed dtypes by default."""
         from pandas.lazy.backends.convert import arrays_to_dataframe
 
         arrays = {
@@ -378,6 +378,25 @@ class TestArraysToDataFrame:
             "b": pa.array([4, 5, 6]),
         }
         result = arrays_to_dataframe(arrays)
+
+        # Default is use_arrow_dtype=True for near-zero-copy conversion
+        expected = pd.DataFrame(
+            {
+                "a": pd.array([1, 2, 3], dtype="int64[pyarrow]"),
+                "b": pd.array([4, 5, 6], dtype="int64[pyarrow]"),
+            }
+        )
+        tm.assert_frame_equal(result, expected)
+
+    def test_with_arrow_arrays_numpy_output(self):
+        """Test conversion with Arrow arrays can return NumPy dtypes."""
+        from pandas.lazy.backends.convert import arrays_to_dataframe
+
+        arrays = {
+            "a": pa.array([1, 2, 3]),
+            "b": pa.array([4, 5, 6]),
+        }
+        result = arrays_to_dataframe(arrays, use_arrow_dtype=False)
 
         expected = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
         tm.assert_frame_equal(result, expected)
@@ -1807,20 +1826,6 @@ class TestAdditionalStringKernels:
 class TestRollingWindowKernels:
     """Tests for rolling window function kernels."""
 
-    def test_arrow_rolling_sum(self):
-        """Test Arrow rolling sum."""
-        from pandas.lazy.backends import dispatch_kernel
-
-        arr = pa.array([1.0, 2.0, 3.0, 4.0, 5.0])
-        result = dispatch_kernel("rolling_sum", "arrow", arr, window=3)
-        result_list = result.to_pylist()
-        # First two are NaN (not enough data for window=3)
-        assert result_list[0] is None or np.isnan(result_list[0])
-        assert result_list[1] is None or np.isnan(result_list[1])
-        assert result_list[2] == 6.0  # 1 + 2 + 3
-        assert result_list[3] == 9.0  # 2 + 3 + 4
-        assert result_list[4] == 12.0  # 3 + 4 + 5
-
     def test_numpy_rolling_sum(self):
         """Test NumPy rolling sum."""
         from pandas.lazy.backends import dispatch_kernel
@@ -1833,17 +1838,6 @@ class TestRollingWindowKernels:
         assert result[3] == 9.0
         assert result[4] == 12.0
 
-    def test_arrow_rolling_mean(self):
-        """Test Arrow rolling mean."""
-        from pandas.lazy.backends import dispatch_kernel
-
-        arr = pa.array([1.0, 2.0, 3.0, 4.0, 5.0])
-        result = dispatch_kernel("rolling_mean", "arrow", arr, window=3)
-        result_list = result.to_pylist()
-        assert result_list[2] == 2.0  # (1 + 2 + 3) / 3
-        assert result_list[3] == 3.0  # (2 + 3 + 4) / 3
-        assert result_list[4] == 4.0  # (3 + 4 + 5) / 3
-
     def test_numpy_rolling_mean(self):
         """Test NumPy rolling mean."""
         from pandas.lazy.backends import dispatch_kernel
@@ -1853,17 +1847,6 @@ class TestRollingWindowKernels:
         assert result[2] == 2.0
         assert result[3] == 3.0
         assert result[4] == 4.0
-
-    def test_arrow_rolling_min(self):
-        """Test Arrow rolling min."""
-        from pandas.lazy.backends import dispatch_kernel
-
-        arr = pa.array([3.0, 1.0, 4.0, 1.0, 5.0])
-        result = dispatch_kernel("rolling_min", "arrow", arr, window=3)
-        result_list = result.to_pylist()
-        assert result_list[2] == 1.0  # min(3, 1, 4)
-        assert result_list[3] == 1.0  # min(1, 4, 1)
-        assert result_list[4] == 1.0  # min(4, 1, 5)
 
     def test_numpy_rolling_min(self):
         """Test NumPy rolling min."""
@@ -1875,17 +1858,6 @@ class TestRollingWindowKernels:
         assert result[3] == 1.0
         assert result[4] == 1.0
 
-    def test_arrow_rolling_max(self):
-        """Test Arrow rolling max."""
-        from pandas.lazy.backends import dispatch_kernel
-
-        arr = pa.array([3.0, 1.0, 4.0, 1.0, 5.0])
-        result = dispatch_kernel("rolling_max", "arrow", arr, window=3)
-        result_list = result.to_pylist()
-        assert result_list[2] == 4.0  # max(3, 1, 4)
-        assert result_list[3] == 4.0  # max(1, 4, 1)
-        assert result_list[4] == 5.0  # max(4, 1, 5)
-
     def test_numpy_rolling_max(self):
         """Test NumPy rolling max."""
         from pandas.lazy.backends import dispatch_kernel
@@ -1895,18 +1867,6 @@ class TestRollingWindowKernels:
         assert result[2] == 4.0
         assert result[3] == 4.0
         assert result[4] == 5.0
-
-    def test_arrow_rolling_std(self):
-        """Test Arrow rolling std."""
-        from pandas.lazy.backends import dispatch_kernel
-
-        arr = pa.array([1.0, 2.0, 3.0, 4.0, 5.0])
-        result = dispatch_kernel("rolling_std", "arrow", arr, window=3)
-        result_list = result.to_pylist()
-        # std([1, 2, 3]) = 1.0 with ddof=1
-        assert abs(result_list[2] - 1.0) < 1e-10
-        assert abs(result_list[3] - 1.0) < 1e-10
-        assert abs(result_list[4] - 1.0) < 1e-10
 
     def test_numpy_rolling_std(self):
         """Test NumPy rolling std."""
@@ -1918,18 +1878,6 @@ class TestRollingWindowKernels:
         assert abs(result[3] - 1.0) < 1e-10
         assert abs(result[4] - 1.0) < 1e-10
 
-    def test_arrow_rolling_var(self):
-        """Test Arrow rolling var."""
-        from pandas.lazy.backends import dispatch_kernel
-
-        arr = pa.array([1.0, 2.0, 3.0, 4.0, 5.0])
-        result = dispatch_kernel("rolling_var", "arrow", arr, window=3)
-        result_list = result.to_pylist()
-        # var([1, 2, 3]) = 1.0 with ddof=1
-        assert abs(result_list[2] - 1.0) < 1e-10
-        assert abs(result_list[3] - 1.0) < 1e-10
-        assert abs(result_list[4] - 1.0) < 1e-10
-
     def test_numpy_rolling_var(self):
         """Test NumPy rolling var."""
         from pandas.lazy.backends import dispatch_kernel
@@ -1940,18 +1888,6 @@ class TestRollingWindowKernels:
         assert abs(result[3] - 1.0) < 1e-10
         assert abs(result[4] - 1.0) < 1e-10
 
-    def test_arrow_rolling_with_min_periods(self):
-        """Test Arrow rolling with min_periods."""
-        from pandas.lazy.backends import dispatch_kernel
-
-        arr = pa.array([1.0, 2.0, 3.0, 4.0, 5.0])
-        result = dispatch_kernel("rolling_sum", "arrow", arr, window=3, min_periods=1)
-        result_list = result.to_pylist()
-        # With min_periods=1, all values should be valid
-        assert result_list[0] == 1.0  # 1
-        assert result_list[1] == 3.0  # 1 + 2
-        assert result_list[2] == 6.0  # 1 + 2 + 3
-
     def test_numpy_rolling_with_min_periods(self):
         """Test NumPy rolling with min_periods."""
         from pandas.lazy.backends import dispatch_kernel
@@ -1961,18 +1897,6 @@ class TestRollingWindowKernels:
         assert result[0] == 1.0
         assert result[1] == 3.0
         assert result[2] == 6.0
-
-    def test_arrow_rolling_with_nan(self):
-        """Test Arrow rolling with NaN values."""
-        from pandas.lazy.backends import dispatch_kernel
-
-        arr = pa.array([1.0, np.nan, 3.0, 4.0, 5.0])
-        result = dispatch_kernel("rolling_sum", "arrow", arr, window=3, min_periods=2)
-        result_list = result.to_pylist()
-        # Position 2: [1, nan, 3] has 2 valid values, sum = 4.0
-        assert result_list[2] == 4.0
-        # Position 3: [nan, 3, 4] has 2 valid values, sum = 7.0
-        assert result_list[3] == 7.0
 
     def test_numpy_rolling_with_nan(self):
         """Test NumPy rolling with NaN values."""

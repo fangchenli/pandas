@@ -420,7 +420,9 @@ class TestEndToEndPhysicalExecution:
         physical = planner.plan(lf._plan)
         result = execute_physical_plan(physical)
 
-        tm.assert_frame_equal(result, expected)
+        # check_dtype=False because physical planner returns Arrow-backed dtypes
+        # for near-zero-copy conversion, while collect() returns NumPy dtypes
+        tm.assert_frame_equal(result, expected, check_dtype=False)
 
     def test_join_query_matches_collect(self):
         """Test that join execution matches collect() result."""
@@ -435,7 +437,7 @@ class TestEndToEndPhysicalExecution:
         physical = planner.plan(lf._plan)
         result = execute_physical_plan(physical)
 
-        tm.assert_frame_equal(result, expected)
+        tm.assert_frame_equal(result, expected, check_dtype=False)
 
     def test_multiple_filters_matches_collect(self):
         """Test that multiple filters execution matches collect() result."""
@@ -448,7 +450,7 @@ class TestEndToEndPhysicalExecution:
         physical = planner.plan(lf._plan)
         result = execute_physical_plan(physical)
 
-        tm.assert_frame_equal(result, expected)
+        tm.assert_frame_equal(result, expected, check_dtype=False)
 
 
 class TestCollectPhysicalPlannerFlag:
@@ -476,7 +478,9 @@ class TestCollectPhysicalPlannerFlag:
         # Physical planner
         result_physical = lf.collect(use_physical_planner=True)
 
-        tm.assert_frame_equal(result_eager, result_physical)
+        # check_dtype=False because physical planner returns Arrow-backed dtypes
+        # for near-zero-copy conversion, while eager returns NumPy dtypes
+        tm.assert_frame_equal(result_eager, result_physical, check_dtype=False)
 
     def test_physical_planner_with_join(self):
         """Physical planner should handle joins correctly."""
@@ -488,7 +492,7 @@ class TestCollectPhysicalPlannerFlag:
         result_eager = lf.collect(use_physical_planner=False)
         result_physical = lf.collect(use_physical_planner=True)
 
-        tm.assert_frame_equal(result_eager, result_physical)
+        tm.assert_frame_equal(result_eager, result_physical, check_dtype=False)
 
     def test_physical_planner_with_topk(self):
         """Physical planner should handle TopK correctly."""
@@ -498,7 +502,7 @@ class TestCollectPhysicalPlannerFlag:
         result_eager = lf.collect(use_physical_planner=False)
         result_physical = lf.collect(use_physical_planner=True)
 
-        tm.assert_frame_equal(result_eager, result_physical)
+        tm.assert_frame_equal(result_eager, result_physical, check_dtype=False)
 
     def test_physical_planner_with_tail(self):
         """Physical planner should handle tail correctly."""
@@ -508,7 +512,7 @@ class TestCollectPhysicalPlannerFlag:
         result_eager = lf.collect(use_physical_planner=False)
         result_physical = lf.collect(use_physical_planner=True)
 
-        tm.assert_frame_equal(result_eager, result_physical)
+        tm.assert_frame_equal(result_eager, result_physical, check_dtype=False)
 
     def test_physical_planner_with_distinct(self):
         """Physical planner should handle distinct correctly."""
@@ -518,7 +522,7 @@ class TestCollectPhysicalPlannerFlag:
         result_eager = lf.collect(use_physical_planner=False)
         result_physical = lf.collect(use_physical_planner=True)
 
-        tm.assert_frame_equal(result_eager, result_physical)
+        tm.assert_frame_equal(result_eager, result_physical, check_dtype=False)
 
     def test_physical_planner_respects_optimize_flag(self):
         """Physical planner should respect the optimize flag."""

@@ -330,81 +330,117 @@ class PhysicalFilter(PhysicalPlan):
 
         from pandas.lazy.backends import dispatch_kernel
         from pandas.lazy.backends.array_eval import ArrayEvaluator
-        from pandas.lazy.backends.convert import get_array_backend
+        from pandas.lazy.backends.convert import (
+            get_array_backend,
+            to_arrow,
+        )
         from pandas.lazy.backends.types import is_index_col
 
         input_arrays = self.input.execute(context)
-
-        # Use ArrayEvaluator for predicate evaluation
-        evaluator = ArrayEvaluator(input_arrays, preferred_backend=self.backend)
-        mask = evaluator.evaluate(self.predicate._ir)
 
         # Separate data columns from index columns
         data_arrays = {k: v for k, v in input_arrays.items() if not is_index_col(k)}
         index_arrays = {k: v for k, v in input_arrays.items() if is_index_col(k)}
 
-        # Check if all data arrays are Arrow-backed for batch filtering
+        # Check if all data arrays are Arrow-backed
         all_data_arrow = len(data_arrays) > 0 and all(
             isinstance(arr, (pa.Array, pa.ChunkedArray)) for arr in data_arrays.values()
         )
 
+        # Optimization: Convert NumPy to Arrow for large datasets
+        # Arrow Table filter is ~3x faster than NumPy boolean indexing
+        use_arrow_filter = all_data_arrow
+        if not all_data_arrow and len(data_arrays) > 0:
+            # Check data size - Arrow is faster for larger datasets
+            first_arr = next(iter(data_arrays.values()))
+            n_rows = len(first_arr)
+            # Use Arrow for datasets with >50K rows (conversion overhead is minimal)
+            if n_rows > 50_000:
+                use_arrow_filter = True
+                # Convert NumPy arrays to Arrow
+                data_arrays = {
+                    k: to_arrow(v) if isinstance(v, np.ndarray) else v
+                    for k, v in data_arrays.items()
+                }
+
+        if use_arrow_filter:
+            # Use Arrow Table filter (fastest path)
+            # Build table for predicate evaluation
+            table = pa.table(data_arrays)
+
+            # Evaluate predicate using Arrow backend
+            arrow_arrays = dict(data_arrays)
+            evaluator = ArrayEvaluator(arrow_arrays, preferred_backend="arrow")
+            mask = evaluator.evaluate(self.predicate._ir)
+
+            # Ensure mask is Arrow array
+            if isinstance(mask, np.ndarray):
+                pa_mask = pa.array(mask)
+            elif isinstance(mask, (pa.Array, pa.ChunkedArray)):
+                pa_mask = mask
+            else:
+                pa_mask = pa.array(np.asarray(mask))
+
+            # Filter using Arrow Table
+            filtered_table = table.filter(pa_mask)
+
+            # Extract result arrays (keep as Arrow for efficiency)
+            result: ArrayDict = {}
+            for name in data_arrays.keys():
+                result[name] = filtered_table.column(name).combine_chunks()
+
+            # Filter index columns using Arrow for efficiency
+            # Index columns are typically small, so convert to Arrow and use pc.filter
+            import pyarrow.compute as pc
+
+            for name, arr in index_arrays.items():
+                if isinstance(arr, np.ndarray):
+                    # Convert to Arrow, filter, and keep as Arrow
+                    arr_arrow = pa.array(arr)
+                    result[name] = pc.filter(arr_arrow, pa_mask)
+                elif isinstance(arr, (pa.Array, pa.ChunkedArray)):
+                    result[name] = pc.filter(arr, pa_mask)
+                else:
+                    backend = get_array_backend(arr)
+                    mask_np = pa_mask.to_numpy(zero_copy_only=False)
+                    result[name] = dispatch_kernel("filter", backend, arr, mask_np)
+
+            return result
+
+        # NumPy path for small datasets (< 50K rows)
+        # Use ArrayEvaluator for predicate evaluation
+        evaluator = ArrayEvaluator(input_arrays, preferred_backend=self.backend)
+        mask = evaluator.evaluate(self.predicate._ir)
+
         # Ensure mask is a proper array for filtering
         if isinstance(mask, (pa.Array, pa.ChunkedArray)):
             mask_arr = mask.to_numpy(zero_copy_only=False)
-            pa_mask = mask
         elif isinstance(mask, np.ndarray):
             mask_arr = mask
-            pa_mask = None
         else:
             mask_arr = np.asarray(mask)
-            pa_mask = None
 
-        result: ArrayDict = {}
+        # For NumPy arrays, compute indices once and use take() for all columns
+        # This is ~3.5x faster than boolean indexing per column
+        indices = np.nonzero(mask_arr)[0]
 
-        if all_data_arrow:
-            # Batch filter data columns using Arrow Table for efficiency
-            if pa_mask is None:
-                pa_mask = pa.array(mask_arr)
+        result = {}
+        # Filter data arrays using take
+        for name, arr in data_arrays.items():
+            if isinstance(arr, np.ndarray):
+                result[name] = arr.take(indices)
+            else:
+                # Fallback for non-numpy arrays
+                backend = get_array_backend(arr)
+                result[name] = dispatch_kernel("filter", backend, arr, mask_arr)
 
-            # Build table and filter in one operation
-            table = pa.table(data_arrays)
-            filtered_table = table.filter(pa_mask)
-
-            # Extract result arrays
-            for name in data_arrays.keys():
-                result[name] = filtered_table.column(name).combine_chunks()
-        else:
-            # For NumPy arrays, compute indices once and use take() for all columns
-            # This is ~3.5x faster than boolean indexing per column
-            indices = np.nonzero(mask_arr)[0]
-
-            # Filter data arrays using take
-            for name, arr in data_arrays.items():
-                if isinstance(arr, np.ndarray):
-                    result[name] = arr.take(indices)
-                else:
-                    # Fallback for non-numpy arrays
-                    backend = get_array_backend(arr)
-                    result[name] = dispatch_kernel("filter", backend, arr, mask_arr)
-
-        # Filter index columns using same indices (they're typically numpy arrays)
-        if not all_data_arrow:
-            # Reuse indices computed above
-            for name, arr in index_arrays.items():
-                if isinstance(arr, np.ndarray):
-                    result[name] = arr.take(indices)
-                else:
-                    backend = get_array_backend(arr)
-                    result[name] = dispatch_kernel("filter", backend, arr, mask_arr)
-        else:
-            # For Arrow path, compute indices for index columns
-            indices = np.nonzero(mask_arr)[0]
-            for name, arr in index_arrays.items():
-                if isinstance(arr, np.ndarray):
-                    result[name] = arr.take(indices)
-                else:
-                    backend = get_array_backend(arr)
-                    result[name] = dispatch_kernel("filter", backend, arr, mask_arr)
+        # Filter index columns using same indices
+        for name, arr in index_arrays.items():
+            if isinstance(arr, np.ndarray):
+                result[name] = arr.take(indices)
+            else:
+                backend = get_array_backend(arr)
+                result[name] = dispatch_kernel("filter", backend, arr, mask_arr)
 
         return result
 
