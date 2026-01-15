@@ -76,6 +76,98 @@ class DataFrameSource(LogicalPlan):
 
 
 @dataclass
+class ParquetSource(LogicalPlan):
+    """
+    Source node for reading Parquet files lazily.
+
+    Supports predicate and projection pushdown to minimize I/O.
+    The actual reading happens during physical execution.
+
+    Parameters
+    ----------
+    path : str
+        Path to Parquet file or directory. Supports:
+        - Local paths: "/path/to/data.parquet"
+        - Glob patterns: "/path/to/*.parquet"
+        - URLs: "s3://bucket/data.parquet", "gs://bucket/data.parquet"
+    columns : tuple[str, ...] | None
+        Columns to read. None means all columns.
+        Set by ProjectionPruning optimization pass.
+    predicate : Expr | None
+        Filter predicate to push down to Parquet reader.
+        Set by PredicatePushdown optimization pass.
+    """
+
+    path: str
+    columns: tuple[str, ...] | None = None
+    predicate: Expr | None = None
+
+    # Cached schema from Parquet metadata
+    _parquet_schema: Schema | None = None
+
+    def __post_init__(self) -> None:
+        self._cached_schema = None
+        # Don't set _parquet_schema here - it will be resolved lazily
+
+    def _resolve_schema_impl(self) -> Schema:
+        from pandas.lazy.types import Schema
+
+        if self._parquet_schema is not None:
+            schema = self._parquet_schema
+        else:
+            # Read schema from Parquet metadata (no data read)
+            schema = self._read_parquet_schema()
+            # Cache it for future use
+            object.__setattr__(self, "_parquet_schema", schema)
+
+        # If columns are specified, filter schema
+        if self.columns is not None:
+            return Schema({c: schema[c] for c in self.columns if c in schema})
+        return schema
+
+    def _read_parquet_schema(self) -> Schema:
+        """Read schema from Parquet file metadata without reading data."""
+        import pyarrow.parquet as pq
+
+        from pandas.lazy.types import (
+            LazyDtype,
+            Schema,
+        )
+
+        # Handle glob patterns
+        path = self.path
+        if "*" in path:
+            import glob
+
+            files = glob.glob(path)
+            if not files:
+                raise FileNotFoundError(f"No files match pattern: {path}")
+            path = files[0]  # Use first file for schema
+
+        # Read schema from metadata only
+        parquet_file = pq.ParquetFile(path)
+        arrow_schema = parquet_file.schema_arrow
+
+        # Convert Arrow schema to lazy Schema
+        columns = {}
+        for field in arrow_schema:
+            columns[field.name] = LazyDtype.from_arrow_type(field.type)
+
+        return Schema(columns)
+
+    def children(self) -> list[LogicalPlan]:
+        return []
+
+    def __repr__(self) -> str:
+        parts = [f"path={self.path!r}"]
+        if self.columns is not None:
+            parts.append(f"columns={list(self.columns)}")
+        if self.predicate is not None:
+            parts.append(f"predicate={self.predicate!r}")
+        return f"ParquetSource({', '.join(parts)})"
+
+
+@dataclass
 class Project(LogicalPlan):
     """Projection (column selection/computation)."""
 

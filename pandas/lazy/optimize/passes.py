@@ -46,6 +46,7 @@ from pandas.lazy.plan import (
     Join,
     Limit,
     LogicalPlan,
+    ParquetSource,
     Project,
     Sort,
     TopK,
@@ -440,6 +441,21 @@ class PredicatePushdown(PlanVisitor):
             # Cannot push filter below TopK (would change which rows are selected)
             return Filter(input_plan, predicate)
 
+        elif isinstance(input_plan, ParquetSource):
+            # Push predicate into ParquetSource for pushdown to Parquet reader
+            # Combine with any existing predicate
+            if input_plan.predicate is not None:
+                combined_ir = Call("and_", (input_plan.predicate._ir, predicate._ir))
+                combined_pred = Expr(combined_ir)
+            else:
+                combined_pred = predicate
+
+            return ParquetSource(
+                path=input_plan.path,
+                columns=input_plan.columns,
+                predicate=combined_pred,
+            )
+
         # Cannot push below source or unknown node type
         return Filter(input_plan, predicate)
 
@@ -470,6 +486,21 @@ class ProjectionPruning(PlanVisitor):
 
         if isinstance(plan, DataFrameSource):
             # Can't prune source in logical plan
+            return plan
+
+        elif isinstance(plan, ParquetSource):
+            # Push column selection into ParquetSource
+            # Only select columns that are actually needed
+            full_schema = plan.resolve_schema()
+            available = set(full_schema.names)
+            columns_to_read = tuple(sorted(needed & available))
+
+            if columns_to_read and columns_to_read != plan.columns:
+                return ParquetSource(
+                    path=plan.path,
+                    columns=columns_to_read if columns_to_read else None,
+                    predicate=plan.predicate,
+                )
             return plan
 
         elif isinstance(plan, Project):
@@ -1178,12 +1209,20 @@ class ExpressionSimplification(PlanVisitor):
         """Simplify unary operations."""
         # Double negation elimination: !!x -> x
         if function == "invert":
-            if isinstance(arg, Call) and arg.function == "invert" and len(arg.args) == 1:
+            if (
+                isinstance(arg, Call)
+                and arg.function == "invert"
+                and len(arg.args) == 1
+            ):
                 return arg.args[0]
 
         # Double negate elimination: --x -> x
         elif function == "negate":
-            if isinstance(arg, Call) and arg.function == "negate" and len(arg.args) == 1:
+            if (
+                isinstance(arg, Call)
+                and arg.function == "negate"
+                and len(arg.args) == 1
+            ):
                 return arg.args[0]
 
         return None

@@ -165,6 +165,178 @@ class PhysicalScan(PhysicalPlan):
         return self.schema
 
 
+@dataclass
+class PhysicalParquetScan(PhysicalPlan):
+    """
+    Physical scan of Parquet file(s).
+
+    Supports predicate and projection pushdown to minimize I/O.
+    Uses PyArrow for efficient Parquet reading.
+
+    Parameters
+    ----------
+    path : str
+        Path to Parquet file(s). Supports local paths, globs, and URLs.
+    schema : Schema
+        Output schema (after column pruning if applicable).
+    columns : tuple[str, ...] | None
+        Columns to read. None means all columns.
+    predicate : Expr | None
+        Filter predicate to push down to Parquet reader.
+    """
+
+    path: str
+    schema: Schema
+    columns: tuple[str, ...] | None = None
+    predicate: Expr | None = None
+
+    def execute(self, context: ExecutionContext) -> ArrayDict:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from pandas.lazy.backends.types import INDEX_COL_NAME
+
+        # Build filters for PyArrow if we have a predicate
+        filters = None
+        if self.predicate is not None:
+            filters = self._build_arrow_filters(self.predicate)
+
+        # Expand glob patterns for local paths
+        path = self.path
+        if "*" in path and "://" not in path:
+            import glob
+
+            files = glob.glob(path)
+            if not files:
+                raise FileNotFoundError(f"No files found matching pattern: {path}")
+            path = files  # Pass list of files to read_table
+
+        # Read Parquet file(s)
+        # PyArrow handles directories and URLs natively
+        table = pq.read_table(
+            path,
+            columns=list(self.columns) if self.columns else None,
+            filters=filters,
+        )
+
+        # Convert to ArrayDict
+        arrays: ArrayDict = {}
+        for col_name in table.column_names:
+            # Combine chunks for single contiguous array
+            arrays[col_name] = table.column(col_name).combine_chunks()
+
+        # Create a synthetic index column (Parquet doesn't have index concept)
+        # Use a RangeIndex-equivalent
+        arrays[INDEX_COL_NAME] = pa.array(range(table.num_rows))
+        context.index_is_multi = False
+        context.index_names = [None]
+
+        return arrays
+
+    def _build_arrow_filters(self, predicate: Expr) -> list | None:
+        """
+        Convert lazy predicate to PyArrow filter expression.
+
+        PyArrow supports filter pushdown in the format:
+        - Simple: [("col", "op", value)]
+        - Compound: [[("col1", ">", 5)], [("col2", "<", 10)]]  # OR of ANDs
+
+        Returns None if predicate cannot be pushed down.
+        """
+
+        ir = predicate._ir
+
+        # Try to convert to PyArrow compute expression for row group filtering
+        arrow_expr = self._ir_to_arrow_expr(ir)
+        if arrow_expr is not None:
+            # Return as PyArrow compute expression
+            return arrow_expr
+
+        return None
+
+    def _ir_to_arrow_expr(self, ir):
+        """Convert IR node to PyArrow compute expression."""
+        import pyarrow.compute as pc
+
+        from pandas.lazy.ir import (
+            Call,
+            FieldRef,
+            Literal,
+        )
+
+        if isinstance(ir, FieldRef):
+            return pc.field(ir.name)
+
+        if isinstance(ir, Literal):
+            return ir.value
+
+        if isinstance(ir, Call):
+            # Binary comparison operators
+            if ir.function == "greater" and len(ir.args) == 2:
+                left = self._ir_to_arrow_expr(ir.args[0])
+                right = self._ir_to_arrow_expr(ir.args[1])
+                if left is not None and right is not None:
+                    return pc.greater(left, right)
+
+            elif ir.function == "greater_equal" and len(ir.args) == 2:
+                left = self._ir_to_arrow_expr(ir.args[0])
+                right = self._ir_to_arrow_expr(ir.args[1])
+                if left is not None and right is not None:
+                    return pc.greater_equal(left, right)
+
+            elif ir.function == "less" and len(ir.args) == 2:
+                left = self._ir_to_arrow_expr(ir.args[0])
+                right = self._ir_to_arrow_expr(ir.args[1])
+                if left is not None and right is not None:
+                    return pc.less(left, right)
+
+            elif ir.function == "less_equal" and len(ir.args) == 2:
+                left = self._ir_to_arrow_expr(ir.args[0])
+                right = self._ir_to_arrow_expr(ir.args[1])
+                if left is not None and right is not None:
+                    return pc.less_equal(left, right)
+
+            elif ir.function == "equal" and len(ir.args) == 2:
+                left = self._ir_to_arrow_expr(ir.args[0])
+                right = self._ir_to_arrow_expr(ir.args[1])
+                if left is not None and right is not None:
+                    return pc.equal(left, right)
+
+            elif ir.function == "not_equal" and len(ir.args) == 2:
+                left = self._ir_to_arrow_expr(ir.args[0])
+                right = self._ir_to_arrow_expr(ir.args[1])
+                if left is not None and right is not None:
+                    return pc.not_equal(left, right)
+
+            # Logical operators
+            elif ir.function == "and_" and len(ir.args) == 2:
+                left = self._ir_to_arrow_expr(ir.args[0])
+                right = self._ir_to_arrow_expr(ir.args[1])
+                if left is not None and right is not None:
+                    return pc.and_(left, right)
+
+            elif ir.function == "or_" and len(ir.args) == 2:
+                left = self._ir_to_arrow_expr(ir.args[0])
+                right = self._ir_to_arrow_expr(ir.args[1])
+                if left is not None and right is not None:
+                    return pc.or_(left, right)
+
+            elif ir.function == "invert" and len(ir.args) == 1:
+                arg = self._ir_to_arrow_expr(ir.args[0])
+                if arg is not None:
+                    return pc.invert(arg)
+
+        # Cannot convert this expression
+        return None
+
+    def children(self) -> list[PhysicalPlan]:
+        return []
+
+    @property
+    def output_schema(self) -> Schema:
+        return self.schema
+
+
 # =============================================================================
 # Projection Nodes
 # =============================================================================
@@ -1547,6 +1719,7 @@ class PhysicalPlanner:
             Filter,
             Join,
             Limit,
+            ParquetSource,
             Project,
             Sort,
             TopK,
@@ -1554,6 +1727,9 @@ class PhysicalPlanner:
 
         if isinstance(logical_plan, DataFrameSource):
             return self._plan_scan(logical_plan)
+
+        elif isinstance(logical_plan, ParquetSource):
+            return self._plan_parquet_scan(logical_plan)
 
         elif isinstance(logical_plan, Project):
             return self._plan_project(logical_plan)
@@ -1592,6 +1768,15 @@ class PhysicalPlanner:
         return PhysicalScan(
             df=node.df,
             schema=node.resolve_schema(),
+        )
+
+    def _plan_parquet_scan(self, node) -> PhysicalParquetScan:
+        """Plan a ParquetSource."""
+        return PhysicalParquetScan(
+            path=node.path,
+            schema=node.resolve_schema(),
+            columns=node.columns,
+            predicate=node.predicate,
         )
 
     def _plan_project(self, node) -> PhysicalProject:

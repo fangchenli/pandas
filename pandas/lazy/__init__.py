@@ -4,9 +4,9 @@ Lazy pandas - opt-in lazy query mode for pandas DataFrames.
 This module provides a lazy evaluation mode for pandas, allowing users
 to build query plans that are optimized before execution.
 
-Entry Point
------------
-Use DataFrame.select() to enter lazy mode:
+Entry Points
+------------
+**From DataFrame**: Use DataFrame.select() to enter lazy mode:
 
     >>> import pandas as pd
     >>> from pandas.lazy import col, lit
@@ -14,6 +14,13 @@ Use DataFrame.select() to enter lazy mode:
     >>> ldf = df.select()  # All columns
     >>> ldf = df.select("a", "b")  # Specific columns
     >>> ldf = df.select(col("a"), col("b"))  # Using expressions
+
+**From Files**: Use scan() to lazily read files:
+
+    >>> from pandas.lazy import scan, col
+    >>> ldf = scan("data.parquet")
+    >>> ldf = scan("data/*.parquet")  # Glob patterns
+    >>> ldf = scan("s3://bucket/data.parquet")  # URLs
 
 Expression Building
 -------------------
@@ -43,6 +50,11 @@ Examples
 
 # View the query plan
 >>> print(df.select("a", "b").explain())
+
+# Lazy file scanning with predicate pushdown
+>>> from pandas.lazy import scan, col
+>>> ldf = scan("data.parquet")
+>>> result = ldf.filter(col("value") > 100).collect(use_physical_planner=True)
 """
 
 from pandas.lazy.expr import (
@@ -52,11 +64,13 @@ from pandas.lazy.expr import (
     when,
 )
 from pandas.lazy.frame import LazyDataFrame
+from pandas.lazy.scan import scan
 
 __all__ = [
     "LazyDataFrame",
     "coalesce",
     "col",
     "lit",
+    "scan",
     "when",
 ]
