@@ -9,6 +9,7 @@ This document describes which operations use which backend (Arrow, NumPy, or pan
 | Operator | Primary Backend | Fallback | Notes |
 |----------|----------------|----------|-------|
 | `PhysicalScan` | Direct extraction | N/A | Extracts arrays from DataFrame |
+| `PhysicalParquetScan` | PyArrow Parquet | N/A | Lazy Parquet with pushdown |
 | `PhysicalFilter` | Arrow/NumPy kernel | pandas DataFrame | Uses `filter` kernel |
 | `PhysicalProject` | Arrow/NumPy kernel | pandas Evaluator | Expression evaluation |
 | `PhysicalHashAggregate` | Arrow/NumPy kernel | pandas groupby | Uses `groupby_*` kernels |
@@ -276,11 +277,60 @@ opportunities for another.
 **Note**: Parallelism benefits scale with data size. For small datasets (<3M rows),
 the overhead may exceed the benefit.
 
+## Lazy File Scanning
+
+The `scan()` function enables lazy reading of files with optimization pushdown.
+
+### Supported Formats
+
+| Format | Status | Pushdown Support |
+|--------|--------|------------------|
+| Parquet | ✅ Implemented | Predicate + Projection |
+| CSV | 🚧 Planned | Projection only |
+| JSON | 🚧 Planned | Projection only |
+
+### Path Types
+
+| Path Type | Example | Notes |
+|-----------|---------|-------|
+| Local file | `scan("data.parquet")` | Single file |
+| Glob pattern | `scan("data/*.parquet")` | Multiple files |
+| S3 URL | `scan("s3://bucket/data.parquet")` | Requires fsspec |
+| GCS URL | `scan("gs://bucket/data.parquet")` | Requires gcsfs |
+| HTTPS URL | `scan("https://example.com/data.parquet")` | Direct download |
+
+### Predicate Pushdown
+
+Filters are converted to PyArrow compute expressions and pushed to the Parquet reader:
+
+```python
+from pandas.lazy import scan, col
+
+# Filter is pushed to Parquet reader
+ldf = scan("data.parquet").filter(col("value") > 100)
+result = ldf.collect(use_physical_planner=True)
+```
+
+Supported predicates:
+- Comparison: `>`, `>=`, `<`, `<=`, `==`, `!=`
+- Logical: `&` (and), `|` (or), `~` (not)
+
+### Projection Pushdown
+
+Only columns actually used in the query are read from the file:
+
+```python
+# Only reads columns "a" and "b" from Parquet
+ldf = scan("data.parquet").select("a", "b")
+result = ldf.collect(use_physical_planner=True)
+```
+
 ## Files Reference
 
 | File | Description |
 |------|-------------|
-| `pandas/lazy/physical.py` | Physical operators (1600+ lines) |
+| `pandas/lazy/scan.py` | `scan()` function and format detection |
+| `pandas/lazy/physical.py` | Physical operators (1800+ lines) |
 | `pandas/lazy/backends/__init__.py` | Kernel registry and dispatch |
 | `pandas/lazy/backends/_bottleneck.py` | Bottleneck integration and configuration |
 | `pandas/lazy/backends/router.py` | Backend routing logic |

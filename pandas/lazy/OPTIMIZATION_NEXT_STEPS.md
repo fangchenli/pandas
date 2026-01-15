@@ -179,11 +179,27 @@ assert original_addr == pandas_addr  # Same memory!
 - [Arrow Python Pandas Integration](https://arrow.apache.org/docs/python/pandas.html)
 - [pandas PyArrow Functionality](https://pandas.pydata.org/docs/user_guide/pyarrow.html)
 
+4. ✅ **Bottleneck acceleration for rolling/fill operations** (NEW)
+   - Integrated Bottleneck library for C-optimized rolling window functions
+   - Uses `bn.move_sum`, `bn.move_mean`, `bn.move_std`, etc. when available
+   - Uses `bn.push` for ffill/bfill operations
+   - Falls back to pure NumPy when Bottleneck not installed
+   - Controlled by `pd.set_option("compute.use_bottleneck", True/False)`
+   - Configuration module: `pandas/lazy/backends/_bottleneck.py`
+
+5. ✅ **Lazy Parquet scanning with predicate/projection pushdown** (NEW)
+   - Added `scan()` function for lazy file reading
+   - `ParquetSource` logical plan node with predicate and projection fields
+   - `PhysicalParquetScan` converts predicates to PyArrow compute expressions
+   - Supports local paths, glob patterns (`*.parquet`), and URLs (s3://, gs://)
+   - Predicate pushdown enables row group filtering in Parquet
+   - Projection pushdown reads only required columns
+
 ### Next Optimization Opportunities
 
-1. **Predicate pushdown to data source** for Parquet files
-2. **Streaming execution** for very large datasets
-3. **Cost-based backend selection** based on data characteristics
+1. **Streaming execution** for very large datasets
+2. **Cost-based backend selection** based on data characteristics
+3. **Row group statistics** for smarter predicate pushdown in Parquet
 
 ## Expected Results
 
