@@ -68,7 +68,13 @@ def arrow_group_by(
     agg_specs = []
     for output_name, input_col, agg_func in aggregations:
         pa_func, _ = agg_map.get(agg_func, (f"hash_{agg_func}", agg_func))
-        agg_specs.append((input_col, pa_func, pc.ScalarAggregateOptions()))
+        # Use appropriate options for each aggregation type
+        if agg_func == "count":
+            # Count non-null values (matches pandas behavior)
+            options = pc.CountOptions(mode="only_valid")
+        else:
+            options = pc.ScalarAggregateOptions()
+        agg_specs.append((input_col, pa_func, options))
 
     # Use PyArrow's group_by functionality
     grouped = table.group_by(group_keys, use_threads=not needs_single_thread)
@@ -144,14 +150,17 @@ def arrow_hash_aggregate(
     # Check if we need single-threaded execution
     needs_single_thread = any(f in ("first", "last") for f in agg_funcs)
 
-    agg_specs = [
-        (
-            val_name,
-            agg_map.get(agg_func, (f"hash_{agg_func}", agg_func))[0],
-            pc.ScalarAggregateOptions(),
-        )
-        for val_name, agg_func in zip(val_names, agg_funcs, strict=True)
-    ]
+    # Build aggregation specs with appropriate options
+    agg_specs = []
+    for val_name, agg_func in zip(val_names, agg_funcs, strict=True):
+        pa_func = agg_map.get(agg_func, (f"hash_{agg_func}", agg_func))[0]
+        # Use appropriate options for each aggregation type
+        if agg_func == "count":
+            # Count non-null values (matches pandas behavior)
+            options = pc.CountOptions(mode="only_valid")
+        else:
+            options = pc.ScalarAggregateOptions()
+        agg_specs.append((val_name, pa_func, options))
 
     # Execute grouped aggregation
     grouped = table.group_by(key_names, use_threads=not needs_single_thread)

@@ -746,3 +746,239 @@ class TestRowGroupStatistics:
 
         stats = ldf.row_group_stats()
         assert stats is None
+
+
+class TestArrowGroupBy:
+    """Tests for Arrow-native GroupBy on Parquet data.
+
+    When data comes from Parquet scan (which returns Arrow arrays),
+    the physical planner should use PyArrow's native group_by() for
+    efficient aggregation.
+    """
+
+    def test_groupby_sum_on_parquet(self):
+        """Test groupby sum uses Arrow path for Parquet data."""
+        df = pd.DataFrame(
+            {
+                "category": ["A", "B", "A", "B", "A"] * 1000,
+                "value": list(range(5000)),
+            }
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+            df.to_parquet(f.name, index=False)
+
+            try:
+                ldf = (
+                    scan(f.name)
+                    .group_by("category")
+                    .agg(col("value").sum().alias("total"))
+                )
+                result = ldf.collect(use_physical_planner=True)
+
+                # Check result correctness
+                assert len(result) == 2
+                assert "category" in result.columns
+                assert "total" in result.columns
+
+                # Verify sums match
+                expected_a = sum(i for i in range(5000) if i % 5 in [0, 2, 4])
+                expected_b = sum(i for i in range(5000) if i % 5 in [1, 3])
+                result_sorted = result.sort_values("category").reset_index(drop=True)
+                assert result_sorted.loc[0, "total"] == expected_a
+                assert result_sorted.loc[1, "total"] == expected_b
+            finally:
+                os.unlink(f.name)
+
+    def test_groupby_multiple_aggs_on_parquet(self):
+        """Test groupby with multiple aggregations on Parquet data."""
+        df = pd.DataFrame(
+            {
+                "category": ["X", "Y", "X", "Y", "X", "Y"],
+                "value": [10, 20, 30, 40, 50, 60],
+            }
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+            df.to_parquet(f.name, index=False)
+
+            try:
+                ldf = (
+                    scan(f.name)
+                    .group_by("category")
+                    .agg(
+                        col("value").sum().alias("total"),
+                        col("value").mean().alias("avg"),
+                        col("value").min().alias("min_val"),
+                        col("value").max().alias("max_val"),
+                        col("value").count().alias("cnt"),
+                    )
+                )
+                result = ldf.collect(use_physical_planner=True)
+
+                assert len(result) == 2
+                result_sorted = result.sort_values("category").reset_index(drop=True)
+
+                # X: 10, 30, 50 -> sum=90, mean=30, min=10, max=50, count=3
+                assert result_sorted.loc[0, "total"] == 90
+                assert result_sorted.loc[0, "avg"] == 30.0
+                assert result_sorted.loc[0, "min_val"] == 10
+                assert result_sorted.loc[0, "max_val"] == 50
+                assert result_sorted.loc[0, "cnt"] == 3
+
+                # Y: 20, 40, 60 -> sum=120, mean=40, min=20, max=60, count=3
+                assert result_sorted.loc[1, "total"] == 120
+                assert result_sorted.loc[1, "avg"] == 40.0
+                assert result_sorted.loc[1, "min_val"] == 20
+                assert result_sorted.loc[1, "max_val"] == 60
+                assert result_sorted.loc[1, "cnt"] == 3
+            finally:
+                os.unlink(f.name)
+
+    def test_groupby_multi_key_on_parquet(self):
+        """Test multi-key groupby on Parquet data."""
+        df = pd.DataFrame(
+            {
+                "a": ["x", "x", "y", "y", "x", "y"],
+                "b": [1, 2, 1, 2, 1, 1],
+                "value": [10, 20, 30, 40, 50, 60],
+            }
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+            df.to_parquet(f.name, index=False)
+
+            try:
+                ldf = (
+                    scan(f.name)
+                    .group_by("a", "b")
+                    .agg(col("value").sum().alias("total"))
+                )
+                result = ldf.collect(use_physical_planner=True)
+
+                assert len(result) == 4
+                assert "a" in result.columns
+                assert "b" in result.columns
+                assert "total" in result.columns
+            finally:
+                os.unlink(f.name)
+
+    def test_groupby_with_filter_on_parquet(self):
+        """Test groupby with filter on Parquet data."""
+        df = pd.DataFrame(
+            {
+                "category": ["A", "B", "A", "B", "A"],
+                "value": [10, 20, 30, 40, 50],
+            }
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+            df.to_parquet(f.name, index=False)
+
+            try:
+                ldf = (
+                    scan(f.name)
+                    .filter(col("value") > 15)
+                    .group_by("category")
+                    .agg(col("value").sum().alias("total"))
+                )
+                result = ldf.collect(use_physical_planner=True)
+
+                # After filter: A(30, 50), B(20, 40)
+                assert len(result) == 2
+                result_sorted = result.sort_values("category").reset_index(drop=True)
+                assert result_sorted.loc[0, "total"] == 80  # A: 30 + 50
+                assert result_sorted.loc[1, "total"] == 60  # B: 20 + 40
+            finally:
+                os.unlink(f.name)
+
+    def test_groupby_first_last_on_parquet(self):
+        """Test groupby first/last aggregations on Parquet data."""
+        df = pd.DataFrame(
+            {
+                "category": ["A", "B", "A", "B", "A"],
+                "value": [10, 20, 30, 40, 50],
+            }
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+            df.to_parquet(f.name, index=False)
+
+            try:
+                ldf = (
+                    scan(f.name)
+                    .group_by("category")
+                    .agg(
+                        col("value").first().alias("first_val"),
+                        col("value").last().alias("last_val"),
+                    )
+                )
+                result = ldf.collect(use_physical_planner=True)
+
+                assert len(result) == 2
+                result_sorted = result.sort_values("category").reset_index(drop=True)
+                # A: first=10, last=50
+                assert result_sorted.loc[0, "first_val"] == 10
+                assert result_sorted.loc[0, "last_val"] == 50
+                # B: first=20, last=40
+                assert result_sorted.loc[1, "first_val"] == 20
+                assert result_sorted.loc[1, "last_val"] == 40
+            finally:
+                os.unlink(f.name)
+
+    def test_groupby_large_dataset_parquet(self):
+        """Test groupby on larger dataset to benefit from Arrow optimization."""
+        import numpy as np
+
+        rng = np.random.default_rng(42)
+        n_rows = 100000
+        df = pd.DataFrame(
+            {
+                "category": rng.choice(["A", "B", "C", "D", "E"], n_rows),
+                "value": rng.standard_normal(n_rows) * 100,
+            }
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+            df.to_parquet(f.name, index=False)
+
+            try:
+                ldf = (
+                    scan(f.name)
+                    .group_by("category")
+                    .agg(
+                        col("value").sum().alias("total"),
+                        col("value").mean().alias("avg"),
+                        col("value").count().alias("cnt"),
+                    )
+                )
+                result = ldf.collect(use_physical_planner=True)
+
+                assert len(result) == 5  # 5 categories
+                assert result["cnt"].sum() == n_rows  # All rows accounted for
+            finally:
+                os.unlink(f.name)
+
+    def test_groupby_glob_pattern(self):
+        """Test groupby on multiple Parquet files via glob."""
+        df1 = pd.DataFrame({"category": ["A", "B"], "value": [10, 20]})
+        df2 = pd.DataFrame({"category": ["A", "B"], "value": [30, 40]})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path1 = os.path.join(tmpdir, "part1.parquet")
+            path2 = os.path.join(tmpdir, "part2.parquet")
+            df1.to_parquet(path1, index=False)
+            df2.to_parquet(path2, index=False)
+
+            pattern = os.path.join(tmpdir, "*.parquet")
+            ldf = (
+                scan(pattern)
+                .group_by("category")
+                .agg(col("value").sum().alias("total"))
+            )
+            result = ldf.collect(use_physical_planner=True)
+
+            assert len(result) == 2
+            result_sorted = result.sort_values("category").reset_index(drop=True)
+            assert result_sorted.loc[0, "total"] == 40  # A: 10 + 30
+            assert result_sorted.loc[1, "total"] == 60  # B: 20 + 40

@@ -892,6 +892,23 @@ class PhysicalHashAggregate(PhysicalPlan):
 
     Uses hash table for grouping - good for high cardinality.
     Uses kernel dispatch for efficient aggregation on Arrow or NumPy arrays.
+
+    Arrow GroupBy Optimization
+    --------------------------
+    When input data is Arrow-backed (e.g., from Parquet scan), this operator
+    uses PyArrow's native group_by() function which provides:
+
+    - Zero-copy aggregation on Arrow tables
+    - Multi-threaded execution for most aggregations
+    - Efficient memory usage through Arrow's columnar format
+    - Hardware-optimized SIMD operations in Arrow's C++ backend
+
+    The Arrow path is automatically selected when:
+    1. Input arrays are PyArrow arrays (from Parquet scan or Arrow-backed DataFrame)
+    2. All aggregation functions are supported by PyArrow
+
+    Supported Arrow aggregations: sum, mean, min, max, count, first, last,
+    std, var, any, all, count_distinct/nunique, prod
     """
 
     input: PhysicalPlan
@@ -938,7 +955,7 @@ class PhysicalHashAggregate(PhysicalPlan):
                 input_arrays, agg_specs, backend, context
             )
 
-        # Grouped aggregation using kernel dispatch
+        # Grouped aggregation - prefer Arrow table-based groupby for efficiency
         return self._execute_grouped_aggregation(
             input_arrays, group_cols, agg_specs, backend
         )
@@ -993,9 +1010,26 @@ class PhysicalHashAggregate(PhysicalPlan):
         agg_specs: list[tuple[str, str, str]],
         backend: str,
     ) -> ArrayDict:
-        """Execute grouped aggregation using kernel dispatch."""
+        """
+        Execute grouped aggregation using kernel dispatch.
 
-        # For single-key groupby, use optimized single-key kernels
+        When data is Arrow-backed, uses PyArrow's native Table.group_by()
+        for both single-key and multi-key groupby. This provides:
+        - Zero-copy aggregation (no conversion overhead)
+        - Multi-threaded execution
+        - Efficient SIMD operations from Arrow's C++ backend
+        """
+        from pandas.lazy.backends import has_kernel
+
+        # For Arrow data, prefer the Arrow Table-based groupby path
+        # This handles both single-key and multi-key cases efficiently
+        if backend == "arrow" and has_kernel("group_by", "arrow"):
+            if self._can_use_arrow_groupby(agg_specs):
+                return self._execute_arrow_table_groupby(
+                    input_arrays, group_cols, agg_specs
+                )
+
+        # Fallback: For single-key groupby, use optimized single-key kernels
         # For multi-key, use hash_aggregate kernel
         if len(group_cols) == 1:
             return self._execute_single_key_groupby(
@@ -1005,6 +1039,27 @@ class PhysicalHashAggregate(PhysicalPlan):
             return self._execute_multi_key_groupby(
                 input_arrays, group_cols, agg_specs, backend
             )
+
+    def _can_use_arrow_groupby(self, agg_specs: list[tuple[str, str, str]]) -> bool:
+        """Check if all aggregations are supported by Arrow's group_by."""
+        # PyArrow's hash aggregation supports these functions
+        arrow_supported_aggs = {
+            "sum",
+            "mean",
+            "min",
+            "max",
+            "count",
+            "first",
+            "last",
+            "std",
+            "var",
+            "any",
+            "all",
+            "count_distinct",
+            "nunique",
+            "prod",
+        }
+        return all(agg_func in arrow_supported_aggs for _, _, agg_func in agg_specs)
 
     def _execute_single_key_groupby(
         self,
@@ -1145,7 +1200,15 @@ class PhysicalHashAggregate(PhysicalPlan):
         group_cols: list[str],
         agg_specs: list[tuple[str, str, str]],
     ) -> ArrayDict:
-        """Execute groupby using Arrow's native table group_by."""
+        """
+        Execute groupby using Arrow's native table group_by.
+
+        This is the preferred path for Arrow data because:
+        1. Zero-copy table construction from existing Arrow arrays
+        2. Multi-threaded aggregation (except first/last)
+        3. Vectorized SIMD operations in Arrow's C++ backend
+        4. Memory-efficient columnar processing
+        """
         import pyarrow as pa
 
         from pandas.lazy.backends import dispatch_kernel
@@ -1155,15 +1218,21 @@ class PhysicalHashAggregate(PhysicalPlan):
         columns = {k: v for k, v in input_arrays.items() if not is_index_col(k)}
         table = pa.table(columns)
 
-        # Execute groupby
+        # Execute groupby using Arrow's native group_by
         result_table = dispatch_kernel(
             "group_by", "arrow", table, group_cols, agg_specs
         )
 
         # Convert result table back to ArrayDict
+        # Combine chunks for consistency (Table.column returns ChunkedArray)
         result: ArrayDict = {}
         for col_name in result_table.column_names:
-            result[col_name] = result_table.column(col_name)
+            chunked = result_table.column(col_name)
+            # Combine chunks into a single contiguous array
+            if isinstance(chunked, pa.ChunkedArray):
+                result[col_name] = chunked.combine_chunks()
+            else:
+                result[col_name] = chunked
 
         return result
 
