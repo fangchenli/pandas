@@ -183,6 +183,12 @@ class ExecutionContext:
 
     The threshold_config parameter provides centralized access to all
     execution thresholds. If not provided, uses the global default.
+
+    Adaptive Thresholds
+    -------------------
+    When adaptive_thresholds is True, the context collects execution
+    statistics and adjusts thresholds based on observed performance.
+    This is useful for workloads where optimal thresholds vary.
     """
 
     # Preferred backend for operations that support multiple
@@ -216,14 +222,51 @@ class ExecutionContext:
     # This provides centralized access to all execution thresholds
     _threshold_config: Any = field(default=None, repr=False)
 
+    # Adaptive threshold configuration
+    # When enabled, collects execution statistics and adjusts thresholds
+    adaptive_thresholds: bool = False
+
     @property
     def threshold_config(self) -> Any:
         """Get the threshold configuration, using global default if not set."""
         if self._threshold_config is not None:
             return self._threshold_config
+
+        # If adaptive thresholds enabled, get adapted config
+        if self.adaptive_thresholds:
+            from pandas.lazy.optimize.adaptive import get_adaptive_config
+
+            return get_adaptive_config()
+
         from pandas.lazy.optimize.config import get_threshold_config
 
         return get_threshold_config()
+
+    def record_execution(
+        self,
+        operation: str,
+        backend: str,
+        rows: int,
+        time_ms: float,
+    ) -> None:
+        """
+        Record an execution event for adaptive threshold tuning.
+
+        Parameters
+        ----------
+        operation : str
+            The operation type ("filter", "groupby", "projection", "numexpr").
+        backend : str
+            The backend used ("arrow" or "numpy").
+        rows : int
+            Number of rows processed.
+        time_ms : float
+            Execution time in milliseconds.
+        """
+        if self.adaptive_thresholds:
+            from pandas.lazy.optimize.adaptive import record_execution
+
+            record_execution(operation, backend, rows, time_ms)
 
 
 # =============================================================================
@@ -782,6 +825,8 @@ class PhysicalFilter(PhysicalPlan):
         self, input_arrays: ArrayDict, context: ExecutionContext
     ) -> ArrayDict:
         """Apply predicate filter to a single batch."""
+        import time
+
         import numpy as np
         import pyarrow as pa
 
@@ -800,6 +845,10 @@ class PhysicalFilter(PhysicalPlan):
         if not data_arrays:
             return input_arrays
 
+        # Get row count for statistics
+        first_arr = next(iter(data_arrays.values()))
+        n_rows = len(first_arr)
+
         # Check if all data arrays are Arrow-backed
         all_data_arrow = all(
             isinstance(arr, (pa.Array, pa.ChunkedArray)) for arr in data_arrays.values()
@@ -808,8 +857,6 @@ class PhysicalFilter(PhysicalPlan):
         # For streaming, prefer Arrow path as data is typically Arrow from scan
         use_arrow_filter = all_data_arrow
         if not all_data_arrow:
-            first_arr = next(iter(data_arrays.values()))
-            n_rows = len(first_arr)
             # Use threshold config to determine if Arrow filter is beneficial
             threshold = context.threshold_config.filter_arrow_threshold
             if n_rows > threshold:
@@ -818,6 +865,8 @@ class PhysicalFilter(PhysicalPlan):
                     k: to_arrow(v) if isinstance(v, np.ndarray) else v
                     for k, v in data_arrays.items()
                 }
+
+        start_time = time.perf_counter()
 
         if use_arrow_filter:
             import pyarrow.compute as pc
@@ -849,6 +898,10 @@ class PhysicalFilter(PhysicalPlan):
                     mask_np = pa_mask.to_numpy(zero_copy_only=False)
                     result[name] = dispatch_kernel("filter", backend, arr, mask_np)
 
+            # Record execution statistics for adaptive thresholds
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            context.record_execution("filter", "arrow", n_rows, elapsed_ms)
+
             return result
 
         # NumPy path
@@ -878,6 +931,10 @@ class PhysicalFilter(PhysicalPlan):
             else:
                 backend = get_array_backend(arr)
                 result[name] = dispatch_kernel("filter", backend, arr, mask_arr)
+
+        # Record execution statistics for adaptive thresholds
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+        context.record_execution("filter", "numpy", n_rows, elapsed_ms)
 
         return result
 

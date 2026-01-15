@@ -156,6 +156,14 @@ lazy_arrow_majority_fraction_doc = """
     Valid values: floats between 0.0 and 1.0
 """
 
+lazy_adaptive_thresholds_doc = """
+: bool
+    Enable adaptive threshold tuning based on runtime statistics.
+    When enabled, the lazy execution engine collects execution statistics
+    and adjusts thresholds to optimize for the observed workload.
+    Valid values: True, False
+"""
+
 
 def _lazy_threshold_cb(key: str) -> None:
     """Callback to sync pandas options with ThresholdConfig."""
@@ -256,6 +264,12 @@ with cf.config_prefix("compute.lazy"):
         lazy_arrow_majority_fraction_doc,
         validator=is_float,
         cb=_lazy_threshold_cb,
+    )
+    cf.register_option(
+        "adaptive_thresholds",
+        False,
+        lazy_adaptive_thresholds_doc,
+        validator=is_bool,
     )
 
 #
