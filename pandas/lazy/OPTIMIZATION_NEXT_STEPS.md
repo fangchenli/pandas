@@ -195,11 +195,43 @@ assert original_addr == pandas_addr  # Same memory!
    - Predicate pushdown enables row group filtering in Parquet
    - Projection pushdown reads only required columns
 
+6. ✅ **Advanced expression simplification** (NEW)
+   - **De Morgan's Laws**: `~(a & b) → ~a | ~b`, `~(a | b) → ~a & ~b`
+   - **Self-cancellation**: `x - x → 0`, `x / x → 1`
+   - **Comparison simplifications**: `x == x → True`, `x != x → False`, `x < x → False`, etc.
+   - **Logical idempotence**: `x & x → x`, `x | x → x`
+   - Enables more aggressive constant folding and dead code elimination
+   - Located in `ExpressionSimplification` pass in `pandas/lazy/optimize/passes.py`
+
+7. ✅ **Threshold Configuration System** (NEW)
+   - Centralized `ThresholdConfig` dataclass for all execution thresholds
+   - Supports loading/saving to JSON for hardware-specific calibration
+   - Integrates with `ExecutionContext` for runtime access
+   - Configuration module: `pandas/lazy/optimize/config.py`
+   - Threshold catalog: `pandas/lazy/optimize/THRESHOLD_CATALOG.md`
+
+8. ✅ **Calibration Benchmark Suite** (NEW)
+   - Script to determine optimal thresholds for current hardware
+   - Benchmarks: filter backend, groupby backend, numexpr fusion, parallelization
+   - Outputs JSON consumable by `ThresholdConfig.from_file()`
+   - Script: `scripts/calibrate_lazy_thresholds.py`
+
+9. ✅ **Pandas Options Integration** (NEW)
+   - Lazy thresholds exposed via `pd.set_option("compute.lazy.*")`
+   - Available options:
+     - `compute.lazy.filter_arrow_threshold` (default: 50,000)
+     - `compute.lazy.groupby_arrow_row_threshold` (default: 100,000)
+     - `compute.lazy.groupby_arrow_cardinality_threshold` (default: 100)
+     - `compute.lazy.parallel_expr_threshold` (default: 8)
+     - `compute.lazy.numexpr_min_elements` (default: 100,000)
+   - Supports `pd.option_context()` for temporary changes
+   - Attribute-style access: `pd.options.compute.lazy.filter_arrow_threshold`
+
 ### Next Optimization Opportunities
 
 1. **Streaming execution** for very large datasets
-2. **Cost-based backend selection** based on data characteristics
-3. **Row group statistics** for smarter predicate pushdown in Parquet
+2. **Row group statistics** for smarter predicate pushdown in Parquet
+3. **Dynamic threshold adjustment** based on runtime statistics
 
 ## Expected Results
 

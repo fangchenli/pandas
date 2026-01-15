@@ -88,6 +88,111 @@ with cf.config_prefix("compute"):
     cf.register_option(
         "use_numba", False, use_numba_doc, validator=is_bool, cb=use_numba_cb
     )
+
+# Lazy pandas execution thresholds
+# These options control cost-based optimization decisions in the lazy execution engine
+
+lazy_filter_arrow_threshold_doc = """
+: int
+    Number of rows above which Arrow filter is used instead of NumPy.
+    Arrow filter is faster for large datasets due to SIMD operations.
+    Valid values: positive integers
+"""
+
+lazy_groupby_arrow_row_threshold_doc = """
+: int
+    Number of rows above which Arrow groupby is used instead of Pandas Cython.
+    Arrow has ~10-15ms JIT overhead, so it's only beneficial for large data.
+    Valid values: positive integers
+"""
+
+lazy_groupby_arrow_cardinality_threshold_doc = """
+: int
+    Number of groups above which Arrow groupby is preferred.
+    Arrow scales better with high cardinality.
+    Valid values: positive integers
+"""
+
+lazy_parallel_expr_threshold_doc = """
+: int
+    Minimum number of expressions before parallelizing projections.
+    ThreadPoolExecutor has ~1-2ms overhead per submission.
+    Valid values: positive integers
+"""
+
+lazy_numexpr_min_elements_doc = """
+: int
+    Minimum array elements for NumExpr fusion to be beneficial.
+    NumExpr has compilation overhead that must be amortized.
+    Valid values: positive integers
+"""
+
+
+def _lazy_threshold_cb(key: str) -> None:
+    """Callback to sync pandas options with ThresholdConfig."""
+    try:
+        from pandas.lazy.optimize.config import (
+            ThresholdConfig,
+            set_threshold_config,
+        )
+
+        # Build config from all compute.lazy.* options
+        config = ThresholdConfig(
+            filter_arrow_threshold=cf.get_option("compute.lazy.filter_arrow_threshold"),
+            groupby_arrow_row_threshold=cf.get_option(
+                "compute.lazy.groupby_arrow_row_threshold"
+            ),
+            groupby_arrow_cardinality_threshold=cf.get_option(
+                "compute.lazy.groupby_arrow_cardinality_threshold"
+            ),
+            parallel_expr_threshold=cf.get_option(
+                "compute.lazy.parallel_expr_threshold"
+            ),
+            numexpr_min_elements=cf.get_option("compute.lazy.numexpr_min_elements"),
+        )
+        set_threshold_config(config)
+    except ImportError:
+        # Lazy module not available
+        pass
+
+
+with cf.config_prefix("compute.lazy"):
+    cf.register_option(
+        "filter_arrow_threshold",
+        50_000,
+        lazy_filter_arrow_threshold_doc,
+        validator=is_nonnegative_int,
+        cb=_lazy_threshold_cb,
+    )
+    cf.register_option(
+        "groupby_arrow_row_threshold",
+        100_000,
+        lazy_groupby_arrow_row_threshold_doc,
+        validator=is_nonnegative_int,
+        cb=_lazy_threshold_cb,
+    )
+    cf.register_option(
+        "groupby_arrow_cardinality_threshold",
+        100,
+        lazy_groupby_arrow_cardinality_threshold_doc,
+        validator=is_nonnegative_int,
+        cb=_lazy_threshold_cb,
+    )
+    cf.register_option(
+        "parallel_expr_threshold",
+        8,
+        lazy_parallel_expr_threshold_doc,
+        validator=is_nonnegative_int,
+        cb=_lazy_threshold_cb,
+    )
+    cf.register_option(
+        "numexpr_min_elements",
+        100_000,
+        lazy_numexpr_min_elements_doc,
+        validator=is_nonnegative_int,
+        cb=_lazy_threshold_cb,
+    )
+
 #
 # options from the "display" namespace
 

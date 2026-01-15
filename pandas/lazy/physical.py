@@ -180,6 +180,9 @@ class ExecutionContext:
 
     Holds state needed during execution, like intermediate results
     and configuration.
+
+    The threshold_config parameter provides centralized access to all
+    execution thresholds. If not provided, uses the global default.
     """
 
     # Preferred backend for operations that support multiple
@@ -208,6 +211,19 @@ class ExecutionContext:
     batch_size: int = 65536
     # Whether streaming execution is enabled
     streaming_enabled: bool = False
+
+    # Threshold configuration (None = use global default)
+    # This provides centralized access to all execution thresholds
+    _threshold_config: Any = field(default=None, repr=False)
+
+    @property
+    def threshold_config(self) -> Any:
+        """Get the threshold configuration, using global default if not set."""
+        if self._threshold_config is not None:
+            return self._threshold_config
+        from pandas.lazy.optimize.config import get_threshold_config
+
+        return get_threshold_config()
 
 
 # =============================================================================
@@ -794,7 +810,9 @@ class PhysicalFilter(PhysicalPlan):
         if not all_data_arrow:
             first_arr = next(iter(data_arrays.values()))
             n_rows = len(first_arr)
-            if n_rows > 50_000:
+            # Use threshold config to determine if Arrow filter is beneficial
+            threshold = context.threshold_config.filter_arrow_threshold
+            if n_rows > threshold:
                 use_arrow_filter = True
                 data_arrays = {
                     k: to_arrow(v) if isinstance(v, np.ndarray) else v

@@ -50,9 +50,21 @@ if TYPE_CHECKING:
     from pandas.lazy.ir import IRNode
 
 
-# Minimum array size for NumExpr to be beneficial
+# Minimum array size for NumExpr to be beneficial (default value)
 # Below this threshold, NumPy is faster due to numexpr overhead
+# This value can be overridden via ThresholdConfig
 MIN_ELEMENTS_FOR_NUMEXPR = 100_000
+
+
+def get_numexpr_min_elements() -> int:
+    """Get the minimum elements threshold, using config if available."""
+    try:
+        from pandas.lazy.optimize.config import get_threshold_config
+
+        return get_threshold_config().numexpr_min_elements
+    except ImportError:
+        return MIN_ELEMENTS_FOR_NUMEXPR
+
 
 # NumPy dtypes supported by NumExpr
 NUMEXPR_SUPPORTED_DTYPES = frozenset(
@@ -204,9 +216,10 @@ def can_fuse_expression(node: IRNode, arrays: ArrayDict | None = None) -> bool:
     # Check array sizes if arrays provided
     if arrays is not None:
         # Get size from first array
+        min_elements = get_numexpr_min_elements()
         for arr in arrays.values():
             if isinstance(arr, np.ndarray):
-                if len(arr) < MIN_ELEMENTS_FOR_NUMEXPR:
+                if len(arr) < min_elements:
                     return False
                 break
 
@@ -454,12 +467,23 @@ def estimate_fusion_benefit(node: IRNode, array_size: int) -> float:
     base_benefit = 1.0 + 0.3 * (op_count - 1)
 
     # Size scaling - larger arrays benefit more from fusion
-    if array_size < MIN_ELEMENTS_FOR_NUMEXPR:
-        size_factor = 0.5  # NumExpr overhead dominates
-    elif array_size < 1_000_000:
-        size_factor = 1.0
-    else:
-        size_factor = 1.2  # Memory bandwidth becomes bottleneck
+    # Use threshold config if available for size factors
+    try:
+        from pandas.lazy.optimize.config import get_threshold_config
+
+        config = get_threshold_config()
+        min_elements = config.numexpr_min_elements
+        large_threshold = config.numexpr_large_array_threshold
+        size_factor = config.get_numexpr_size_factor(array_size)
+    except ImportError:
+        min_elements = MIN_ELEMENTS_FOR_NUMEXPR
+        large_threshold = 1_000_000
+        if array_size < min_elements:
+            size_factor = 0.5  # NumExpr overhead dominates
+        elif array_size < large_threshold:
+            size_factor = 1.0
+        else:
+            size_factor = 1.2  # Memory bandwidth becomes bottleneck
 
     return base_benefit * size_factor
 
