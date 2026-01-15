@@ -13,6 +13,8 @@ from typing import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from pandas import DataFrame
     from pandas.lazy.expr import Expr
     from pandas.lazy.plan import (
@@ -535,7 +537,9 @@ class LazyDataFrame:
         strict: bool = False,
         engine: Literal["auto", "arrow", "numpy"] = "auto",
         use_physical_planner: bool = False,
-    ) -> DataFrame:
+        streaming: bool = False,
+        batch_size: int = 65536,
+    ) -> DataFrame | Iterator[DataFrame]:
         """
         Execute the query and return a pandas DataFrame.
 
@@ -557,23 +561,56 @@ class LazyDataFrame:
             concrete execution strategies (algorithm selection, backend
             choice). If False, use direct eager evaluation with pandas
             native operations.
+        streaming : bool, default False
+            If True, return an iterator of DataFrames (one per batch).
+            This enables memory-efficient processing of large datasets.
+            Requires use_physical_planner=True.
+
+            Streaming execution is useful for:
+            - Processing data larger than available RAM
+            - Early termination with head()/limit() operations
+            - Better cache locality with batch-by-batch processing
+        batch_size : int, default 65536
+            Batch size for streaming execution. Default is 64K rows
+            which is typically L3 cache-friendly.
 
         Returns
         -------
-        DataFrame
-            The materialized result.
+        DataFrame or Iterator[DataFrame]
+            If streaming=False, returns the materialized result as a
+            single DataFrame. If streaming=True, returns an iterator
+            yielding DataFrames (one per batch).
 
         Raises
         ------
         StrictModeError
             If strict=True and fallback/conversion would be required.
+        ValueError
+            If streaming=True but use_physical_planner=False.
 
         Examples
         --------
         >>> result = ldf.collect()
         >>> result = ldf.collect(optimize=False)  # Skip optimization
         >>> result = ldf.collect(use_physical_planner=True)  # Use physical planner
+
+        >>> # Streaming execution for large datasets
+        >>> for batch_df in ldf.collect(streaming=True, use_physical_planner=True):
+        ...     process(batch_df)
+
+        >>> # Early termination with head()
+        >>> result = ldf.head(100).collect(use_physical_planner=True)
         """
+        if streaming:
+            if not use_physical_planner:
+                raise ValueError("streaming=True requires use_physical_planner=True")
+            return self._collect_streaming(
+                optimize=optimize,
+                strict=strict,
+                engine=engine,
+                batch_size=batch_size,
+            )
+
         if use_physical_planner:
             return self._collect_physical(
                 optimize=optimize, strict=strict, engine=engine
@@ -728,6 +765,70 @@ class LazyDataFrame:
             preferred_backend=engine,
             strict=strict,
         )
+
+    def _collect_streaming(
+        self,
+        optimize: bool = True,
+        strict: bool = False,
+        engine: Literal["auto", "arrow", "numpy"] = "auto",
+        batch_size: int = 65536,
+    ) -> Iterator[DataFrame]:
+        """
+        Execute the query and stream results as batches of DataFrames.
+
+        This method yields DataFrames one batch at a time, enabling
+        memory-efficient processing of large datasets. The streaming
+        execution also supports early termination for head()/limit()
+        operations.
+
+        Parameters
+        ----------
+        optimize : bool, default True
+            If True, apply query optimization passes before execution.
+        strict : bool, default False
+            If True, fail on backend fallbacks.
+        engine : {"auto", "arrow", "numpy"}, default "auto"
+            Preferred execution backend.
+        batch_size : int, default 65536
+            Number of rows per batch.
+
+        Yields
+        ------
+        DataFrame
+            DataFrames, one per batch from the execution.
+        """
+        from pandas.lazy.backends.convert import arrays_to_dataframe
+        from pandas.lazy.physical import (
+            ExecutionContext,
+            PhysicalPlanner,
+        )
+
+        # Apply optimization if requested
+        plan = self._plan
+        if optimize:
+            from pandas.lazy.optimize import Optimizer
+
+            plan = Optimizer().optimize(plan)
+
+        # Convert logical plan to physical plan
+        planner = PhysicalPlanner(preferred_backend=engine)
+        physical_plan = planner.plan(plan)
+
+        # Create execution context with streaming configuration
+        context = ExecutionContext(
+            preferred_backend=engine,
+            strict=strict,
+            batch_size=batch_size,
+            streaming_enabled=True,
+        )
+
+        # Stream batches
+        for batch in physical_plan.execute_batches(context):
+            yield arrays_to_dataframe(
+                batch,
+                index_names=context.index_names,
+                index_is_multi=context.index_is_multi,
+            )
 
     def explain(
         self,

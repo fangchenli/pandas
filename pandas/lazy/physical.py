@@ -33,6 +33,8 @@ from typing import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from pandas import DataFrame
     from pandas.lazy.backends.types import ArrayDict
     from pandas.lazy.expr import Expr
@@ -52,12 +54,25 @@ class PhysicalPlan(ABC):
 
     Physical plans represent concrete execution strategies with backend
     and algorithm choices already made.
+
+    Streaming Execution
+    -------------------
+    Physical plan nodes can support streaming execution through the
+    `execute_batches()` method. This enables:
+
+    - Memory efficiency: Process data larger than RAM
+    - Early termination: Stop reading when limit is satisfied
+    - Better cache locality: Process in L3-cache-friendly batches
+
+    Operators that support streaming should override `execute_batches()`
+    and set `supports_streaming` to True. The default implementation
+    calls `execute()` and yields a single batch.
     """
 
     @abstractmethod
     def execute(self, context: ExecutionContext) -> ArrayDict:
         """
-        Execute this physical plan node.
+        Execute this physical plan node and return all results at once.
 
         Parameters
         ----------
@@ -71,6 +86,80 @@ class PhysicalPlan(ABC):
             Index columns are stored as "__index__" or "__index_N__".
         """
         ...
+
+    def execute_batches(self, context: ExecutionContext) -> Iterator[ArrayDict]:
+        """
+        Execute this physical plan node and yield batches of results.
+
+        This method enables streaming execution for memory efficiency
+        and early termination. Override this method for operators that
+        can process data in batches (e.g., scan, filter, project, limit).
+
+        The default implementation calls execute() and yields a single batch.
+        Operators that need all data (e.g., sort, aggregate) should use
+        the default implementation.
+
+        Parameters
+        ----------
+        context : ExecutionContext
+            Execution context with runtime state.
+
+        Yields
+        ------
+        ArrayDict
+            Batches of results, each as a dictionary mapping column names
+            to arrays.
+
+        Notes
+        -----
+        Streaming operators should:
+        1. Override this method to yield batches from input
+        2. Set `supports_streaming` property to True
+        3. Check `context.batch_size` for suggested batch size
+
+        Pipeline breakers (sort, aggregate, distinct) should use the
+        default implementation which materializes all data.
+        """
+        yield self.execute(context)
+
+    @property
+    def supports_streaming(self) -> bool:
+        """
+        Whether this operator supports batch-by-batch streaming execution.
+
+        Returns True if this operator can process data incrementally
+        without needing all input data at once. Pipeline breakers
+        (sort, aggregate, distinct, join) return False.
+
+        Returns
+        -------
+        bool
+            True if streaming is supported, False otherwise.
+        """
+        return False
+
+    def _materialize_input(
+        self, input_plan: PhysicalPlan, context: ExecutionContext
+    ) -> ArrayDict:
+        """
+        Materialize input from a potentially streaming source.
+
+        This helper should be used by pipeline breakers (sort, aggregate,
+        distinct, join) that need all data before processing.
+
+        Parameters
+        ----------
+        input_plan : PhysicalPlan
+            The input plan to execute.
+        context : ExecutionContext
+            Execution context.
+
+        Returns
+        -------
+        ArrayDict
+            Materialized data from the input.
+        """
+        return input_plan.execute(context)
 
     @abstractmethod
     def children(self) -> list[PhysicalPlan]:
@@ -113,6 +202,12 @@ class ExecutionContext:
     # ThreadPoolExecutor has ~1-2ms overhead per submission, so only parallelize
     # when there are enough heavy expressions to amortize this cost
     parallel_threshold: int = 8
+
+    # Streaming configuration
+    # Batch size for streaming execution (64K rows is L3 cache friendly)
+    batch_size: int = 65536
+    # Whether streaming execution is enabled
+    streaming_enabled: bool = False
 
 
 # =============================================================================
@@ -173,6 +268,13 @@ class PhysicalParquetScan(PhysicalPlan):
     Supports predicate and projection pushdown to minimize I/O.
     Uses PyArrow for efficient Parquet reading.
 
+    Streaming Execution
+    -------------------
+    This operator supports streaming execution via `execute_batches()`.
+    When a `limit` is set, it enables early termination - only reading
+    enough row groups to satisfy the limit. This can provide significant
+    speedups for `head()` operations on large files.
+
     Parameters
     ----------
     path : str
@@ -183,55 +285,145 @@ class PhysicalParquetScan(PhysicalPlan):
         Columns to read. None means all columns.
     predicate : Expr | None
         Filter predicate to push down to Parquet reader.
+    limit : int | None
+        Maximum number of rows to return. Enables early termination
+        during streaming execution.
     """
 
     path: str
     schema: Schema
     columns: tuple[str, ...] | None = None
     predicate: Expr | None = None
+    limit: int | None = None
 
-    def execute(self, context: ExecutionContext) -> ArrayDict:
+    @property
+    def supports_streaming(self) -> bool:
+        return True
+
+    def _resolve_paths(self) -> str | list[str]:
+        """Resolve path, expanding glob patterns if needed."""
+        path = self.path
+        if "*" in path and "://" not in path:
+            import glob as glob_module
+
+            files = sorted(glob_module.glob(path))
+            if not files:
+                raise FileNotFoundError(f"No files found matching pattern: {path}")
+            return files
+        return path
+
+    def execute_batches(self, context: ExecutionContext) -> Iterator[ArrayDict]:
+        """
+        Stream batches from Parquet file(s).
+
+        Uses PyArrow's Dataset API for efficient batch iteration with
+        predicate pushdown. Supports early termination when a limit
+        is set.
+
+        Yields
+        ------
+        ArrayDict
+            Batches of data from the Parquet file(s).
+        """
         import pyarrow as pa
-        import pyarrow.parquet as pq
+        import pyarrow.dataset as ds
 
         from pandas.lazy.backends.types import INDEX_COL_NAME
 
-        # Build filters for PyArrow if we have a predicate
-        filters = None
+        # Resolve file paths
+        paths = self._resolve_paths()
+
+        # Create dataset (handles single file, list of files, or directory)
+        dataset = ds.dataset(paths, format="parquet")
+
+        # Build scanner with pushdown optimizations
+        filter_expr = None
         if self.predicate is not None:
-            filters = self._build_arrow_filters(self.predicate)
+            filter_expr = self._build_arrow_filters(self.predicate)
 
-        # Expand glob patterns for local paths
-        path = self.path
-        if "*" in path and "://" not in path:
-            import glob
-
-            files = glob.glob(path)
-            if not files:
-                raise FileNotFoundError(f"No files found matching pattern: {path}")
-            path = files  # Pass list of files to read_table
-
-        # Read Parquet file(s)
-        # PyArrow handles directories and URLs natively
-        table = pq.read_table(
-            path,
+        scanner = dataset.scanner(
             columns=list(self.columns) if self.columns else None,
-            filters=filters,
+            filter=filter_expr,
+            batch_size=context.batch_size,
         )
 
-        # Convert to ArrayDict
-        arrays: ArrayDict = {}
-        for col_name in table.column_names:
-            # Combine chunks for single contiguous array
-            arrays[col_name] = table.column(col_name).combine_chunks()
+        rows_yielded = 0
+        row_offset = 0  # Track row offset for index generation
 
-        # Create a synthetic index column (Parquet doesn't have index concept)
-        # Use a RangeIndex-equivalent
-        arrays[INDEX_COL_NAME] = pa.array(range(table.num_rows))
-        context.index_is_multi = False
-        context.index_names = [None]
+        for batch in scanner.to_batches():
+            batch_len = batch.num_rows
+            if batch_len == 0:
+                continue
 
-        return arrays
+            # Check limit for early termination
+            if self.limit is not None:
+                remaining = self.limit - rows_yielded
+                if remaining <= 0:
+                    return
+                if batch_len > remaining:
+                    # Slice the batch to exact limit
+                    batch = batch.slice(0, remaining)
+                    batch_len = remaining
+
+            # Convert RecordBatch to ArrayDict
+            arrays: ArrayDict = {}
+            for col_name in batch.schema.names:
+                arrays[col_name] = batch.column(col_name)
+
+            # Generate index column for this batch
+            arrays[INDEX_COL_NAME] = pa.array(range(row_offset, row_offset + batch_len))
+            context.index_is_multi = False
+            context.index_names = [None]
+
+            yield arrays
+
+            rows_yielded += batch_len
+            row_offset += batch_len
+
+            # Early termination check
+            if self.limit is not None and rows_yielded >= self.limit:
+                return
+
+    def execute(self, context: ExecutionContext) -> ArrayDict:
+        """
+        Execute and return all data at once.
+
+        For non-streaming execution or when downstream operators need
+        all data. Materializes batches from execute_batches() into
+        a single ArrayDict.
+        """
+        import pyarrow as pa
+
+        from pandas.lazy.backends.types import INDEX_COL_NAME
+
+        # Collect all batches
+        batches = list(self.execute_batches(context))
+
+        if not batches:
+            # Return empty ArrayDict with correct schema
+            arrays: ArrayDict = {}
+            for col_name in self.schema:
+                arrays[col_name] = pa.array([])
+            arrays[INDEX_COL_NAME] = pa.array([], type=pa.int64())
+            return arrays
+
+        if len(batches) == 1:
+            return batches[0]
+
+        # Concatenate all batches
+        result: ArrayDict = {}
+        all_columns = set()
+        for batch in batches:
+            all_columns.update(batch.keys())
+
+        for col_name in all_columns:
+            chunks = [batch[col_name] for batch in batches if col_name in batch]
+            if chunks:
+                # Combine into single contiguous array
+                chunked = pa.chunked_array(chunks)
+                result[col_name] = chunked.combine_chunks()
+
+        return result
 
     def _build_arrow_filters(self, predicate: Expr) -> list | None:
         """
@@ -348,6 +540,12 @@ class PhysicalProject(PhysicalPlan):
     Physical projection (column selection/computation).
 
     Executes expressions to produce output columns.
+
+    Streaming Execution
+    -------------------
+    This operator supports streaming execution. It passes through batches
+    from the input, evaluating projection expressions on each batch
+    independently.
     """
 
     input: PhysicalPlan
@@ -355,13 +553,32 @@ class PhysicalProject(PhysicalPlan):
     schema: Schema
     backend: Literal["auto", "arrow", "numpy"] = "auto"
 
-    def execute(self, context: ExecutionContext) -> ArrayDict:
+    @property
+    def supports_streaming(self) -> bool:
+        return self.input.supports_streaming
+
+    def execute_batches(self, context: ExecutionContext) -> Iterator[ArrayDict]:
+        """
+        Stream projected batches from input.
+
+        Evaluates projection expressions on each batch independently.
+
+        Yields
+        ------
+        ArrayDict
+            Projected batches from the input.
+        """
+        for batch in self.input.execute_batches(context):
+            yield self._project_batch(batch, context)
+
+    def _project_batch(
+        self, input_arrays: ArrayDict, context: ExecutionContext
+    ) -> ArrayDict:
+        """Evaluate projection expressions on a single batch."""
         import numpy as np
         import pyarrow as pa
 
         from pandas.lazy.backends.types import is_index_col
-
-        input_arrays = self.input.execute(context)
 
         result: ArrayDict = {}
 
@@ -375,13 +592,20 @@ class PhysicalProject(PhysicalPlan):
         use_parallel = n_exprs >= context.parallel_threshold
 
         if use_parallel:
-            # Parallel expression evaluation using ThreadPoolExecutor
             result.update(self._evaluate_parallel(input_arrays, context, np, pa))
         else:
-            # Sequential evaluation for small number of expressions
             result.update(self._evaluate_sequential(input_arrays, context, np, pa))
 
         return result
+
+    def execute(self, context: ExecutionContext) -> ArrayDict:
+        """
+        Execute projection and return all results at once.
+
+        Delegates to _project_batch for the actual projection logic.
+        """
+        input_arrays = self.input.execute(context)
+        return self._project_batch(input_arrays, context)
 
     def _evaluate_sequential(
         self,
@@ -489,6 +713,12 @@ class PhysicalFilter(PhysicalPlan):
     Physical filter (row selection).
 
     Applies a predicate to filter rows.
+
+    Streaming Execution
+    -------------------
+    This operator supports streaming execution. It passes through batches
+    from the input, applying the predicate filter to each batch independently.
+    Empty batches (where all rows are filtered out) are skipped.
     """
 
     input: PhysicalPlan
@@ -496,7 +726,34 @@ class PhysicalFilter(PhysicalPlan):
     schema: Schema
     backend: Literal["auto", "arrow", "numpy"] = "auto"
 
-    def execute(self, context: ExecutionContext) -> ArrayDict:
+    @property
+    def supports_streaming(self) -> bool:
+        return self.input.supports_streaming
+
+    def execute_batches(self, context: ExecutionContext) -> Iterator[ArrayDict]:
+        """
+        Stream filtered batches from input.
+
+        Applies the filter predicate to each batch independently and
+        yields non-empty filtered results.
+
+        Yields
+        ------
+        ArrayDict
+            Filtered batches from the input.
+        """
+        for batch in self.input.execute_batches(context):
+            filtered = self._filter_batch(batch, context)
+            # Skip empty batches
+            if filtered:
+                first_arr = next(iter(filtered.values()))
+                if len(first_arr) > 0:
+                    yield filtered
+
+    def _filter_batch(
+        self, input_arrays: ArrayDict, context: ExecutionContext
+    ) -> ArrayDict:
+        """Apply predicate filter to a single batch."""
         import numpy as np
         import pyarrow as pa
 
@@ -508,44 +765,37 @@ class PhysicalFilter(PhysicalPlan):
         )
         from pandas.lazy.backends.types import is_index_col
 
-        input_arrays = self.input.execute(context)
-
         # Separate data columns from index columns
         data_arrays = {k: v for k, v in input_arrays.items() if not is_index_col(k)}
         index_arrays = {k: v for k, v in input_arrays.items() if is_index_col(k)}
 
+        if not data_arrays:
+            return input_arrays
+
         # Check if all data arrays are Arrow-backed
-        all_data_arrow = len(data_arrays) > 0 and all(
+        all_data_arrow = all(
             isinstance(arr, (pa.Array, pa.ChunkedArray)) for arr in data_arrays.values()
         )
 
-        # Optimization: Convert NumPy to Arrow for large datasets
-        # Arrow Table filter is ~3x faster than NumPy boolean indexing
+        # For streaming, prefer Arrow path as data is typically Arrow from scan
         use_arrow_filter = all_data_arrow
-        if not all_data_arrow and len(data_arrays) > 0:
-            # Check data size - Arrow is faster for larger datasets
+        if not all_data_arrow:
             first_arr = next(iter(data_arrays.values()))
             n_rows = len(first_arr)
-            # Use Arrow for datasets with >50K rows (conversion overhead is minimal)
             if n_rows > 50_000:
                 use_arrow_filter = True
-                # Convert NumPy arrays to Arrow
                 data_arrays = {
                     k: to_arrow(v) if isinstance(v, np.ndarray) else v
                     for k, v in data_arrays.items()
                 }
 
         if use_arrow_filter:
-            # Use Arrow Table filter (fastest path)
-            # Build table for predicate evaluation
-            table = pa.table(data_arrays)
+            import pyarrow.compute as pc
 
-            # Evaluate predicate using Arrow backend
-            arrow_arrays = dict(data_arrays)
-            evaluator = ArrayEvaluator(arrow_arrays, preferred_backend="arrow")
+            table = pa.table(data_arrays)
+            evaluator = ArrayEvaluator(dict(data_arrays), preferred_backend="arrow")
             mask = evaluator.evaluate(self.predicate._ir)
 
-            # Ensure mask is Arrow array
             if isinstance(mask, np.ndarray):
                 pa_mask = pa.array(mask)
             elif isinstance(mask, (pa.Array, pa.ChunkedArray)):
@@ -553,23 +803,15 @@ class PhysicalFilter(PhysicalPlan):
             else:
                 pa_mask = pa.array(np.asarray(mask))
 
-            # Filter using Arrow Table
             filtered_table = table.filter(pa_mask)
 
-            # Extract result arrays (keep as Arrow for efficiency)
             result: ArrayDict = {}
             for name in data_arrays.keys():
                 result[name] = filtered_table.column(name).combine_chunks()
 
-            # Filter index columns using Arrow for efficiency
-            # Index columns are typically small, so convert to Arrow and use pc.filter
-            import pyarrow.compute as pc
-
             for name, arr in index_arrays.items():
                 if isinstance(arr, np.ndarray):
-                    # Convert to Arrow, filter, and keep as Arrow
-                    arr_arrow = pa.array(arr)
-                    result[name] = pc.filter(arr_arrow, pa_mask)
+                    result[name] = pc.filter(pa.array(arr), pa_mask)
                 elif isinstance(arr, (pa.Array, pa.ChunkedArray)):
                     result[name] = pc.filter(arr, pa_mask)
                 else:
@@ -579,12 +821,10 @@ class PhysicalFilter(PhysicalPlan):
 
             return result
 
-        # NumPy path for small datasets (< 50K rows)
-        # Use ArrayEvaluator for predicate evaluation
+        # NumPy path
         evaluator = ArrayEvaluator(input_arrays, preferred_backend=self.backend)
         mask = evaluator.evaluate(self.predicate._ir)
 
-        # Ensure mask is a proper array for filtering
         if isinstance(mask, (pa.Array, pa.ChunkedArray)):
             mask_arr = mask.to_numpy(zero_copy_only=False)
         elif isinstance(mask, np.ndarray):
@@ -592,21 +832,16 @@ class PhysicalFilter(PhysicalPlan):
         else:
             mask_arr = np.asarray(mask)
 
-        # For NumPy arrays, compute indices once and use take() for all columns
-        # This is ~3.5x faster than boolean indexing per column
         indices = np.nonzero(mask_arr)[0]
 
-        result = {}
-        # Filter data arrays using take
+        result: ArrayDict = {}
         for name, arr in data_arrays.items():
             if isinstance(arr, np.ndarray):
                 result[name] = arr.take(indices)
             else:
-                # Fallback for non-numpy arrays
                 backend = get_array_backend(arr)
                 result[name] = dispatch_kernel("filter", backend, arr, mask_arr)
 
-        # Filter index columns using same indices
         for name, arr in index_arrays.items():
             if isinstance(arr, np.ndarray):
                 result[name] = arr.take(indices)
@@ -615,6 +850,15 @@ class PhysicalFilter(PhysicalPlan):
                 result[name] = dispatch_kernel("filter", backend, arr, mask_arr)
 
         return result
+
+    def execute(self, context: ExecutionContext) -> ArrayDict:
+        """
+        Execute filter and return all results at once.
+
+        Delegates to _filter_batch for the actual filtering logic.
+        """
+        input_arrays = self.input.execute(context)
+        return self._filter_batch(input_arrays, context)
 
     def children(self) -> list[PhysicalPlan]:
         return [self.input]
@@ -1234,6 +1478,16 @@ class PhysicalTopK(PhysicalPlan):
 class PhysicalLimit(PhysicalPlan):
     """
     Physical limit (row count restriction).
+
+    Streaming Execution
+    -------------------
+    This operator supports streaming execution with early termination.
+    For head() operations, it stops reading from the input once enough
+    rows have been collected, providing significant speedups for large
+    datasets.
+
+    Note: Tail operations (offset=-1) require all data and cannot
+    benefit from early termination in streaming mode.
     """
 
     input: PhysicalPlan
@@ -1241,36 +1495,153 @@ class PhysicalLimit(PhysicalPlan):
     offset: int
     schema: Schema
 
-    def execute(self, context: ExecutionContext) -> ArrayDict:
-        input_arrays = self.input.execute(context)
-
-        # Determine array length from first array
-        first_arr = next(iter(input_arrays.values()))
-        arr_len = len(first_arr)
-
-        # Calculate slice indices
+    @property
+    def supports_streaming(self) -> bool:
+        # Tail operations need all data, so don't support streaming
+        # for offset=-1 (special marker for tail)
         if self.offset == -1:
-            # Tail operation (offset=-1 is a special marker)
-            start = max(0, arr_len - self.n)
-            end = arr_len
-        elif self.offset > 0:
-            # Skip + limit
-            start = self.offset
-            end = min(self.offset + self.n, arr_len)
-        else:
-            # Simple head/limit
-            start = 0
-            end = min(self.n, arr_len)
+            return False
+        return self.input.supports_streaming
 
-        # Slice all arrays
+    def execute_batches(self, context: ExecutionContext) -> Iterator[ArrayDict]:
+        """
+        Stream limited batches with early termination.
+
+        For head() operations, stops reading from input once the
+        limit is reached. For skip+limit operations, skips the
+        required rows before yielding results.
+
+        Yields
+        ------
+        ArrayDict
+            Batches limited to the requested number of rows.
+        """
+        rows_seen = 0
+        rows_yielded = 0
+
+        for batch in self.input.execute_batches(context):
+            if not batch:
+                continue
+
+            first_arr = next(iter(batch.values()))
+            batch_len = len(first_arr)
+
+            if batch_len == 0:
+                continue
+
+            # Handle offset (skip rows)
+            if self.offset > 0 and rows_seen + batch_len <= self.offset:
+                # Skip entire batch
+                rows_seen += batch_len
+                continue
+
+            # Calculate what to keep from this batch
+            skip_start = max(0, self.offset - rows_seen) if self.offset > 0 else 0
+            keep_count = min(batch_len - skip_start, self.n - rows_yielded)
+
+            if keep_count > 0:
+                # Slice the batch
+                sliced = self._slice_batch(batch, skip_start, skip_start + keep_count)
+                yield sliced
+                rows_yielded += keep_count
+
+            rows_seen += batch_len
+
+            # Early termination - we have enough rows!
+            if rows_yielded >= self.n:
+                return
+
+    def _slice_batch(self, batch: ArrayDict, start: int, end: int) -> ArrayDict:
+        """Slice all arrays in a batch."""
         result: ArrayDict = {}
-        for name, arr in input_arrays.items():
+        for name, arr in batch.items():
             if hasattr(arr, "slice"):
                 # Arrow array
                 result[name] = arr.slice(start, end - start)
             else:
                 # NumPy array
                 result[name] = arr[start:end]
+        return result
+
+    def execute(self, context: ExecutionContext) -> ArrayDict:
+        """
+        Execute limit and return all results at once.
+
+        For streaming-capable inputs, uses execute_batches() with early
+        termination for efficiency. For tail operations or non-streaming
+        inputs, falls back to materializing all data first.
+        """
+        # Tail operation needs all data
+        if self.offset == -1:
+            return self._execute_tail(context)
+
+        # For streaming sources, use batched execution with early termination
+        if self.input.supports_streaming:
+            return self._materialize_batches(context)
+
+        # Non-streaming fallback: get all data, then slice
+        return self._execute_slice(context)
+
+    def _execute_tail(self, context: ExecutionContext) -> ArrayDict:
+        """Execute tail operation (needs all data)."""
+        input_arrays = self.input.execute(context)
+        first_arr = next(iter(input_arrays.values()))
+        arr_len = len(first_arr)
+
+        start = max(0, arr_len - self.n)
+        end = arr_len
+
+        return self._slice_batch(input_arrays, start, end)
+
+    def _execute_slice(self, context: ExecutionContext) -> ArrayDict:
+        """Execute as a simple slice on materialized data."""
+        input_arrays = self.input.execute(context)
+        first_arr = next(iter(input_arrays.values()))
+        arr_len = len(first_arr)
+
+        if self.offset > 0:
+            start = self.offset
+            end = min(self.offset + self.n, arr_len)
+        else:
+            start = 0
+            end = min(self.n, arr_len)
+
+        return self._slice_batch(input_arrays, start, end)
+
+    def _materialize_batches(self, context: ExecutionContext) -> ArrayDict:
+        """Materialize batches from execute_batches into single result."""
+        import pyarrow as pa
+
+        batches = list(self.execute_batches(context))
+
+        if not batches:
+            # Return empty result
+            result: ArrayDict = {}
+            for col_name in self.schema:
+                result[col_name] = pa.array([])
+            return result
+
+        if len(batches) == 1:
+            return batches[0]
+
+        # Concatenate all batches
+        result: ArrayDict = {}
+        all_columns = set()
+        for batch in batches:
+            all_columns.update(batch.keys())
+
+        for col_name in all_columns:
+            chunks = [batch[col_name] for batch in batches if col_name in batch]
+            if chunks:
+                if hasattr(chunks[0], "type"):
+                    # Arrow arrays - concatenate
+                    chunked = pa.chunked_array(chunks)
+                    result[col_name] = chunked.combine_chunks()
+                else:
+                    # NumPy arrays
+                    import numpy as np
+
+                    result[col_name] = np.concatenate(chunks)
 
         return result
 
