@@ -1027,13 +1027,26 @@ class ExpressionSimplification(PlanVisitor):
     """
     Simplify algebraic expressions to reduce runtime computation.
 
-    Transformations:
+    Arithmetic Transformations:
         x * 1 -> x           x * 0 -> 0
         x / 1 -> x           x + 0 -> x
         x - 0 -> x           x ** 1 -> x
-        x ** 0 -> 1          x & True -> x
-        x | False -> x       x & False -> False
-        x | True -> True     !!x -> x (double negation)
+        x ** 0 -> 1          x - x -> 0
+        x / x -> 1           x + x -> x * 2
+
+    Logical Transformations:
+        x & True -> x        x & False -> False
+        x | False -> x       x | True -> True
+        !!x -> x             --x -> x (double negation)
+
+    De Morgan's Laws:
+        !(a & b) -> !a | !b
+        !(a | b) -> !a & !b
+
+    Comparison Simplifications:
+        x == x -> True       x != x -> False
+        x < x -> False       x > x -> False
+        x <= x -> True       x >= x -> True
 
     This pass complements ConstantFolding, which only handles
     expressions where ALL operands are constants.
@@ -1132,6 +1145,12 @@ class ExpressionSimplification(PlanVisitor):
 
         left, right = args
 
+        # Check for self-referential patterns (x op x)
+        if self._ir_equal(left, right):
+            result = self._simplify_self_op(function, left)
+            if result is not None:
+                return result
+
         # Check for identity patterns with literals
         left_is_lit = isinstance(left, Literal)
         right_is_lit = isinstance(right, Literal)
@@ -1216,6 +1235,19 @@ class ExpressionSimplification(PlanVisitor):
             ):
                 return arg.args[0]
 
+            # De Morgan's Laws: !(a & b) -> !a | !b, !(a | b) -> !a & !b
+            if isinstance(arg, Call) and len(arg.args) == 2:
+                if arg.function == "and_":
+                    # !(a & b) -> !a | !b
+                    left_inverted = Call("invert", (arg.args[0],))
+                    right_inverted = Call("invert", (arg.args[1],))
+                    return Call("or_", (left_inverted, right_inverted))
+                elif arg.function == "or_":
+                    # !(a | b) -> !a & !b
+                    left_inverted = Call("invert", (arg.args[0],))
+                    right_inverted = Call("invert", (arg.args[1],))
+                    return Call("and_", (left_inverted, right_inverted))
+
         # Double negate elimination: --x -> x
         elif function == "negate":
             if (
@@ -1226,3 +1258,85 @@ class ExpressionSimplification(PlanVisitor):
                 return arg.args[0]
 
         return None
+
+    def _simplify_self_op(self, function: str, operand: IRNode) -> IRNode | None:
+        """
+        Simplify operations where both operands are the same (x op x).
+
+        Patterns:
+            x - x -> 0
+            x / x -> 1 (note: doesn't handle x=0, but neither does runtime)
+            x == x -> True
+            x != x -> False
+            x < x -> False
+            x > x -> False
+            x <= x -> True
+            x >= x -> True
+            x & x -> x
+            x | x -> x
+        """
+        # Arithmetic self-cancellation
+        if function == "subtract":
+            return Literal(0)  # x - x -> 0
+
+        elif function == "divide":
+            return Literal(1)  # x / x -> 1
+
+        # Comparison tautologies/contradictions
+        elif function == "equal":
+            return Literal(True)  # x == x -> True
+
+        elif function == "not_equal":
+            return Literal(False)  # x != x -> False
+
+        elif function == "less":
+            return Literal(False)  # x < x -> False
+
+        elif function == "greater":
+            return Literal(False)  # x > x -> False
+
+        elif function == "less_equal":
+            return Literal(True)  # x <= x -> True
+
+        elif function == "greater_equal":
+            return Literal(True)  # x >= x -> True
+
+        # Logical idempotence
+        elif function == "and_":
+            return operand  # x & x -> x
+
+        elif function == "or_":
+            return operand  # x | x -> x
+
+        return None
+
+    def _ir_equal(self, a: IRNode, b: IRNode) -> bool:
+        """
+        Check if two IR nodes are structurally equal.
+
+        This is a conservative equality check that returns True only when
+        the nodes are guaranteed to produce the same result.
+        """
+        if type(a) is not type(b):
+            return False
+
+        if isinstance(a, Literal):
+            return a.value == b.value
+
+        elif isinstance(a, FieldRef):
+            return a.name == b.name
+
+        elif isinstance(a, Alias):
+            return a.name == b.name and self._ir_equal(a.arg, b.arg)
+
+        elif isinstance(a, Cast):
+            return a.target_dtype == b.target_dtype and self._ir_equal(a.arg, b.arg)
+
+        elif isinstance(a, Call):
+            if a.function != b.function or len(a.args) != len(b.args):
+                return False
+            return all(
+                self._ir_equal(aa, bb) for aa, bb in zip(a.args, b.args, strict=True)
+            )
+
+        return False

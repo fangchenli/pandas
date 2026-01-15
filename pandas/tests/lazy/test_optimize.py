@@ -1142,7 +1142,7 @@ class TestConstantFolding:
         ldf = df.select("a", (col("a") + (lit(1) + lit(2))).alias("b"))
 
         # Apply constant folding
-        folded_plan = ConstantFolding().optimize(ldf._plan)
+        ConstantFolding().optimize(ldf._plan)
 
         # Execute and verify result is correct
         result = ldf.collect()
@@ -1376,10 +1376,7 @@ class TestTopKNode:
 
     def test_topk_resolve_schema(self):
         """TopK should preserve input schema."""
-        from pandas.lazy.plan import DataFrameSource
-
         df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
-        source = DataFrameSource(df)
         ldf = df.select()
         topk = TopK(
             ldf._plan,
@@ -1737,7 +1734,7 @@ class TestAggregatePushdown:
 
         # Apply optimization
         optimizer = AggregatePushdown()
-        optimized = optimizer.optimize(ldf._plan)
+        optimizer.optimize(ldf._plan)
 
         # The aggregate should be pushed through/combined with project
         # Result should still be correct
@@ -2043,3 +2040,353 @@ class TestPredicatePushdownThroughJoin:
             }
         )
         tm.assert_frame_equal(result, expected)
+
+
+class TestExpressionSimplificationAdvanced:
+    """Tests for advanced expression simplification patterns."""
+
+    def test_de_morgan_and_to_or(self):
+        """Test De Morgan's law: ~(a & b) -> ~a | ~b."""
+        from pandas.lazy.ir import (
+            Call,
+            FieldRef,
+        )
+        from pandas.lazy.optimize.passes import ExpressionSimplification
+
+        simplifier = ExpressionSimplification()
+
+        # ~(a & b)
+        a = FieldRef("a")
+        b = FieldRef("b")
+        and_node = Call("and_", (a, b))
+        not_and = Call("invert", (and_node,))
+
+        result = simplifier._simplify_ir(not_and)
+
+        # Should become ~a | ~b
+        assert isinstance(result, Call)
+        assert result.function == "or_"
+        assert len(result.args) == 2
+        assert isinstance(result.args[0], Call)
+        assert result.args[0].function == "invert"
+        assert isinstance(result.args[1], Call)
+        assert result.args[1].function == "invert"
+
+    def test_de_morgan_or_to_and(self):
+        """Test De Morgan's law: ~(a | b) -> ~a & ~b."""
+        from pandas.lazy.ir import (
+            Call,
+            FieldRef,
+        )
+        from pandas.lazy.optimize.passes import ExpressionSimplification
+
+        simplifier = ExpressionSimplification()
+
+        # ~(a | b)
+        a = FieldRef("a")
+        b = FieldRef("b")
+        or_node = Call("or_", (a, b))
+        not_or = Call("invert", (or_node,))
+
+        result = simplifier._simplify_ir(not_or)
+
+        # Should become ~a & ~b
+        assert isinstance(result, Call)
+        assert result.function == "and_"
+        assert len(result.args) == 2
+        assert isinstance(result.args[0], Call)
+        assert result.args[0].function == "invert"
+        assert isinstance(result.args[1], Call)
+        assert result.args[1].function == "invert"
+
+    def test_self_subtraction(self):
+        """Test x - x -> 0."""
+        from pandas.lazy.ir import (
+            Call,
+            FieldRef,
+            Literal,
+        )
+        from pandas.lazy.optimize.passes import ExpressionSimplification
+
+        simplifier = ExpressionSimplification()
+
+        # a - a
+        a = FieldRef("a")
+        subtract = Call("subtract", (a, a))
+
+        result = simplifier._simplify_ir(subtract)
+
+        assert isinstance(result, Literal)
+        assert result.value == 0
+
+    def test_self_division(self):
+        """Test x / x -> 1."""
+        from pandas.lazy.ir import (
+            Call,
+            FieldRef,
+            Literal,
+        )
+        from pandas.lazy.optimize.passes import ExpressionSimplification
+
+        simplifier = ExpressionSimplification()
+
+        # a / a
+        a = FieldRef("a")
+        divide = Call("divide", (a, a))
+
+        result = simplifier._simplify_ir(divide)
+
+        assert isinstance(result, Literal)
+        assert result.value == 1
+
+    def test_self_equality(self):
+        """Test x == x -> True."""
+        from pandas.lazy.ir import (
+            Call,
+            FieldRef,
+            Literal,
+        )
+        from pandas.lazy.optimize.passes import ExpressionSimplification
+
+        simplifier = ExpressionSimplification()
+
+        # a == a
+        a = FieldRef("a")
+        equal = Call("equal", (a, a))
+
+        result = simplifier._simplify_ir(equal)
+
+        assert isinstance(result, Literal)
+        assert result.value is True
+
+    def test_self_inequality(self):
+        """Test x != x -> False."""
+        from pandas.lazy.ir import (
+            Call,
+            FieldRef,
+            Literal,
+        )
+        from pandas.lazy.optimize.passes import ExpressionSimplification
+
+        simplifier = ExpressionSimplification()
+
+        # a != a
+        a = FieldRef("a")
+        not_equal = Call("not_equal", (a, a))
+
+        result = simplifier._simplify_ir(not_equal)
+
+        assert isinstance(result, Literal)
+        assert result.value is False
+
+    def test_self_less_than(self):
+        """Test x < x -> False."""
+        from pandas.lazy.ir import (
+            Call,
+            FieldRef,
+            Literal,
+        )
+        from pandas.lazy.optimize.passes import ExpressionSimplification
+
+        simplifier = ExpressionSimplification()
+
+        # a < a
+        a = FieldRef("a")
+        less = Call("less", (a, a))
+
+        result = simplifier._simplify_ir(less)
+
+        assert isinstance(result, Literal)
+        assert result.value is False
+
+    def test_self_greater_than(self):
+        """Test x > x -> False."""
+        from pandas.lazy.ir import (
+            Call,
+            FieldRef,
+            Literal,
+        )
+        from pandas.lazy.optimize.passes import ExpressionSimplification
+
+        simplifier = ExpressionSimplification()
+
+        # a > a
+        a = FieldRef("a")
+        greater = Call("greater", (a, a))
+
+        result = simplifier._simplify_ir(greater)
+
+        assert isinstance(result, Literal)
+        assert result.value is False
+
+    def test_self_less_equal(self):
+        """Test x <= x -> True."""
+        from pandas.lazy.ir import (
+            Call,
+            FieldRef,
+            Literal,
+        )
+        from pandas.lazy.optimize.passes import ExpressionSimplification
+
+        simplifier = ExpressionSimplification()
+
+        # a <= a
+        a = FieldRef("a")
+        le = Call("less_equal", (a, a))
+
+        result = simplifier._simplify_ir(le)
+
+        assert isinstance(result, Literal)
+        assert result.value is True
+
+    def test_self_greater_equal(self):
+        """Test x >= x -> True."""
+        from pandas.lazy.ir import (
+            Call,
+            FieldRef,
+            Literal,
+        )
+        from pandas.lazy.optimize.passes import ExpressionSimplification
+
+        simplifier = ExpressionSimplification()
+
+        # a >= a
+        a = FieldRef("a")
+        ge = Call("greater_equal", (a, a))
+
+        result = simplifier._simplify_ir(ge)
+
+        assert isinstance(result, Literal)
+        assert result.value is True
+
+    def test_self_and_idempotent(self):
+        """Test x & x -> x."""
+        from pandas.lazy.ir import (
+            Call,
+            FieldRef,
+        )
+        from pandas.lazy.optimize.passes import ExpressionSimplification
+
+        simplifier = ExpressionSimplification()
+
+        # a & a
+        a = FieldRef("a")
+        and_node = Call("and_", (a, a))
+
+        result = simplifier._simplify_ir(and_node)
+
+        assert isinstance(result, FieldRef)
+        assert result.name == "a"
+
+    def test_self_or_idempotent(self):
+        """Test x | x -> x."""
+        from pandas.lazy.ir import (
+            Call,
+            FieldRef,
+        )
+        from pandas.lazy.optimize.passes import ExpressionSimplification
+
+        simplifier = ExpressionSimplification()
+
+        # a | a
+        a = FieldRef("a")
+        or_node = Call("or_", (a, a))
+
+        result = simplifier._simplify_ir(or_node)
+
+        assert isinstance(result, FieldRef)
+        assert result.name == "a"
+
+    def test_complex_self_expression(self):
+        """Test (a + b) - (a + b) -> 0."""
+        from pandas.lazy.ir import (
+            Call,
+            FieldRef,
+            Literal,
+        )
+        from pandas.lazy.optimize.passes import ExpressionSimplification
+
+        simplifier = ExpressionSimplification()
+
+        # (a + b)
+        a = FieldRef("a")
+        b = FieldRef("b")
+        add_node = Call("add", (a, b))
+
+        # (a + b) - (a + b)
+        subtract = Call("subtract", (add_node, Call("add", (a, b))))
+
+        result = simplifier._simplify_ir(subtract)
+
+        assert isinstance(result, Literal)
+        assert result.value == 0
+
+    def test_ir_equal_literals(self):
+        """Test _ir_equal for Literal nodes."""
+        from pandas.lazy.ir import Literal
+        from pandas.lazy.optimize.passes import ExpressionSimplification
+
+        simplifier = ExpressionSimplification()
+
+        assert simplifier._ir_equal(Literal(5), Literal(5)) is True
+        assert simplifier._ir_equal(Literal(5), Literal(10)) is False
+        assert simplifier._ir_equal(Literal("a"), Literal("a")) is True
+        assert simplifier._ir_equal(Literal("a"), Literal("b")) is False
+
+    def test_ir_equal_field_refs(self):
+        """Test _ir_equal for FieldRef nodes."""
+        from pandas.lazy.ir import FieldRef
+        from pandas.lazy.optimize.passes import ExpressionSimplification
+
+        simplifier = ExpressionSimplification()
+
+        assert simplifier._ir_equal(FieldRef("a"), FieldRef("a")) is True
+        assert simplifier._ir_equal(FieldRef("a"), FieldRef("b")) is False
+
+    def test_ir_equal_calls(self):
+        """Test _ir_equal for Call nodes."""
+        from pandas.lazy.ir import (
+            Call,
+            FieldRef,
+        )
+        from pandas.lazy.optimize.passes import ExpressionSimplification
+
+        simplifier = ExpressionSimplification()
+
+        a = FieldRef("a")
+        b = FieldRef("b")
+
+        # Same call
+        call1 = Call("add", (a, b))
+        call2 = Call("add", (FieldRef("a"), FieldRef("b")))
+        assert simplifier._ir_equal(call1, call2) is True
+
+        # Different function
+        call3 = Call("subtract", (a, b))
+        assert simplifier._ir_equal(call1, call3) is False
+
+        # Different args
+        call4 = Call("add", (a, FieldRef("c")))
+        assert simplifier._ir_equal(call1, call4) is False
+
+    def test_end_to_end_self_subtraction(self):
+        """Integration test: x - x simplification through full pipeline."""
+        df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+
+        # (a - a) should become 0
+        result = df.select(
+            col("b"),
+            (col("a") - col("a")).alias("zero"),
+        ).collect()
+
+        expected = pd.DataFrame({"b": [4, 5, 6], "zero": [0, 0, 0]})
+        tm.assert_frame_equal(result, expected)
+
+    def test_end_to_end_self_equality_filter(self):
+        """Integration test: x == x in filter should return all rows."""
+        df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+
+        # Filter on (a == a) which is always True -> should return all rows
+        result = df.select().filter(col("a") == col("a")).collect()
+
+        tm.assert_frame_equal(result, df)
