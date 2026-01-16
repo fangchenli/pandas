@@ -473,37 +473,263 @@ def print_summary(results: dict) -> None:
 # =============================================================================
 
 
-def validate_results(filepath: Path) -> None:
-    """Validate that all approaches produce equivalent results."""
-    print("\nValidating results...")
+def _normalize_result(df) -> pd.DataFrame:
+    """
+    Normalize a result DataFrame for comparison.
+
+    Converts to pandas DataFrame if needed, sorts by key columns,
+    and resets index for consistent comparison.
+    """
+    # Convert Polars to pandas if needed
+    if hasattr(df, "to_pandas"):
+        df = df.to_pandas()
+
+    # Ensure consistent column order
+    cols = [
+        "PULocationID",
+        "pickup_hour",
+        "trip_count",
+        "avg_distance",
+        "total_fare",
+        "avg_tip_pct",
+        "avg_passengers",
+    ]
+    df = df[cols].copy()
+
+    # Sort by key columns for consistent ordering
+    df = df.sort_values(["PULocationID", "pickup_hour"]).reset_index(drop=True)
+
+    # Convert dtypes to float64 for consistent comparison
+    for col in ["avg_distance", "total_fare", "avg_tip_pct", "avg_passengers"]:
+        df[col] = df[col].astype("float64")
+
+    # trip_count should be int
+    df["trip_count"] = df["trip_count"].astype("int64")
+
+    return df
+
+
+def _compare_dataframes(
+    df1: pd.DataFrame,
+    df2: pd.DataFrame,
+    name1: str,
+    name2: str,
+    rtol: float = 1e-5,
+    atol: float = 1e-8,
+) -> tuple[bool, list[str]]:
+    """
+    Compare two DataFrames for approximate equality.
+
+    Returns (is_equal, list_of_differences).
+    """
+    import pandas as pd
+
+    differences = []
+
+    # Check shape
+    if df1.shape != df2.shape:
+        differences.append(f"Shape mismatch: {name1}={df1.shape}, {name2}={df2.shape}")
+        return False, differences
+
+    # Check columns
+    if list(df1.columns) != list(df2.columns):
+        differences.append(
+            f"Column mismatch: {name1}={list(df1.columns)}, {name2}={list(df2.columns)}"
+        )
+        return False, differences
+
+    # Compare each column
+    all_close = True
+    for col in df1.columns:
+        col1 = df1[col].values
+        col2 = df2[col].values
+
+        if pd.api.types.is_numeric_dtype(df1[col]):
+            # Numeric comparison with tolerance
+            if not np.allclose(col1, col2, rtol=rtol, atol=atol, equal_nan=True):
+                all_close = False
+                # Find specific differences
+                mask = ~np.isclose(col1, col2, rtol=rtol, atol=atol, equal_nan=True)
+                n_diff = mask.sum()
+                if n_diff > 0:
+                    max_diff = np.abs(col1[mask] - col2[mask]).max()
+                    msg = f"Column '{col}': {n_diff} values differ "
+                    msg += f"(max diff: {max_diff:.6e})"
+                    differences.append(msg)
+        elif not (col1 == col2).all():
+            # Non-numeric: exact comparison
+            all_close = False
+            n_diff = (col1 != col2).sum()
+            differences.append(f"Column '{col}': {n_diff} values differ")
+
+    return all_close, differences
+
+
+def validate_results(filepath: Path) -> bool:
+    """
+    Validate that all approaches produce equivalent results.
+
+    Returns True if all results match, False otherwise.
+    """
+    print("\n" + "=" * 70)
+    print("RESULT VALIDATION")
+    print("=" * 70)
 
     df_pandas = load_pandas(filepath)
     lf_polars = load_polars(filepath)
 
     # Run all workflows
-    result_polars = workflow_polars(lf_polars)
-    result_eager = workflow_pandas_eager(df_pandas.copy())
+    print("\nRunning workflows...")
+    results = {}
 
     try:
-        result_lazy = workflow_lazy_pandas(df_pandas, use_physical_planner=False)
-        result_physical = workflow_lazy_pandas(df_pandas, use_physical_planner=True)
+        results["polars"] = workflow_polars(lf_polars)
+        print("  ✓ Polars")
     except Exception as e:
-        print(f"Lazy pandas failed: {e}")
-        return
+        print(f"  ✗ Polars FAILED: {e}")
+
+    try:
+        results["pandas_eager"] = workflow_pandas_eager(df_pandas.copy())
+        print("  ✓ Pandas eager")
+    except Exception as e:
+        print(f"  ✗ Pandas eager FAILED: {e}")
+
+    try:
+        results["lazy_no_physical"] = workflow_lazy_pandas(
+            df_pandas, use_physical_planner=False
+        )
+        print("  ✓ Lazy pandas (no physical)")
+    except Exception as e:
+        print(f"  ✗ Lazy pandas (no physical) FAILED: {e}")
+
+    try:
+        results["lazy_physical"] = workflow_lazy_pandas(
+            df_pandas, use_physical_planner=True
+        )
+        print("  ✓ Lazy pandas (physical)")
+    except Exception as e:
+        print(f"  ✗ Lazy pandas (physical) FAILED: {e}")
+
+    if len(results) < 2:
+        print("\nNot enough results to compare!")
+        return False
+
+    # Normalize all results
+    print("\nNormalizing results for comparison...")
+    normalized = {}
+    for name, df in results.items():
+        normalized[name] = _normalize_result(df)
 
     # Compare row counts
-    print("\nRow counts:")
-    print(f"  Polars:                    {len(result_polars)}")
-    print(f"  Pandas eager:              {len(result_eager)}")
-    print(f"  Lazy pandas (no physical): {len(result_lazy)}")
-    print(f"  Lazy pandas (physical):    {len(result_physical)}")
+    print("\n--- Row Counts ---")
+    for name, df in normalized.items():
+        print(f"  {name:<25}: {len(df):>6} rows")
 
-    # Compare total_fare sum (should be very close)
-    print("\nTotal fare sum:")
-    print(f"  Polars:                    {result_polars['total_fare'].sum():,.2f}")
-    print(f"  Pandas eager:              {result_eager['total_fare'].sum():,.2f}")
-    print(f"  Lazy pandas (no physical): {result_lazy['total_fare'].sum():,.2f}")
-    print(f"  Lazy pandas (physical):    {result_physical['total_fare'].sum():,.2f}")
+    # Compare aggregate statistics
+    print("\n--- Aggregate Statistics ---")
+    stats_cols = ["trip_count", "total_fare", "avg_distance", "avg_tip_pct"]
+    for col in stats_cols:
+        print(f"\n  {col}:")
+        for name, df in normalized.items():
+            total = df[col].sum()
+            print(f"    {name:<25}: {total:>15,.2f}")
+
+    # Cross-validation: compare each pair
+    print("\n--- Cross-Validation ---")
+    all_passed = True
+    baseline_name = "pandas_eager"  # Use eager pandas as the reference
+
+    if baseline_name not in normalized:
+        baseline_name = next(iter(normalized.keys()))
+
+    baseline = normalized[baseline_name]
+
+    for name, df in normalized.items():
+        if name == baseline_name:
+            continue
+
+        is_equal, diffs = _compare_dataframes(
+            baseline, df, baseline_name, name, rtol=1e-4, atol=1e-6
+        )
+
+        if is_equal:
+            print(f"  ✓ {baseline_name} vs {name}: MATCH")
+        else:
+            all_passed = False
+            print(f"  ✗ {baseline_name} vs {name}: MISMATCH")
+            for diff in diffs[:5]:  # Show first 5 differences
+                print(f"      - {diff}")
+            if len(diffs) > 5:
+                print(f"      ... and {len(diffs) - 5} more differences")
+
+    # Summary
+    print("\n" + "-" * 70)
+    if all_passed:
+        print("VALIDATION PASSED: All results match within tolerance!")
+    else:
+        print("VALIDATION FAILED: Some results do not match!")
+    print("-" * 70)
+
+    return all_passed
+
+
+def validate_results_quick(filepath: Path) -> bool:
+    """
+    Quick validation - just check key aggregates match.
+
+    Faster than full validation, good for CI/testing.
+    """
+    df_pandas = load_pandas(filepath)
+    lf_polars = load_polars(filepath)
+
+    results = {}
+
+    # Run all workflows
+    results["polars"] = workflow_polars(lf_polars)
+    results["pandas_eager"] = workflow_pandas_eager(df_pandas.copy())
+    results["lazy_no_physical"] = workflow_lazy_pandas(
+        df_pandas, use_physical_planner=False
+    )
+    results["lazy_physical"] = workflow_lazy_pandas(
+        df_pandas, use_physical_planner=True
+    )
+
+    # Normalize
+    normalized = {name: _normalize_result(df) for name, df in results.items()}
+
+    # Quick checks
+    baseline = normalized["pandas_eager"]
+
+    checks_passed = True
+    for name, df in normalized.items():
+        if name == "pandas_eager":
+            continue
+
+        # Check row count
+        if len(df) != len(baseline):
+            print(f"FAIL: {name} row count {len(df)} != {len(baseline)}")
+            checks_passed = False
+            continue
+
+        # Check total_fare sum is within 0.01%
+        base_fare = baseline["total_fare"].sum()
+        test_fare = df["total_fare"].sum()
+        if not np.isclose(base_fare, test_fare, rtol=1e-4):
+            print(f"FAIL: {name} total_fare {test_fare:.2f} != {base_fare:.2f}")
+            checks_passed = False
+            continue
+
+        # Check trip_count sum matches exactly
+        base_trips = baseline["trip_count"].sum()
+        test_trips = df["trip_count"].sum()
+        if base_trips != test_trips:
+            print(f"FAIL: {name} trip_count {test_trips} != {base_trips}")
+            checks_passed = False
+            continue
+
+        print(f"PASS: {name}")
+
+    return checks_passed
 
 
 # =============================================================================
@@ -533,7 +759,12 @@ def main():
         "--runs", type=int, default=3, help="Number of benchmark runs (default: 3)"
     )
     parser.add_argument(
-        "--validate", action="store_true", help="Validate results match"
+        "--validate", action="store_true", help="Validate results match (detailed)"
+    )
+    parser.add_argument(
+        "--quick-validate",
+        action="store_true",
+        help="Quick validation (check key aggregates only)",
     )
 
     args = parser.parse_args()
@@ -551,6 +782,10 @@ def main():
 
     if args.validate:
         validate_results(filepaths)
+    elif args.quick_validate:
+        success = validate_results_quick(filepaths)
+        if not success:
+            raise SystemExit(1)
     else:
         results = run_benchmarks(filepaths, runs=args.runs)
         print_summary(results)
