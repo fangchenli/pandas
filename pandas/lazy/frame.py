@@ -797,6 +797,7 @@ class LazyDataFrame:
         DataFrame
             DataFrames, one per batch from the execution.
         """
+        import pandas as pd
         from pandas.lazy.backends.convert import arrays_to_dataframe
         from pandas.lazy.physical import (
             ExecutionContext,
@@ -814,12 +815,16 @@ class LazyDataFrame:
         planner = PhysicalPlanner(preferred_backend=engine)
         physical_plan = planner.plan(plan)
 
+        # Check if adaptive thresholds are enabled
+        adaptive_enabled = pd.get_option("compute.lazy.adaptive_thresholds")
+
         # Create execution context with streaming configuration
         context = ExecutionContext(
             preferred_backend=engine,
             strict=strict,
             batch_size=batch_size,
             streaming_enabled=True,
+            adaptive_thresholds=adaptive_enabled,
         )
 
         # Stream batches

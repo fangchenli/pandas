@@ -2437,11 +2437,16 @@ def execute_physical_plan(
     DataFrame
         The execution result.
     """
+    import pandas as pd
     from pandas.lazy.backends.convert import arrays_to_dataframe
+
+    # Check if adaptive thresholds are enabled
+    adaptive_enabled = pd.get_option("compute.lazy.adaptive_thresholds")
 
     context = ExecutionContext(
         preferred_backend=preferred_backend,
         strict=strict,
+        adaptive_thresholds=adaptive_enabled,
     )
 
     # Execute and get ArrayDict
