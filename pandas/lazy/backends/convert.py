@@ -446,9 +446,18 @@ def arrays_to_dataframe(
     else:
         # Mixed or NumPy arrays - convert individually
         def to_pandas_array(arr):
-            """Convert array to pandas-compatible format."""
+            """Convert array to pandas-compatible format with proper null handling."""
             if isinstance(arr, (pa.Array, pa.ChunkedArray)):
                 return arr.to_pandas()
+
+            # For numpy arrays, convert float arrays with NaN to nullable dtypes
+            # This ensures we use pd.NA instead of np.nan
+            if isinstance(arr, np.ndarray) and arr.dtype.kind == "f":
+                # Check if array has any NaN values
+                mask = np.isnan(arr)
+                if mask.any():
+                    # Convert to nullable dtype with pd.NA
+                    return pd.array(arr, dtype=pd.Float64Dtype())
             return arr
 
         pandas_data = {name: to_pandas_array(arr) for name, arr in data_cols.items()}

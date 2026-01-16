@@ -213,8 +213,8 @@ def lag_lead_df():
 @pytest.mark.parametrize(
     "func_name,expected",
     [
-        ("lag", [np.nan, 1.0, 2.0, 3.0, 10.0, 20.0]),
-        ("lead", [2.0, 3.0, 10.0, 20.0, 30.0, np.nan]),
+        ("lag", [pd.NA, 1, 2, 3, 10, 20]),
+        ("lead", [2, 3, 10, 20, 30, pd.NA]),
     ],
 )
 def test_lag_lead_global(lag_lead_df, func_name, expected):
@@ -222,15 +222,16 @@ def test_lag_lead_global(lag_lead_df, func_name, expected):
     expr = getattr(col("value"), func_name)(1)
     result = lag_lead_df.select().with_columns(expr.over().alias("result")).collect()
     expected_df = lag_lead_df.copy()
-    expected_df["result"] = expected
+    # Original value column is int64, so result should be Int64
+    expected_df["result"] = pd.array(expected, dtype=pd.Int64Dtype())
     tm.assert_frame_equal(result, expected_df)
 
 
 @pytest.mark.parametrize(
     "func_name,expected",
     [
-        ("lag", [np.nan, 1.0, 2.0, np.nan, 10.0, 20.0]),
-        ("lead", [2.0, 3.0, np.nan, 20.0, 30.0, np.nan]),
+        ("lag", [pd.NA, 1, 2, pd.NA, 10, 20]),
+        ("lead", [2, 3, pd.NA, 20, 30, pd.NA]),
     ],
 )
 def test_lag_lead_over_partition(lag_lead_df, func_name, expected):
@@ -240,7 +241,8 @@ def test_lag_lead_over_partition(lag_lead_df, func_name, expected):
         lag_lead_df.select().with_columns(expr.over("group").alias("result")).collect()
     )
     expected_df = lag_lead_df.copy()
-    expected_df["result"] = expected
+    # Original value column is int64, so result should be Int64
+    expected_df["result"] = pd.array(expected, dtype=pd.Int64Dtype())
     tm.assert_frame_equal(result, expected_df)
 
 
@@ -270,7 +272,10 @@ def test_lag_n2(lag_lead_df):
         .collect()
     )
     expected = lag_lead_df.copy()
-    expected["prev2"] = [np.nan, np.nan, 1.0, np.nan, np.nan, 10.0]
+    # Original value column is int64, so result should be Int64
+    expected["prev2"] = pd.array(
+        [pd.NA, pd.NA, 1, pd.NA, pd.NA, 10], dtype=pd.Int64Dtype()
+    )
     tm.assert_frame_equal(result, expected)
 
 

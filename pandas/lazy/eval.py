@@ -22,6 +22,67 @@ if TYPE_CHECKING:
     from pandas.lazy.ir import IRNode
 
 
+def _convert_series_to_nullable(series: Series, original_dtype=None) -> Series:
+    """
+    Convert a Series with NaN to nullable dtype (using pd.NA).
+
+    This ensures operations like lag/lead that introduce null values
+    use pd.NA instead of np.nan, preserving the original dtype category
+    (integer stays integer, float stays float).
+
+    Parameters
+    ----------
+    series : Series
+        The input Series, typically from a shift operation.
+    original_dtype : dtype, optional
+        The original dtype before the operation that introduced NaN.
+        If provided, uses this to determine the appropriate nullable type.
+
+    Returns
+    -------
+    Series
+        Series with nullable dtype if it contains NaN values.
+    """
+    import pandas as pd
+
+    if not series.isna().any():
+        return series
+
+    # Determine the appropriate nullable dtype
+    if original_dtype is not None:
+        # Use the original dtype to pick the right nullable variant
+        if original_dtype.kind == "i":  # signed integer
+            # Map to appropriate nullable int dtype
+            if original_dtype == np.dtype("int8"):
+                return pd.array(series, dtype=pd.Int8Dtype())
+            elif original_dtype == np.dtype("int16"):
+                return pd.array(series, dtype=pd.Int16Dtype())
+            elif original_dtype == np.dtype("int32"):
+                return pd.array(series, dtype=pd.Int32Dtype())
+            else:  # int64 or default
+                return pd.array(series, dtype=pd.Int64Dtype())
+        elif original_dtype.kind == "u":  # unsigned integer
+            if original_dtype == np.dtype("uint8"):
+                return pd.array(series, dtype=pd.UInt8Dtype())
+            elif original_dtype == np.dtype("uint16"):
+                return pd.array(series, dtype=pd.UInt16Dtype())
+            elif original_dtype == np.dtype("uint32"):
+                return pd.array(series, dtype=pd.UInt32Dtype())
+            else:  # uint64 or default
+                return pd.array(series, dtype=pd.UInt64Dtype())
+        elif original_dtype.kind == "f":  # float
+            if original_dtype == np.dtype("float32"):
+                return pd.array(series, dtype=pd.Float32Dtype())
+            else:  # float64 or default
+                return pd.array(series, dtype=pd.Float64Dtype())
+
+    # Fallback: if series is float (due to NaN promotion), use Float64
+    if series.dtype.kind == "f":
+        return pd.array(series, dtype=pd.Float64Dtype())
+
+    return series
+
+
 class Evaluator:
     """
     Evaluates IR expressions against a DataFrame context.
@@ -265,19 +326,27 @@ class Evaluator:
         elif func == "lag":
             n = node.kwargs.get("n", 1)
             default_node = node.kwargs.get("default")
+            original_dtype = args[0].dtype
             result = args[0].shift(n)
             if default_node is not None:
                 default_val = self.evaluate(default_node)
                 result = result.fillna(default_val)
+            else:
+                # Convert to nullable dtype, preserving original type
+                result = _convert_series_to_nullable(result, original_dtype)
             return result
 
         elif func == "lead":
             n = node.kwargs.get("n", 1)
             default_node = node.kwargs.get("default")
+            original_dtype = args[0].dtype
             result = args[0].shift(-n)
             if default_node is not None:
                 default_val = self.evaluate(default_node)
                 result = result.fillna(default_val)
+            else:
+                # Convert to nullable dtype, preserving original type
+                result = _convert_series_to_nullable(result, original_dtype)
             return result
 
         elif func == "cum_sum":
@@ -289,43 +358,59 @@ class Evaluator:
         elif func == "cum_max":
             return args[0].cummax()
 
-        # Rolling window operations
+        # Rolling window operations - convert to nullable dtype if NaN introduced
+        # Operations that preserve dtype: sum, min, max
+        # Operations that produce floats: mean, std, var, median
         elif func == "rolling_sum":
             window = node.kwargs.get("window")
             min_periods = node.kwargs.get("min_periods")
-            return args[0].rolling(window, min_periods=min_periods).sum()
+            original_dtype = args[0].dtype
+            result = args[0].rolling(window, min_periods=min_periods).sum()
+            return _convert_series_to_nullable(result, original_dtype)
 
         elif func == "rolling_mean":
             window = node.kwargs.get("window")
             min_periods = node.kwargs.get("min_periods")
-            return args[0].rolling(window, min_periods=min_periods).mean()
+            result = args[0].rolling(window, min_periods=min_periods).mean()
+            # mean always produces floats
+            return _convert_series_to_nullable(result)
 
         elif func == "rolling_min":
             window = node.kwargs.get("window")
             min_periods = node.kwargs.get("min_periods")
-            return args[0].rolling(window, min_periods=min_periods).min()
+            original_dtype = args[0].dtype
+            result = args[0].rolling(window, min_periods=min_periods).min()
+            return _convert_series_to_nullable(result, original_dtype)
 
         elif func == "rolling_max":
             window = node.kwargs.get("window")
             min_periods = node.kwargs.get("min_periods")
-            return args[0].rolling(window, min_periods=min_periods).max()
+            original_dtype = args[0].dtype
+            result = args[0].rolling(window, min_periods=min_periods).max()
+            return _convert_series_to_nullable(result, original_dtype)
 
         elif func == "rolling_std":
             window = node.kwargs.get("window")
             min_periods = node.kwargs.get("min_periods")
             ddof = node.kwargs.get("ddof", 1)
-            return args[0].rolling(window, min_periods=min_periods).std(ddof=ddof)
+            result = args[0].rolling(window, min_periods=min_periods).std(ddof=ddof)
+            # std always produces floats
+            return _convert_series_to_nullable(result)
 
         elif func == "rolling_var":
             window = node.kwargs.get("window")
             min_periods = node.kwargs.get("min_periods")
             ddof = node.kwargs.get("ddof", 1)
-            return args[0].rolling(window, min_periods=min_periods).var(ddof=ddof)
+            result = args[0].rolling(window, min_periods=min_periods).var(ddof=ddof)
+            # var always produces floats
+            return _convert_series_to_nullable(result)
 
         elif func == "rolling_median":
             window = node.kwargs.get("window")
             min_periods = node.kwargs.get("min_periods")
-            return args[0].rolling(window, min_periods=min_periods).median()
+            result = args[0].rolling(window, min_periods=min_periods).median()
+            # median always produces floats
+            return _convert_series_to_nullable(result)
 
         else:
             raise NotImplementedError(f"Function not implemented: {func}")
@@ -400,18 +485,24 @@ class Evaluator:
             elif func_name == "lag":
                 n = inner_node.kwargs.get("n", 1)
                 default_node = inner_node.kwargs.get("default")
+                original_dtype = col_series.dtype
                 result = col_series.shift(n)
                 if default_node is not None:
                     default_val = self.evaluate(default_node)
                     result = result.fillna(default_val)
+                else:
+                    result = _convert_series_to_nullable(result, original_dtype)
                 return result
             elif func_name == "lead":
                 n = inner_node.kwargs.get("n", 1)
                 default_node = inner_node.kwargs.get("default")
+                original_dtype = col_series.dtype
                 result = col_series.shift(-n)
                 if default_node is not None:
                     default_val = self.evaluate(default_node)
                     result = result.fillna(default_val)
+                else:
+                    result = _convert_series_to_nullable(result, original_dtype)
                 return result
             elif func_name == "cum_sum":
                 return col_series.cumsum()
@@ -483,6 +574,7 @@ class Evaluator:
             if func_name == "lead":
                 n = -n
             default_node = inner_node.kwargs.get("default")
+            original_dtype = col_series.dtype
 
             col_name = (
                 inner_node.args[0].name
@@ -500,6 +592,8 @@ class Evaluator:
             if default_node is not None:
                 default_val = self.evaluate(default_node)
                 result = result.fillna(default_val)
+            else:
+                result = _convert_series_to_nullable(result, original_dtype)
             return result
 
         elif func_name == "cum_sum":

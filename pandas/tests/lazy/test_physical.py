@@ -269,7 +269,11 @@ class TestPhysicalPlanExecution:
         result = execute_physical_plan(physical)
 
         expected = pd.DataFrame(
-            {"a": [1, 2, 3], "b": [4, 5, 6], "c": [7.0, 8.0, float("nan")]}
+            {
+                "a": [1, 2, 3],
+                "b": [4, 5, 6],
+                "c": pd.array([7.0, 8.0, pd.NA], dtype=pd.Float64Dtype()),
+            }
         )
         tm.assert_frame_equal(result, expected)
 
