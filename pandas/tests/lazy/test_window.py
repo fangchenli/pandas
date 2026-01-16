@@ -11,70 +11,57 @@ from pandas.lazy import col
 from pandas.lazy.ir import Call
 
 
-class TestWindowAPI:
-    """Tests for window function expression API."""
+@pytest.mark.parametrize(
+    "expr_func,expected_function",
+    [
+        (lambda: col("a").rank(), "rank"),
+        (lambda: col("a").dense_rank(), "dense_rank"),
+        (lambda: col("a").row_number(), "row_number"),
+        (lambda: col("a").cum_sum(), "cum_sum"),
+        (lambda: col("a").cum_min(), "cum_min"),
+        (lambda: col("a").cum_max(), "cum_max"),
+    ],
+)
+def test_window_function_ir(expr_func, expected_function):
+    """Test that window function expressions produce correct IR."""
+    expr = expr_func()
+    assert isinstance(expr._ir, Call)
+    assert expr._ir.function == expected_function
 
-    def test_over_no_partition(self):
+
+@pytest.mark.parametrize(
+    "partition_by,expected_len",
+    [
+        (None, 0),
+        ("group", 1),
+        (["group1", "group2"], 2),
+    ],
+)
+def test_over_partition_by(partition_by, expected_len):
+    """Test .over() with different partition_by arguments."""
+    if partition_by is None:
         expr = col("a").sum().over()
-        assert isinstance(expr._ir, Call)
-        assert expr._ir.function == "window"
+    else:
+        expr = col("a").sum().over(partition_by)
+    assert isinstance(expr._ir, Call)
+    assert expr._ir.function == "window"
+    assert len(expr._ir.kwargs["partition_by"]) == expected_len
 
-    def test_over_single_partition(self):
-        expr = col("a").sum().over("group")
-        ir = expr._ir
-        assert isinstance(ir, Call)
-        assert ir.function == "window"
-        assert len(ir.kwargs["partition_by"]) == 1
 
-    def test_over_multiple_partitions(self):
-        expr = col("a").sum().over(["group1", "group2"])
-        ir = expr._ir
-        assert isinstance(ir, Call)
-        assert len(ir.kwargs["partition_by"]) == 2
+def test_lag_ir():
+    """Test lag() produces correct IR with n parameter."""
+    expr = col("a").lag(2)
+    assert isinstance(expr._ir, Call)
+    assert expr._ir.function == "lag"
+    assert expr._ir.kwargs["n"] == 2
 
-    def test_rank_ir(self):
-        expr = col("a").rank()
-        assert isinstance(expr._ir, Call)
-        assert expr._ir.function == "rank"
 
-    def test_dense_rank_ir(self):
-        expr = col("a").dense_rank()
-        assert isinstance(expr._ir, Call)
-        assert expr._ir.function == "dense_rank"
-
-    def test_row_number_ir(self):
-        expr = col("a").row_number()
-        assert isinstance(expr._ir, Call)
-        assert expr._ir.function == "row_number"
-
-    def test_lag_ir(self):
-        expr = col("a").lag(2)
-        ir = expr._ir
-        assert isinstance(ir, Call)
-        assert ir.function == "lag"
-        assert ir.kwargs["n"] == 2
-
-    def test_lead_ir(self):
-        expr = col("a").lead(3)
-        ir = expr._ir
-        assert isinstance(ir, Call)
-        assert ir.function == "lead"
-        assert ir.kwargs["n"] == 3
-
-    def test_cum_sum_ir(self):
-        expr = col("a").cum_sum()
-        assert isinstance(expr._ir, Call)
-        assert expr._ir.function == "cum_sum"
-
-    def test_cum_min_ir(self):
-        expr = col("a").cum_min()
-        assert isinstance(expr._ir, Call)
-        assert expr._ir.function == "cum_min"
-
-    def test_cum_max_ir(self):
-        expr = col("a").cum_max()
-        assert isinstance(expr._ir, Call)
-        assert expr._ir.function == "cum_max"
+def test_lead_ir():
+    """Test lead() produces correct IR with n parameter."""
+    expr = col("a").lead(3)
+    assert isinstance(expr._ir, Call)
+    assert expr._ir.function == "lead"
+    assert expr._ir.kwargs["n"] == 3
 
 
 class TestWindowAggregations:
@@ -213,152 +200,119 @@ class TestWindowRankFunctions:
         tm.assert_frame_equal(result, expected)
 
 
-class TestWindowLagLead:
-    """Tests for lag/lead window functions."""
-
-    @pytest.fixture
-    def sample_df(self):
-        return pd.DataFrame(
-            {
-                "group": ["A", "A", "A", "B", "B", "B"],
-                "value": [1, 2, 3, 10, 20, 30],
-            }
-        )
-
-    def test_lag_global(self, sample_df):
-        result = (
-            sample_df.select()
-            .with_columns(col("value").lag(1).over().alias("prev"))
-            .collect()
-        )
-        expected = sample_df.copy()
-        expected["prev"] = [np.nan, 1.0, 2.0, 3.0, 10.0, 20.0]
-        tm.assert_frame_equal(result, expected)
-
-    def test_lag_over_partition(self, sample_df):
-        result = (
-            sample_df.select()
-            .with_columns(col("value").lag(1).over("group").alias("prev"))
-            .collect()
-        )
-        expected = sample_df.copy()
-        expected["prev"] = [np.nan, 1.0, 2.0, np.nan, 10.0, 20.0]
-        tm.assert_frame_equal(result, expected)
-
-    def test_lag_with_default(self, sample_df):
-        result = (
-            sample_df.select()
-            .with_columns(col("value").lag(1, default=0).over("group").alias("prev"))
-            .collect()
-        )
-        expected = sample_df.copy()
-        expected["prev"] = [0.0, 1.0, 2.0, 0.0, 10.0, 20.0]
-        tm.assert_frame_equal(result, expected)
-
-    def test_lead_global(self, sample_df):
-        result = (
-            sample_df.select()
-            .with_columns(col("value").lead(1).over().alias("next"))
-            .collect()
-        )
-        expected = sample_df.copy()
-        expected["next"] = [2.0, 3.0, 10.0, 20.0, 30.0, np.nan]
-        tm.assert_frame_equal(result, expected)
-
-    def test_lead_over_partition(self, sample_df):
-        result = (
-            sample_df.select()
-            .with_columns(col("value").lead(1).over("group").alias("next"))
-            .collect()
-        )
-        expected = sample_df.copy()
-        expected["next"] = [2.0, 3.0, np.nan, 20.0, 30.0, np.nan]
-        tm.assert_frame_equal(result, expected)
-
-    def test_lead_with_default(self, sample_df):
-        result = (
-            sample_df.select()
-            .with_columns(col("value").lead(1, default=-1).over("group").alias("next"))
-            .collect()
-        )
-        expected = sample_df.copy()
-        expected["next"] = [2.0, 3.0, -1.0, 20.0, 30.0, -1.0]
-        tm.assert_frame_equal(result, expected)
-
-    def test_lag_n2(self, sample_df):
-        result = (
-            sample_df.select()
-            .with_columns(col("value").lag(2).over("group").alias("prev2"))
-            .collect()
-        )
-        expected = sample_df.copy()
-        expected["prev2"] = [np.nan, np.nan, 1.0, np.nan, np.nan, 10.0]
-        tm.assert_frame_equal(result, expected)
+@pytest.fixture
+def lag_lead_df():
+    return pd.DataFrame(
+        {
+            "group": ["A", "A", "A", "B", "B", "B"],
+            "value": [1, 2, 3, 10, 20, 30],
+        }
+    )
 
 
-class TestWindowCumulative:
-    """Tests for cumulative window functions."""
+@pytest.mark.parametrize(
+    "func_name,expected",
+    [
+        ("lag", [np.nan, 1.0, 2.0, 3.0, 10.0, 20.0]),
+        ("lead", [2.0, 3.0, 10.0, 20.0, 30.0, np.nan]),
+    ],
+)
+def test_lag_lead_global(lag_lead_df, func_name, expected):
+    """Test lag/lead over entire DataFrame (no partition)."""
+    expr = getattr(col("value"), func_name)(1)
+    result = lag_lead_df.select().with_columns(expr.over().alias("result")).collect()
+    expected_df = lag_lead_df.copy()
+    expected_df["result"] = expected
+    tm.assert_frame_equal(result, expected_df)
 
-    @pytest.fixture
-    def sample_df(self):
-        return pd.DataFrame(
-            {
-                "group": ["A", "A", "A", "B", "B", "B"],
-                "value": [1, 2, 3, 10, 20, 30],
-            }
-        )
 
-    def test_cum_sum_global(self, sample_df):
-        result = (
-            sample_df.select()
-            .with_columns(col("value").cum_sum().over().alias("running_total"))
-            .collect()
-        )
-        expected = sample_df.copy()
-        expected["running_total"] = [1, 3, 6, 16, 36, 66]
-        tm.assert_frame_equal(result, expected)
+@pytest.mark.parametrize(
+    "func_name,expected",
+    [
+        ("lag", [np.nan, 1.0, 2.0, np.nan, 10.0, 20.0]),
+        ("lead", [2.0, 3.0, np.nan, 20.0, 30.0, np.nan]),
+    ],
+)
+def test_lag_lead_over_partition(lag_lead_df, func_name, expected):
+    """Test lag/lead over partition."""
+    expr = getattr(col("value"), func_name)(1)
+    result = (
+        lag_lead_df.select().with_columns(expr.over("group").alias("result")).collect()
+    )
+    expected_df = lag_lead_df.copy()
+    expected_df["result"] = expected
+    tm.assert_frame_equal(result, expected_df)
 
-    def test_cum_sum_over_partition(self, sample_df):
-        result = (
-            sample_df.select()
-            .with_columns(col("value").cum_sum().over("group").alias("group_running"))
-            .collect()
-        )
-        expected = sample_df.copy()
-        expected["group_running"] = [1, 3, 6, 10, 30, 60]
-        tm.assert_frame_equal(result, expected)
 
-    def test_cum_min_over_partition(self, sample_df):
-        df = pd.DataFrame(
-            {
-                "group": ["A", "A", "A", "B", "B", "B"],
-                "value": [3, 1, 2, 30, 10, 20],
-            }
-        )
-        result = (
-            df.select()
-            .with_columns(col("value").cum_min().over("group").alias("running_min"))
-            .collect()
-        )
-        expected = df.copy()
-        expected["running_min"] = [3, 1, 1, 30, 10, 10]
-        tm.assert_frame_equal(result, expected)
+@pytest.mark.parametrize(
+    "func_name,default,expected",
+    [
+        ("lag", 0, [0.0, 1.0, 2.0, 0.0, 10.0, 20.0]),
+        ("lead", -1, [2.0, 3.0, -1.0, 20.0, 30.0, -1.0]),
+    ],
+)
+def test_lag_lead_with_default(lag_lead_df, func_name, default, expected):
+    """Test lag/lead with default value."""
+    expr = getattr(col("value"), func_name)(1, default=default)
+    result = (
+        lag_lead_df.select().with_columns(expr.over("group").alias("result")).collect()
+    )
+    expected_df = lag_lead_df.copy()
+    expected_df["result"] = expected
+    tm.assert_frame_equal(result, expected_df)
 
-    def test_cum_max_over_partition(self, sample_df):
-        df = pd.DataFrame(
-            {
-                "group": ["A", "A", "A", "B", "B", "B"],
-                "value": [1, 3, 2, 10, 30, 20],
-            }
-        )
-        result = (
-            df.select()
-            .with_columns(col("value").cum_max().over("group").alias("running_max"))
-            .collect()
-        )
-        expected = df.copy()
-        expected["running_max"] = [1, 3, 3, 10, 30, 30]
-        tm.assert_frame_equal(result, expected)
+
+def test_lag_n2(lag_lead_df):
+    """Test lag with n=2."""
+    result = (
+        lag_lead_df.select()
+        .with_columns(col("value").lag(2).over("group").alias("prev2"))
+        .collect()
+    )
+    expected = lag_lead_df.copy()
+    expected["prev2"] = [np.nan, np.nan, 1.0, np.nan, np.nan, 10.0]
+    tm.assert_frame_equal(result, expected)
+
+
+def test_cum_sum_global():
+    """Test cumulative sum over entire DataFrame."""
+    df = pd.DataFrame(
+        {
+            "group": ["A", "A", "A", "B", "B", "B"],
+            "value": [1, 2, 3, 10, 20, 30],
+        }
+    )
+    result = (
+        df.select()
+        .with_columns(col("value").cum_sum().over().alias("running_total"))
+        .collect()
+    )
+    expected = df.copy()
+    expected["running_total"] = [1, 3, 6, 16, 36, 66]
+    tm.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize(
+    "func_name,values,expected_result",
+    [
+        ("cum_sum", [1, 2, 3, 10, 20, 30], [1, 3, 6, 10, 30, 60]),
+        ("cum_min", [3, 1, 2, 30, 10, 20], [3, 1, 1, 30, 10, 10]),
+        ("cum_max", [1, 3, 2, 10, 30, 20], [1, 3, 3, 10, 30, 30]),
+    ],
+)
+def test_cumulative_over_partition(func_name, values, expected_result):
+    """Test cumulative functions over partition."""
+    df = pd.DataFrame(
+        {
+            "group": ["A", "A", "A", "B", "B", "B"],
+            "value": values,
+        }
+    )
+    expr = getattr(col("value"), func_name)()
+    result = df.select().with_columns(expr.over("group").alias("result")).collect()
+    expected = df.copy()
+    expected["result"] = expected_result
+    tm.assert_frame_equal(result, expected)
 
 
 class TestWindowMultiplePartitions:
