@@ -651,3 +651,102 @@ class Join(LogicalPlan):
             right = list(self.right_on)
             return f"Join(left_on={left}, right_on={right}, how={self.how!r})"
         return f"Join(how={self.how!r})"
+
+
+@dataclass
+class SetIndex(LogicalPlan):
+    """
+    Set column(s) as the DataFrame index.
+
+    This is a lazy operation - the index is set when .collect() is called
+    with preserve_index=True.
+
+    Parameters
+    ----------
+    input : LogicalPlan
+        Input plan node.
+    keys : tuple[str, ...]
+        Column name(s) to use as index.
+    drop : bool, default True
+        If True, delete columns to be used as the new index.
+    """
+
+    input: LogicalPlan
+    keys: tuple[str, ...]
+    drop: bool = True
+
+    def __post_init__(self) -> None:
+        self._cached_schema = None
+
+    def _resolve_schema_impl(self) -> Schema:
+        from pandas.lazy.types import Schema
+
+        input_schema = self.input.resolve_schema()
+
+        if self.drop:
+            # Remove key columns from schema
+            new_fields = {
+                k: v for k, v in input_schema.fields.items() if k not in self.keys
+            }
+            return Schema(new_fields)
+        # Keep all columns
+        return input_schema
+
+    def children(self) -> list[LogicalPlan]:
+        return [self.input]
+
+    def _estimate_row_count_impl(self) -> int | None:
+        # SetIndex doesn't change row count
+        return self.input.estimate_row_count()
+
+    def __repr__(self) -> str:
+        return f"SetIndex(keys={list(self.keys)}, drop={self.drop})"
+
+
+@dataclass
+class ResetIndex(LogicalPlan):
+    """
+    Reset the index to default RangeIndex.
+
+    Parameters
+    ----------
+    input : LogicalPlan
+        Input plan node.
+    drop : bool, default False
+        If False, insert index into DataFrame columns.
+        If True, discard the index entirely.
+    """
+
+    input: LogicalPlan
+    drop: bool = False
+
+    def __post_init__(self) -> None:
+        self._cached_schema = None
+
+    def _resolve_schema_impl(self) -> Schema:
+        from pandas.lazy.types import Schema
+
+        input_schema = self.input.resolve_schema()
+
+        if self.drop:
+            # Just return the same schema - index is discarded
+            return input_schema
+
+        # Add index columns back to schema
+        # Get index names from input schema
+        new_fields = dict(input_schema.fields)
+
+        # Add index columns at the beginning
+        # Note: The actual index column names depend on the source DataFrame
+        # This will be handled at execution time
+        return Schema(new_fields)
+
+    def children(self) -> list[LogicalPlan]:
+        return [self.input]
+
+    def _estimate_row_count_impl(self) -> int | None:
+        # ResetIndex doesn't change row count
+        return self.input.estimate_row_count()
+
+    def __repr__(self) -> str:
+        return f"ResetIndex(drop={self.drop})"

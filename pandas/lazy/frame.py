@@ -290,6 +290,93 @@ class LazyDataFrame:
 
         return self.with_columns(row_index_expr)
 
+    def set_index(self, keys: str | list[str], drop: bool = True) -> LazyDataFrame:
+        """
+        Set column(s) as the DataFrame index.
+
+        This is a lazy operation. The index is set when .collect() is called
+        with preserve_index=True. If drop=True (default), the columns used
+        as index are removed from the result.
+
+        Parameters
+        ----------
+        keys : str or list of str
+            Column name(s) to use as index.
+        drop : bool, default True
+            If True, delete columns to be used as the new index.
+
+        Returns
+        -------
+        LazyDataFrame
+            A new LazyDataFrame with the index set.
+
+        Examples
+        --------
+        >>> df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+        >>> df.select().set_index("a").collect(preserve_index=True)
+           b
+        a
+        1  4
+        2  5
+        3  6
+
+        See Also
+        --------
+        LazyDataFrame.reset_index : Reset index to default RangeIndex.
+        """
+        from pandas.lazy.plan import SetIndex
+
+        if isinstance(keys, str):
+            keys = [keys]
+
+        new_plan = SetIndex(input=self._plan, keys=tuple(keys), drop=drop)
+        return LazyDataFrame(new_plan, new_plan.resolve_schema())
+
+    def reset_index(self, drop: bool = False) -> LazyDataFrame:
+        """
+        Reset the index to default RangeIndex.
+
+        This is a lazy operation. When collected, the result will have
+        a fresh RangeIndex. If drop=False (default), the current index
+        is inserted as a column in the result.
+
+        Parameters
+        ----------
+        drop : bool, default False
+            If False, insert index into DataFrame columns.
+            If True, discard the index entirely.
+
+        Returns
+        -------
+        LazyDataFrame
+            A new LazyDataFrame with the index reset.
+
+        Examples
+        --------
+        >>> df = pd.DataFrame(
+        ...     {"a": [1, 2, 3]}, index=pd.Index([10, 20, 30], name="idx")
+        ... )
+        >>> df.select().reset_index().collect()
+           idx  a
+        0   10  1
+        1   20  2
+        2   30  3
+
+        >>> df.select().reset_index(drop=True).collect()
+           a
+        0  1
+        1  2
+        2  3
+
+        See Also
+        --------
+        LazyDataFrame.set_index : Set column(s) as index.
+        """
+        from pandas.lazy.plan import ResetIndex
+
+        new_plan = ResetIndex(input=self._plan, drop=drop)
+        return LazyDataFrame(new_plan, new_plan.resolve_schema())
+
     def group_by(self, *by: Expr | str) -> LazyGroupBy:
         """
         Group by one or more columns for aggregation.
@@ -705,6 +792,8 @@ class LazyDataFrame:
             Join,
             Limit,
             Project,
+            ResetIndex,
+            SetIndex,
             Sort,
             TopK,
         )
@@ -774,6 +863,19 @@ class LazyDataFrame:
             elif isinstance(plan, TopK):
                 input_df = evaluate(plan.input)
                 return _evaluate_topk(input_df, plan)
+
+            elif isinstance(plan, SetIndex):
+                input_df = evaluate(plan.input)
+                keys = list(plan.keys)
+                if len(keys) == 1:
+                    result = input_df.set_index(keys[0], drop=plan.drop)
+                else:
+                    result = input_df.set_index(keys, drop=plan.drop)
+                return result
+
+            elif isinstance(plan, ResetIndex):
+                input_df = evaluate(plan.input)
+                return input_df.reset_index(drop=plan.drop)
 
             else:
                 raise NotImplementedError(f"Unknown plan type: {type(plan)}")
