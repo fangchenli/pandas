@@ -348,7 +348,7 @@ def arrays_to_dataframe(
     arrays: ArrayDict,
     index_names: list[str | None] | None = None,
     index_is_multi: bool = False,
-    reset_index: bool = True,
+    preserve_index: bool = False,
     use_arrow_dtype: bool = True,
 ):
     """
@@ -366,10 +366,11 @@ def arrays_to_dataframe(
         Names for the index level(s). If None, no names are set.
     index_is_multi : bool, default False
         Whether the index is a MultiIndex.
-    reset_index : bool, default True
-        If True, use a fresh RangeIndex instead of restoring the
-        original index. This is the expected behavior for lazy execution
-        where operations like filter/sort/distinct reset the index.
+    preserve_index : bool, default False
+        If True, reconstruct the original DataFrame index from the
+        stored index columns. If False (default), use a fresh RangeIndex.
+        The default matches Polars-style behavior where lazy execution
+        returns positional indexes.
     use_arrow_dtype : bool, default True
         If True and all columns are Arrow-backed, use Arrow-backed pandas
         dtypes (pd.ArrowDtype) for near-zero-copy conversion. This is much
@@ -418,10 +419,15 @@ def arrays_to_dataframe(
       https://pandas.pydata.org/docs/user_guide/pyarrow.html
     """
     import pandas as pd
-    from pandas.lazy.backends.types import is_index_col
+    from pandas.lazy.backends.types import (
+        INDEX_COL_NAME,
+        index_col_name,
+        is_index_col,
+    )
 
     # Separate index columns from data columns
     data_cols = {name: arr for name, arr in arrays.items() if not is_index_col(name)}
+    index_cols = {name: arr for name, arr in arrays.items() if is_index_col(name)}
 
     if not data_cols:
         # Empty DataFrame
@@ -463,9 +469,37 @@ def arrays_to_dataframe(
         pandas_data = {name: to_pandas_array(arr) for name, arr in data_cols.items()}
         df = pd.DataFrame(pandas_data)
 
-    # Always use fresh RangeIndex for lazy execution results
-    # This matches the expected behavior where filter/sort/distinct reset the index
-    df.index = pd.RangeIndex(len(df))
+    # Index reconstruction
+    if preserve_index and index_cols:
+        # Convert index arrays to pandas-compatible format
+        def to_pandas_index_array(arr):
+            if isinstance(arr, (pa.Array, pa.ChunkedArray)):
+                return arr.to_pandas()
+            return arr
+
+        if index_is_multi:
+            # Reconstruct MultiIndex from multiple index columns
+            levels = []
+            names = index_names if index_names else []
+            for i in range(len(names) if names else 0):
+                col_name = index_col_name(i)
+                if col_name in index_cols:
+                    levels.append(to_pandas_index_array(index_cols[col_name]))
+            if levels:
+                df.index = pd.MultiIndex.from_arrays(levels, names=names)
+            else:
+                df.index = pd.RangeIndex(len(df))
+        else:
+            # Reconstruct single Index
+            idx_arr = index_cols.get(INDEX_COL_NAME)
+            if idx_arr is not None:
+                idx_name = index_names[0] if index_names else None
+                df.index = pd.Index(to_pandas_index_array(idx_arr), name=idx_name)
+            else:
+                df.index = pd.RangeIndex(len(df))
+    else:
+        # Default: fresh RangeIndex (Polars-style behavior)
+        df.index = pd.RangeIndex(len(df))
 
     return df
 

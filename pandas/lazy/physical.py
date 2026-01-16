@@ -2571,6 +2571,7 @@ def execute_physical_plan(
     *,
     preferred_backend: Literal["auto", "arrow", "numpy"] = "auto",
     strict: bool = False,
+    preserve_index: bool = False,
 ) -> DataFrame:
     """
     Execute a physical plan and return the result.
@@ -2583,6 +2584,8 @@ def execute_physical_plan(
         Preferred execution backend.
     strict : bool
         If True, fail on backend fallbacks.
+    preserve_index : bool, default False
+        If True, preserve the original DataFrame index.
 
     Returns
     -------
@@ -2609,4 +2612,5 @@ def execute_physical_plan(
         arrays,
         index_names=context.index_names,
         index_is_multi=context.index_is_multi,
+        preserve_index=preserve_index,
     )

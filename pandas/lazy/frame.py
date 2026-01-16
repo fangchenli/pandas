@@ -243,6 +243,53 @@ class LazyDataFrame:
         new_plan = Project(self._plan, tuple(all_exprs))
         return LazyDataFrame(new_plan, new_plan.resolve_schema())
 
+    def with_row_index(self, name: str = "index", offset: int = 0) -> LazyDataFrame:
+        """
+        Add a row index column.
+
+        This method adds a column containing row numbers (starting from offset).
+        The row numbers are computed based on the position of rows in the
+        DataFrame at execution time.
+
+        Parameters
+        ----------
+        name : str, default "index"
+            Name for the new row index column.
+        offset : int, default 0
+            Start counting from this value.
+
+        Returns
+        -------
+        LazyDataFrame
+            A new LazyDataFrame with the row index column added.
+
+        Examples
+        --------
+        >>> df.select().with_row_index().collect()
+           index  a  b
+        0      0  1  4
+        1      1  2  5
+        2      2  3  6
+
+        >>> df.select().with_row_index("row_num", offset=1).collect()
+           row_num  a  b
+        0        1  1  4
+        1        2  2  5
+        2        3  3  6
+
+        See Also
+        --------
+        LazyDataFrame.with_columns : Add computed columns.
+        """
+        from pandas.lazy.expr import Expr
+        from pandas.lazy.ir import Call
+
+        # Create row_index expression
+        row_index_ir = Call("row_index", (), {"offset": offset})
+        row_index_expr = Expr(row_index_ir).alias(name)
+
+        return self.with_columns(row_index_expr)
+
     def group_by(self, *by: Expr | str) -> LazyGroupBy:
         """
         Group by one or more columns for aggregation.
@@ -539,6 +586,7 @@ class LazyDataFrame:
         use_physical_planner: bool = False,
         streaming: bool = False,
         batch_size: int = 65536,
+        preserve_index: bool = False,
     ) -> DataFrame | Iterator[DataFrame]:
         """
         Execute the query and return a pandas DataFrame.
@@ -573,6 +621,11 @@ class LazyDataFrame:
         batch_size : int, default 65536
             Batch size for streaming execution. Default is 64K rows
             which is typically L3 cache-friendly.
+        preserve_index : bool, default False
+            If True, reconstruct the original DataFrame index from the
+            source data. If False (default), return DataFrame with
+            RangeIndex. The default matches Polars-style behavior where
+            lazy execution returns positional indexes.
 
         Returns
         -------
@@ -600,6 +653,9 @@ class LazyDataFrame:
 
         >>> # Early termination with head()
         >>> result = ldf.head(100).collect(use_physical_planner=True)
+
+        >>> # Preserve original index
+        >>> result = ldf.collect(preserve_index=True)
         """
         if streaming:
             if not use_physical_planner:
@@ -609,16 +665,22 @@ class LazyDataFrame:
                 strict=strict,
                 engine=engine,
                 batch_size=batch_size,
+                preserve_index=preserve_index,
             )
 
         if use_physical_planner:
             return self._collect_physical(
-                optimize=optimize, strict=strict, engine=engine
+                optimize=optimize,
+                strict=strict,
+                engine=engine,
+                preserve_index=preserve_index,
             )
         else:
-            return self._collect_eager(optimize=optimize)
+            return self._collect_eager(optimize=optimize, preserve_index=preserve_index)
 
-    def _collect_eager(self, optimize: bool = True) -> DataFrame:
+    def _collect_eager(
+        self, optimize: bool = True, preserve_index: bool = False
+    ) -> DataFrame:
         """
         Eager execution that evaluates the plan.
 
@@ -626,6 +688,8 @@ class LazyDataFrame:
         ----------
         optimize : bool, default True
             If True, apply query optimization passes before execution.
+        preserve_index : bool, default False
+            If True, preserve the original DataFrame index.
         """
         import numpy as np
 
@@ -721,6 +785,7 @@ class LazyDataFrame:
         optimize: bool = True,
         strict: bool = False,
         engine: Literal["auto", "arrow", "numpy"] = "auto",
+        preserve_index: bool = False,
     ) -> DataFrame:
         """
         Execute the query using the physical planner.
@@ -737,6 +802,8 @@ class LazyDataFrame:
             If True, fail on backend fallbacks.
         engine : {"auto", "arrow", "numpy"}, default "auto"
             Preferred execution backend.
+        preserve_index : bool, default False
+            If True, preserve the original DataFrame index.
 
         Returns
         -------
@@ -764,6 +831,7 @@ class LazyDataFrame:
             physical_plan,
             preferred_backend=engine,
             strict=strict,
+            preserve_index=preserve_index,
         )
 
     def _collect_streaming(
@@ -772,6 +840,7 @@ class LazyDataFrame:
         strict: bool = False,
         engine: Literal["auto", "arrow", "numpy"] = "auto",
         batch_size: int = 65536,
+        preserve_index: bool = False,
     ) -> Iterator[DataFrame]:
         """
         Execute the query and stream results as batches of DataFrames.
@@ -791,6 +860,8 @@ class LazyDataFrame:
             Preferred execution backend.
         batch_size : int, default 65536
             Number of rows per batch.
+        preserve_index : bool, default False
+            If True, preserve the original DataFrame index.
 
         Yields
         ------
@@ -833,6 +904,7 @@ class LazyDataFrame:
                 batch,
                 index_names=context.index_names,
                 index_is_multi=context.index_is_multi,
+                preserve_index=preserve_index,
             )
 
     def explain(

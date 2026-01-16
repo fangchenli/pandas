@@ -295,6 +295,10 @@ class ArrayEvaluator:
         elif func == "cum_max":
             return self._evaluate_cumulative(args[0], "max")
 
+        # Row index generation
+        elif func == "row_index":
+            return self._evaluate_row_index(node.kwargs.get("offset", 0), backend)
+
         else:
             raise NotImplementedError(
                 f"Function '{func}' not implemented for array evaluation. "
@@ -468,6 +472,22 @@ class ArrayEvaluator:
         length = len(arr)
         result = np.arange(1, length + 1)
         if is_arrow_backed(arr):
+            return pa.array(result)
+        return result
+
+    def _evaluate_row_index(
+        self, offset: int, backend: Literal["arrow", "numpy"]
+    ) -> ArrayLike:
+        """Evaluate row_index operation - generates sequence from offset."""
+        # Get length from first array in the dict
+        if not self._arrays:
+            return np.array([], dtype=np.int64)
+
+        first_arr = next(iter(self._arrays.values()))
+        length = len(first_arr)
+        result = np.arange(offset, offset + length, dtype=np.int64)
+
+        if backend == "arrow":
             return pa.array(result)
         return result
 
