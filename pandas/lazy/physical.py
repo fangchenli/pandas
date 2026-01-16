@@ -203,6 +203,8 @@ class ExecutionContext:
     # Index metadata (populated by PhysicalScan)
     index_names: list[str | None] = field(default_factory=list)
     index_is_multi: bool = False
+    # Whether to preserve index during operations (for groupby, join)
+    preserve_index: bool = False
 
     # Parallelism configuration
     # Number of workers for parallel execution (None = auto based on CPU count)
@@ -1032,7 +1034,7 @@ class PhysicalHashAggregate(PhysicalPlan):
 
         # Grouped aggregation - prefer Arrow table-based groupby for efficiency
         return self._execute_grouped_aggregation(
-            input_arrays, group_cols, agg_specs, backend
+            input_arrays, group_cols, agg_specs, backend, context
         )
 
     def _execute_global_aggregation(
@@ -1084,6 +1086,7 @@ class PhysicalHashAggregate(PhysicalPlan):
         group_cols: list[str],
         agg_specs: list[tuple[str, str, str]],
         backend: str,
+        context: ExecutionContext,
     ) -> ArrayDict:
         """
         Execute grouped aggregation using kernel dispatch.
@@ -1093,6 +1096,10 @@ class PhysicalHashAggregate(PhysicalPlan):
         - Zero-copy aggregation (no conversion overhead)
         - Multi-threaded execution
         - Efficient SIMD operations from Arrow's C++ backend
+
+        When preserve_index is enabled in context, group keys are stored
+        as index columns (using __index__ naming convention) rather than
+        as regular data columns, mimicking pandas groupby behavior.
         """
         from pandas.lazy.backends import has_kernel
 
@@ -1101,18 +1108,18 @@ class PhysicalHashAggregate(PhysicalPlan):
         if backend == "arrow" and has_kernel("group_by", "arrow"):
             if self._can_use_arrow_groupby(agg_specs):
                 return self._execute_arrow_table_groupby(
-                    input_arrays, group_cols, agg_specs
+                    input_arrays, group_cols, agg_specs, context
                 )
 
         # Fallback: For single-key groupby, use optimized single-key kernels
         # For multi-key, use hash_aggregate kernel
         if len(group_cols) == 1:
             return self._execute_single_key_groupby(
-                input_arrays, group_cols[0], agg_specs, backend
+                input_arrays, group_cols[0], agg_specs, backend, context
             )
         else:
             return self._execute_multi_key_groupby(
-                input_arrays, group_cols, agg_specs, backend
+                input_arrays, group_cols, agg_specs, backend, context
             )
 
     def _can_use_arrow_groupby(self, agg_specs: list[tuple[str, str, str]]) -> bool:
@@ -1142,6 +1149,7 @@ class PhysicalHashAggregate(PhysicalPlan):
         group_col: str,
         agg_specs: list[tuple[str, str, str]],
         backend: str,
+        context: ExecutionContext,
     ) -> ArrayDict:
         """Execute single-key groupby using optimized kernels."""
         import pyarrow as pa
@@ -1151,6 +1159,7 @@ class PhysicalHashAggregate(PhysicalPlan):
             has_kernel,
         )
         from pandas.lazy.backends.convert import ensure_backend
+        from pandas.lazy.backends.types import INDEX_COL_NAME
 
         key_arr = input_arrays[group_col]
         result: ArrayDict = {}
@@ -1202,8 +1211,19 @@ class PhysicalHashAggregate(PhysicalPlan):
                         f"No kernel for groupby_{agg_func} in {backend} or numpy"
                     )
 
-        # Add group key to result first (for correct column ordering)
-        ordered_result: ArrayDict = {group_col: unique_keys}
+        # Store group key - either as index column or data column
+        # When preserve_index=True, group keys become the index (pandas-style)
+        ordered_result: ArrayDict = {}
+
+        if context.preserve_index:
+            # Store group key as index column for index reconstruction
+            ordered_result[INDEX_COL_NAME] = unique_keys
+            context.index_names = [group_col]
+            context.index_is_multi = False
+        else:
+            # Default: store as regular data column
+            ordered_result[group_col] = unique_keys
+
         ordered_result.update(result)
 
         return ordered_result
@@ -1214,6 +1234,7 @@ class PhysicalHashAggregate(PhysicalPlan):
         group_cols: list[str],
         agg_specs: list[tuple[str, str, str]],
         backend: str,
+        context: ExecutionContext,
     ) -> ArrayDict:
         """Execute multi-key groupby using hash_aggregate kernel."""
         import pyarrow as pa
@@ -1223,11 +1244,15 @@ class PhysicalHashAggregate(PhysicalPlan):
             has_kernel,
         )
         from pandas.lazy.backends.convert import ensure_backend
+        from pandas.lazy.backends.types import (
+            INDEX_COL_NAME,
+            index_col_name,
+        )
 
         if backend == "arrow" and has_kernel("group_by", "arrow"):
             # Use Arrow's native table-based group_by
             return self._execute_arrow_table_groupby(
-                input_arrays, group_cols, agg_specs
+                input_arrays, group_cols, agg_specs, context
             )
 
         # Fallback to hash_aggregate kernel
@@ -1262,8 +1287,21 @@ class PhysicalHashAggregate(PhysicalPlan):
 
         # Build result dict
         result: ArrayDict = {}
-        for col, arr in zip(group_cols, result_keys, strict=False):
-            result[col] = arr
+
+        if context.preserve_index:
+            # Store group keys as index columns for index reconstruction
+            is_multi = len(group_cols) > 1
+            for i, (col, arr) in enumerate(zip(group_cols, result_keys, strict=False)):
+                # Use INDEX_COL_NAME for single key, index_col_name(i) for multi-key
+                idx_col = index_col_name(i) if is_multi else INDEX_COL_NAME
+                result[idx_col] = arr
+            context.index_names = list(group_cols)
+            context.index_is_multi = is_multi
+        else:
+            # Default: store as regular data columns
+            for col, arr in zip(group_cols, result_keys, strict=False):
+                result[col] = arr
+
         for (output_name, _, _), arr in zip(agg_specs, result_values, strict=False):
             result[output_name] = arr
 
@@ -1274,6 +1312,7 @@ class PhysicalHashAggregate(PhysicalPlan):
         input_arrays: ArrayDict,
         group_cols: list[str],
         agg_specs: list[tuple[str, str, str]],
+        context: ExecutionContext,
     ) -> ArrayDict:
         """
         Execute groupby using Arrow's native table group_by.
@@ -1287,7 +1326,11 @@ class PhysicalHashAggregate(PhysicalPlan):
         import pyarrow as pa
 
         from pandas.lazy.backends import dispatch_kernel
-        from pandas.lazy.backends.types import is_index_col
+        from pandas.lazy.backends.types import (
+            INDEX_COL_NAME,
+            index_col_name,
+            is_index_col,
+        )
 
         # Build Arrow table from arrays (excluding index columns)
         columns = {k: v for k, v in input_arrays.items() if not is_index_col(k)}
@@ -1301,13 +1344,37 @@ class PhysicalHashAggregate(PhysicalPlan):
         # Convert result table back to ArrayDict
         # Combine chunks for consistency (Table.column returns ChunkedArray)
         result: ArrayDict = {}
-        for col_name in result_table.column_names:
-            chunked = result_table.column(col_name)
-            # Combine chunks into a single contiguous array
-            if isinstance(chunked, pa.ChunkedArray):
-                result[col_name] = chunked.combine_chunks()
-            else:
-                result[col_name] = chunked
+
+        if context.preserve_index:
+            # Store group keys as index columns for index reconstruction
+            is_multi = len(group_cols) > 1
+            for i, col in enumerate(group_cols):
+                chunked = result_table.column(col)
+                # Use INDEX_COL_NAME for single key, index_col_name(i) for multi-key
+                idx_col = index_col_name(i) if is_multi else INDEX_COL_NAME
+                if isinstance(chunked, pa.ChunkedArray):
+                    result[idx_col] = chunked.combine_chunks()
+                else:
+                    result[idx_col] = chunked
+            context.index_names = list(group_cols)
+            context.index_is_multi = is_multi
+
+            # Add aggregation result columns (skip group cols)
+            for col_name in result_table.column_names:
+                if col_name not in group_cols:
+                    chunked = result_table.column(col_name)
+                    if isinstance(chunked, pa.ChunkedArray):
+                        result[col_name] = chunked.combine_chunks()
+                    else:
+                        result[col_name] = chunked
+        else:
+            # Default: store group keys as regular data columns
+            for col_name in result_table.column_names:
+                chunked = result_table.column(col_name)
+                if isinstance(chunked, pa.ChunkedArray):
+                    result[col_name] = chunked.combine_chunks()
+                else:
+                    result[col_name] = chunked
 
         return result
 
@@ -1963,9 +2030,14 @@ class PhysicalHashJoin(PhysicalPlan):
         # Execute left and right sides in parallel
         left_arrays, right_arrays = self._execute_sides_parallel(context)
 
-        # Exclude index columns from join
+        # Separate index columns - we'll include left index in join to preserve it
+        left_index_cols = {k: v for k, v in left_arrays.items() if is_index_col(k)}
         left_data = {k: v for k, v in left_arrays.items() if not is_index_col(k)}
         right_data = {k: v for k, v in right_arrays.items() if not is_index_col(k)}
+
+        # Include left index columns in left_data so they get the same row selection
+        # This allows index preservation when preserve_index=True is used
+        left_data_with_index = {**left_data, **left_index_cols}
 
         # Determine backend
         first_col = next(iter(left_data.values()))
@@ -1973,27 +2045,46 @@ class PhysicalHashJoin(PhysicalPlan):
 
         # Cross join requires special handling (no kernel, use DataFrame)
         if self.how == "cross":
-            return self._execute_cross_join(left_data, right_data, context)
+            return self._execute_cross_join(left_data_with_index, right_data, context)
 
         # Semi and anti joins
         if self.how in ("semi", "anti"):
-            return self._execute_semi_anti_join(left_data, right_data, backend)
+            return self._execute_semi_anti_join(
+                left_data_with_index, right_data, backend
+            )
 
         # For inner joins, apply build/probe optimization
         # Build hash table on smaller side for better performance
+        # Note: For inner joins, we don't include index columns in the swap
+        # because when sides are swapped, the "left" becomes the original right
+        # We'll add left index columns back after getting the result
+        swapped = False
         if self.how == "inner":
+            orig_left_data = left_data
             left_data, right_data = self._maybe_swap_for_build_probe(
                 left_data, right_data
             )
+            swapped = left_data is not orig_left_data
+
+        # Prepare data for join - include index for non-swapped cases
+        if self.how == "inner" and swapped:
+            # When swapped, we need to track which rows from original left are kept
+            # Don't include left index cols in the join data - we'll add them back
+            join_left_data = left_data
+            join_right_data = {**right_data, **left_index_cols}
+        else:
+            # Normal case - include left index in left data
+            join_left_data = left_data_with_index
+            join_right_data = right_data
 
         # Try Arrow kernel for Arrow backend
         if backend == "arrow" and has_kernel("hash_join", "arrow"):
-            result = self._execute_arrow_join(left_data, right_data)
+            result = self._execute_arrow_join(join_left_data, join_right_data)
             return self._reorder_columns(result)
 
         # Try NumPy kernel for NumPy backend
         if backend == "numpy" and has_kernel("hash_join", "numpy"):
-            result = self._execute_numpy_join(left_data, right_data)
+            result = self._execute_numpy_join(join_left_data, join_right_data)
             return self._reorder_columns(result)
 
         # Fallback to DataFrame-based join
@@ -2285,14 +2376,22 @@ class PhysicalHashJoin(PhysicalPlan):
 
         For large plans, this can provide significant speedup by overlapping
         the execution of independent subplans.
+
+        Note: Each side gets its own ExecutionContext to avoid race conditions
+        when modifying index metadata. The left side's index metadata is
+        preserved in the main context for index preservation during joins.
         """
         from concurrent.futures import ThreadPoolExecutor
 
+        # Create separate contexts for each side to avoid race conditions
+        left_context = ExecutionContext()
+        right_context = ExecutionContext()
+
         def execute_left():
-            return self.left.execute(context)
+            return self.left.execute(left_context)
 
         def execute_right():
-            return self.right.execute(context)
+            return self.right.execute(right_context)
 
         # Use ThreadPoolExecutor with 2 workers for left and right
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -2301,6 +2400,11 @@ class PhysicalHashJoin(PhysicalPlan):
 
             left_arrays = left_future.result()
             right_arrays = right_future.result()
+
+        # Preserve left side's index metadata in main context for index preservation
+        # This allows joins to preserve the left table's index when preserve_index=True
+        context.index_names = left_context.index_names
+        context.index_is_multi = left_context.index_is_multi
 
         return left_arrays, right_arrays
 
@@ -2338,6 +2442,119 @@ class PhysicalConvert(PhysicalPlan):
         result: ArrayDict = {}
         for name, arr in input_arrays.items():
             result[name] = ensure_backend(arr, self.target_backend)
+
+        return result
+
+    def children(self) -> list[PhysicalPlan]:
+        return [self.input]
+
+    @property
+    def output_schema(self) -> Schema:
+        return self.schema
+
+
+@dataclass
+class PhysicalSetIndex(PhysicalPlan):
+    """
+    Physical set_index operation.
+
+    Marks columns to be used as the index. The actual index setting
+    happens during arrays_to_dataframe conversion when preserve_index=True.
+    """
+
+    input: PhysicalPlan
+    keys: tuple[str, ...]
+    drop: bool
+    schema: Schema
+
+    def execute(self, context: ExecutionContext) -> ArrayDict:
+        from pandas.lazy.backends.types import (
+            INDEX_COL_NAME,
+            index_col_name,
+        )
+
+        input_arrays = self.input.execute(context)
+        result: ArrayDict = {}
+
+        # Copy all non-key columns to result
+        for name, arr in input_arrays.items():
+            if name in self.keys and self.drop:
+                continue  # Skip key columns when drop=True
+            result[name] = arr
+
+        # Store key columns as index columns
+        if len(self.keys) == 1:
+            # Single index
+            key_name = self.keys[0]
+            if key_name in input_arrays:
+                result[INDEX_COL_NAME] = input_arrays[key_name]
+                context.index_names = [key_name]
+                context.index_is_multi = False
+        else:
+            # MultiIndex
+            context.index_names = list(self.keys)
+            context.index_is_multi = True
+            for i, key_name in enumerate(self.keys):
+                if key_name in input_arrays:
+                    result[index_col_name(i)] = input_arrays[key_name]
+
+        return result
+
+    def children(self) -> list[PhysicalPlan]:
+        return [self.input]
+
+    @property
+    def output_schema(self) -> Schema:
+        return self.schema
+
+
+@dataclass
+class PhysicalResetIndex(PhysicalPlan):
+    """
+    Physical reset_index operation.
+
+    Converts index columns back to regular columns and sets a fresh RangeIndex.
+    """
+
+    input: PhysicalPlan
+    drop: bool
+    schema: Schema
+
+    def execute(self, context: ExecutionContext) -> ArrayDict:
+        from pandas.lazy.backends.types import (
+            INDEX_COL_NAME,
+            index_col_name,
+            is_index_col,
+        )
+
+        input_arrays = self.input.execute(context)
+        result: ArrayDict = {}
+
+        # Get current index info
+        index_names = context.index_names or [None]
+        index_is_multi = context.index_is_multi
+
+        if not self.drop:
+            # Add index columns as regular data columns
+            if index_is_multi:
+                for i, idx_name in enumerate(index_names):
+                    idx_col = index_col_name(i)
+                    if idx_col in input_arrays:
+                        col_name = idx_name if idx_name else f"level_{i}"
+                        result[col_name] = input_arrays[idx_col]
+            elif INDEX_COL_NAME in input_arrays:
+                idx_name = index_names[0] if index_names else None
+                col_name = idx_name if idx_name else "index"
+                result[col_name] = input_arrays[INDEX_COL_NAME]
+
+        # Copy all non-index columns
+        for name, arr in input_arrays.items():
+            if not is_index_col(name):
+                result[name] = arr
+
+        # Reset context index info (will use RangeIndex)
+        context.index_names = [None]
+        context.index_is_multi = False
 
         return result
 
@@ -2394,6 +2611,8 @@ class PhysicalPlanner:
             Limit,
             ParquetSource,
             Project,
+            ResetIndex,
+            SetIndex,
             Sort,
             TopK,
         )
@@ -2430,6 +2649,12 @@ class PhysicalPlanner:
 
         elif isinstance(logical_plan, Convert):
             return self._plan_convert(logical_plan)
+
+        elif isinstance(logical_plan, SetIndex):
+            return self._plan_set_index(logical_plan)
+
+        elif isinstance(logical_plan, ResetIndex):
+            return self._plan_reset_index(logical_plan)
 
         else:
             raise NotImplementedError(
@@ -2548,6 +2773,23 @@ class PhysicalPlanner:
             schema=node.resolve_schema(),
         )
 
+    def _plan_set_index(self, node) -> PhysicalSetIndex:
+        """Plan a SetIndex."""
+        return PhysicalSetIndex(
+            input=self.plan(node.input),
+            keys=node.keys,
+            drop=node.drop,
+            schema=node.resolve_schema(),
+        )
+
+    def _plan_reset_index(self, node) -> PhysicalResetIndex:
+        """Plan a ResetIndex."""
+        return PhysicalResetIndex(
+            input=self.plan(node.input),
+            drop=node.drop,
+            schema=node.resolve_schema(),
+        )
+
     def _choose_backend_for_exprs(
         self, exprs: tuple[Expr, ...]
     ) -> Literal["auto", "arrow", "numpy"]:
@@ -2602,6 +2844,7 @@ def execute_physical_plan(
         preferred_backend=preferred_backend,
         strict=strict,
         adaptive_thresholds=adaptive_enabled,
+        preserve_index=preserve_index,
     )
 
     # Execute and get ArrayDict
