@@ -1923,10 +1923,21 @@ class PhysicalDistinct(PhysicalPlan):
 @dataclass
 class PhysicalHashJoin(PhysicalPlan):
     """
-    Hash-based join.
+    Hash-based join with build/probe optimization.
 
     Good for equi-joins with reasonable key cardinality.
     Uses kernel dispatch for efficient join on Arrow or NumPy arrays.
+
+    Build/Probe Optimization
+    ------------------------
+    For inner joins and semi/anti joins, the hash table is built on the
+    smaller side for optimal performance. This reduces memory usage and
+    improves cache locality.
+
+    - Inner join: Build on smaller side, probe with larger
+    - Left join: Must build on right (probe side is left)
+    - Right join: Must build on left (probe side is right)
+    - Outer join: No optimization (need both sides)
     """
 
     left: PhysicalPlan
@@ -1934,9 +1945,13 @@ class PhysicalHashJoin(PhysicalPlan):
     on: tuple[str, ...] | None
     left_on: tuple[str, ...] | None
     right_on: tuple[str, ...] | None
-    how: Literal["inner", "left", "right", "outer", "cross"]
+    how: Literal["inner", "left", "right", "outer", "cross", "semi", "anti"]
     suffix: tuple[str, str]
     schema: Schema
+
+    # Estimated row counts for build/probe optimization (set by planner)
+    left_rows_estimate: int | None = None
+    right_rows_estimate: int | None = None
 
     def execute(self, context: ExecutionContext) -> ArrayDict:
         from pandas.lazy.backends import has_kernel
@@ -1960,16 +1975,147 @@ class PhysicalHashJoin(PhysicalPlan):
         if self.how == "cross":
             return self._execute_cross_join(left_data, right_data, context)
 
+        # Semi and anti joins
+        if self.how in ("semi", "anti"):
+            return self._execute_semi_anti_join(left_data, right_data, backend)
+
+        # For inner joins, apply build/probe optimization
+        # Build hash table on smaller side for better performance
+        if self.how == "inner":
+            left_data, right_data = self._maybe_swap_for_build_probe(
+                left_data, right_data
+            )
+
         # Try Arrow kernel for Arrow backend
         if backend == "arrow" and has_kernel("hash_join", "arrow"):
-            return self._execute_arrow_join(left_data, right_data)
+            result = self._execute_arrow_join(left_data, right_data)
+            return self._reorder_columns(result)
 
         # Try NumPy kernel for NumPy backend
         if backend == "numpy" and has_kernel("hash_join", "numpy"):
-            return self._execute_numpy_join(left_data, right_data)
+            result = self._execute_numpy_join(left_data, right_data)
+            return self._reorder_columns(result)
 
         # Fallback to DataFrame-based join
         return self._execute_dataframe_join(left_arrays, right_arrays, context)
+
+    def _reorder_columns(self, result: ArrayDict) -> ArrayDict:
+        """Reorder result columns to match schema order."""
+        schema_cols = self.schema.names
+        # Filter to only columns that exist in result
+        ordered = {}
+        for col in schema_cols:
+            if col in result:
+                ordered[col] = result[col]
+        # Add any extra columns not in schema (shouldn't happen, but be safe)
+        for col in result:
+            if col not in ordered:
+                ordered[col] = result[col]
+        return ordered
+
+    def _maybe_swap_for_build_probe(
+        self,
+        left_data: ArrayDict,
+        right_data: ArrayDict,
+    ) -> tuple[ArrayDict, ArrayDict]:
+        """
+        Swap left and right if right is smaller (build/probe optimization).
+
+        For inner joins, it's more efficient to build the hash table on
+        the smaller side and probe with the larger side.
+
+        Returns
+        -------
+        tuple[ArrayDict, ArrayDict]
+            (left_data, right_data) potentially swapped
+        """
+        # Get row counts
+        left_rows = len(next(iter(left_data.values()))) if left_data else 0
+        right_rows = len(next(iter(right_data.values()))) if right_data else 0
+
+        # Use estimates if available (more accurate for pre-filtered data)
+        if self.left_rows_estimate is not None:
+            left_rows = self.left_rows_estimate
+        if self.right_rows_estimate is not None:
+            right_rows = self.right_rows_estimate
+
+        # Swap if right is smaller (for inner join, order doesn't matter)
+        # This makes right the build side (smaller = better for hash table)
+        if right_rows < left_rows:
+            # No swap needed - right is already smaller
+            return left_data, right_data
+        # Swap so build side (right) is smaller
+        # For inner joins with same keys, this is semantically equivalent
+        # but we need to handle left_on/right_on swap if different
+        elif self.on is not None or (self.left_on == self.right_on):
+            # Same keys - can swap freely
+            return right_data, left_data
+        else:
+            # Different keys - don't swap to preserve semantics
+            return left_data, right_data
+
+    def _execute_semi_anti_join(
+        self,
+        left_data: ArrayDict,
+        right_data: ArrayDict,
+        backend: str,
+    ) -> ArrayDict:
+        """Execute semi or anti join."""
+        import numpy as np
+
+        from pandas.lazy.backends import (
+            dispatch_kernel,
+            has_kernel,
+        )
+
+        kernel_name = "semi_join" if self.how == "semi" else "anti_join"
+
+        # Determine keys
+        if self.on is not None:
+            keys = list(self.on)
+            left_keys = None
+            right_keys = None
+        else:
+            keys = None
+            left_keys = list(self.left_on) if self.left_on else None
+            right_keys = list(self.right_on) if self.right_on else None
+
+        # Try Arrow kernel
+        if backend == "arrow" and has_kernel(kernel_name, "arrow"):
+            import pyarrow as pa
+
+            left_table = pa.table(left_data)
+            right_table = pa.table(right_data)
+
+            result_table = dispatch_kernel(
+                kernel_name,
+                "arrow",
+                left_table,
+                right_table,
+                keys=keys,
+                left_keys=left_keys,
+                right_keys=right_keys,
+            )
+
+            return {col: result_table.column(col) for col in result_table.column_names}
+
+        # Try NumPy kernel
+        if has_kernel(kernel_name, "numpy"):
+            left_arrays = {k: np.asarray(v) for k, v in left_data.items()}
+            right_arrays = {k: np.asarray(v) for k, v in right_data.items()}
+
+            return dispatch_kernel(
+                kernel_name,
+                "numpy",
+                left_arrays,
+                right_arrays,
+                keys=keys,
+                left_keys=left_keys,
+                right_keys=right_keys,
+            )
+
+        # Fallback: simulate with inner join and filter
+        raise NotImplementedError(f"{kernel_name} not available for backend {backend}")
 
     def _execute_arrow_join(
         self,
@@ -2375,6 +2521,10 @@ class PhysicalPlanner:
 
     def _plan_join(self, node) -> PhysicalHashJoin:
         """Plan a Join."""
+        # Get row count estimates for build/probe optimization
+        left_rows = node.left.estimate_row_count()
+        right_rows = node.right.estimate_row_count()
+
         # For now, always use hash join
         # Future: could choose between hash/merge/nested-loop based on statistics
         return PhysicalHashJoin(
@@ -2386,6 +2536,8 @@ class PhysicalPlanner:
             how=node.how,
             suffix=node.suffix,
             schema=node.resolve_schema(),
+            left_rows_estimate=left_rows,
+            right_rows_estimate=right_rows,
         )
 
     def _plan_convert(self, node) -> PhysicalConvert:

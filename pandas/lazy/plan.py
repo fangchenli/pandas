@@ -52,6 +52,33 @@ class LogicalPlan:
         """Return child plan nodes."""
         raise NotImplementedError(f"{type(self).__name__} must implement children()")
 
+    def estimate_row_count(self) -> int | None:
+        """
+        Estimate the number of rows this plan node will produce.
+
+        Used by the physical planner for optimization decisions such as:
+        - Join build/probe side selection (build on smaller side)
+        - Choosing between algorithms (hash vs sort-merge join)
+        - Parallel execution decisions
+
+        Returns
+        -------
+        int or None
+            Estimated row count, or None if unknown.
+
+        Notes
+        -----
+        These are rough estimates for optimization purposes.
+        Actual row counts may differ significantly, especially
+        after filters with unknown selectivity.
+        """
+        return self._estimate_row_count_impl()
+
+    def _estimate_row_count_impl(self) -> int | None:
+        """Override in subclasses to provide row count estimates."""
+        # Default: unknown
+        return None
+
 
 @dataclass
 class DataFrameSource(LogicalPlan):
@@ -69,6 +96,9 @@ class DataFrameSource(LogicalPlan):
 
     def children(self) -> list[LogicalPlan]:
         return []
+
+    def _estimate_row_count_impl(self) -> int | None:
+        return len(self.df)
 
     def __repr__(self) -> str:
         cols = list(self.df.columns)
@@ -158,6 +188,37 @@ class ParquetSource(LogicalPlan):
     def children(self) -> list[LogicalPlan]:
         return []
 
+    def _estimate_row_count_impl(self) -> int | None:
+        """Estimate row count from Parquet metadata."""
+        try:
+            import pyarrow.parquet as pq
+
+            path = self.path
+            if "*" in path:
+                import glob
+
+                files = glob.glob(path)
+                if not files:
+                    return None
+                # Sum row counts from all files
+                total = 0
+                for f in files:
+                    pf = pq.ParquetFile(f)
+                    total += pf.metadata.num_rows
+                return total
+
+            pf = pq.ParquetFile(path)
+            row_count = pf.metadata.num_rows
+
+            # Apply selectivity estimate if predicate is present
+            # Use a conservative estimate of 30% selectivity for unknown predicates
+            if self.predicate is not None:
+                row_count = int(row_count * 0.3)
+
+            return row_count
+        except Exception:
+            return None
+
     def __repr__(self) -> str:
         parts = [f"path={self.path!r}"]
         if self.columns is not None:
@@ -186,6 +247,10 @@ class Project(LogicalPlan):
     def children(self) -> list[LogicalPlan]:
         return [self.input]
 
+    def _estimate_row_count_impl(self) -> int | None:
+        # Projection doesn't change row count
+        return self.input.estimate_row_count()
+
     def __repr__(self) -> str:
         from pandas.lazy.expr import extract_output_name
 
@@ -211,6 +276,14 @@ class Filter(LogicalPlan):
 
     def children(self) -> list[LogicalPlan]:
         return [self.input]
+
+    def _estimate_row_count_impl(self) -> int | None:
+        # Use a default selectivity estimate of 30% for unknown predicates
+        # This is a conservative estimate that works reasonably well in practice
+        input_count = self.input.estimate_row_count()
+        if input_count is None:
+            return None
+        return max(1, int(input_count * 0.3))
 
     def __repr__(self) -> str:
         return f"Filter({self.predicate!r})"
@@ -253,6 +326,23 @@ class Aggregate(LogicalPlan):
     def children(self) -> list[LogicalPlan]:
         return [self.input]
 
+    def _estimate_row_count_impl(self) -> int | None:
+        # For global aggregation, result is 1 row
+        if len(self.group_by) == 0:
+            return 1
+
+        # For grouped aggregation, estimate based on number of groups
+        # Heuristic: assume cardinality reduces by sqrt(n)
+        input_count = self.input.estimate_row_count()
+        if input_count is None:
+            return None
+
+        # Conservative estimate: at most input_count groups,
+        # but typically much fewer (use sqrt as heuristic)
+        import math
+
+        return max(1, min(input_count, int(math.sqrt(input_count) * 10)))
+
     def __repr__(self) -> str:
         from pandas.lazy.expr import extract_output_name
 
@@ -281,6 +371,10 @@ class Sort(LogicalPlan):
 
     def children(self) -> list[LogicalPlan]:
         return [self.input]
+
+    def _estimate_row_count_impl(self) -> int | None:
+        # Sort doesn't change row count
+        return self.input.estimate_row_count()
 
     def __repr__(self) -> str:
         from pandas.lazy.expr import extract_output_name
@@ -311,6 +405,13 @@ class Limit(LogicalPlan):
     def children(self) -> list[LogicalPlan]:
         return [self.input]
 
+    def _estimate_row_count_impl(self) -> int | None:
+        # Limit returns at most n rows (minus offset)
+        input_count = self.input.estimate_row_count()
+        if input_count is None:
+            return self.n  # Best estimate is the limit itself
+        return min(self.n, max(0, input_count - self.offset))
+
     def __repr__(self) -> str:
         if self.offset > 0:
             return f"Limit(n={self.n}, offset={self.offset})"
@@ -332,6 +433,15 @@ class Distinct(LogicalPlan):
 
     def children(self) -> list[LogicalPlan]:
         return [self.input]
+
+    def _estimate_row_count_impl(self) -> int | None:
+        # Distinct reduces rows, use sqrt heuristic similar to Aggregate
+        input_count = self.input.estimate_row_count()
+        if input_count is None:
+            return None
+        import math
+
+        return max(1, int(math.sqrt(input_count) * 10))
 
     def __repr__(self) -> str:
         if self.subset:
@@ -364,6 +474,10 @@ class Convert(LogicalPlan):
     def children(self) -> list[LogicalPlan]:
         return [self.input]
 
+    def _estimate_row_count_impl(self) -> int | None:
+        # Conversion doesn't change row count
+        return self.input.estimate_row_count()
+
     def __repr__(self) -> str:
         return f"Convert(to={self.target_backend!r})"
 
@@ -391,6 +505,13 @@ class TopK(LogicalPlan):
 
     def children(self) -> list[LogicalPlan]:
         return [self.input]
+
+    def _estimate_row_count_impl(self) -> int | None:
+        # TopK returns exactly k rows (or fewer if input is smaller)
+        input_count = self.input.estimate_row_count()
+        if input_count is None:
+            return self.k
+        return min(self.k, input_count)
 
     def __repr__(self) -> str:
         from pandas.lazy.expr import extract_output_name
@@ -464,6 +585,63 @@ class Join(LogicalPlan):
 
     def children(self) -> list[LogicalPlan]:
         return [self.left, self.right]
+
+    def _estimate_row_count_impl(self) -> int | None:
+        """
+        Estimate join cardinality based on join type.
+
+        These are rough estimates for optimization purposes:
+        - Inner: min(left, right) * selectivity factor
+        - Left/Right: preserves one side, may expand for many-to-many
+        - Outer: max(left, right) * expansion factor
+        - Cross: left * right
+        - Semi/Anti: subset of left
+        """
+        left_count = self.left.estimate_row_count()
+        right_count = self.right.estimate_row_count()
+
+        if left_count is None and right_count is None:
+            return None
+
+        # Use available estimates, default to 10000 for unknown
+        left_count = left_count or 10000
+        right_count = right_count or 10000
+
+        if self.how == "cross":
+            # Cross join: Cartesian product
+            return left_count * right_count
+
+        if self.how == "inner":
+            # Inner join: typically reduces result size
+            # Heuristic: selectivity based on smaller table
+            return min(left_count, right_count)
+
+        if self.how == "left":
+            # Left join: at least left_count rows
+            # May have more if one-to-many relationship
+            return left_count
+
+        if self.how == "right":
+            # Right join: at least right_count rows
+            return right_count
+
+        if self.how == "outer":
+            # Full outer: at most sum of both sides (no matches)
+            # More typically: max of both sides
+            return max(left_count, right_count)
+
+        if self.how == "semi":
+            # Semi join: at most left_count rows
+            # Typically filters down to matched rows
+            return min(left_count, right_count)
+
+        if self.how == "anti":
+            # Anti join: at most left_count rows (unmatched)
+            # Heuristic: assume most left rows don't match
+            return max(1, int(left_count * 0.7))
+
+        # Default: use left count
+        return left_count
 
     def __repr__(self) -> str:
         if self.on:

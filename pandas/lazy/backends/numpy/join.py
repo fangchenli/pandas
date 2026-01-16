@@ -656,3 +656,271 @@ def numpy_outer_join(
 
 
 # =============================================================================
+# Semi and Anti Joins
+# =============================================================================
+
+
+def _ismember_mask(
+    left_arr: np.ndarray,
+    right_arr: np.ndarray,
+) -> np.ndarray:
+    """
+    Return boolean mask indicating which left elements exist in right.
+
+    Uses pandas' Cython hashtable.ismember for O(1) lookup per element.
+    Falls back to np.isin for unsupported dtypes.
+
+    Parameters
+    ----------
+    left_arr : np.ndarray
+        Values to check membership for.
+    right_arr : np.ndarray
+        Values to check membership against.
+
+    Returns
+    -------
+    np.ndarray[bool]
+        Boolean mask of same length as left_arr.
+    """
+    from pandas._libs import hashtable as htable
+
+    if len(left_arr) == 0:
+        return np.array([], dtype=np.bool_)
+
+    if len(right_arr) == 0:
+        return np.zeros(len(left_arr), dtype=np.bool_)
+
+    # Ensure contiguous arrays
+    left_arr = np.ascontiguousarray(left_arr)
+    right_arr = np.ascontiguousarray(right_arr)
+
+    # htable.ismember supports: int8/16/32/64, uint8/16/32/64,
+    # float32/64, complex64/128, object
+    try:
+        return htable.ismember(left_arr, right_arr)
+    except TypeError:
+        # Fallback for unsupported dtypes (e.g., strings in some cases)
+        return np.isin(left_arr, right_arr)
+
+
+def _semi_join_single_key(
+    left_arr: np.ndarray,
+    right_arr: np.ndarray,
+) -> np.ndarray:
+    """
+    Semi join on a single key column using ismember.
+
+    Returns indices of left rows that have a match in right.
+    """
+    mask = _ismember_mask(left_arr, right_arr)
+    return np.where(mask)[0].astype(np.intp)
+
+
+def _anti_join_single_key(
+    left_arr: np.ndarray,
+    right_arr: np.ndarray,
+) -> np.ndarray:
+    """
+    Anti join on a single key column using ismember.
+
+    Returns indices of left rows that have NO match in right.
+    """
+    mask = _ismember_mask(left_arr, right_arr)
+    return np.where(~mask)[0].astype(np.intp)
+
+
+def _semi_join_composite_key(
+    left_key_arrays: list[np.ndarray],
+    right_key_arrays: list[np.ndarray],
+) -> np.ndarray:
+    """
+    Semi join on composite (multi-column) keys.
+
+    Creates composite key codes via factorize, then uses ismember.
+    """
+    if not left_key_arrays or not right_key_arrays:
+        return np.array([], dtype=np.intp)
+
+    n_left = len(left_key_arrays[0])
+    if n_left == 0:
+        return np.array([], dtype=np.intp)
+
+    n_right = len(right_key_arrays[0])
+    if n_right == 0:
+        return np.array([], dtype=np.intp)
+
+    # Concatenate and factorize to get consistent codes
+    combined_arrays = []
+    for left_arr, right_arr in zip(left_key_arrays, right_key_arrays, strict=False):
+        combined_arrays.append(np.concatenate([left_arr, right_arr]))
+
+    combined_codes = _create_composite_key_vectorized(combined_arrays)
+    left_codes = combined_codes[:n_left]
+    right_codes = combined_codes[n_left:]
+
+    # Use ismember on the codes (int64)
+    mask = _ismember_mask(left_codes, right_codes)
+    return np.where(mask)[0].astype(np.intp)
+
+
+def _anti_join_composite_key(
+    left_key_arrays: list[np.ndarray],
+    right_key_arrays: list[np.ndarray],
+) -> np.ndarray:
+    """
+    Anti join on composite (multi-column) keys.
+
+    Creates composite key codes via factorize, then uses ismember.
+    """
+    if not left_key_arrays:
+        return np.array([], dtype=np.intp)
+
+    n_left = len(left_key_arrays[0])
+    if n_left == 0:
+        return np.array([], dtype=np.intp)
+
+    if not right_key_arrays or len(right_key_arrays[0]) == 0:
+        # No right keys - all left rows don't match
+        return np.arange(n_left, dtype=np.intp)
+
+    # Concatenate and factorize to get consistent codes
+    combined_arrays = []
+    for left_arr, right_arr in zip(left_key_arrays, right_key_arrays, strict=False):
+        combined_arrays.append(np.concatenate([left_arr, right_arr]))
+
+    combined_codes = _create_composite_key_vectorized(combined_arrays)
+    left_codes = combined_codes[:n_left]
+    right_codes = combined_codes[len(left_key_arrays[0]) :]
+
+    # Use ismember on the codes (int64)
+    mask = _ismember_mask(left_codes, right_codes)
+    return np.where(~mask)[0].astype(np.intp)
+
+
+@register_kernel("semi_join", "numpy")
+def numpy_semi_join(
+    left_arrays: dict[str, np.ndarray],
+    right_arrays: dict[str, np.ndarray],
+    *,
+    keys: list[str] | None = None,
+    left_keys: list[str] | None = None,
+    right_keys: list[str] | None = None,
+) -> dict[str, np.ndarray]:
+    """
+    Perform a left semi join - return left rows that exist in right.
+
+    Semi join is useful for filtering (EXISTS subquery equivalent).
+    Only returns columns from the left table.
+
+    Uses pandas' Cython hashtable for O(n+m) performance.
+
+    Parameters
+    ----------
+    left_arrays : dict[str, np.ndarray]
+        Left table as dict of column name to array.
+    right_arrays : dict[str, np.ndarray]
+        Right table as dict of column name to array.
+    keys : list[str] or None
+        Column names to join on (used for both tables).
+    left_keys : list[str] or None
+        Column names from left table to join on.
+    right_keys : list[str] or None
+        Column names from right table to join on.
+
+    Returns
+    -------
+    dict[str, np.ndarray]
+        Left rows that have a match in right.
+    """
+    # Determine keys
+    if keys is not None:
+        left_key_cols = keys
+        right_key_cols = keys
+    else:
+        left_key_cols = left_keys or []
+        right_key_cols = right_keys or []
+
+    # Get key arrays
+    left_key_arrays = [left_arrays[k] for k in left_key_cols]
+    right_key_arrays = [right_arrays[k] for k in right_key_cols]
+
+    # Choose optimal path based on number of keys
+    if len(left_key_cols) == 1:
+        # Single key - use direct ismember (fastest path)
+        left_indices = _semi_join_single_key(left_key_arrays[0], right_key_arrays[0])
+    else:
+        # Multiple keys - use composite key approach
+        left_indices = _semi_join_composite_key(left_key_arrays, right_key_arrays)
+
+    # Build result - only left columns
+    result = {}
+    for col, arr in left_arrays.items():
+        result[col] = arr[left_indices]
+
+    return result
+
+
+@register_kernel("anti_join", "numpy")
+def numpy_anti_join(
+    left_arrays: dict[str, np.ndarray],
+    right_arrays: dict[str, np.ndarray],
+    *,
+    keys: list[str] | None = None,
+    left_keys: list[str] | None = None,
+    right_keys: list[str] | None = None,
+) -> dict[str, np.ndarray]:
+    """
+    Perform a left anti join - return left rows that do NOT exist in right.
+
+    Anti join is useful for filtering (NOT EXISTS subquery equivalent).
+    Only returns columns from the left table.
+
+    Uses pandas' Cython hashtable for O(n+m) performance.
+
+    Parameters
+    ----------
+    left_arrays : dict[str, np.ndarray]
+        Left table as dict of column name to array.
+    right_arrays : dict[str, np.ndarray]
+        Right table as dict of column name to array.
+    keys : list[str] or None
+        Column names to join on (used for both tables).
+    left_keys : list[str] or None
+        Column names from left table to join on.
+    right_keys : list[str] or None
+        Column names from right table to join on.
+
+    Returns
+    -------
+    dict[str, np.ndarray]
+        Left rows that have no match in right.
+    """
+    # Determine keys
+    if keys is not None:
+        left_key_cols = keys
+        right_key_cols = keys
+    else:
+        left_key_cols = left_keys or []
+        right_key_cols = right_keys or []
+
+    # Get key arrays
+    left_key_arrays = [left_arrays[k] for k in left_key_cols]
+    right_key_arrays = [right_arrays[k] for k in right_key_cols]
+
+    # Choose optimal path based on number of keys
+    if len(left_key_cols) == 1:
+        # Single key - use direct ismember (fastest path)
+        left_indices = _anti_join_single_key(left_key_arrays[0], right_key_arrays[0])
+    else:
+        # Multiple keys - use composite key approach
+        left_indices = _anti_join_composite_key(left_key_arrays, right_key_arrays)
+
+    # Build result - only left columns
+    result = {}
+    for col, arr in left_arrays.items():
+        result[col] = arr[left_indices]
+
+    return result
+
+
+# =============================================================================

@@ -406,3 +406,307 @@ class TestJoinChaining:
             }
         )
         tm.assert_frame_equal(result, expected)
+
+
+class TestSemiAntiJoinKernels:
+    """Tests for semi and anti join kernel implementations."""
+
+    def test_semi_join_basic(self):
+        """Test basic semi join - return left rows that exist in right."""
+        import numpy as np
+
+        from pandas.lazy.backends.numpy.join import numpy_semi_join
+
+        left = {"id": np.array([1, 2, 3, 4]), "val": np.array(["a", "b", "c", "d"])}
+        right = {"id": np.array([2, 3, 5]), "other": np.array([10, 20, 30])}
+
+        result = numpy_semi_join(left, right, keys=["id"])
+
+        # Only ids 2 and 3 exist in right
+        assert list(result["id"]) == [2, 3]
+        assert list(result["val"]) == ["b", "c"]
+        # Right columns should NOT be in result
+        assert "other" not in result
+
+    def test_anti_join_basic(self):
+        """Test basic anti join - return left rows that DON'T exist in right."""
+        import numpy as np
+
+        from pandas.lazy.backends.numpy.join import numpy_anti_join
+
+        left = {"id": np.array([1, 2, 3, 4]), "val": np.array(["a", "b", "c", "d"])}
+        right = {"id": np.array([2, 3, 5]), "other": np.array([10, 20, 30])}
+
+        result = numpy_anti_join(left, right, keys=["id"])
+
+        # Only ids 1 and 4 do NOT exist in right
+        assert list(result["id"]) == [1, 4]
+        assert list(result["val"]) == ["a", "d"]
+        assert "other" not in result
+
+    def test_semi_join_empty_right(self):
+        """Semi join with empty right table returns empty result."""
+        import numpy as np
+
+        from pandas.lazy.backends.numpy.join import numpy_semi_join
+
+        left = {"id": np.array([1, 2, 3]), "val": np.array(["a", "b", "c"])}
+        right = {
+            "id": np.array([], dtype=np.int64),
+            "other": np.array([], dtype=np.int64),
+        }
+
+        result = numpy_semi_join(left, right, keys=["id"])
+        assert len(result["id"]) == 0
+
+    def test_anti_join_empty_right(self):
+        """Anti join with empty right table returns all left rows."""
+        import numpy as np
+
+        from pandas.lazy.backends.numpy.join import numpy_anti_join
+
+        left = {"id": np.array([1, 2, 3]), "val": np.array(["a", "b", "c"])}
+        right = {
+            "id": np.array([], dtype=np.int64),
+            "other": np.array([], dtype=np.int64),
+        }
+
+        result = numpy_anti_join(left, right, keys=["id"])
+        assert list(result["id"]) == [1, 2, 3]
+        assert list(result["val"]) == ["a", "b", "c"]
+
+    def test_semi_join_all_match(self):
+        """Semi join where all left rows match returns all left rows."""
+        import numpy as np
+
+        from pandas.lazy.backends.numpy.join import numpy_semi_join
+
+        left = {"id": np.array([1, 2]), "val": np.array(["a", "b"])}
+        right = {"id": np.array([1, 2, 3]), "other": np.array([10, 20, 30])}
+
+        result = numpy_semi_join(left, right, keys=["id"])
+        assert list(result["id"]) == [1, 2]
+        assert list(result["val"]) == ["a", "b"]
+
+    def test_anti_join_all_match(self):
+        """Anti join where all left rows match returns empty result."""
+        import numpy as np
+
+        from pandas.lazy.backends.numpy.join import numpy_anti_join
+
+        left = {"id": np.array([1, 2]), "val": np.array(["a", "b"])}
+        right = {"id": np.array([1, 2, 3]), "other": np.array([10, 20, 30])}
+
+        result = numpy_anti_join(left, right, keys=["id"])
+        assert len(result["id"]) == 0
+
+    def test_semi_join_composite_keys(self):
+        """Test semi join with multiple key columns."""
+        import numpy as np
+
+        from pandas.lazy.backends.numpy.join import numpy_semi_join
+
+        left = {
+            "k1": np.array([1, 1, 2, 2]),
+            "k2": np.array(["a", "b", "a", "b"]),
+            "val": np.array([10, 20, 30, 40]),
+        }
+        right = {
+            "k1": np.array([1, 2]),
+            "k2": np.array(["a", "b"]),
+            "other": np.array([100, 200]),
+        }
+
+        result = numpy_semi_join(left, right, keys=["k1", "k2"])
+        # Only (1, 'a') and (2, 'b') exist in right
+        assert list(result["k1"]) == [1, 2]
+        assert list(result["k2"]) == ["a", "b"]
+        assert list(result["val"]) == [10, 40]
+
+
+class TestJoinCardinalityEstimation:
+    """Tests for join cardinality estimation in logical plan nodes."""
+
+    def test_dataframe_source_row_count(self):
+        """DataFrameSource should return exact row count."""
+        from pandas.lazy.plan import DataFrameSource
+
+        df = pd.DataFrame({"a": range(100)})
+        source = DataFrameSource(df)
+        assert source.estimate_row_count() == 100
+
+    def test_filter_reduces_row_count(self):
+        """Filter should estimate reduced row count."""
+        df = pd.DataFrame({"a": range(1000)})
+        ldf = df.select().filter(col("a") > 500)
+        estimate = ldf._plan.estimate_row_count()
+        # Should be less than 1000 but not None
+        assert estimate is not None
+        assert 0 < estimate < 1000
+
+    def test_limit_caps_row_count(self):
+        """Limit should cap row count at n."""
+        df = pd.DataFrame({"a": range(1000)})
+        ldf = df.select().head(10)
+        estimate = ldf._plan.estimate_row_count()
+        assert estimate == 10
+
+    def test_inner_join_row_count(self):
+        """Inner join should estimate min of both sides."""
+        left = pd.DataFrame({"id": range(1000), "a": range(1000)})
+        right = pd.DataFrame({"id": range(500), "b": range(500)})
+        ldf = left.select().join(right.select(), on="id")
+        estimate = ldf._plan.estimate_row_count()
+        # Inner join estimate should be min(left, right)
+        assert estimate == 500
+
+    def test_left_join_row_count(self):
+        """Left join should preserve left side row count."""
+        left = pd.DataFrame({"id": range(1000), "a": range(1000)})
+        right = pd.DataFrame({"id": range(500), "b": range(500)})
+        ldf = left.select().join(right.select(), on="id", how="left")
+        estimate = ldf._plan.estimate_row_count()
+        # Left join should preserve left count
+        assert estimate == 1000
+
+    def test_cross_join_row_count(self):
+        """Cross join should be product of both sides."""
+        left = pd.DataFrame({"a": range(100)})
+        right = pd.DataFrame({"b": range(50)})
+        ldf = left.select().join(right.select(), how="cross")
+        estimate = ldf._plan.estimate_row_count()
+        assert estimate == 5000
+
+    def test_row_count_propagates_through_plan(self):
+        """Row count should propagate through filter->join chain."""
+        left = pd.DataFrame({"id": range(10000), "a": range(10000)})
+        right = pd.DataFrame({"id": range(5000), "b": range(5000)})
+
+        # Filter left, then join
+        ldf = left.select().filter(col("a") > 5000).join(right.select(), on="id")
+        estimate = ldf._plan.estimate_row_count()
+
+        # Filter estimate ~30% of 10000 = 3000
+        # Join with right (5000 rows) -> min = 3000
+        assert estimate is not None
+        assert 0 < estimate < 10000
+
+
+class TestBuildProbeOptimization:
+    """Tests for hash join build/probe side optimization."""
+
+    def test_physical_hash_join_has_row_estimates(self):
+        """PhysicalHashJoin should receive row count estimates from planner."""
+        from pandas.lazy.optimize import Optimizer
+        from pandas.lazy.physical import PhysicalPlanner
+
+        left = pd.DataFrame({"id": range(100), "a": range(100)})
+        right = pd.DataFrame({"id": range(1000), "b": range(1000)})
+        ldf = left.select().join(right.select(), on="id")
+
+        # Optimize and plan
+        optimizer = Optimizer()
+        optimized = optimizer.optimize(ldf._plan)
+        planner = PhysicalPlanner(preferred_backend="numpy")
+        physical = planner.plan(optimized)
+
+        # Check that row estimates are set
+        assert physical.left_rows_estimate == 100
+        assert physical.right_rows_estimate == 1000
+
+    def test_build_probe_swap_when_left_is_smaller(self):
+        """Build/probe should swap to build on smaller side for inner join."""
+        import numpy as np
+
+        # Create data where LEFT is SMALLER than right
+        # The implementation should swap to put smaller side in right position
+        left_data = {"id": np.array([2, 3]), "val": np.array(["b", "c"])}
+        right_data = {
+            "id": np.array([1, 2, 3, 4, 5]),
+            "other": np.array([10, 20, 30, 40, 50]),
+        }
+
+        from pandas.lazy.physical import PhysicalHashJoin
+        from pandas.lazy.types import (
+            LazyDtype,
+            Schema,
+        )
+
+        # Create schema using LazyDtype.from_pandas_dtype
+        schema = Schema(
+            {
+                "id": LazyDtype.from_pandas_dtype(np.dtype("int64")),
+                "val": LazyDtype.from_pandas_dtype(np.dtype("O")),
+                "other": LazyDtype.from_pandas_dtype(np.dtype("int64")),
+            }
+        )
+
+        # Create a mock plan with left SMALLER than right
+        join = PhysicalHashJoin(
+            left=None,  # Not used for _maybe_swap_for_build_probe
+            right=None,
+            on=("id",),
+            left_on=None,
+            right_on=None,
+            how="inner",
+            suffix=("", "_right"),
+            schema=schema,
+            left_rows_estimate=2,  # Left is smaller
+            right_rows_estimate=5,
+        )
+
+        # Should swap for inner join to put smaller side in build (right) position
+        swapped_left, swapped_right = join._maybe_swap_for_build_probe(
+            left_data, right_data
+        )
+
+        # Left (smaller) should now be swapped to right position for building hash table
+        assert len(swapped_right["id"]) == 2  # Was left, now right (build side)
+        assert len(swapped_left["id"]) == 5  # Was right, now left (probe side)
+
+    def test_build_probe_no_swap_when_right_already_smaller(self):
+        """Build/probe should not swap when right is already smaller."""
+        import numpy as np
+
+        # Create data where right is already smaller
+        left_data = {
+            "id": np.array([1, 2, 3, 4, 5]),
+            "val": np.array(["a", "b", "c", "d", "e"]),
+        }
+        right_data = {"id": np.array([2, 3]), "other": np.array([10, 20])}
+
+        from pandas.lazy.physical import PhysicalHashJoin
+        from pandas.lazy.types import (
+            LazyDtype,
+            Schema,
+        )
+
+        schema = Schema(
+            {
+                "id": LazyDtype.from_pandas_dtype(np.dtype("int64")),
+                "val": LazyDtype.from_pandas_dtype(np.dtype("O")),
+                "other": LazyDtype.from_pandas_dtype(np.dtype("int64")),
+            }
+        )
+
+        join = PhysicalHashJoin(
+            left=None,
+            right=None,
+            on=("id",),
+            left_on=None,
+            right_on=None,
+            how="inner",
+            suffix=("", "_right"),
+            schema=schema,
+            left_rows_estimate=5,  # Left is larger
+            right_rows_estimate=2,  # Right is already smaller - no swap needed
+        )
+
+        # Should NOT swap since right is already smaller (optimal for build)
+        swapped_left, swapped_right = join._maybe_swap_for_build_probe(
+            left_data, right_data
+        )
+
+        # No swap - left stays left, right stays right
+        assert len(swapped_left["id"]) == 5  # Left unchanged
+        assert len(swapped_right["id"]) == 2  # Right unchanged (already build side)
