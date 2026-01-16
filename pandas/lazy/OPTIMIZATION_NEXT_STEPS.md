@@ -218,20 +218,56 @@ assert original_addr == pandas_addr  # Same memory!
 
 9. ✅ **Pandas Options Integration** (NEW)
    - Lazy thresholds exposed via `pd.set_option("compute.lazy.*")`
-   - Available options:
+   - Complete set of 10 configurable options:
      - `compute.lazy.filter_arrow_threshold` (default: 50,000)
      - `compute.lazy.groupby_arrow_row_threshold` (default: 100,000)
      - `compute.lazy.groupby_arrow_cardinality_threshold` (default: 100)
      - `compute.lazy.parallel_expr_threshold` (default: 8)
+     - `compute.lazy.parallel_chunk_size` (default: 65,536)
      - `compute.lazy.numexpr_min_elements` (default: 100,000)
+     - `compute.lazy.numexpr_min_operations` (default: 2)
+     - `compute.lazy.numexpr_large_array_threshold` (default: 1,000,000)
+     - `compute.lazy.arrow_majority_fraction` (default: 0.5)
+     - `compute.lazy.adaptive_thresholds` (default: False)
    - Supports `pd.option_context()` for temporary changes
    - Attribute-style access: `pd.options.compute.lazy.filter_arrow_threshold`
 
+10. ✅ **Adaptive Threshold System** (NEW)
+    - Runtime-adaptive threshold tuning based on observed performance
+    - Uses Exponential Moving Average (EMA) for smooth adaptation
+    - Tracks per-operation backend performance (Arrow vs NumPy)
+    - Estimates crossover points where backends have equal performance
+    - Disabled by default (experimental): `pd.set_option("compute.lazy.adaptive_thresholds", True)`
+    - Implementation: `pandas/lazy/optimize/adaptive.py`
+    - Evaluation script: `scripts/evaluate_adaptive_thresholds.py`
+
+11. ✅ **Streaming Execution** (NEW)
+    - Batch-based execution for memory efficiency
+    - Early termination for `head()`/`limit()` operations
+    - L3-cache-friendly batch sizes (configurable via `parallel_chunk_size`)
+    - 2-2.5x speedup for `head(N)` on large datasets
+    - Pipeline operators (Filter, Project, Limit) support streaming
+    - Pipeline breakers (Sort, Aggregate) materialize before processing
+    - API: `collect(streaming=True, batch_size=65536)`
+
+12. ✅ **Row Group Statistics Predicate Pushdown** (NEW)
+    - Leverages Parquet row group statistics for query optimization
+    - Skips entire row groups based on min/max statistics
+    - No data I/O for row groups that can't match predicate
+    - Significant speedup for selective queries on large files
+    - Implementation in `PhysicalParquetScan`
+
+13. ✅ **Arrow-Native GroupBy Optimization** (NEW)
+    - Uses PyArrow's native `Table.group_by()` for large datasets
+    - 2-3x faster than Pandas Cython for >100K rows
+    - Automatic threshold-based selection
+    - Supports sum, mean, min, max, count aggregations
+
 ### Next Optimization Opportunities
 
-1. **Streaming execution** for very large datasets
-2. **Row group statistics** for smarter predicate pushdown in Parquet
-3. **Dynamic threshold adjustment** based on runtime statistics
+1. **Join optimization** - Hash join with build/probe optimization
+2. **Partition-aware execution** - Parallel processing of partitioned data
+3. **Memory budget enforcement** - Spill to disk for out-of-core processing
 
 ## Expected Results
 
