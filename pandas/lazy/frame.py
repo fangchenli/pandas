@@ -48,7 +48,7 @@ class LazyDataFrame:
     >>> result = ldf.collect()  # Execute and return DataFrame
     """
 
-    __slots__ = ("_plan", "_schema")
+    __slots__ = ("_optimized_plan", "_plan", "_schema")
 
     def __init__(self, plan: LogicalPlan, schema: Schema) -> None:
         """
@@ -66,6 +66,22 @@ class LazyDataFrame:
         """
         self._plan = plan
         self._schema = schema
+        self._optimized_plan: LogicalPlan | None = None
+
+    def _get_optimized_plan(self) -> LogicalPlan:
+        """
+        Get the optimized plan, caching the result.
+
+        Returns
+        -------
+        LogicalPlan
+            The optimized logical plan.
+        """
+        if self._optimized_plan is None:
+            from pandas.lazy.optimize import Optimizer
+
+            self._optimized_plan = Optimizer().optimize(self._plan)
+        return self._optimized_plan
 
     @classmethod
     def _from_dataframe(
@@ -799,11 +815,7 @@ class LazyDataFrame:
         )
 
         # Apply optimization if requested
-        plan = self._plan
-        if optimize:
-            from pandas.lazy.optimize import Optimizer
-
-            plan = Optimizer().optimize(plan)
+        plan = self._get_optimized_plan() if optimize else self._plan
 
         def evaluate(plan: LogicalPlan) -> DataFrame:
             """Evaluate a plan node."""
@@ -918,11 +930,7 @@ class LazyDataFrame:
         )
 
         # Apply optimization if requested
-        plan = self._plan
-        if optimize:
-            from pandas.lazy.optimize import Optimizer
-
-            plan = Optimizer().optimize(plan)
+        plan = self._get_optimized_plan() if optimize else self._plan
 
         # Convert logical plan to physical plan
         planner = PhysicalPlanner(preferred_backend=engine)
@@ -978,11 +986,7 @@ class LazyDataFrame:
         )
 
         # Apply optimization if requested
-        plan = self._plan
-        if optimize:
-            from pandas.lazy.optimize import Optimizer
-
-            plan = Optimizer().optimize(plan)
+        plan = self._get_optimized_plan() if optimize else self._plan
 
         # Convert logical plan to physical plan
         planner = PhysicalPlanner(preferred_backend=engine)
@@ -1035,19 +1039,32 @@ class LazyDataFrame:
         >>> print(ldf.explain())  # Show optimized plan
         >>> print(ldf.explain(optimized=False))  # Show unoptimized plan
         """
-        return self._explain_simple(optimized=optimized)
-
-    def _explain_simple(self, optimized: bool = True) -> str:
-        """Simple explain output."""
-        plan = self._plan
-
-        if optimized:
-            from pandas.lazy.optimize import Optimizer
-
-            plan = Optimizer().optimize(plan)
-            plan_type = "optimized"
+        if format == "text":
+            return self._explain_text(optimized=optimized)
+        elif format == "tree":
+            return self._explain_tree(optimized=optimized)
+        elif format == "json":
+            return self._explain_json(optimized=optimized)
         else:
+            raise ValueError(
+                f"Unknown format: {format!r}. Use 'text', 'tree', or 'json'."
+            )
+
+    def _get_plan_for_explain(
+        self, optimized: bool
+    ) -> tuple[LogicalPlan, Literal["optimized", "unoptimized"]]:
+        """Get the plan to explain, optionally optimized."""
+        if optimized:
+            plan = self._get_optimized_plan()
+            plan_type: Literal["optimized", "unoptimized"] = "optimized"
+        else:
+            plan = self._plan
             plan_type = "unoptimized"
+        return plan, plan_type
+
+    def _explain_text(self, optimized: bool = True) -> str:
+        """Text format explain output with simple indentation."""
+        plan, plan_type = self._get_plan_for_explain(optimized)
 
         lines = []
         lines.append("=" * 50)
@@ -1070,6 +1087,91 @@ class LazyDataFrame:
         lines.append("")
         lines.append("=" * 50)
         return "\n".join(lines)
+
+    def _explain_tree(self, optimized: bool = True) -> str:
+        """Tree format explain output with box-drawing characters."""
+        plan, plan_type = self._get_plan_for_explain(optimized)
+
+        lines = []
+        lines.append(f"LAZY PANDAS QUERY PLAN ({plan_type})")
+        lines.append(f"Output columns: {self.columns}")
+        lines.append("")
+
+        def format_tree(
+            plan_node: LogicalPlan, prefix: str = "", is_last: bool = True
+        ) -> None:
+            # Current node connector
+            connector = "└─ " if is_last else "├─ "
+            lines.append(f"{prefix}{connector}{plan_node!r}")
+
+            # Prepare prefix for children
+            child_prefix = prefix + ("   " if is_last else "│  ")
+
+            children = plan_node.children()
+            for i, child in enumerate(children):
+                is_last_child = i == len(children) - 1
+                format_tree(child, child_prefix, is_last_child)
+
+        # Start with root (no prefix, always "last" since it's root)
+        lines.append(f"┌─ {plan!r}")
+        children = plan.children()
+        for i, child in enumerate(children):
+            is_last_child = i == len(children) - 1
+            format_tree(child, "", is_last_child)
+
+        return "\n".join(lines)
+
+    def _explain_json(self, optimized: bool = True) -> str:
+        """JSON format explain output for programmatic use."""
+        import json
+
+        plan, plan_type = self._get_plan_for_explain(optimized)
+
+        def plan_to_dict(plan_node: LogicalPlan) -> dict:
+            node_dict: dict = {
+                "type": type(plan_node).__name__,
+            }
+
+            # Add node-specific attributes based on type
+            if hasattr(plan_node, "exprs") and plan_node.exprs:
+                node_dict["expressions"] = [repr(e) for e in plan_node.exprs]
+            if hasattr(plan_node, "predicate") and plan_node.predicate is not None:
+                node_dict["predicate"] = repr(plan_node.predicate)
+            if hasattr(plan_node, "keys") and plan_node.keys:
+                node_dict["keys"] = list(plan_node.keys)
+            if hasattr(plan_node, "aggs") and plan_node.aggs:
+                node_dict["aggregations"] = [repr(a) for a in plan_node.aggs]
+            if hasattr(plan_node, "by") and plan_node.by:
+                node_dict["sort_by"] = [repr(b) for b in plan_node.by]
+            if hasattr(plan_node, "source"):
+                node_dict["source"] = repr(plan_node.source)
+            if hasattr(plan_node, "left") and hasattr(plan_node, "right"):
+                node_dict["left"] = plan_to_dict(plan_node.left)
+                node_dict["right"] = plan_to_dict(plan_node.right)
+                if hasattr(plan_node, "on"):
+                    node_dict["on"] = list(plan_node.on) if plan_node.on else None
+                if hasattr(plan_node, "how"):
+                    node_dict["how"] = plan_node.how
+
+            # Process children (except join which has left/right)
+            children = plan_node.children()
+            if children and not (
+                hasattr(plan_node, "left") and hasattr(plan_node, "right")
+            ):
+                if len(children) == 1:
+                    node_dict["input"] = plan_to_dict(children[0])
+                else:
+                    node_dict["inputs"] = [plan_to_dict(c) for c in children]
+
+            return node_dict
+
+        result = {
+            "plan_type": plan_type,
+            "output_columns": list(self.columns),
+            "plan": plan_to_dict(plan),
+        }
+
+        return json.dumps(result, indent=2)
 
     def row_group_stats(self) -> DataFrame | None:
         """

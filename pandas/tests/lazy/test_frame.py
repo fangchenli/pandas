@@ -163,6 +163,212 @@ class TestLazyDataFrameExplain:
         result = ldf.explain()
         assert "DataFrameSource" in result
 
+    def test_explain_text_format(self):
+        df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
+        ldf = df.select()
+        result = ldf.explain(format="text")
+        assert "=" * 50 in result
+        assert "LAZY PANDAS QUERY PLAN" in result
+        assert "Output columns:" in result
+        assert "Plan tree:" in result
+
+    def test_explain_tree_format(self):
+        df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
+        ldf = df.select()
+        result = ldf.explain(format="tree")
+        assert "LAZY PANDAS QUERY PLAN" in result
+        assert "Output columns:" in result
+        # Box-drawing characters
+        assert "┌─" in result
+
+    def test_explain_tree_format_with_children(self):
+        df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
+        ldf = df.select("a")
+        result = ldf.explain(format="tree")
+        # Should have connector for child node
+        assert "└─" in result or "├─" in result
+
+    def test_explain_tree_format_join(self):
+        df1 = pd.DataFrame({"key": [1, 2], "val": [10, 20]})
+        df2 = pd.DataFrame({"key": [1, 2], "other": [100, 200]})
+        ldf = df1.select().join(df2.select(), on="key")
+        result = ldf.explain(format="tree")
+        # Join should show both children with proper connectors
+        assert "├─" in result
+        assert "└─" in result
+
+    def test_explain_tree_format_deep_nesting(self):
+        from pandas.lazy import col
+
+        df1 = pd.DataFrame({"key": [1, 2, 3], "a": [10, 20, 30]})
+        df2 = pd.DataFrame({"key": [1, 2, 3], "b": [100, 200, 300]})
+
+        # Create deeply nested plan: project -> sort -> join -> (filter, source)
+        ldf = (
+            df1.select()
+            .join(df2.select(), on="key")
+            .filter(col("a") > 10)
+            .sort("b", descending=True)
+        )
+        result = ldf.explain(format="tree")
+
+        # Should have vertical connector for nested children
+        assert "│" in result
+        # Should have proper child connectors
+        assert "├─" in result
+        assert "└─" in result
+        # Should show all operations
+        assert "Sort" in result
+        assert "Join" in result
+        assert "Filter" in result
+        assert "DataFrameSource" in result
+
+    def test_explain_json_format(self):
+        import json
+
+        df = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
+        ldf = df.select()
+        result = ldf.explain(format="json")
+        # Should be valid JSON
+        parsed = json.loads(result)
+        assert "plan_type" in parsed
+        assert "output_columns" in parsed
+        assert "plan" in parsed
+
+    def test_explain_json_format_plan_type(self):
+        import json
+
+        df = pd.DataFrame({"a": [1]})
+        ldf = df.select()
+
+        result_opt = json.loads(ldf.explain(format="json", optimized=True))
+        assert result_opt["plan_type"] == "optimized"
+
+        result_unopt = json.loads(ldf.explain(format="json", optimized=False))
+        assert result_unopt["plan_type"] == "unoptimized"
+
+    def test_explain_json_format_has_type(self):
+        import json
+
+        df = pd.DataFrame({"a": [1]})
+        ldf = df.select()
+        result = json.loads(ldf.explain(format="json"))
+        assert "type" in result["plan"]
+
+    def test_explain_json_format_filter(self):
+        import json
+
+        from pandas.lazy import col
+
+        df = pd.DataFrame({"a": [1, 2, 3]})
+        ldf = df.select().filter(col("a") > 1)
+        result = json.loads(ldf.explain(format="json"))
+        assert result["plan"]["type"] == "Filter"
+        assert "predicate" in result["plan"]
+
+    def test_explain_json_format_join(self):
+        import json
+
+        df1 = pd.DataFrame({"key": [1, 2], "val": [10, 20]})
+        df2 = pd.DataFrame({"key": [1, 2], "other": [100, 200]})
+        ldf = df1.select().join(df2.select(), on="key")
+        result = json.loads(ldf.explain(format="json"))
+        # Find the Join node (may be nested)
+        plan = result["plan"]
+        if plan["type"] != "Join":
+            plan = plan.get("input", plan)
+        if plan["type"] == "Join":
+            assert "left" in plan
+            assert "right" in plan
+            assert plan["on"] == ["key"]
+            assert plan["how"] == "inner"
+
+    def test_explain_invalid_format(self):
+        import pytest
+
+        df = pd.DataFrame({"a": [1]})
+        ldf = df.select()
+        with pytest.raises(ValueError, match="Unknown format"):
+            ldf.explain(format="invalid")
+
+    def test_explain_default_format_is_text(self):
+        df = pd.DataFrame({"a": [1]})
+        ldf = df.select()
+        # Default should be text format
+        result = ldf.explain()
+        assert "=" * 50 in result
+
+
+class TestOptimizationCaching:
+    """Tests for optimization plan caching."""
+
+    def test_optimized_plan_starts_as_none(self):
+        df = pd.DataFrame({"a": [1, 2, 3]})
+        ldf = df.select()
+        assert ldf._optimized_plan is None
+
+    def test_explain_caches_optimized_plan(self):
+        from pandas.lazy import col
+
+        df = pd.DataFrame({"a": [1, 2, 3]})
+        ldf = df.select().filter(col("a") > 1)
+
+        assert ldf._optimized_plan is None
+        ldf.explain()
+        assert ldf._optimized_plan is not None
+
+    def test_collect_caches_optimized_plan(self):
+        from pandas.lazy import col
+
+        df = pd.DataFrame({"a": [1, 2, 3]})
+        ldf = df.select().filter(col("a") > 1)
+
+        assert ldf._optimized_plan is None
+        ldf.collect()
+        assert ldf._optimized_plan is not None
+
+    def test_cached_plan_reused_across_calls(self):
+        from pandas.lazy import col
+
+        df = pd.DataFrame({"a": [1, 2, 3]})
+        ldf = df.select().filter(col("a") > 1)
+
+        # First call caches
+        ldf.explain()
+        plan_id_after_explain = id(ldf._optimized_plan)
+
+        # Second call should reuse cached plan
+        ldf.collect()
+        plan_id_after_collect = id(ldf._optimized_plan)
+
+        assert plan_id_after_explain == plan_id_after_collect
+
+    def test_unoptimized_explain_does_not_cache(self):
+        from pandas.lazy import col
+
+        df = pd.DataFrame({"a": [1, 2, 3]})
+        ldf = df.select().filter(col("a") > 1)
+
+        ldf.explain(optimized=False)
+        # Should not cache when optimized=False
+        assert ldf._optimized_plan is None
+
+    def test_chained_operations_have_separate_caches(self):
+        from pandas.lazy import col
+
+        df = pd.DataFrame({"a": [1, 2, 3]})
+        ldf1 = df.select().filter(col("a") > 1)
+        ldf2 = ldf1.filter(col("a") > 2)
+
+        # ldf1 and ldf2 are different objects with separate caches
+        ldf1.explain()
+        assert ldf1._optimized_plan is not None
+        assert ldf2._optimized_plan is None
+
+        ldf2.explain()
+        assert ldf2._optimized_plan is not None
+        assert id(ldf1._optimized_plan) != id(ldf2._optimized_plan)
+
 
 class TestLazyDataFrameCollect:
     """Tests for LazyDataFrame.collect() method."""
@@ -337,7 +543,7 @@ class TestLazyDataFrameArithmetic:
         tm.assert_frame_equal(result, expected)
 
 
-class TestLazyDataFrameFilter:
+class TestLazyDataFrameFilterExecution:
     """Tests for filter execution."""
 
     def test_filter_greater(self):
