@@ -977,7 +977,9 @@ class PhysicalFilter(PhysicalPlan):
 
             result: ArrayDict = {}
             for name in data_arrays.keys():
-                result[name] = filtered_table.column(name).combine_chunks()
+                # Keep as ChunkedArray - PyArrow ops work on ChunkedArray directly
+                # This avoids expensive memory consolidation when there are many chunks
+                result[name] = filtered_table.column(name)
 
             for name, arr in index_arrays.items():
                 if isinstance(arr, np.ndarray):
