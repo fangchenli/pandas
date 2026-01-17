@@ -63,13 +63,17 @@ from pandas.lazy.expr import (
     lit,
     when,
 )
-from pandas.lazy.frame import LazyDataFrame
+from pandas.lazy.frame import (
+    LazyDataFrame,
+    concat,
+)
 from pandas.lazy.scan import scan
 
 __all__ = [
     "LazyDataFrame",
     "coalesce",
     "col",
+    "concat",
     "lit",
     "scan",
     "when",

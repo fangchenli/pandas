@@ -801,6 +801,7 @@ class LazyDataFrame:
         from pandas.lazy.expr import extract_output_name
         from pandas.lazy.plan import (
             Aggregate,
+            Concat,
             Convert,
             DataFrameSource,
             Distinct,
@@ -864,6 +865,13 @@ class LazyDataFrame:
                 left_df = evaluate(plan.left)
                 right_df = evaluate(plan.right)
                 return _evaluate_join(left_df, right_df, plan)
+
+            elif isinstance(plan, Concat):
+                # Evaluate all inputs and concatenate
+                import pandas as pd
+
+                dfs = [evaluate(inp) for inp in plan.inputs]
+                return pd.concat(dfs, ignore_index=True)
 
             elif isinstance(plan, Convert):
                 # Convert node handles backend conversion (Arrow <-> NumPy)
@@ -1694,3 +1702,59 @@ def _evaluate_join(left_df: DataFrame, right_df: DataFrame, plan) -> DataFrame:
         raise ValueError("Invalid join parameters")
 
     return result.reset_index(drop=True)
+
+
+def concat(dfs: list[LazyDataFrame] | tuple[LazyDataFrame, ...]) -> LazyDataFrame:
+    """
+    Concatenate multiple LazyDataFrames vertically (union all).
+
+    This creates a lazy Concat plan node that will stream batches
+    from each input sequentially during execution.
+
+    Parameters
+    ----------
+    dfs : list of LazyDataFrame or tuple of LazyDataFrame
+        The LazyDataFrames to concatenate. All must have compatible schemas
+        (same column names).
+
+    Returns
+    -------
+    LazyDataFrame
+        A new LazyDataFrame representing the concatenation of all inputs.
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> df1 = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
+    >>> df2 = pd.DataFrame({"a": [5, 6], "b": [7, 8]})
+    >>> from pandas.lazy import concat
+    >>> lf = concat([df1.select(), df2.select()])
+    >>> result = lf.collect()
+    >>> result
+       a  b
+    0  1  3
+    1  2  4
+    2  5  7
+    3  6  8
+
+    Works with Parquet scans for multi-file processing:
+
+    >>> from pandas.lazy import scan, concat
+    >>> lf1 = scan("data/part1.parquet")
+    >>> lf2 = scan("data/part2.parquet")
+    >>> combined = concat([lf1, lf2])
+    >>> result = combined.filter(col("value") > 100).collect()
+    """
+    from pandas.lazy.plan import Concat as ConcatPlan
+
+    if not dfs:
+        raise ValueError("concat requires at least one LazyDataFrame")
+
+    if not all(isinstance(df, LazyDataFrame) for df in dfs):
+        raise TypeError("All inputs to concat must be LazyDataFrame instances")
+
+    plans = tuple(df._plan for df in dfs)
+    concat_plan = ConcatPlan(plans)
+    # Use schema from first input (all should be compatible)
+    schema = concat_plan.resolve_schema()
+    return LazyDataFrame(concat_plan, schema)

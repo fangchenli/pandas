@@ -41,6 +41,7 @@ from pandas.lazy.optimize.utils import (
 )
 from pandas.lazy.plan import (
     Aggregate,
+    Concat,
     Distinct,
     Filter,
     Join,
@@ -456,6 +457,14 @@ class PredicatePushdown(PlanVisitor):
                 predicate=combined_pred,
             )
 
+        elif isinstance(input_plan, Concat):
+            # Push filter through Concat to all inputs
+            # This enables predicate pushdown to each source independently
+            new_inputs = tuple(
+                self._push_filter(inp, predicate) for inp in input_plan.inputs
+            )
+            return Concat(new_inputs)
+
         # Cannot push below source or unknown node type
         return Filter(input_plan, predicate)
 
@@ -603,6 +612,15 @@ class ProjectionPruning(PlanVisitor):
             new_input = self._prune(plan.input, child_needed)
             if new_input is not plan.input:
                 return TopK(new_input, plan.k, plan.by, plan.descending)
+            return plan
+
+        elif isinstance(plan, Concat):
+            # Push projection requirements to all inputs
+            new_inputs = tuple(self._prune(inp, needed) for inp in plan.inputs)
+            if any(
+                new != old for new, old in zip(new_inputs, plan.inputs, strict=True)
+            ):
+                return Concat(new_inputs)
             return plan
 
         return plan

@@ -750,3 +750,52 @@ class ResetIndex(LogicalPlan):
 
     def __repr__(self) -> str:
         return f"ResetIndex(drop={self.drop})"
+
+
+@dataclass
+class Concat(LogicalPlan):
+    """
+    Concatenate multiple DataFrames vertically (union all).
+
+    All inputs must have compatible schemas (same column names and types).
+    This is a lazy operation - the concatenation happens at execution time.
+
+    Parameters
+    ----------
+    inputs : tuple[LogicalPlan, ...]
+        Tuple of plan nodes to concatenate.
+
+    Examples
+    --------
+    >>> from pandas.lazy import concat, scan
+    >>> lf1 = scan("data/part1.parquet")
+    >>> lf2 = scan("data/part2.parquet")
+    >>> combined = concat([lf1, lf2])
+    >>> result = combined.filter(col("value") > 100).collect()
+    """
+
+    inputs: tuple[LogicalPlan, ...]
+
+    def __post_init__(self) -> None:
+        self._cached_schema = None
+        if len(self.inputs) == 0:
+            raise ValueError("Concat requires at least one input")
+
+    def _resolve_schema_impl(self) -> Schema:
+        # Use schema from first input (all should be compatible)
+        return self.inputs[0].resolve_schema()
+
+    def children(self) -> list[LogicalPlan]:
+        return list(self.inputs)
+
+    def _estimate_row_count_impl(self) -> int | None:
+        total = 0
+        for inp in self.inputs:
+            count = inp.estimate_row_count()
+            if count is None:
+                return None
+            total += count
+        return total
+
+    def __repr__(self) -> str:
+        return f"Concat(inputs={len(self.inputs)})"
