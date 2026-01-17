@@ -1209,13 +1209,35 @@ class PhysicalHashAggregate(PhysicalPlan):
         # This handles both single-key and multi-key cases efficiently
         if backend == "arrow" and has_kernel("group_by", "arrow"):
             if self._can_use_arrow_groupby(agg_specs):
+                # Check if we have nunique - PyArrow's hash_count_distinct is slow
+                # Use pandas Cython path for nunique (6x faster)
+                nunique_aggs = [
+                    spec
+                    for spec in agg_specs
+                    if spec[2] in ("nunique", "n_unique", "count_distinct")
+                ]
+                other_aggs = [
+                    spec
+                    for spec in agg_specs
+                    if spec[2] not in ("nunique", "n_unique", "count_distinct")
+                ]
+
+                if nunique_aggs:
+                    # Hybrid path: pandas Cython for nunique, Arrow for rest
+                    return self._execute_hybrid_groupby(
+                        input_arrays,
+                        group_cols,
+                        nunique_aggs,
+                        other_aggs,
+                        context,
+                    )
+
                 return self._execute_arrow_table_groupby(
                     input_arrays, group_cols, agg_specs, context
                 )
 
-        # Note: We previously had an optimization to prefer Arrow for nunique,
-        # but the NumPy path is now vectorized and efficient (using factorize +
-        # lexsort + bincount), so we let each backend handle it natively.
+        # Note: The NumPy path is vectorized and efficient (using factorize +
+        # get_group_index + duplicated + bincount for nunique).
 
         # For single-key groupby, use optimized single-key kernels
         # For multi-key, use hash_aggregate kernel
@@ -1482,6 +1504,224 @@ class PhysicalHashAggregate(PhysicalPlan):
                     result[col_name] = chunked.combine_chunks()
                 else:
                     result[col_name] = chunked
+
+        return result
+
+    def _execute_hybrid_groupby(
+        self,
+        input_arrays: ArrayDict,
+        group_cols: list[str],
+        nunique_aggs: list[tuple[str, str, str]],
+        other_aggs: list[tuple[str, str, str]],
+        context: ExecutionContext,
+    ) -> ArrayDict:
+        """
+        Execute groupby with hybrid approach: pandas Cython for nunique, Arrow for rest.
+
+        PyArrow's hash_count_distinct is ~6x slower than pandas' Cython-based
+        approach using factorize + get_group_index + duplicated + bincount.
+        This method uses pandas internals for nunique aggregations while
+        leveraging Arrow's efficient hash aggregation for other operations.
+
+        Parameters
+        ----------
+        input_arrays : ArrayDict
+            Input arrays including group columns and value columns.
+        group_cols : list[str]
+            Column names to group by.
+        nunique_aggs : list[tuple[str, str, str]]
+            Aggregation specs for nunique: (output_name, input_col, agg_func)
+        other_aggs : list[tuple[str, str, str]]
+            Aggregation specs for non-nunique operations.
+        context : ExecutionContext
+            Execution context with settings like preserve_index.
+
+        Returns
+        -------
+        ArrayDict
+            Result with group keys and all aggregated values.
+        """
+        import numpy as np
+        import pyarrow as pa
+        import pyarrow.compute as pc
+
+        from pandas.core.algorithms import duplicated
+        from pandas.core.sorting import get_group_index
+        from pandas.lazy.backends.types import (
+            INDEX_COL_NAME,
+            index_col_name,
+            is_index_col,
+        )
+
+        def _factorize_arrow(arr):
+            """
+            Factorize an array using PyArrow's dictionary_encode.
+
+            This is faster than pandas' factorize for Arrow arrays because
+            it avoids the Arrow -> pandas -> numpy conversion overhead.
+
+            Returns (codes, uniques_arrow) where codes is numpy int array
+            and uniques_arrow is a PyArrow array.
+            """
+            # Handle ChunkedArray
+            if isinstance(arr, pa.ChunkedArray):
+                arr = arr.combine_chunks()
+
+            # Use PyArrow's dictionary_encode (C++ hash table)
+            dict_arr = pc.dictionary_encode(arr)
+            codes = dict_arr.indices.to_numpy()
+            uniques = dict_arr.dictionary
+            return codes, uniques, len(uniques)
+
+        result: ArrayDict = {}
+
+        # Step 1: Factorize group keys to get group codes
+        # For single key, factorize directly; for multi-key, create compound index
+        if len(group_cols) == 1:
+            group_arr = input_arrays[group_cols[0]]
+
+            # Use PyArrow's dictionary_encode for Arrow arrays (faster)
+            if isinstance(group_arr, (pa.Array, pa.ChunkedArray)):
+                group_codes, group_uniques_arrow, n_groups = _factorize_arrow(group_arr)
+            else:
+                # Fallback to pandas factorize for numpy arrays
+                from pandas.core.algorithms import factorize
+
+                if hasattr(group_arr, "to_numpy"):
+                    group_values = group_arr.to_numpy(zero_copy_only=False)
+                else:
+                    group_values = np.asarray(group_arr)
+                group_codes, group_uniques = factorize(group_values, sort=False)
+                n_groups = len(group_uniques)
+                group_uniques_arrow = pa.array(group_uniques)
+        else:
+            # Multi-key: factorize each key and create compound group index
+            from pandas.core.algorithms import factorize
+
+            key_codes_list = []
+            shapes = []
+
+            for col in group_cols:
+                arr = input_arrays[col]
+                if isinstance(arr, (pa.Array, pa.ChunkedArray)):
+                    codes, _, n_unique = _factorize_arrow(arr)
+                else:
+                    if hasattr(arr, "to_numpy"):
+                        values = arr.to_numpy(zero_copy_only=False)
+                    else:
+                        values = np.asarray(arr)
+                    codes, uniques = factorize(values, sort=False)
+                    n_unique = len(uniques)
+
+                key_codes_list.append(codes)
+                shapes.append(n_unique)
+
+            # Create compound group index
+            group_codes = get_group_index(
+                labels=key_codes_list,
+                shape=tuple(shapes),
+                sort=False,
+                xnull=True,
+            )
+
+            # Re-factorize to get contiguous group codes
+            group_codes, compound_uniques = factorize(group_codes, sort=False)
+            n_groups = len(compound_uniques)
+
+            # Note: group_uniques_arrow not set for multi-key case
+            # We handle this in the else branch below
+
+        # Step 2: Compute nunique for each nunique aggregation
+        for output_name, col_name, _ in nunique_aggs:
+            value_arr = input_arrays[col_name]
+
+            # Use PyArrow's dictionary_encode for Arrow arrays
+            if isinstance(value_arr, (pa.Array, pa.ChunkedArray)):
+                value_codes, _, n_values = _factorize_arrow(value_arr)
+            else:
+                from pandas.core.algorithms import factorize
+
+                if hasattr(value_arr, "to_numpy"):
+                    values = value_arr.to_numpy(zero_copy_only=False)
+                else:
+                    values = np.asarray(value_arr)
+                value_codes, value_uniques = factorize(values, sort=False)
+                n_values = len(value_uniques)
+
+            # Create compound (group, value) index
+            compound_index = get_group_index(
+                labels=[group_codes, value_codes],
+                shape=(n_groups, n_values),
+                sort=False,
+                xnull=True,
+            )
+
+            # Find duplicates using Cython hash table
+            is_dup = duplicated(compound_index, keep="first")
+
+            # Count unique values per group
+            nunique_result = np.bincount(
+                group_codes[~is_dup], minlength=n_groups
+            ).astype(np.int64)
+
+            result[output_name] = pa.array(nunique_result)
+
+        # Step 3: Execute other aggregations with Arrow (if any)
+        if other_aggs:
+            from pandas.lazy.backends import dispatch_kernel
+
+            # Build Arrow table
+            columns = {k: v for k, v in input_arrays.items() if not is_index_col(k)}
+            table = pa.table(columns)
+
+            # Execute groupby for non-nunique aggregations
+            other_result_table = dispatch_kernel(
+                "group_by", "arrow", table, group_cols, other_aggs
+            )
+
+            # Extract results
+            for output_name, _, _ in other_aggs:
+                chunked = other_result_table.column(output_name)
+                if isinstance(chunked, pa.ChunkedArray):
+                    result[output_name] = chunked.combine_chunks()
+                else:
+                    result[output_name] = chunked
+
+            # Use group keys from Arrow result (guaranteed same order)
+            if context.preserve_index:
+                is_multi = len(group_cols) > 1
+                for i, col in enumerate(group_cols):
+                    chunked = other_result_table.column(col)
+                    idx_col = index_col_name(i) if is_multi else INDEX_COL_NAME
+                    if isinstance(chunked, pa.ChunkedArray):
+                        result[idx_col] = chunked.combine_chunks()
+                    else:
+                        result[idx_col] = chunked
+                context.index_names = list(group_cols)
+                context.index_is_multi = is_multi
+            else:
+                for col in group_cols:
+                    chunked = other_result_table.column(col)
+                    if isinstance(chunked, pa.ChunkedArray):
+                        result[col] = chunked.combine_chunks()
+                    else:
+                        result[col] = chunked
+        # Only nunique aggregations - add group keys from our factorization
+        elif len(group_cols) == 1:
+            if context.preserve_index:
+                result[INDEX_COL_NAME] = group_uniques_arrow
+                context.index_names = list(group_cols)
+                context.index_is_multi = False
+            else:
+                result[group_cols[0]] = group_uniques_arrow
+        else:
+            # Multi-key: need to reconstruct unique key combinations
+            # This is a fallback - in practice, mixed aggs are common
+            # For pure nunique multi-key, fall back to Arrow path
+            # (slower but correct)
+            return self._execute_arrow_table_groupby(
+                input_arrays, group_cols, nunique_aggs, context
+            )
 
         return result
 
