@@ -664,7 +664,8 @@ def numpy_outer_join(
 # =============================================================================
 
 
-def _ismember_mask(
+@register_kernel("ismember", "numpy")
+def ismember(
     left_arr: np.ndarray,
     right_arr: np.ndarray,
 ) -> np.ndarray:
@@ -705,6 +706,10 @@ def _ismember_mask(
     except TypeError:
         # Fallback for unsupported dtypes (e.g., strings in some cases)
         return np.isin(left_arr, right_arr)
+
+
+# Keep the old name as an alias for internal use
+_ismember_mask = ismember
 
 
 def _semi_join_single_key(
