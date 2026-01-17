@@ -26,7 +26,7 @@ from pandas.lazy.backends.types import (
 
 def is_arrow_backed(arr: ArrayLike) -> bool:
     """
-    Check if array is Arrow-backed (Array or ChunkedArray).
+    Check if array is Arrow-backed (Array, ChunkedArray, or ArrowExtensionArray).
 
     Parameters
     ----------
@@ -38,7 +38,16 @@ def is_arrow_backed(arr: ArrayLike) -> bool:
     bool
         True if Arrow-backed.
     """
-    return isinstance(arr, (pa.Array, pa.ChunkedArray))
+    # Direct PyArrow types
+    if isinstance(arr, (pa.Array, pa.ChunkedArray)):
+        return True
+    # Pandas ArrowExtensionArray (ArrowStringArray, ArrowDtype-backed, etc.)
+    # These wrap PyArrow ChunkedArrays internally via _pa_array attribute
+    if hasattr(arr, "_pa_array") and isinstance(
+        getattr(arr, "_pa_array", None), pa.ChunkedArray
+    ):
+        return True
+    return False
 
 
 def is_numpy_backed(arr: ArrayLike) -> bool:
@@ -205,8 +214,14 @@ def to_arrow(arr: ArrayLike) -> PyArrowArray:
     PyArrowArray
         Arrow array (Array or ChunkedArray).
     """
-    if is_arrow_backed(arr):
+    # Direct PyArrow types - return as-is
+    if isinstance(arr, (pa.Array, pa.ChunkedArray)):
         return arr
+    # Pandas ArrowExtensionArray - extract underlying PyArrow ChunkedArray
+    if hasattr(arr, "_pa_array") and isinstance(
+        getattr(arr, "_pa_array", None), pa.ChunkedArray
+    ):
+        return arr._pa_array
     # NumPy to Arrow
     return pa.array(arr)
 
@@ -227,6 +242,11 @@ def to_numpy(arr: ArrayLike) -> np.ndarray:
     """
     if is_numpy_backed(arr):
         return arr
+    # Pandas ArrowExtensionArray - extract and convert
+    if hasattr(arr, "_pa_array") and isinstance(
+        getattr(arr, "_pa_array", None), pa.ChunkedArray
+    ):
+        return arr._pa_array.to_numpy(zero_copy_only=False)
     # Arrow to NumPy
     if isinstance(arr, pa.ChunkedArray):
         return arr.to_numpy(zero_copy_only=False)
