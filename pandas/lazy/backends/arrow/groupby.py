@@ -55,6 +55,7 @@ def arrow_group_by(
         "all": ("hash_all", "all"),
         "count_distinct": ("hash_count_distinct", "count_distinct"),
         "nunique": ("hash_count_distinct", "count_distinct"),
+        "n_unique": ("hash_count_distinct", "count_distinct"),
         "prod": ("hash_product", "product"),
         "list": ("hash_list", "list"),
     }
@@ -69,12 +70,15 @@ def arrow_group_by(
     for output_name, input_col, agg_func in aggregations:
         pa_func, _ = agg_map.get(agg_func, (f"hash_{agg_func}", agg_func))
         # Use appropriate options for each aggregation type
+        # Note: hash_count_distinct should not receive ScalarAggregateOptions
         if agg_func == "count":
             # Count non-null values (matches pandas behavior)
-            options = pc.CountOptions(mode="only_valid")
+            agg_specs.append((input_col, pa_func, pc.CountOptions(mode="only_valid")))
+        elif agg_func in ("count_distinct", "nunique", "n_unique"):
+            # count_distinct doesn't use ScalarAggregateOptions
+            agg_specs.append((input_col, pa_func))
         else:
-            options = pc.ScalarAggregateOptions()
-        agg_specs.append((input_col, pa_func, options))
+            agg_specs.append((input_col, pa_func, pc.ScalarAggregateOptions()))
 
     # Use PyArrow's group_by functionality
     grouped = table.group_by(group_keys, use_threads=not needs_single_thread)
@@ -144,6 +148,7 @@ def arrow_hash_aggregate(
         "all": ("hash_all", "all"),
         "count_distinct": ("hash_count_distinct", "count_distinct"),
         "nunique": ("hash_count_distinct", "count_distinct"),
+        "n_unique": ("hash_count_distinct", "count_distinct"),
         "prod": ("hash_product", "product"),
     }
 
@@ -155,12 +160,15 @@ def arrow_hash_aggregate(
     for val_name, agg_func in zip(val_names, agg_funcs, strict=True):
         pa_func = agg_map.get(agg_func, (f"hash_{agg_func}", agg_func))[0]
         # Use appropriate options for each aggregation type
+        # Note: hash_count_distinct should not receive ScalarAggregateOptions
         if agg_func == "count":
             # Count non-null values (matches pandas behavior)
-            options = pc.CountOptions(mode="only_valid")
+            agg_specs.append((val_name, pa_func, pc.CountOptions(mode="only_valid")))
+        elif agg_func in ("count_distinct", "nunique", "n_unique"):
+            # count_distinct doesn't use ScalarAggregateOptions
+            agg_specs.append((val_name, pa_func))
         else:
-            options = pc.ScalarAggregateOptions()
-        agg_specs.append((val_name, pa_func, options))
+            agg_specs.append((val_name, pa_func, pc.ScalarAggregateOptions()))
 
     # Execute grouped aggregation
     grouped = table.group_by(key_names, use_threads=not needs_single_thread)
@@ -348,6 +356,7 @@ def arrow_groupby_var(
 
 
 @register_kernel("groupby_nunique", "arrow")
+@register_kernel("groupby_n_unique", "arrow")
 def arrow_groupby_nunique(
     keys: PyArrowArray, values: PyArrowArray
 ) -> tuple[PyArrowArray, PyArrowArray]:
