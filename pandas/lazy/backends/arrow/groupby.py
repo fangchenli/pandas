@@ -4,11 +4,58 @@ Arrow GroupBy kernel implementations.
 This module contains groupby aggregation operations using PyArrow.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import pyarrow as pa
 import pyarrow.compute as pc
 
 from pandas.lazy.backends import register_kernel
-from pandas.lazy.backends.types import PyArrowArray
+
+if TYPE_CHECKING:
+    import numpy as np
+
+    from pandas.lazy.backends.types import PyArrowArray
+
+# Factorization
+# =============================================================================
+
+
+@register_kernel("factorize", "arrow")
+def factorize(
+    arr: pa.Array | pa.ChunkedArray,
+) -> tuple[np.ndarray, pa.Array, int]:
+    """
+    Factorize an Arrow array using dictionary encoding.
+
+    Uses PyArrow's dictionary_encode which is implemented as a C++ hash table.
+    This is faster than converting to pandas and using pandas' factorize.
+
+    Parameters
+    ----------
+    arr : pa.Array or pa.ChunkedArray
+        Input array to factorize.
+
+    Returns
+    -------
+    tuple[np.ndarray, pa.Array, int]
+        - codes: Integer codes as numpy array (int32)
+        - uniques: Unique values as PyArrow array
+        - n_uniques: Number of unique values
+    """
+    # Use PyArrow's dictionary_encode (C++ hash table)
+    # Works directly on both Array and ChunkedArray
+    dict_arr = pc.dictionary_encode(arr)
+
+    # For ChunkedArray result, combine to get contiguous indices
+    if isinstance(dict_arr, pa.ChunkedArray):
+        dict_arr = dict_arr.combine_chunks()
+
+    codes = dict_arr.indices.to_numpy()
+    uniques = dict_arr.dictionary
+    return codes, uniques, len(uniques)
+
 
 # GroupBy / Aggregation Operations
 # =============================================================================

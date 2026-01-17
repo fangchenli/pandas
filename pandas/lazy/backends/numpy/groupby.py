@@ -4,9 +4,104 @@ NumPy GroupBy kernel implementations.
 This module contains groupby aggregation operations.
 """
 
+from __future__ import annotations
+
 import numpy as np
 
 from pandas.lazy.backends import register_kernel
+
+# Factorization and Grouping Utilities
+# =============================================================================
+
+
+@register_kernel("factorize", "numpy")
+def factorize(
+    arr: np.ndarray, sort: bool = False
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """
+    Factorize a numpy array to integer codes.
+
+    Uses pandas' Cython-based factorize for fast hash table lookups.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input array to factorize.
+    sort : bool, default False
+        Whether to sort the unique values.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray, int]
+        - codes: Integer codes as numpy array
+        - uniques: Unique values as numpy array
+        - n_uniques: Number of unique values
+    """
+    from pandas.core.algorithms import factorize as pd_factorize
+
+    codes, uniques = pd_factorize(arr, sort=sort)
+    return codes, uniques, len(uniques)
+
+
+@register_kernel("get_group_index", "numpy")
+def get_group_index(
+    labels: list[np.ndarray],
+    shape: tuple[int, ...],
+    sort: bool = False,
+    xnull: bool = True,
+) -> np.ndarray:
+    """
+    Create a single group index from multiple label arrays.
+
+    Combines multiple factorized arrays into a single compound index.
+    Uses pandas' Cython implementation for speed.
+
+    Parameters
+    ----------
+    labels : list[np.ndarray]
+        List of integer label arrays (from factorize).
+    shape : tuple[int, ...]
+        Number of unique values in each label array.
+    sort : bool, default False
+        Whether to sort the resulting index.
+    xnull : bool, default True
+        Whether to exclude null labels.
+
+    Returns
+    -------
+    np.ndarray
+        Single integer array representing compound group index.
+    """
+    from pandas.core.sorting import get_group_index as pd_get_group_index
+
+    return pd_get_group_index(labels=labels, shape=shape, sort=sort, xnull=xnull)
+
+
+@register_kernel("duplicated", "numpy")
+def duplicated(values: np.ndarray, keep: str = "first") -> np.ndarray:
+    """
+    Find duplicate values in an array.
+
+    Uses pandas' Cython hash table for fast duplicate detection.
+
+    Parameters
+    ----------
+    values : np.ndarray
+        Input array to check for duplicates.
+    keep : {'first', 'last', False}, default 'first'
+        - 'first': Mark duplicates as True except for the first occurrence.
+        - 'last': Mark duplicates as True except for the last occurrence.
+        - False: Mark all duplicates as True.
+
+    Returns
+    -------
+    np.ndarray
+        Boolean array where True indicates a duplicate value.
+    """
+    from pandas.core.algorithms import duplicated as pd_duplicated
+
+    return pd_duplicated(values, keep=keep)
+
 
 # GroupBy / Aggregation Operations
 # =============================================================================

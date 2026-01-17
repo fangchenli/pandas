@@ -1557,37 +1557,24 @@ class PhysicalHashAggregate(PhysicalPlan):
         """
         import numpy as np
         import pyarrow as pa
-        import pyarrow.compute as pc
 
-        from pandas.core.algorithms import duplicated
-        from pandas.core.sorting import get_group_index
+        from pandas.lazy.backends import dispatch_kernel
         from pandas.lazy.backends.types import (
             INDEX_COL_NAME,
             index_col_name,
             is_index_col,
         )
 
-        def _factorize_arrow(arr):
-            """
-            Factorize an array using PyArrow's dictionary_encode.
-
-            This is faster than pandas' factorize for Arrow arrays because
-            it avoids the Arrow -> pandas -> numpy conversion overhead.
-
-            Returns (codes, uniques_arrow, n_uniques) where codes is numpy int
-            array and uniques_arrow is a PyArrow array.
-            """
-            # Use PyArrow's dictionary_encode (C++ hash table)
-            # Works directly on both Array and ChunkedArray
-            dict_arr = pc.dictionary_encode(arr)
-
-            # For ChunkedArray result, combine to get contiguous indices
-            if isinstance(dict_arr, pa.ChunkedArray):
-                dict_arr = dict_arr.combine_chunks()
-
-            codes = dict_arr.indices.to_numpy()
-            uniques = dict_arr.dictionary
-            return codes, uniques, len(uniques)
+        def _factorize(arr):
+            """Factorize array using appropriate backend."""
+            if isinstance(arr, (pa.Array, pa.ChunkedArray)):
+                return dispatch_kernel("factorize", "arrow", arr)
+            else:
+                if hasattr(arr, "to_numpy"):
+                    arr = arr.to_numpy(zero_copy_only=False)
+                else:
+                    arr = np.asarray(arr)
+                return dispatch_kernel("factorize", "numpy", arr)
 
         result: ArrayDict = {}
 
@@ -1595,54 +1582,32 @@ class PhysicalHashAggregate(PhysicalPlan):
         # For single key, factorize directly; for multi-key, create compound index
         if len(group_cols) == 1:
             group_arr = input_arrays[group_cols[0]]
-
-            # Use PyArrow's dictionary_encode for Arrow arrays (faster)
-            if isinstance(group_arr, (pa.Array, pa.ChunkedArray)):
-                group_codes, group_uniques_arrow, n_groups = _factorize_arrow(group_arr)
-            else:
-                # Fallback to pandas factorize for numpy arrays
-                from pandas.core.algorithms import factorize
-
-                if hasattr(group_arr, "to_numpy"):
-                    group_values = group_arr.to_numpy(zero_copy_only=False)
-                else:
-                    group_values = np.asarray(group_arr)
-                group_codes, group_uniques = factorize(group_values, sort=False)
-                n_groups = len(group_uniques)
+            group_codes, group_uniques, n_groups = _factorize(group_arr)
+            # Convert numpy uniques to arrow for consistency
+            if not isinstance(group_uniques, pa.Array):
                 group_uniques_arrow = pa.array(group_uniques)
+            else:
+                group_uniques_arrow = group_uniques
         else:
             # Multi-key: factorize each key and create compound group index
-            from pandas.core.algorithms import factorize
-
             key_codes_list = []
             shapes = []
 
             for col in group_cols:
                 arr = input_arrays[col]
-                if isinstance(arr, (pa.Array, pa.ChunkedArray)):
-                    codes, _, n_unique = _factorize_arrow(arr)
-                else:
-                    if hasattr(arr, "to_numpy"):
-                        values = arr.to_numpy(zero_copy_only=False)
-                    else:
-                        values = np.asarray(arr)
-                    codes, uniques = factorize(values, sort=False)
-                    n_unique = len(uniques)
-
+                codes, _, n_unique = _factorize(arr)
                 key_codes_list.append(codes)
                 shapes.append(n_unique)
 
             # Create compound group index
-            group_codes = get_group_index(
-                labels=key_codes_list,
-                shape=tuple(shapes),
-                sort=False,
-                xnull=True,
+            group_codes = dispatch_kernel(
+                "get_group_index", "numpy", key_codes_list, tuple(shapes)
             )
 
             # Re-factorize to get contiguous group codes
-            group_codes, compound_uniques = factorize(group_codes, sort=False)
-            n_groups = len(compound_uniques)
+            group_codes, _, n_groups = dispatch_kernel(
+                "factorize", "numpy", group_codes
+            )
 
             # Note: group_uniques_arrow not set for multi-key case
             # We handle this in the else branch below
@@ -1650,30 +1615,18 @@ class PhysicalHashAggregate(PhysicalPlan):
         # Step 2: Compute nunique for each nunique aggregation
         for output_name, col_name, _ in nunique_aggs:
             value_arr = input_arrays[col_name]
-
-            # Use PyArrow's dictionary_encode for Arrow arrays
-            if isinstance(value_arr, (pa.Array, pa.ChunkedArray)):
-                value_codes, _, n_values = _factorize_arrow(value_arr)
-            else:
-                from pandas.core.algorithms import factorize
-
-                if hasattr(value_arr, "to_numpy"):
-                    values = value_arr.to_numpy(zero_copy_only=False)
-                else:
-                    values = np.asarray(value_arr)
-                value_codes, value_uniques = factorize(values, sort=False)
-                n_values = len(value_uniques)
+            value_codes, _, n_values = _factorize(value_arr)
 
             # Create compound (group, value) index
-            compound_index = get_group_index(
-                labels=[group_codes, value_codes],
-                shape=(n_groups, n_values),
-                sort=False,
-                xnull=True,
+            compound_index = dispatch_kernel(
+                "get_group_index",
+                "numpy",
+                [group_codes, value_codes],
+                (n_groups, n_values),
             )
 
             # Find duplicates using Cython hash table
-            is_dup = duplicated(compound_index, keep="first")
+            is_dup = dispatch_kernel("duplicated", "numpy", compound_index)
 
             # Count unique values per group
             nunique_result = np.bincount(
@@ -1684,8 +1637,6 @@ class PhysicalHashAggregate(PhysicalPlan):
 
         # Step 3: Execute other aggregations with Arrow (if any)
         if other_aggs:
-            from pandas.lazy.backends import dispatch_kernel
-
             # Build Arrow table
             columns = {k: v for k, v in input_arrays.items() if not is_index_col(k)}
             table = pa.table(columns)
