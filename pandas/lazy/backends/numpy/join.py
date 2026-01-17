@@ -6,10 +6,14 @@ This module contains join operations (inner, left, right, outer, cross).
 Uses vectorized factorize-based composite key creation for performance.
 """
 
+from __future__ import annotations
+
 import numpy as np
 
-from pandas import factorize
-from pandas.lazy.backends import register_kernel
+from pandas.lazy.backends import (
+    dispatch_kernel,
+    register_kernel,
+)
 
 # Join Operations
 # =============================================================================
@@ -40,7 +44,7 @@ def _create_composite_key_vectorized(arrays: list[np.ndarray]) -> np.ndarray:
 
     if len(arrays) == 1:
         # Single key - just factorize it
-        codes, _ = factorize(arrays[0], sort=False)
+        codes, _, _ = dispatch_kernel("factorize", "numpy", arrays[0])
         return codes.astype(np.int64)
 
     # Multiple keys - create composite codes using factorize
@@ -50,7 +54,7 @@ def _create_composite_key_vectorized(arrays: list[np.ndarray]) -> np.ndarray:
     current_multiplier = 1
 
     for arr in arrays:
-        codes, uniques = factorize(arr, sort=False)
+        codes, uniques, _ = dispatch_kernel("factorize", "numpy", arr)
         all_codes.append(codes)
         multipliers.append(current_multiplier)
         current_multiplier *= len(uniques) + 1  # +1 for potential -1 codes (NA)

@@ -136,13 +136,8 @@ def _numpy_groupby_aggregate(
     tuple[np.ndarray, np.ndarray]
         (unique_keys, aggregated_values)
     """
-    # Get unique keys and indices
-    # Use pandas factorize for proper handling of various dtypes
-    from pandas import factorize
-
-    codes, unique_keys = factorize(keys, sort=False)
-
-    n_groups = len(unique_keys)
+    # Get unique keys and indices using the factorize kernel
+    codes, unique_keys, n_groups = factorize(keys)
 
     # Aggregation functions mapping
     if agg_func == "sum":
@@ -233,22 +228,13 @@ def _numpy_groupby_aggregate(
         # 4. Count unique values per group with bincount
         #
         # This is ~18x faster than lexsort-based approach for large datasets
-        from pandas.core.algorithms import duplicated
-        from pandas.core.sorting import get_group_index
-
-        value_codes, unique_values = factorize(values, sort=False)
-        n_values = len(unique_values)
+        value_codes, _, n_values = factorize(values)
 
         # Create compound index: unique integer for each (group, value) pair
-        group_index = get_group_index(
-            labels=[codes, value_codes],
-            shape=(n_groups, n_values),
-            sort=False,
-            xnull=True,
-        )
+        group_index = get_group_index([codes, value_codes], (n_groups, n_values))
 
         # Find duplicates using Cython hash table (much faster than sort)
-        mask = duplicated(group_index, keep="first")
+        mask = duplicated(group_index)
 
         # Count unique values per group (only count first occurrence of each pair)
         result = np.bincount(codes[~mask], minlength=n_groups).astype(np.int64)
@@ -480,8 +466,6 @@ def _numpy_multi_key_groupby(
     tuple[list[np.ndarray], list[np.ndarray]]
         (unique_key_arrays, aggregated_value_arrays)
     """
-    from pandas import factorize
-
     # For single key, use the simpler path
     if len(key_arrays) == 1:
         result_values = []
@@ -504,7 +488,7 @@ def _numpy_multi_key_groupby(
     current_multiplier = 1
 
     for key_arr in key_arrays:
-        codes, uniques = factorize(key_arr, sort=False)
+        codes, uniques, _ = factorize(key_arr)
         all_codes.append(codes)
         all_uniques.append(uniques)
         multipliers.append(current_multiplier)
@@ -517,8 +501,7 @@ def _numpy_multi_key_groupby(
         composite_codes += codes.astype(np.int64) * mult
 
     # Factorize the composite codes to get contiguous group indices
-    group_codes, unique_composites = factorize(composite_codes, sort=False)
-    n_groups = len(unique_composites)
+    group_codes, unique_composites, n_groups = factorize(composite_codes)
 
     # Aggregate each value array using the group codes
     result_values = []
