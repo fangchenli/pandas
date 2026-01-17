@@ -343,10 +343,10 @@ def query_lazy_pandas_with_spill(
     )
     lf = lf.sort("transaction_date")
 
-    # Execute with physical planner and spill support
-    # Note: Currently using streaming; full spill integration will come
-    # when physical planner operators use spill_config from ExecutionContext
-    result = lf.collect(streaming=True)
+    # Execute with physical planner
+    # Note: Full spill integration will come when physical planner operators
+    # use spill_config from ExecutionContext
+    result = lf.collect(use_physical_planner=True)
 
     # Cleanup spill directory
     shutil.rmtree(spill_dir, ignore_errors=True)
