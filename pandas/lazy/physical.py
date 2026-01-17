@@ -1560,15 +1560,17 @@ class PhysicalHashAggregate(PhysicalPlan):
             This is faster than pandas' factorize for Arrow arrays because
             it avoids the Arrow -> pandas -> numpy conversion overhead.
 
-            Returns (codes, uniques_arrow) where codes is numpy int array
-            and uniques_arrow is a PyArrow array.
+            Returns (codes, uniques_arrow, n_uniques) where codes is numpy int
+            array and uniques_arrow is a PyArrow array.
             """
-            # Handle ChunkedArray
-            if isinstance(arr, pa.ChunkedArray):
-                arr = arr.combine_chunks()
-
             # Use PyArrow's dictionary_encode (C++ hash table)
+            # Works directly on both Array and ChunkedArray
             dict_arr = pc.dictionary_encode(arr)
+
+            # For ChunkedArray result, combine to get contiguous indices
+            if isinstance(dict_arr, pa.ChunkedArray):
+                dict_arr = dict_arr.combine_chunks()
+
             codes = dict_arr.indices.to_numpy()
             uniques = dict_arr.dictionary
             return codes, uniques, len(uniques)
