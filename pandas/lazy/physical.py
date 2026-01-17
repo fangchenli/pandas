@@ -660,25 +660,39 @@ class PhysicalParquetScan(PhysicalPlan):
             # String operations - enable row group filtering on string columns
             elif ir.function == "str_startswith" and len(ir.args) >= 1:
                 col = self._ir_to_arrow_expr(ir.args[0])
-                prefix = ir.args[1] if len(ir.args) > 1 else ir.kwargs.get("prefix")
-                if col is not None and prefix is not None:
-                    if isinstance(prefix, str):
-                        return pc.starts_with(col, prefix)
+                prefix_arg = ir.args[1] if len(ir.args) > 1 else ir.kwargs.get("prefix")
+                # Extract value if it's a Literal
+                if isinstance(prefix_arg, Literal):
+                    prefix = prefix_arg.value
+                else:
+                    prefix = prefix_arg
+                if col is not None and isinstance(prefix, str):
+                    return pc.starts_with(col, prefix)
 
             elif ir.function == "str_endswith" and len(ir.args) >= 1:
                 col = self._ir_to_arrow_expr(ir.args[0])
-                suffix = ir.args[1] if len(ir.args) > 1 else ir.kwargs.get("suffix")
-                if col is not None and suffix is not None:
-                    if isinstance(suffix, str):
-                        return pc.ends_with(col, suffix)
+                suffix_arg = ir.args[1] if len(ir.args) > 1 else ir.kwargs.get("suffix")
+                # Extract value if it's a Literal
+                if isinstance(suffix_arg, Literal):
+                    suffix = suffix_arg.value
+                else:
+                    suffix = suffix_arg
+                if col is not None and isinstance(suffix, str):
+                    return pc.ends_with(col, suffix)
 
             elif ir.function == "str_contains" and len(ir.args) >= 1:
                 col = self._ir_to_arrow_expr(ir.args[0])
-                pattern = ir.args[1] if len(ir.args) > 1 else ir.kwargs.get("pattern")
-                if col is not None and pattern is not None:
-                    if isinstance(pattern, str):
-                        # Use match_substring for contains
-                        return pc.match_substring(col, pattern)
+                pattern_arg = (
+                    ir.args[1] if len(ir.args) > 1 else ir.kwargs.get("pattern")
+                )
+                # Extract value if it's a Literal
+                if isinstance(pattern_arg, Literal):
+                    pattern = pattern_arg.value
+                else:
+                    pattern = pattern_arg
+                if col is not None and isinstance(pattern, str):
+                    # Use match_substring for contains
+                    return pc.match_substring(col, pattern)
 
         # Cannot convert this expression
         return None

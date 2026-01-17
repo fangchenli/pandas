@@ -727,7 +727,6 @@ def query_sort_polars(files: list[str] | list[Path]) -> pd.DataFrame:
 
 def query_sort_lazy_pandas(files: list[str] | list[Path]) -> pd.DataFrame:
     """Sort query: order all transactions by amount using lazy pandas."""
-    import pandas as pd
     from pandas import lazy
 
     if isinstance(files[0], Path):
@@ -735,18 +734,21 @@ def query_sort_lazy_pandas(files: list[str] | list[Path]) -> pd.DataFrame:
     else:
         file_list = list(files)
 
-    # Process each file and concatenate results
-    results = []
-    for f in file_list:
-        lf = lazy.scan(f)
-        result = lf.select("transaction_id", "amount", "transaction_date").collect(
-            use_physical_planner=True
-        )
-        results.append(result)
+    # Use Concat node for multi-file + head() for TopK optimization
+    if len(file_list) == 1:
+        lf = lazy.scan(file_list[0])
+    else:
+        lfs = [lazy.scan(f) for f in file_list]
+        lf = lazy.concat(lfs)
 
-    # Concatenate, sort, and take top 10000
-    combined = pd.concat(results, ignore_index=True)
-    return combined.sort_values("amount", ascending=False).head(10000)
+    # Select columns, sort descending, take top 10000
+    result = (
+        lf.select("transaction_id", "amount", "transaction_date")
+        .sort("amount", descending=True)
+        .head(10000)
+        .collect(use_physical_planner=True)
+    )
+    return result
 
 
 def run_sort_benchmark(
