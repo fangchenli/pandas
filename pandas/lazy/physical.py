@@ -1066,6 +1066,18 @@ class PhysicalFilter(PhysicalPlan):
 # Aggregation Nodes
 # =============================================================================
 
+# Merge functions for two-phase streaming aggregation
+# Maps: original_agg -> merge_agg (to combine partial results)
+_STREAMING_MERGE_FUNCS: dict[str, str] = {
+    "sum": "sum",  # sum of partial sums
+    "count": "sum",  # sum of partial counts
+    "min": "min",  # min of partial mins
+    "max": "max",  # max of partial maxes
+    "first": "first",  # first of firsts (batch order preserved)
+    "last": "last",  # last of lasts (batch order preserved)
+    # mean handled specially: track (sum, count), then divide
+}
+
 
 @dataclass
 class PhysicalHashAggregate(PhysicalPlan):
@@ -1126,27 +1138,30 @@ class PhysicalHashAggregate(PhysicalPlan):
                     agg_func = ir.function
                     agg_specs.append((output_name, col_name, agg_func))
 
-        # Streaming aggregation is currently disabled.
+        # Try streaming aggregation for memory-efficient processing of large inputs
+        # (e.g., Concat nodes that scan multiple files).
         #
-        # TODO: Revisit streaming aggregation design. The current implementation
-        # converts batches to pandas DataFrames and uses Python dicts for partial
-        # aggregates, which bypasses all optimized kernels (Arrow table groupby,
-        # Cython nunique via factorize+bincount). This makes it slower than the
-        # non-streaming path.
+        # Streaming is only possible for "mergeable" aggregations where partial
+        # results can be combined algebraically:
+        # - sum: sum of partial sums
+        # - count: sum of partial counts
+        # - min/max: min/max of partial min/max
+        # - mean: sum of sums / sum of counts
+        # - first/last: first of firsts / last of lasts (requires ordering)
         #
-        # A proper streaming implementation should:
-        # 1. Keep data as Arrow/NumPy arrays throughout
-        # 2. Use existing backend kernels for per-batch aggregation
-        # 3. Merge partial results with vectorized operations
+        # Non-mergeable aggregations (nunique, std, var) require full materialization
+        # because there's no algebraic way to merge partial results without
+        # maintaining per-group state that can grow unbounded.
         #
-        # For nunique specifically, there's no algebraic way to merge partial
-        # results (unlike sum/count/min/max). Options:
-        # - Collect unique values per group across batches (memory grows)
-        # - Use HyperLogLog for approximate count (adds ~2% error)
-        # - Don't stream nunique (current choice - fall back to full materialization)
-        #
-        # Reference: DuckDB and Polars also don't efficiently parallelize exact
-        # COUNT DISTINCT - they either use hash sets or approximate sketches.
+        # Trade-off: Streaming uses less peak memory but has ~2x merge overhead.
+        # For data that fits in RAM, non-streaming is faster.
+        # For data exceeding RAM, streaming prevents OOM errors.
+        if (
+            self.input.supports_streaming
+            and group_cols
+            and self._can_stream_aggregation(agg_specs)
+        ):
+            return self._execute_streaming_aggregation(group_cols, agg_specs, context)
 
         input_arrays = self.input.execute(context)
 
@@ -1715,6 +1730,30 @@ class PhysicalHashAggregate(PhysicalPlan):
 
         return result
 
+    # =========================================================================
+    # Streaming Aggregation (v2) - Array-based, uses optimized kernels
+    # =========================================================================
+
+    def _can_stream_aggregation(self, agg_specs: list[tuple[str, str, str]]) -> bool:
+        """
+        Check if all aggregations can be computed in streaming mode.
+
+        Streaming requires that partial results can be merged algebraically.
+        Non-mergeable aggregations (nunique, std, var) require full data.
+
+        Parameters
+        ----------
+        agg_specs : list[tuple[str, str, str]]
+            Aggregation specs: (output_name, input_col, agg_func)
+
+        Returns
+        -------
+        bool
+            True if all aggregations are streaming-compatible.
+        """
+        mergeable_aggs = set(_STREAMING_MERGE_FUNCS.keys()) | {"mean"}
+        return all(agg_func in mergeable_aggs for _, _, agg_func in agg_specs)
+
     def _execute_streaming_aggregation(
         self,
         group_cols: list[str],
@@ -1722,21 +1761,16 @@ class PhysicalHashAggregate(PhysicalPlan):
         context: ExecutionContext,
     ) -> ArrayDict:
         """
-        Execute aggregation in streaming mode, processing batches incrementally.
+        Execute aggregation in streaming mode using two-phase map-reduce.
 
-        This method processes input batches one at a time, maintaining partial
-        aggregates per group. This enables memory-efficient aggregation for
-        streaming sources like ConcatNode without materializing all data.
+        This method keeps data as Arrow arrays throughout and uses the same
+        optimized Arrow group_by kernel for both phases:
 
-        Uses pandas' efficient groupby per batch and merges partial results.
-        For nunique, tracks unique values per group using Python sets.
+        Phase 1 (Map): For each batch, compute partial aggregates per group
+        Phase 2 (Reduce): Concatenate partials and re-aggregate with merge funcs
 
-        Streaming-compatible aggregations:
-        - sum: accumulate sums per group
-        - count: accumulate counts per group
-        - min/max: keep running min/max per group
-        - mean: accumulate sum + count, compute mean at end
-        - nunique: track unique values per group (uses hash sets)
+        This enables memory-efficient aggregation for streaming sources like
+        ConcatNode (multi-file scans) without materializing all data at once.
 
         Parameters
         ----------
@@ -1752,227 +1786,175 @@ class PhysicalHashAggregate(PhysicalPlan):
         ArrayDict
             Aggregated result with group keys and aggregated values.
         """
-        import numpy as np
         import pyarrow as pa
 
-        from pandas import DataFrame
-        from pandas.lazy.backends.types import INDEX_COL_NAME
+        from pandas.lazy.backends import dispatch_kernel
+        from pandas.lazy.backends.types import (
+            INDEX_COL_NAME,
+            index_col_name,
+            is_index_col,
+        )
 
-        # Classify aggregations by type
-        sum_aggs = []
-        count_aggs = []
-        min_aggs = []
-        max_aggs = []
-        mean_aggs = []
-        nunique_aggs = []
+        # Separate mean aggregations (need special handling)
+        mean_aggs: list[tuple[str, str]] = []  # (output_name, input_col)
+        direct_aggs: list[tuple[str, str, str]] = []  # (output_name, input_col, agg)
 
         for output_name, col_name, agg_func in agg_specs:
-            if agg_func == "sum":
-                sum_aggs.append((output_name, col_name))
-            elif agg_func == "count":
-                count_aggs.append((output_name, col_name))
-            elif agg_func == "min":
-                min_aggs.append((output_name, col_name))
-            elif agg_func == "max":
-                max_aggs.append((output_name, col_name))
-            elif agg_func == "mean":
+            if agg_func == "mean":
                 mean_aggs.append((output_name, col_name))
-            elif agg_func in ("nunique", "n_unique"):
-                nunique_aggs.append((output_name, col_name))
+            else:
+                direct_aggs.append((output_name, col_name, agg_func))
 
-        is_single_key = len(group_cols) == 1
+        # Build per-batch aggregation specs
+        # For mean, we need to compute sum and count, then divide at the end
+        batch_agg_specs: list[tuple[str, str, str]] = list(direct_aggs)
+        for output_name, col_name in mean_aggs:
+            batch_agg_specs.append((f"__sum_{output_name}__", col_name, "sum"))
+            batch_agg_specs.append((f"__count_{output_name}__", col_name, "count"))
 
-        # Partial aggregates stored as {group_key: {output_name: value}}
-        # For sum/count/mean, values are numeric
-        # For min/max, values are numeric
-        # For nunique, values are sets
-        partial_aggs: dict = {}
+        # Phase 1: Per-batch aggregation
+        partial_tables: list[pa.Table] = []
 
-        def normalize_key(key):
-            """Normalize key to hashable Python type."""
-            if hasattr(key, "item"):
-                return key.item()
-            return key
-
-        # Process batches
         for batch in self.input.execute_batches(context):
-            # Convert batch to pandas DataFrame for efficient groupby
-            batch_dict = {}
-            needed_cols = set(group_cols)
-            for _, col_name in (
-                sum_aggs + count_aggs + min_aggs + max_aggs + mean_aggs + nunique_aggs
-            ):
-                needed_cols.add(col_name)
+            # Skip empty batches
+            first_arr = next(iter(batch.values()))
+            if len(first_arr) == 0:
+                continue
 
-            for col in needed_cols:
-                arr = batch[col]
-                if isinstance(arr, (pa.Array, pa.ChunkedArray)):
-                    batch_dict[col] = arr.to_numpy(zero_copy_only=False)
-                else:
-                    batch_dict[col] = np.asarray(arr)
+            # Build Arrow table from batch (exclude index columns)
+            columns = {k: v for k, v in batch.items() if not is_index_col(k)}
+            batch_table = pa.table(columns)
 
-            df = DataFrame(batch_dict)
+            # Aggregate this batch using Arrow's optimized group_by
+            partial = dispatch_kernel(
+                "group_by", "arrow", batch_table, group_cols, batch_agg_specs
+            )
+            partial_tables.append(partial)
 
-            # Use pandas groupby for efficient per-batch aggregation
-            grouped = df.groupby(group_cols, sort=False)
+        # Handle empty result
+        if not partial_tables:
+            return self._make_empty_aggregate_result(group_cols, agg_specs, context)
 
-            # Process sum aggregations
-            for output_name, col_name in sum_aggs:
-                batch_result = grouped[col_name].sum()
-                for key, val in batch_result.items():
-                    key = normalize_key(key)
-                    if key not in partial_aggs:
-                        partial_aggs[key] = {}
-                    if output_name not in partial_aggs[key]:
-                        partial_aggs[key][output_name] = 0.0
-                    partial_aggs[key][output_name] += val
-
-            # Process count aggregations
-            for output_name, col_name in count_aggs:
-                batch_result = grouped[col_name].count()
-                for key, val in batch_result.items():
-                    key = normalize_key(key)
-                    if key not in partial_aggs:
-                        partial_aggs[key] = {}
-                    if output_name not in partial_aggs[key]:
-                        partial_aggs[key][output_name] = 0
-                    partial_aggs[key][output_name] += val
-
-            # Process min aggregations
-            for output_name, col_name in min_aggs:
-                batch_result = grouped[col_name].min()
-                for key, val in batch_result.items():
-                    key = normalize_key(key)
-                    if key not in partial_aggs:
-                        partial_aggs[key] = {}
-                    if output_name not in partial_aggs[key]:
-                        partial_aggs[key][output_name] = val
-                    else:
-                        partial_aggs[key][output_name] = min(
-                            partial_aggs[key][output_name], val
-                        )
-
-            # Process max aggregations
-            for output_name, col_name in max_aggs:
-                batch_result = grouped[col_name].max()
-                for key, val in batch_result.items():
-                    key = normalize_key(key)
-                    if key not in partial_aggs:
-                        partial_aggs[key] = {}
-                    if output_name not in partial_aggs[key]:
-                        partial_aggs[key][output_name] = val
-                    else:
-                        partial_aggs[key][output_name] = max(
-                            partial_aggs[key][output_name], val
-                        )
-
-            # Process mean aggregations (track sum and count)
-            for output_name, col_name in mean_aggs:
-                batch_sum = grouped[col_name].sum()
-                batch_count = grouped[col_name].count()
-                sum_key = f"__{output_name}_sum"
-                count_key = f"__{output_name}_count"
-                for orig_key in batch_sum.index:
-                    key = normalize_key(orig_key)
-                    if key not in partial_aggs:
-                        partial_aggs[key] = {}
-                    if sum_key not in partial_aggs[key]:
-                        partial_aggs[key][sum_key] = 0.0
-                        partial_aggs[key][count_key] = 0
-                    partial_aggs[key][sum_key] += batch_sum[orig_key]
-                    partial_aggs[key][count_key] += batch_count[orig_key]
-
-            # Process nunique aggregations - collect unique values per group
-            # Use pandas groupby iteration for efficient unique collection
-            for output_name, col_name in nunique_aggs:
-                set_key = f"__{output_name}_set"
-
-                # For each group, collect unique values as a set
-                for orig_key, grp in grouped:
-                    vals = grp[col_name].values
-                    key = normalize_key(orig_key)
-                    if key not in partial_aggs:
-                        partial_aggs[key] = {}
-                    if set_key not in partial_aggs[key]:
-                        partial_aggs[key][set_key] = set()
-                    # Use numpy unique to reduce set size before Python iteration
-                    unique_vals = np.unique(vals)
-                    partial_aggs[key][set_key].update(unique_vals.tolist())
-
-        # Convert partial aggregates to final result
-        if not partial_aggs:
-            # No data processed, return empty result
-            result: ArrayDict = {}
-            if is_single_key:
-                result[group_cols[0]] = pa.array([])
-            else:
-                for col in group_cols:
-                    result[col] = pa.array([])
-            for output_name, _, _ in agg_specs:
-                result[output_name] = pa.array([])
-            return result
-
-        # Sort keys for consistent output
-        sorted_keys = sorted(partial_aggs.keys())
-
-        # Build result arrays
-        result = {}
-
-        # Add group keys
-        if is_single_key:
-            if context.preserve_index:
-                result[INDEX_COL_NAME] = pa.array(sorted_keys)
-                context.index_names = list(group_cols)
-                context.index_is_multi = False
-            else:
-                result[group_cols[0]] = pa.array(sorted_keys)
-        # Multi-key: unzip tuples
-        elif context.preserve_index:
-            from pandas.lazy.backends.types import index_col_name
-
-            for i, col in enumerate(group_cols):
-                idx_col = index_col_name(i)
-                result[idx_col] = pa.array([k[i] for k in sorted_keys])
-            context.index_names = list(group_cols)
-            context.index_is_multi = True
+        # Single batch - no merge needed
+        if len(partial_tables) == 1:
+            result_table = partial_tables[0]
         else:
+            # Phase 2: Merge partial results
+            # Concatenate all partial tables
+            merged_table = pa.concat_tables(partial_tables)
+
+            # Build merge aggregation specs
+            merge_specs: list[tuple[str, str, str]] = []
+            for output_name, _, agg_func in direct_aggs:
+                merge_func = _STREAMING_MERGE_FUNCS[agg_func]
+                merge_specs.append((output_name, output_name, merge_func))
+            for output_name, _ in mean_aggs:
+                # Sum the partial sums, sum the partial counts
+                merge_specs.append(
+                    (f"__sum_{output_name}__", f"__sum_{output_name}__", "sum")
+                )
+                merge_specs.append(
+                    (f"__count_{output_name}__", f"__count_{output_name}__", "sum")
+                )
+
+            # Re-aggregate with merge functions
+            result_table = dispatch_kernel(
+                "group_by", "arrow", merged_table, group_cols, merge_specs
+            )
+
+        # Post-process: compute mean from sum/count
+        if mean_aggs:
+            # We need to compute mean = sum / count and remove intermediate columns
+            result_columns = {
+                name: result_table.column(name)
+                for name in result_table.column_names
+                if not name.startswith("__")
+            }
+
+            for output_name, _ in mean_aggs:
+                sum_col = result_table.column(f"__sum_{output_name}__")
+                count_col = result_table.column(f"__count_{output_name}__")
+                # Compute mean (handle chunked arrays)
+                import pyarrow.compute as pc
+
+                mean_arr = pc.divide(
+                    pc.cast(sum_col, pa.float64()), pc.cast(count_col, pa.float64())
+                )
+                if isinstance(mean_arr, pa.ChunkedArray):
+                    mean_arr = mean_arr.combine_chunks()
+                result_columns[output_name] = mean_arr
+
+            # Rebuild table with correct column order
+            final_columns = []
+            final_names = []
+            for col in group_cols:
+                final_columns.append(result_columns[col])
+                final_names.append(col)
+            for output_name, _, _ in agg_specs:
+                final_columns.append(result_columns[output_name])
+                final_names.append(output_name)
+            result_table = pa.table(dict(zip(final_names, final_columns, strict=True)))
+
+        # Convert result table to ArrayDict
+        result: ArrayDict = {}
+
+        if context.preserve_index:
+            is_multi = len(group_cols) > 1
             for i, col in enumerate(group_cols):
-                result[col] = pa.array([k[i] for k in sorted_keys])
+                idx_col = index_col_name(i) if is_multi else INDEX_COL_NAME
+                chunked = result_table.column(col)
+                if isinstance(chunked, pa.ChunkedArray):
+                    result[idx_col] = chunked.combine_chunks()
+                else:
+                    result[idx_col] = chunked
+            context.index_names = list(group_cols)
+            context.index_is_multi = is_multi
+        else:
+            for col in group_cols:
+                chunked = result_table.column(col)
+                if isinstance(chunked, pa.ChunkedArray):
+                    result[col] = chunked.combine_chunks()
+                else:
+                    result[col] = chunked
 
-        # Add aggregated values
-        for output_name, _ in sum_aggs:
-            values = [partial_aggs[k][output_name] for k in sorted_keys]
-            result[output_name] = pa.array(values)
+        for output_name, _, _ in agg_specs:
+            chunked = result_table.column(output_name)
+            if isinstance(chunked, pa.ChunkedArray):
+                result[output_name] = chunked.combine_chunks()
+            else:
+                result[output_name] = chunked
 
-        for output_name, _ in count_aggs:
-            values = [partial_aggs[k][output_name] for k in sorted_keys]
-            result[output_name] = pa.array(values)
+        return result
 
-        for output_name, _ in min_aggs:
-            values = [partial_aggs[k][output_name] for k in sorted_keys]
-            result[output_name] = pa.array(values)
+    def _make_empty_aggregate_result(
+        self,
+        group_cols: list[str],
+        agg_specs: list[tuple[str, str, str]],
+        context: ExecutionContext,
+    ) -> ArrayDict:
+        """Create empty result for aggregation with no input rows."""
+        import pyarrow as pa
 
-        for output_name, _ in max_aggs:
-            values = [partial_aggs[k][output_name] for k in sorted_keys]
-            result[output_name] = pa.array(values)
+        from pandas.lazy.backends.types import (
+            INDEX_COL_NAME,
+            index_col_name,
+        )
 
-        # Finalize mean aggregations
-        for output_name, _ in mean_aggs:
-            sum_key = f"__{output_name}_sum"
-            count_key = f"__{output_name}_count"
-            values = [
-                partial_aggs[k][sum_key] / partial_aggs[k][count_key]
-                if partial_aggs[k][count_key] > 0
-                else float("nan")
-                for k in sorted_keys
-            ]
-            result[output_name] = pa.array(values)
+        result: ArrayDict = {}
 
-        # Finalize nunique aggregations
-        for output_name, _ in nunique_aggs:
-            set_key = f"__{output_name}_set"
-            values = [len(partial_aggs[k][set_key]) for k in sorted_keys]
-            result[output_name] = pa.array(values)
+        if context.preserve_index:
+            is_multi = len(group_cols) > 1
+            for i, col in enumerate(group_cols):
+                idx_col = index_col_name(i) if is_multi else INDEX_COL_NAME
+                result[idx_col] = pa.array([])
+            context.index_names = list(group_cols)
+            context.index_is_multi = is_multi
+        else:
+            for col in group_cols:
+                result[col] = pa.array([])
+
+        for output_name, _, _ in agg_specs:
+            result[output_name] = pa.array([])
 
         return result
 
