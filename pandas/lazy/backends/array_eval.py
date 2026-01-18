@@ -581,8 +581,9 @@ class ArrayEvaluator:
         try:
             # Use configured memory pool for allocation
             return fn.call(list(args), memory_pool=self._get_arrow_pool())
-        except (ValueError, TypeError, pa.ArrowInvalid):
-            # Function not available or incompatible args
+        except (ValueError, TypeError, pa.ArrowInvalid, pa.ArrowNotImplementedError):
+            # Function not available or incompatible args (e.g., string type mismatch)
+            # Fall through to kernel-based dispatch which handles type conversion
             return None
 
     # =========================================================================

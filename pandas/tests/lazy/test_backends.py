@@ -2181,3 +2181,82 @@ class TestFillNAKernels:
         assert result[2] == 3.0
         assert result[3] == 4.0
         assert result[4] == 5.0
+
+
+class TestArrowStringConcatenation:
+    """Tests for Arrow string concatenation with type coercion."""
+
+    def test_arrow_string_concat_with_literal(self):
+        """Test concatenation of Arrow large_string with Python string literal."""
+        from pandas.lazy.backends import dispatch_kernel
+
+        arr = pa.array(["hello", "world"], type=pa.large_string())
+        result = dispatch_kernel("add", "arrow", arr, "_suffix")
+
+        # Result should be large_string (same as input)
+        assert pa.types.is_large_string(result.type)
+        assert result.to_pylist() == ["hello_suffix", "world_suffix"]
+
+    def test_arrow_string_concat_two_arrays(self):
+        """Test concatenation of two Arrow string arrays."""
+        from pandas.lazy.backends import dispatch_kernel
+
+        arr1 = pa.array(["hello", "world"], type=pa.large_string())
+        arr2 = pa.array(["_a", "_b"], type=pa.large_string())
+        result = dispatch_kernel("add", "arrow", arr1, arr2)
+
+        assert pa.types.is_large_string(result.type)
+        assert result.to_pylist() == ["hello_a", "world_b"]
+
+    def test_arrow_string_concat_mixed_types(self):
+        """Test concatenation of large_string with regular string array."""
+        from pandas.lazy.backends import dispatch_kernel
+
+        arr1 = pa.array(["hello", "world"], type=pa.large_string())
+        arr2 = pa.array(["_a", "_b"], type=pa.string())
+        result = dispatch_kernel("add", "arrow", arr1, arr2)
+
+        # Should coerce to large_string (the larger type)
+        assert pa.types.is_large_string(result.type)
+        assert result.to_pylist() == ["hello_a", "world_b"]
+
+    def test_physical_planner_string_concat_with_literal(self):
+        """Test string concat works through physical planner with Arrow-backed data."""
+        df = pd.DataFrame(
+            {
+                "region": pd.array(["North", "South", "East"], dtype="string[pyarrow]"),
+                "category": pd.array(["A", "B", "C"], dtype="string[pyarrow]"),
+            }
+        )
+
+        from pandas.lazy import col
+
+        lf = df.select()
+        lf = lf.with_columns((col("region") + "_" + col("category")).alias("combined"))
+        result = lf.collect(use_physical_planner=True)
+
+        expected_combined = ["North_A", "South_B", "East_C"]
+        assert result["combined"].tolist() == expected_combined
+
+    def test_physical_planner_string_concat_after_str_upper(self):
+        """Test string concat after str.upper() works with physical planner."""
+        df = pd.DataFrame(
+            {
+                "region": pd.array(["North", "South"], dtype="string[pyarrow]"),
+                "category": pd.array(["a", "b"], dtype="string[pyarrow]"),
+            }
+        )
+
+        from pandas.lazy import col
+
+        lf = df.select()
+        lf = lf.with_columns(
+            col("region").str.upper().alias("region_upper"),
+        )
+        lf = lf.with_columns(
+            (col("region_upper") + "_" + col("category")).alias("combined")
+        )
+        result = lf.collect(use_physical_planner=True)
+
+        expected_combined = ["NORTH_a", "SOUTH_b"]
+        assert result["combined"].tolist() == expected_combined

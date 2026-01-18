@@ -67,6 +67,13 @@ class LazyDtype:
 
         # Handle pandas StringDtype (includes string[python], string[pyarrow])
         if isinstance(dtype, pd.StringDtype):
+            # Check if it's Arrow-backed via storage attribute
+            storage = getattr(dtype, "storage", None)
+            if storage == "pyarrow":
+                import pyarrow as pa
+
+                # Arrow-backed string uses large_string internally
+                return cls("string", None, pa.large_string(), has_nulls)
             return cls("string", None, None, has_nulls)
 
         # Handle nullable extension dtypes (Int64, Float64, boolean, etc.)
