@@ -210,6 +210,12 @@ class Schema:
     def __contains__(self, name: str) -> bool:
         return name in self.fields
 
+    def __iter__(self):
+        return iter(self.fields)
+
+    def __len__(self) -> int:
+        return len(self.fields)
+
     def dominant_backend(self) -> str:
         """
         Return the dominant storage backend for this schema.

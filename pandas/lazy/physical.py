@@ -1109,9 +1109,8 @@ class PhysicalHashAggregate(PhysicalPlan):
             FieldRef,
         )
 
-        input_arrays = self.input.execute(context)
-
-        # Extract group-by column names
+        # Extract group-by column names and aggregation specs early
+        # (needed to decide if streaming is beneficial)
         group_cols = [extract_output_name(e) for e in self.group_by]
 
         # Build aggregation list: (output_name, input_col, agg_func)
@@ -1126,6 +1125,30 @@ class PhysicalHashAggregate(PhysicalPlan):
                     col_name = ir.args[0].name
                     agg_func = ir.function
                     agg_specs.append((output_name, col_name, agg_func))
+
+        # Streaming aggregation is currently disabled.
+        #
+        # TODO: Revisit streaming aggregation design. The current implementation
+        # converts batches to pandas DataFrames and uses Python dicts for partial
+        # aggregates, which bypasses all optimized kernels (Arrow table groupby,
+        # Cython nunique via factorize+bincount). This makes it slower than the
+        # non-streaming path.
+        #
+        # A proper streaming implementation should:
+        # 1. Keep data as Arrow/NumPy arrays throughout
+        # 2. Use existing backend kernels for per-batch aggregation
+        # 3. Merge partial results with vectorized operations
+        #
+        # For nunique specifically, there's no algebraic way to merge partial
+        # results (unlike sum/count/min/max). Options:
+        # - Collect unique values per group across batches (memory grows)
+        # - Use HyperLogLog for approximate count (adds ~2% error)
+        # - Don't stream nunique (current choice - fall back to full materialization)
+        #
+        # Reference: DuckDB and Polars also don't efficiently parallelize exact
+        # COUNT DISTINCT - they either use hash sets or approximate sketches.
+
+        input_arrays = self.input.execute(context)
 
         # Determine backend from input arrays
         # Prefer Arrow if any of the aggregation value columns are Arrow-backed,
@@ -1692,6 +1715,267 @@ class PhysicalHashAggregate(PhysicalPlan):
 
         return result
 
+    def _execute_streaming_aggregation(
+        self,
+        group_cols: list[str],
+        agg_specs: list[tuple[str, str, str]],
+        context: ExecutionContext,
+    ) -> ArrayDict:
+        """
+        Execute aggregation in streaming mode, processing batches incrementally.
+
+        This method processes input batches one at a time, maintaining partial
+        aggregates per group. This enables memory-efficient aggregation for
+        streaming sources like ConcatNode without materializing all data.
+
+        Uses pandas' efficient groupby per batch and merges partial results.
+        For nunique, tracks unique values per group using Python sets.
+
+        Streaming-compatible aggregations:
+        - sum: accumulate sums per group
+        - count: accumulate counts per group
+        - min/max: keep running min/max per group
+        - mean: accumulate sum + count, compute mean at end
+        - nunique: track unique values per group (uses hash sets)
+
+        Parameters
+        ----------
+        group_cols : list[str]
+            Column names to group by.
+        agg_specs : list[tuple[str, str, str]]
+            Aggregation specs: (output_name, input_col, agg_func)
+        context : ExecutionContext
+            Execution context.
+
+        Returns
+        -------
+        ArrayDict
+            Aggregated result with group keys and aggregated values.
+        """
+        import numpy as np
+        import pyarrow as pa
+
+        from pandas import DataFrame
+        from pandas.lazy.backends.types import INDEX_COL_NAME
+
+        # Classify aggregations by type
+        sum_aggs = []
+        count_aggs = []
+        min_aggs = []
+        max_aggs = []
+        mean_aggs = []
+        nunique_aggs = []
+
+        for output_name, col_name, agg_func in agg_specs:
+            if agg_func == "sum":
+                sum_aggs.append((output_name, col_name))
+            elif agg_func == "count":
+                count_aggs.append((output_name, col_name))
+            elif agg_func == "min":
+                min_aggs.append((output_name, col_name))
+            elif agg_func == "max":
+                max_aggs.append((output_name, col_name))
+            elif agg_func == "mean":
+                mean_aggs.append((output_name, col_name))
+            elif agg_func in ("nunique", "n_unique"):
+                nunique_aggs.append((output_name, col_name))
+
+        is_single_key = len(group_cols) == 1
+
+        # Partial aggregates stored as {group_key: {output_name: value}}
+        # For sum/count/mean, values are numeric
+        # For min/max, values are numeric
+        # For nunique, values are sets
+        partial_aggs: dict = {}
+
+        def normalize_key(key):
+            """Normalize key to hashable Python type."""
+            if hasattr(key, "item"):
+                return key.item()
+            return key
+
+        # Process batches
+        for batch in self.input.execute_batches(context):
+            # Convert batch to pandas DataFrame for efficient groupby
+            batch_dict = {}
+            needed_cols = set(group_cols)
+            for _, col_name in (
+                sum_aggs + count_aggs + min_aggs + max_aggs + mean_aggs + nunique_aggs
+            ):
+                needed_cols.add(col_name)
+
+            for col in needed_cols:
+                arr = batch[col]
+                if isinstance(arr, (pa.Array, pa.ChunkedArray)):
+                    batch_dict[col] = arr.to_numpy(zero_copy_only=False)
+                else:
+                    batch_dict[col] = np.asarray(arr)
+
+            df = DataFrame(batch_dict)
+
+            # Use pandas groupby for efficient per-batch aggregation
+            grouped = df.groupby(group_cols, sort=False)
+
+            # Process sum aggregations
+            for output_name, col_name in sum_aggs:
+                batch_result = grouped[col_name].sum()
+                for key, val in batch_result.items():
+                    key = normalize_key(key)
+                    if key not in partial_aggs:
+                        partial_aggs[key] = {}
+                    if output_name not in partial_aggs[key]:
+                        partial_aggs[key][output_name] = 0.0
+                    partial_aggs[key][output_name] += val
+
+            # Process count aggregations
+            for output_name, col_name in count_aggs:
+                batch_result = grouped[col_name].count()
+                for key, val in batch_result.items():
+                    key = normalize_key(key)
+                    if key not in partial_aggs:
+                        partial_aggs[key] = {}
+                    if output_name not in partial_aggs[key]:
+                        partial_aggs[key][output_name] = 0
+                    partial_aggs[key][output_name] += val
+
+            # Process min aggregations
+            for output_name, col_name in min_aggs:
+                batch_result = grouped[col_name].min()
+                for key, val in batch_result.items():
+                    key = normalize_key(key)
+                    if key not in partial_aggs:
+                        partial_aggs[key] = {}
+                    if output_name not in partial_aggs[key]:
+                        partial_aggs[key][output_name] = val
+                    else:
+                        partial_aggs[key][output_name] = min(
+                            partial_aggs[key][output_name], val
+                        )
+
+            # Process max aggregations
+            for output_name, col_name in max_aggs:
+                batch_result = grouped[col_name].max()
+                for key, val in batch_result.items():
+                    key = normalize_key(key)
+                    if key not in partial_aggs:
+                        partial_aggs[key] = {}
+                    if output_name not in partial_aggs[key]:
+                        partial_aggs[key][output_name] = val
+                    else:
+                        partial_aggs[key][output_name] = max(
+                            partial_aggs[key][output_name], val
+                        )
+
+            # Process mean aggregations (track sum and count)
+            for output_name, col_name in mean_aggs:
+                batch_sum = grouped[col_name].sum()
+                batch_count = grouped[col_name].count()
+                sum_key = f"__{output_name}_sum"
+                count_key = f"__{output_name}_count"
+                for orig_key in batch_sum.index:
+                    key = normalize_key(orig_key)
+                    if key not in partial_aggs:
+                        partial_aggs[key] = {}
+                    if sum_key not in partial_aggs[key]:
+                        partial_aggs[key][sum_key] = 0.0
+                        partial_aggs[key][count_key] = 0
+                    partial_aggs[key][sum_key] += batch_sum[orig_key]
+                    partial_aggs[key][count_key] += batch_count[orig_key]
+
+            # Process nunique aggregations - collect unique values per group
+            # Use pandas groupby iteration for efficient unique collection
+            for output_name, col_name in nunique_aggs:
+                set_key = f"__{output_name}_set"
+
+                # For each group, collect unique values as a set
+                for orig_key, grp in grouped:
+                    vals = grp[col_name].values
+                    key = normalize_key(orig_key)
+                    if key not in partial_aggs:
+                        partial_aggs[key] = {}
+                    if set_key not in partial_aggs[key]:
+                        partial_aggs[key][set_key] = set()
+                    # Use numpy unique to reduce set size before Python iteration
+                    unique_vals = np.unique(vals)
+                    partial_aggs[key][set_key].update(unique_vals.tolist())
+
+        # Convert partial aggregates to final result
+        if not partial_aggs:
+            # No data processed, return empty result
+            result: ArrayDict = {}
+            if is_single_key:
+                result[group_cols[0]] = pa.array([])
+            else:
+                for col in group_cols:
+                    result[col] = pa.array([])
+            for output_name, _, _ in agg_specs:
+                result[output_name] = pa.array([])
+            return result
+
+        # Sort keys for consistent output
+        sorted_keys = sorted(partial_aggs.keys())
+
+        # Build result arrays
+        result = {}
+
+        # Add group keys
+        if is_single_key:
+            if context.preserve_index:
+                result[INDEX_COL_NAME] = pa.array(sorted_keys)
+                context.index_names = list(group_cols)
+                context.index_is_multi = False
+            else:
+                result[group_cols[0]] = pa.array(sorted_keys)
+        # Multi-key: unzip tuples
+        elif context.preserve_index:
+            from pandas.lazy.backends.types import index_col_name
+
+            for i, col in enumerate(group_cols):
+                idx_col = index_col_name(i)
+                result[idx_col] = pa.array([k[i] for k in sorted_keys])
+            context.index_names = list(group_cols)
+            context.index_is_multi = True
+        else:
+            for i, col in enumerate(group_cols):
+                result[col] = pa.array([k[i] for k in sorted_keys])
+
+        # Add aggregated values
+        for output_name, _ in sum_aggs:
+            values = [partial_aggs[k][output_name] for k in sorted_keys]
+            result[output_name] = pa.array(values)
+
+        for output_name, _ in count_aggs:
+            values = [partial_aggs[k][output_name] for k in sorted_keys]
+            result[output_name] = pa.array(values)
+
+        for output_name, _ in min_aggs:
+            values = [partial_aggs[k][output_name] for k in sorted_keys]
+            result[output_name] = pa.array(values)
+
+        for output_name, _ in max_aggs:
+            values = [partial_aggs[k][output_name] for k in sorted_keys]
+            result[output_name] = pa.array(values)
+
+        # Finalize mean aggregations
+        for output_name, _ in mean_aggs:
+            sum_key = f"__{output_name}_sum"
+            count_key = f"__{output_name}_count"
+            values = [
+                partial_aggs[k][sum_key] / partial_aggs[k][count_key]
+                if partial_aggs[k][count_key] > 0
+                else float("nan")
+                for k in sorted_keys
+            ]
+            result[output_name] = pa.array(values)
+
+        # Finalize nunique aggregations
+        for output_name, _ in nunique_aggs:
+            set_key = f"__{output_name}_set"
+            values = [len(partial_aggs[k][set_key]) for k in sorted_keys]
+            result[output_name] = pa.array(values)
+
+        return result
+
     def children(self) -> list[PhysicalPlan]:
         return [self.input]
 
@@ -2033,21 +2317,89 @@ class PhysicalTopK(PhysicalPlan):
         return False
 
     def execute(self, context: ExecutionContext) -> ArrayDict:
-        # For small k with streaming input, use heap-based approach
-        if self.k > 0 and self.k < 10000 and self.input.supports_streaming:
+        # For small k with streaming input, use vectorized streaming approach
+        if self.k > 0 and self.k <= 10000 and self.input.supports_streaming:
             return self._execute_streaming_topk(context)
         return self._execute_materialized_topk(context)
 
     def _execute_streaming_topk(self, context: ExecutionContext) -> ArrayDict:
         """
-        Heap-based streaming top-k selection.
+        Vectorized streaming top-k selection.
 
-        Processes input batches incrementally, maintaining a heap of size k.
+        Processes input batches incrementally using vectorized operations:
+        1. For each batch, select top-k using select_k kernel
+        2. Concatenate partial results (O(k * num_batches) rows)
+        3. Final top-k selection on merged partials
+
+        This is O(n) per batch for selection, much faster than row-by-row heap.
         """
-        import heapq
 
+        partial_results: list[ArrayDict] = []
+
+        for batch in self.input.execute_batches(context):
+            # Skip empty batches
+            first_arr = next(iter(batch.values()))
+            if len(first_arr) == 0:
+                continue
+
+            # Select top-k from this batch
+            batch_topk = self._select_k_from_arrays(batch, self.k)
+            if batch_topk:
+                partial_results.append(batch_topk)
+
+        if not partial_results:
+            return self._make_empty_result(context)
+
+        # If only one batch, return directly
+        if len(partial_results) == 1:
+            return partial_results[0]
+
+        # Concatenate all partial results
+        merged = self._concat_array_dicts(partial_results)
+
+        # Final top-k selection on merged partials
+        return self._select_k_from_arrays(merged, self.k)
+
+    def _concat_array_dicts(self, arrays_list: list[ArrayDict]) -> ArrayDict:
+        """Concatenate multiple ArrayDicts into one."""
+        import numpy as np
+        import pyarrow as pa
+
+        from pandas.lazy.backends.convert import get_array_backend
+
+        if not arrays_list:
+            return {}
+
+        result: ArrayDict = {}
+        col_names = list(arrays_list[0].keys())
+
+        for col_name in col_names:
+            arrays = [d[col_name] for d in arrays_list if col_name in d]
+            if not arrays:
+                continue
+
+            backend = get_array_backend(arrays[0])
+
+            if backend == "arrow":
+                # Concatenate Arrow arrays
+                chunked = pa.chunked_array(arrays)
+                result[col_name] = chunked.combine_chunks()
+            else:
+                # Concatenate NumPy arrays
+                result[col_name] = np.concatenate(arrays)
+
+        return result
+
+    def _select_k_from_arrays(self, arrays: ArrayDict, k: int) -> ArrayDict:
+        """
+        Select top-k rows from arrays using vectorized operations.
+
+        For single-key: uses select_k_unstable kernel (O(n) partitioning)
+        For multi-key: uses lexsort + take (O(n log n) but vectorized)
+        """
         import numpy as np
 
+        from pandas.lazy.backends import dispatch_kernel
         from pandas.lazy.backends.array_eval import ArrayEvaluator
         from pandas.lazy.backends.convert import get_array_backend
         from pandas.lazy.ir import (
@@ -2055,122 +2407,124 @@ class PhysicalTopK(PhysicalPlan):
             FieldRef,
         )
 
-        # Collect batches and build heap
-        # Entry format: (sort_key, batch_idx, row_idx)
-        # For multi-key, sort_key is a tuple
-        heap: list = []
-        all_batches: list[ArrayDict] = []
-        single_key = len(self.by) == 1
-        descending = self.descending[0] if single_key else self.descending
+        first_arr = next(iter(arrays.values()))
+        arr_len = len(first_arr)
 
-        for batch_idx, batch in enumerate(self.input.execute_batches(context)):
-            all_batches.append(batch)
+        if arr_len == 0:
+            return {}
 
-            # Get sort key values
-            if single_key:
-                expr = self.by[0]
-                ir = expr._ir
-                if isinstance(ir, Alias):
-                    ir = ir.arg
-                if isinstance(ir, FieldRef):
-                    key_arr = batch[ir.name]
+        # If k >= array length, return all rows (sorted)
+        if k >= arr_len:
+            return self._sort_arrays(arrays)
+
+        # Single-key case: use select_k_unstable kernel
+        if len(self.by) == 1:
+            expr = self.by[0]
+            ir = expr._ir
+            if isinstance(ir, Alias):
+                ir = ir.arg
+
+            if isinstance(ir, FieldRef):
+                col_name = ir.name
+                arr = arrays[col_name]
+                backend = get_array_backend(arr)
+                descending = self.descending[0]
+                order = "descending" if descending else "ascending"
+
+                if backend == "numpy":
+                    topk_indices = dispatch_kernel(
+                        "select_k_unstable", backend, arr, k, order=order
+                    )
                 else:
-                    evaluator = ArrayEvaluator(batch, preferred_backend="auto")
-                    key_arr = evaluator.evaluate(ir)
+                    topk_indices = dispatch_kernel(
+                        "select_k_unstable", backend, arr, k, sort_keys=[("", order)]
+                    )
 
-                if hasattr(key_arr, "to_numpy"):
-                    key_arr = key_arr.to_numpy(zero_copy_only=False)
-                else:
-                    key_arr = np.asarray(key_arr)
+                result: ArrayDict = {}
+                for name, col_arr in arrays.items():
+                    col_backend = get_array_backend(col_arr)
+                    result[name] = dispatch_kernel(
+                        "take", col_backend, col_arr, topk_indices
+                    )
+                return result
 
-                for row_idx in range(len(key_arr)):
-                    key = key_arr[row_idx]
-                    # For descending, negate numeric keys for min-heap as max-heap
-                    if descending and np.issubdtype(type(key), np.number):
-                        heap_key = -key
-                    else:
-                        heap_key = key
+        # Multi-key case: lexsort + take top k
+        evaluator = ArrayEvaluator(arrays, preferred_backend="auto")
+        sort_key_arrays = []
 
-                    entry = (heap_key, batch_idx, row_idx)
-
-                    if len(heap) < self.k:
-                        heapq.heappush(heap, entry)
-                    elif heap_key > heap[0][0]:
-                        heapq.heapreplace(heap, entry)
+        for expr in self.by:
+            ir = expr._ir
+            if isinstance(ir, Alias):
+                ir = ir.arg
+            if isinstance(ir, FieldRef):
+                sort_key_arrays.append(arrays[ir.name])
             else:
-                # Multi-key: create tuple sort keys
-                evaluator = ArrayEvaluator(batch, preferred_backend="auto")
-                key_arrays = []
-                for expr in self.by:
-                    ir = expr._ir
-                    if isinstance(ir, Alias):
-                        ir = ir.arg
-                    if isinstance(ir, FieldRef):
-                        arr = batch[ir.name]
-                    else:
-                        arr = evaluator.evaluate(ir)
-                    if hasattr(arr, "to_numpy"):
-                        arr = arr.to_numpy(zero_copy_only=False)
-                    key_arrays.append(np.asarray(arr))
+                sort_key_arrays.append(evaluator.evaluate(ir))
 
-                n_rows = len(key_arrays[0])
-                for row_idx in range(n_rows):
-                    # Build tuple key with proper sign for descending
-                    key_parts = []
-                    for i, arr in enumerate(key_arrays):
-                        val = arr[row_idx]
-                        desc = self.descending[i]
-                        if desc and np.issubdtype(arr.dtype, np.number):
-                            key_parts.append(-val)
-                        else:
-                            key_parts.append(val)
-                    heap_key = tuple(key_parts)
+        # Build keys for lexsort (reversed order, with negation for descending)
+        np_keys = []
+        for arr, desc in zip(
+            reversed(sort_key_arrays), reversed(self.descending), strict=True
+        ):
+            if hasattr(arr, "to_numpy"):
+                np_arr = arr.to_numpy(zero_copy_only=False)
+            else:
+                np_arr = np.asarray(arr)
+            if desc and np.issubdtype(np_arr.dtype, np.number):
+                np_arr = -np_arr
+            np_keys.append(np_arr)
 
-                    entry = (heap_key, batch_idx, row_idx)
+        sort_indices = np.lexsort(np_keys)[:k]
 
-                    if len(heap) < self.k:
-                        heapq.heappush(heap, entry)
-                    elif heap_key > heap[0][0]:
-                        heapq.heapreplace(heap, entry)
+        result = {}
+        for name, arr in arrays.items():
+            backend = get_array_backend(arr)
+            result[name] = dispatch_kernel("take", backend, arr, sort_indices)
 
-        if not heap:
-            # Return empty result
-            return self._make_empty_result(context)
+        return result
 
-        # Sort heap to get final order and collect results
-        heap.sort(reverse=True)  # Reverse because we want largest first
+    def _sort_arrays(self, arrays: ArrayDict) -> ArrayDict:
+        """Sort arrays by the sort keys (used when k >= array length)."""
+        import numpy as np
 
-        # Collect selected rows
+        from pandas.lazy.backends import dispatch_kernel
+        from pandas.lazy.backends.array_eval import ArrayEvaluator
+        from pandas.lazy.backends.convert import get_array_backend
+        from pandas.lazy.ir import (
+            Alias,
+            FieldRef,
+        )
+
+        evaluator = ArrayEvaluator(arrays, preferred_backend="auto")
+        sort_key_arrays = []
+
+        for expr in self.by:
+            ir = expr._ir
+            if isinstance(ir, Alias):
+                ir = ir.arg
+            if isinstance(ir, FieldRef):
+                sort_key_arrays.append(arrays[ir.name])
+            else:
+                sort_key_arrays.append(evaluator.evaluate(ir))
+
+        np_keys = []
+        for arr, desc in zip(
+            reversed(sort_key_arrays), reversed(self.descending), strict=True
+        ):
+            if hasattr(arr, "to_numpy"):
+                np_arr = arr.to_numpy(zero_copy_only=False)
+            else:
+                np_arr = np.asarray(arr)
+            if desc and np.issubdtype(np_arr.dtype, np.number):
+                np_arr = -np_arr
+            np_keys.append(np_arr)
+
+        sort_indices = np.lexsort(np_keys)
 
         result: ArrayDict = {}
-        col_names = list(self.schema.names)
-
-        # Pre-allocate result arrays
-        selected_indices = [(batch_idx, row_idx) for _, batch_idx, row_idx in heap]
-
-        for col_name in col_names:
-            first_batch = all_batches[0]
-            if col_name not in first_batch:
-                continue
-            sample_arr = first_batch[col_name]
-            backend = get_array_backend(sample_arr)
-
-            # Collect values from each selected (batch, row)
-            values = []
-            for batch_idx, row_idx in selected_indices:
-                arr = all_batches[batch_idx][col_name]
-                if hasattr(arr, "__getitem__"):
-                    values.append(arr[row_idx])
-                else:
-                    values.append(arr.to_pylist()[row_idx])
-
-            # Convert to appropriate array type
-            if backend == "arrow":
-                import pyarrow as pa
-
-                result[col_name] = pa.array(values)
-            else:
-                result[col_name] = np.array(values)
+        for name, arr in arrays.items():
+            backend = get_array_backend(arr)
+            result[name] = dispatch_kernel("take", backend, arr, sort_indices)
 
         return result
 
