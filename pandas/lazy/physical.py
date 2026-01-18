@@ -4000,6 +4000,7 @@ def execute_physical_plan(
     preferred_backend: Literal["auto", "arrow", "numpy"] = "auto",
     strict: bool = False,
     preserve_index: bool = False,
+    spill_config: SpillConfig | None = None,
 ) -> DataFrame:
     """
     Execute a physical plan and return the result.
@@ -4014,6 +4015,9 @@ def execute_physical_plan(
         If True, fail on backend fallbacks.
     preserve_index : bool, default False
         If True, preserve the original DataFrame index.
+    spill_config : SpillConfig or None, default None
+        Configuration for disk spilling under memory pressure.
+        When enabled, intermediate results can be spilled to disk.
 
     Returns
     -------
@@ -4031,6 +4035,7 @@ def execute_physical_plan(
         strict=strict,
         adaptive_thresholds=adaptive_enabled,
         preserve_index=preserve_index,
+        _spill_config=spill_config,
     )
 
     # Execute and get ArrayDict

@@ -962,3 +962,74 @@ class TestForcedSpillingBehavior:
                 assert not manager.should_spill(), (
                     "Global threshold should not be exceeded"
                 )
+
+
+class TestCollectSpillConfigAPI:
+    """Tests for spill_config parameter in LazyDataFrame.collect()."""
+
+    def test_spill_config_requires_physical_planner(self):
+        """Test that spill_config raises error without use_physical_planner=True."""
+        import pytest
+
+        import pandas as pd
+        from pandas.lazy.backends.spill import SpillConfig
+
+        df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+        ldf = df.select()
+
+        config = SpillConfig(enabled=True)
+
+        with pytest.raises(
+            ValueError, match="spill_config requires use_physical_planner=True"
+        ):
+            ldf.collect(spill_config=config)
+
+    def test_spill_config_with_physical_planner(self):
+        """Test that spill_config works with use_physical_planner=True."""
+        import pandas as pd
+        from pandas.lazy.backends.spill import SpillConfig
+
+        df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+        ldf = df.select()
+
+        config = SpillConfig(enabled=True, threshold_mb=2048)
+
+        # Should work without error
+        result = ldf.collect(use_physical_planner=True, spill_config=config)
+
+        tm.assert_frame_equal(result, df)
+
+    def test_spill_config_with_streaming(self):
+        """Test that spill_config works with streaming=True."""
+        import pandas as pd
+        from pandas.lazy.backends.spill import SpillConfig
+
+        df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+        ldf = df.select()
+
+        config = SpillConfig(enabled=True, threshold_mb=2048)
+
+        # Should work without error
+        batches = list(
+            ldf.collect(
+                streaming=True,
+                use_physical_planner=True,
+                spill_config=config,
+            )
+        )
+
+        # Combine batches
+        result = pd.concat(batches, ignore_index=True)
+        tm.assert_frame_equal(result, df)
+
+    def test_spill_config_none_is_default(self):
+        """Test that spill_config=None (default) works correctly."""
+        import pandas as pd
+
+        df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+        ldf = df.select()
+
+        # Should work without error (default behavior)
+        result = ldf.collect(use_physical_planner=True)
+
+        tm.assert_frame_equal(result, df)

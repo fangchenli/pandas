@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from pandas import DataFrame
+    from pandas.lazy.backends.spill import SpillConfig
     from pandas.lazy.expr import Expr
     from pandas.lazy.plan import (
         Aggregate,
@@ -690,6 +691,7 @@ class LazyDataFrame:
         streaming: bool = False,
         batch_size: int = 65536,
         preserve_index: bool = False,
+        spill_config: SpillConfig | None = None,
     ) -> DataFrame | Iterator[DataFrame]:
         """
         Execute the query and return a pandas DataFrame.
@@ -729,6 +731,26 @@ class LazyDataFrame:
             source data. If False (default), return DataFrame with
             RangeIndex. The default matches Polars-style behavior where
             lazy execution returns positional indexes.
+        spill_config : SpillConfig or None, default None
+            Configuration for disk spilling when memory pressure is detected.
+            When enabled, intermediate results from memory-intensive operations
+            (sort, join, groupby) can be spilled to disk. This allows processing
+            datasets larger than available RAM. Requires use_physical_planner=True.
+
+            Example::
+
+                from pandas.lazy.backends.spill import SpillConfig
+
+                config = SpillConfig(
+                    enabled=True,
+                    threshold_mb=2048,  # Spill when >2GB tracked
+                    operator_budget_mb=512,  # Per-operator budget
+                    spill_dir="/tmp/spill",  # Optional custom directory
+                )
+                result = ldf.collect(
+                    use_physical_planner=True,
+                    spill_config=config,
+                )
 
         Returns
         -------
@@ -743,6 +765,7 @@ class LazyDataFrame:
             If strict=True and fallback/conversion would be required.
         ValueError
             If streaming=True but use_physical_planner=False.
+            If spill_config is provided but use_physical_planner=False.
 
         Examples
         --------
@@ -759,7 +782,16 @@ class LazyDataFrame:
 
         >>> # Preserve original index
         >>> result = ldf.collect(preserve_index=True)
+
+        >>> # Out-of-core processing with disk spilling
+        >>> from pandas.lazy.backends.spill import SpillConfig
+        >>> config = SpillConfig(enabled=True, threshold_mb=2048)
+        >>> result = ldf.collect(use_physical_planner=True, spill_config=config)
         """
+        # Validate spill_config requires physical planner
+        if spill_config is not None and not use_physical_planner:
+            raise ValueError("spill_config requires use_physical_planner=True")
+
         if streaming:
             if not use_physical_planner:
                 raise ValueError("streaming=True requires use_physical_planner=True")
@@ -769,6 +801,7 @@ class LazyDataFrame:
                 engine=engine,
                 batch_size=batch_size,
                 preserve_index=preserve_index,
+                spill_config=spill_config,
             )
 
         if use_physical_planner:
@@ -777,6 +810,7 @@ class LazyDataFrame:
                 strict=strict,
                 engine=engine,
                 preserve_index=preserve_index,
+                spill_config=spill_config,
             )
         else:
             return self._collect_eager(optimize=optimize, preserve_index=preserve_index)
@@ -908,6 +942,7 @@ class LazyDataFrame:
         strict: bool = False,
         engine: Literal["auto", "arrow", "numpy"] = "auto",
         preserve_index: bool = False,
+        spill_config: SpillConfig | None = None,
     ) -> DataFrame:
         """
         Execute the query using the physical planner.
@@ -926,6 +961,8 @@ class LazyDataFrame:
             Preferred execution backend.
         preserve_index : bool, default False
             If True, preserve the original DataFrame index.
+        spill_config : SpillConfig or None, default None
+            Configuration for disk spilling under memory pressure.
 
         Returns
         -------
@@ -950,6 +987,7 @@ class LazyDataFrame:
             preferred_backend=engine,
             strict=strict,
             preserve_index=preserve_index,
+            spill_config=spill_config,
         )
 
     def _collect_streaming(
@@ -959,6 +997,7 @@ class LazyDataFrame:
         engine: Literal["auto", "arrow", "numpy"] = "auto",
         batch_size: int = 65536,
         preserve_index: bool = False,
+        spill_config: SpillConfig | None = None,
     ) -> Iterator[DataFrame]:
         """
         Execute the query and stream results as batches of DataFrames.
@@ -980,6 +1019,8 @@ class LazyDataFrame:
             Number of rows per batch.
         preserve_index : bool, default False
             If True, preserve the original DataFrame index.
+        spill_config : SpillConfig or None, default None
+            Configuration for disk spilling under memory pressure.
 
         Yields
         ------
@@ -1010,6 +1051,7 @@ class LazyDataFrame:
             batch_size=batch_size,
             streaming_enabled=True,
             adaptive_thresholds=adaptive_enabled,
+            _spill_config=spill_config,
         )
 
         # Stream batches
