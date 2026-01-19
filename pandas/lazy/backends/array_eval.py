@@ -566,7 +566,7 @@ class ArrayEvaluator:
         Returns None if the function is not available in Arrow.
         """
         try:
-            from pandas.lazy.backends.numexpr_fusion import get_arrow_function
+            from pandas.lazy.backends.arrow.cache import get_arrow_function
         except ImportError:
             return None
 
