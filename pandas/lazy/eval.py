@@ -241,6 +241,55 @@ class Evaluator:
             start = node.kwargs.get("start")
             stop = node.kwargs.get("stop")
             return args[0].str.slice(start=start, stop=stop)
+        elif func == "str_capitalize":
+            return args[0].str.capitalize()
+        elif func == "str_title":
+            return args[0].str.title()
+        elif func == "str_swapcase":
+            return args[0].str.swapcase()
+        elif func == "str_center":
+            width = args[1]
+            fillchar = args[2] if len(args) > 2 else " "
+            return args[0].str.center(width, fillchar)
+        elif func == "str_pad":
+            width = args[1]
+            side = node.kwargs.get("side", "left")
+            fillchar = node.kwargs.get("fillchar", " ")
+            return args[0].str.pad(width, side=side, fillchar=fillchar)
+        elif func == "str_zfill":
+            width = args[1]
+            return args[0].str.zfill(width)
+        elif func == "str_count":
+            pattern = args[1]
+            return args[0].str.count(pattern)
+        elif func == "str_find":
+            sub = args[1]
+            start = node.kwargs.get("start", 0)
+            end = node.kwargs.get("end")
+            return args[0].str.find(sub, start=start, end=end)
+        elif func == "str_match":
+            pattern = args[1]
+            return args[0].str.match(pattern)
+        elif func == "str_reverse":
+            return args[0].str[::-1]
+        elif func == "str_is_alnum":
+            return args[0].str.isalnum()
+        elif func == "str_is_alpha":
+            return args[0].str.isalpha()
+        elif func == "str_is_digit":
+            return args[0].str.isdigit()
+        elif func == "str_is_decimal":
+            return args[0].str.isdecimal()
+        elif func == "str_is_space":
+            return args[0].str.isspace()
+        elif func == "str_is_lower":
+            return args[0].str.islower()
+        elif func == "str_is_upper":
+            return args[0].str.isupper()
+        elif func == "str_is_title":
+            return args[0].str.istitle()
+        elif func == "str_is_numeric":
+            return args[0].str.isnumeric()
 
         # Aggregation operations
         elif func == "sum":
@@ -365,6 +414,17 @@ class Evaluator:
         elif func == "cum_max":
             return args[0].cummax()
 
+        elif func == "cum_mean":
+            # pandas doesn't have cummean, compute manually
+            from pandas import Series
+
+            cumsum = args[0].cumsum()
+            counts = Series(range(1, len(args[0]) + 1), index=args[0].index)
+            return cumsum / counts
+
+        elif func == "cum_prod":
+            return args[0].cumprod()
+
         # Rolling window operations - convert to nullable dtype if NaN introduced
         # Operations that preserve dtype: sum, min, max
         # Operations that produce floats: mean, std, var, median
@@ -417,6 +477,59 @@ class Evaluator:
             min_periods = node.kwargs.get("min_periods")
             result = args[0].rolling(window, min_periods=min_periods).median()
             # median always produces floats
+            return _convert_series_to_nullable(result)
+
+        elif func == "rolling_argmax":
+            window = node.kwargs.get("window")
+            min_periods = node.kwargs.get("min_periods")
+
+            def rolling_argmax_func(x):
+                if len(x.dropna()) < (min_periods or window):
+                    return np.nan
+                return x.values.argmax()
+
+            result = (
+                args[0]
+                .rolling(window, min_periods=min_periods)
+                .apply(rolling_argmax_func, raw=False)
+            )
+            return _convert_series_to_nullable(result)
+
+        elif func == "rolling_argmin":
+            window = node.kwargs.get("window")
+            min_periods = node.kwargs.get("min_periods")
+
+            def rolling_argmin_func(x):
+                if len(x.dropna()) < (min_periods or window):
+                    return np.nan
+                return x.values.argmin()
+
+            result = (
+                args[0]
+                .rolling(window, min_periods=min_periods)
+                .apply(rolling_argmin_func, raw=False)
+            )
+            return _convert_series_to_nullable(result)
+
+        elif func == "rolling_rank":
+            window = node.kwargs.get("window")
+            min_periods = node.kwargs.get("min_periods")
+            pct = node.kwargs.get("pct", False)
+
+            def rolling_rank_func(x):
+                if len(x.dropna()) < (min_periods or window):
+                    return np.nan
+                # Rank of the last element within the window
+                rank = (x.values < x.values[-1]).sum() + 1
+                if pct:
+                    return rank / len(x)
+                return rank
+
+            result = (
+                args[0]
+                .rolling(window, min_periods=min_periods)
+                .apply(rolling_rank_func, raw=False)
+            )
             return _convert_series_to_nullable(result)
 
         else:
@@ -517,6 +630,14 @@ class Evaluator:
                 return col_series.cummin()
             elif func_name == "cum_max":
                 return col_series.cummax()
+            elif func_name == "cum_mean":
+                from pandas import Series
+
+                cumsum = col_series.cumsum()
+                counts = Series(range(1, len(col_series) + 1), index=col_series.index)
+                return cumsum / counts
+            elif func_name == "cum_prod":
+                return col_series.cumprod()
             else:
                 raise NotImplementedError(f"Window function not supported: {func_name}")
 
@@ -641,6 +762,38 @@ class Evaluator:
                 [self._df[c] if isinstance(c, str) else c for c in partition_cols],
                 sort=False,
             ).cummax()
+
+        elif func_name == "cum_mean":
+            col_name = (
+                inner_node.args[0].name
+                if isinstance(inner_node.args[0], FieldRef)
+                else None
+            )
+            if col_name:
+                # GroupBy cumulative mean - compute from cumsum and cumcount
+                cumsum = grouped[col_name].cumsum()
+                cumcount = grouped[col_name].cumcount() + 1
+                return cumsum / cumcount
+            series_grouped = col_series.groupby(
+                [self._df[c] if isinstance(c, str) else c for c in partition_cols],
+                sort=False,
+            )
+            cumsum = series_grouped.cumsum()
+            cumcount = series_grouped.cumcount() + 1
+            return cumsum / cumcount
+
+        elif func_name == "cum_prod":
+            col_name = (
+                inner_node.args[0].name
+                if isinstance(inner_node.args[0], FieldRef)
+                else None
+            )
+            if col_name:
+                return grouped[col_name].cumprod()
+            return col_series.groupby(
+                [self._df[c] if isinstance(c, str) else c for c in partition_cols],
+                sort=False,
+            ).cumprod()
 
         else:
             raise NotImplementedError(f"Window function not supported: {func_name}")

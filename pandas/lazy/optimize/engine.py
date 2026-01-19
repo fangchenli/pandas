@@ -152,6 +152,8 @@ BACKEND_KERNELS: dict[str, BackendRequirements] = {
     "cum_sum": BackendRequirements.any_backend(),
     "cum_min": BackendRequirements.any_backend(),
     "cum_max": BackendRequirements.any_backend(),
+    "cum_mean": BackendRequirements.any_backend(),
+    "cum_prod": BackendRequirements.any_backend(),
     # Conditional
     "case_when": BackendRequirements.any_backend(),
 }

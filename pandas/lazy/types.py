@@ -426,7 +426,7 @@ def _infer_call_dtype(node: Call, schema: Schema) -> LazyDtype:
             return infer_expr_dtype(node.args[0], schema)
         return LazyDtype("object", np.dtype("object"), None, True)
 
-    if node.function in {"cum_sum", "cum_min", "cum_max"}:
+    if node.function in {"cum_sum", "cum_min", "cum_max", "cum_mean", "cum_prod"}:
         if node.args:
             return infer_expr_dtype(node.args[0], schema)
         return LazyDtype("numeric", np.dtype("float64"), None, True)

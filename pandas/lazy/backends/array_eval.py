@@ -294,6 +294,10 @@ class ArrayEvaluator:
             return self._evaluate_cumulative(args[0], "min")
         elif func == "cum_max":
             return self._evaluate_cumulative(args[0], "max")
+        elif func == "cum_mean":
+            return self._evaluate_cumulative(args[0], "mean")
+        elif func == "cum_prod":
+            return self._evaluate_cumulative(args[0], "prod")
 
         # Row index generation
         elif func == "row_index":
@@ -523,7 +527,7 @@ class ArrayEvaluator:
             return result
 
     def _evaluate_cumulative(self, arr: ArrayLike, agg: str) -> ArrayLike:
-        """Evaluate cumulative operation (cumsum, cummin, cummax)."""
+        """Evaluate cumulative operation (cumsum, cummin, cummax, cummean, cumprod)."""
         if is_arrow_backed(arr):
             import pyarrow.compute as pc
 
@@ -533,12 +537,23 @@ class ArrayEvaluator:
                 return pc.cumulative_min(arr)
             elif agg == "max":
                 return pc.cumulative_max(arr)
+            elif agg == "mean":
+                return pc.cumulative_mean(arr)
+            elif agg == "prod":
+                return pc.cumulative_prod(arr)
         elif agg == "sum":
             return np.cumsum(arr)
         elif agg == "min":
             return np.minimum.accumulate(arr)
         elif agg == "max":
             return np.maximum.accumulate(arr)
+        elif agg == "mean":
+            # NumPy doesn't have cumulative_mean, compute manually
+            cumsum = np.cumsum(arr)
+            counts = np.arange(1, len(arr) + 1)
+            return cumsum / counts
+        elif agg == "prod":
+            return np.cumprod(arr)
 
     # =========================================================================
     # Arrow Memory Pool

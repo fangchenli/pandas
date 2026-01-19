@@ -706,6 +706,36 @@ class Expr:
         """
         return Expr(Call("cum_max", (self._node,)))
 
+    def cum_mean(self) -> Expr:
+        """
+        Compute cumulative mean.
+
+        Returns
+        -------
+        Expr
+            Expression with cumulative means.
+
+        Examples
+        --------
+        >>> col("value").cum_mean().over("group")
+        """
+        return Expr(Call("cum_mean", (self._node,)))
+
+    def cum_prod(self) -> Expr:
+        """
+        Compute cumulative product.
+
+        Returns
+        -------
+        Expr
+            Expression with cumulative products.
+
+        Examples
+        --------
+        >>> col("value").cum_prod().over("group")
+        """
+        return Expr(Call("cum_prod", (self._node,)))
+
     # -------------------------------------------------------------------------
     # Rolling Window Operations
     # -------------------------------------------------------------------------
@@ -914,6 +944,95 @@ class Expr:
             )
         )
 
+    def rolling_argmax(self, window: int, min_periods: int | None = None) -> Expr:
+        """
+        Compute rolling argmax (index of maximum) over a window.
+
+        Parameters
+        ----------
+        window : int
+            Size of the rolling window.
+        min_periods : int or None, default None
+            Minimum number of observations required. Defaults to window size.
+
+        Returns
+        -------
+        Expr
+            Expression with indices of rolling maximums.
+
+        Examples
+        --------
+        >>> col("value").rolling_argmax(window=5)
+        """
+        return Expr(
+            Call(
+                "rolling_argmax",
+                (self._node,),
+                {"window": window, "min_periods": min_periods},
+            )
+        )
+
+    def rolling_argmin(self, window: int, min_periods: int | None = None) -> Expr:
+        """
+        Compute rolling argmin (index of minimum) over a window.
+
+        Parameters
+        ----------
+        window : int
+            Size of the rolling window.
+        min_periods : int or None, default None
+            Minimum number of observations required. Defaults to window size.
+
+        Returns
+        -------
+        Expr
+            Expression with indices of rolling minimums.
+
+        Examples
+        --------
+        >>> col("value").rolling_argmin(window=5)
+        """
+        return Expr(
+            Call(
+                "rolling_argmin",
+                (self._node,),
+                {"window": window, "min_periods": min_periods},
+            )
+        )
+
+    def rolling_rank(
+        self, window: int, min_periods: int | None = None, pct: bool = False
+    ) -> Expr:
+        """
+        Compute rolling rank over a window.
+
+        Parameters
+        ----------
+        window : int
+            Size of the rolling window.
+        min_periods : int or None, default None
+            Minimum number of observations required. Defaults to window size.
+        pct : bool, default False
+            If True, compute percentage rank.
+
+        Returns
+        -------
+        Expr
+            Expression with rolling ranks.
+
+        Examples
+        --------
+        >>> col("value").rolling_rank(window=5)
+        >>> col("value").rolling_rank(window=5, pct=True)
+        """
+        return Expr(
+            Call(
+                "rolling_rank",
+                (self._node,),
+                {"window": window, "min_periods": min_periods, "pct": pct},
+            )
+        )
+
     # -------------------------------------------------------------------------
     # Accessors
     # -------------------------------------------------------------------------
@@ -957,7 +1076,7 @@ class ExprStringAccessor:
 
     def _make_call(self, func: str, *args: Any, **kwargs: Any) -> Expr:
         """Helper to create a Call node with this expression as first arg."""
-        ir_args = (self._expr._node,) + tuple(_to_expr(a)._node for a in args)
+        ir_args = (self._expr._node, *(_to_expr(a)._node for a in args))
         return Expr(Call(func, ir_args, kwargs))
 
     def lower(self) -> Expr:
@@ -1160,6 +1279,332 @@ class ExprStringAccessor:
         >>> col("name").str.slice(0, 3)
         """
         return self._make_call("str_slice", start=start, stop=stop)
+
+    def capitalize(self) -> Expr:
+        """
+        Convert strings to have only the first character capitalized.
+
+        Returns
+        -------
+        Expr
+            Expression with capitalized strings.
+
+        Examples
+        --------
+        >>> col("name").str.capitalize()
+        """
+        return self._make_call("str_capitalize")
+
+    def title(self) -> Expr:
+        """
+        Convert strings to titlecase.
+
+        Returns
+        -------
+        Expr
+            Expression with titlecased strings.
+
+        Examples
+        --------
+        >>> col("name").str.title()
+        """
+        return self._make_call("str_title")
+
+    def swapcase(self) -> Expr:
+        """
+        Swap case of strings (upper becomes lower and vice versa).
+
+        Returns
+        -------
+        Expr
+            Expression with swapped case strings.
+
+        Examples
+        --------
+        >>> col("name").str.swapcase()
+        """
+        return self._make_call("str_swapcase")
+
+    def center(self, width: int, fillchar: str = " ") -> Expr:
+        """
+        Center strings in the specified width.
+
+        Parameters
+        ----------
+        width : int
+            Minimum width of resulting string.
+        fillchar : str, default " "
+            Character to use for padding.
+
+        Returns
+        -------
+        Expr
+            Expression with centered strings.
+
+        Examples
+        --------
+        >>> col("name").str.center(10)
+        >>> col("name").str.center(10, "-")
+        """
+        return self._make_call("str_center", width, fillchar)
+
+    def pad(self, width: int, side: str = "left", fillchar: str = " ") -> Expr:
+        """
+        Pad strings to specified width.
+
+        Parameters
+        ----------
+        width : int
+            Minimum width of resulting string.
+        side : {"left", "right", "both"}, default "left"
+            Side to pad on.
+        fillchar : str, default " "
+            Character to use for padding.
+
+        Returns
+        -------
+        Expr
+            Expression with padded strings.
+
+        Examples
+        --------
+        >>> col("name").str.pad(10, side="left")
+        """
+        return self._make_call("str_pad", width, side=side, fillchar=fillchar)
+
+    def zfill(self, width: int) -> Expr:
+        """
+        Pad strings with zeros on the left.
+
+        Parameters
+        ----------
+        width : int
+            Minimum width of resulting string.
+
+        Returns
+        -------
+        Expr
+            Expression with zero-padded strings.
+
+        Examples
+        --------
+        >>> col("id").str.zfill(5)
+        """
+        return self._make_call("str_zfill", width)
+
+    def count(self, pattern: str) -> Expr:
+        """
+        Count occurrences of pattern in each string.
+
+        Parameters
+        ----------
+        pattern : str
+            Character sequence or regular expression.
+
+        Returns
+        -------
+        Expr
+            Expression with occurrence counts.
+
+        Examples
+        --------
+        >>> col("text").str.count("a")
+        """
+        return self._make_call("str_count", pattern)
+
+    def find(self, sub: str, start: int = 0, end: int | None = None) -> Expr:
+        """
+        Return lowest index of substring.
+
+        Parameters
+        ----------
+        sub : str
+            Substring to search for.
+        start : int, default 0
+            Start position for search.
+        end : int, optional
+            End position for search.
+
+        Returns
+        -------
+        Expr
+            Expression with index positions (-1 if not found).
+
+        Examples
+        --------
+        >>> col("text").str.find("needle")
+        """
+        return self._make_call("str_find", sub, start=start, end=end)
+
+    def match(self, pattern: str) -> Expr:
+        """
+        Determine if each string matches a regular expression.
+
+        Parameters
+        ----------
+        pattern : str
+            Regular expression pattern.
+
+        Returns
+        -------
+        Expr
+            Boolean expression.
+
+        Examples
+        --------
+        >>> col("text").str.match(r"^[A-Z]")
+        """
+        return self._make_call("str_match", pattern)
+
+    def reverse(self) -> Expr:
+        """
+        Reverse each string.
+
+        Returns
+        -------
+        Expr
+            Expression with reversed strings.
+
+        Examples
+        --------
+        >>> col("name").str.reverse()
+        """
+        return self._make_call("str_reverse")
+
+    def isalnum(self) -> Expr:
+        """
+        Check whether all characters are alphanumeric.
+
+        Returns
+        -------
+        Expr
+            Boolean expression.
+
+        Examples
+        --------
+        >>> col("text").str.isalnum()
+        """
+        return self._make_call("str_is_alnum")
+
+    def isalpha(self) -> Expr:
+        """
+        Check whether all characters are alphabetic.
+
+        Returns
+        -------
+        Expr
+            Boolean expression.
+
+        Examples
+        --------
+        >>> col("text").str.isalpha()
+        """
+        return self._make_call("str_is_alpha")
+
+    def isdigit(self) -> Expr:
+        """
+        Check whether all characters are digits.
+
+        Returns
+        -------
+        Expr
+            Boolean expression.
+
+        Examples
+        --------
+        >>> col("text").str.isdigit()
+        """
+        return self._make_call("str_is_digit")
+
+    def isdecimal(self) -> Expr:
+        """
+        Check whether all characters are decimal.
+
+        Returns
+        -------
+        Expr
+            Boolean expression.
+
+        Examples
+        --------
+        >>> col("text").str.isdecimal()
+        """
+        return self._make_call("str_is_decimal")
+
+    def isspace(self) -> Expr:
+        """
+        Check whether all characters are whitespace.
+
+        Returns
+        -------
+        Expr
+            Boolean expression.
+
+        Examples
+        --------
+        >>> col("text").str.isspace()
+        """
+        return self._make_call("str_is_space")
+
+    def islower(self) -> Expr:
+        """
+        Check whether all characters are lowercase.
+
+        Returns
+        -------
+        Expr
+            Boolean expression.
+
+        Examples
+        --------
+        >>> col("text").str.islower()
+        """
+        return self._make_call("str_is_lower")
+
+    def isupper(self) -> Expr:
+        """
+        Check whether all characters are uppercase.
+
+        Returns
+        -------
+        Expr
+            Boolean expression.
+
+        Examples
+        --------
+        >>> col("text").str.isupper()
+        """
+        return self._make_call("str_is_upper")
+
+    def istitle(self) -> Expr:
+        """
+        Check whether all characters are titlecase.
+
+        Returns
+        -------
+        Expr
+            Boolean expression.
+
+        Examples
+        --------
+        >>> col("text").str.istitle()
+        """
+        return self._make_call("str_is_title")
+
+    def isnumeric(self) -> Expr:
+        """
+        Check whether all characters are numeric.
+
+        Returns
+        -------
+        Expr
+            Boolean expression.
+
+        Examples
+        --------
+        >>> col("text").str.isnumeric()
+        """
+        return self._make_call("str_is_numeric")
 
 
 class ExprDatetimeAccessor:
@@ -1505,7 +1950,7 @@ class When:
         """
         value_expr = _to_expr(value)
         # Update the last case with the value
-        updated_cases = self._cases[:-1] + ((self._cases[-1][0], value_expr),)
+        updated_cases = (*self._cases[:-1], (self._cases[-1][0], value_expr))
         return Then(updated_cases)
 
 
@@ -1561,7 +2006,7 @@ class Then:
                 f"condition must be an Expr, got {type(condition).__name__}. "
                 f"Use col('name') for column references."
             )
-        return When(self._cases + ((condition, None),))
+        return When((*self._cases, (condition, None)))
 
     def otherwise(self, value: Any) -> Expr:
         """
