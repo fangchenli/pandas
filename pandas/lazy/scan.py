@@ -16,6 +16,11 @@ def scan(
     path: str,
     *,
     format: Literal["parquet", "csv", "json"] | None = None,
+    # CSV-specific options
+    sep: str = ",",
+    header: bool = True,
+    skip_rows: int = 0,
+    n_rows: int | None = None,
 ) -> LazyDataFrame:
     """
     Create a lazy query from a file or files.
@@ -39,6 +44,18 @@ def scan(
         File format. If not specified, inferred from file extension.
         Required for directories without extension or ambiguous paths.
 
+    sep : str, default ","
+        Delimiter/separator character. Only used for CSV files.
+
+    header : bool, default True
+        Whether the CSV file has a header row. Only used for CSV files.
+
+    skip_rows : int, default 0
+        Number of rows to skip at the start of the file. Only used for CSV files.
+
+    n_rows : int, optional
+        Maximum number of rows to read. Only used for CSV files.
+
     Returns
     -------
     LazyDataFrame
@@ -54,9 +71,13 @@ def scan(
     Examples
     --------
     >>> from pandas.lazy import scan, col
-    >>> # Single file
+    >>> # Single Parquet file
     >>> ldf = scan("data.parquet")
     >>> result = ldf.filter(col("a") > 10).collect()
+
+    >>> # CSV file with custom separator
+    >>> ldf = scan("data.csv", sep=";")
+    >>> result = ldf.select("a", "b").collect()
 
     >>> # Glob pattern
     >>> ldf = scan("data/*.parquet")
@@ -72,6 +93,7 @@ def scan(
     (`collect(use_physical_planner=True)`), filter predicates are
     pushed down to the file reader. For Parquet files, this means
     entire row groups can be skipped based on column statistics.
+    For CSV files, predicates are applied after reading.
 
     **Projection Pushdown**: Only columns that are actually used in
     the query will be read from the file, reducing I/O.
@@ -96,7 +118,9 @@ def scan(
     if format == "parquet":
         return _scan_parquet(path)
     elif format == "csv":
-        raise NotImplementedError("CSV scanning not yet implemented")
+        return _scan_csv(
+            path, sep=sep, header=header, skip_rows=skip_rows, n_rows=n_rows
+        )
     elif format == "json":
         raise NotImplementedError("JSON scanning not yet implemented")
     else:
@@ -132,5 +156,26 @@ def _scan_parquet(path: str) -> LazyDataFrame:
     from pandas.lazy.plan import ParquetSource
 
     source = ParquetSource(path=path)
+    schema = source.resolve_schema()
+    return LazyDataFrame(source, schema)
+
+
+def _scan_csv(
+    path: str,
+    sep: str = ",",
+    header: bool = True,
+    skip_rows: int = 0,
+    n_rows: int | None = None,
+) -> LazyDataFrame:
+    """Create a lazy query from CSV file(s)."""
+    from pandas.lazy.plan import CSVSource
+
+    source = CSVSource(
+        path=path,
+        sep=sep,
+        header=header,
+        skip_rows=skip_rows,
+        n_rows=n_rows,
+    )
     schema = source.resolve_schema()
     return LazyDataFrame(source, schema)

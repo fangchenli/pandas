@@ -42,6 +42,7 @@ from pandas.lazy.optimize.utils import (
 from pandas.lazy.plan import (
     Aggregate,
     Concat,
+    CSVSource,
     Distinct,
     Filter,
     Join,
@@ -457,6 +458,25 @@ class PredicatePushdown(PlanVisitor):
                 predicate=combined_pred,
             )
 
+        elif isinstance(input_plan, CSVSource):
+            # Push predicate into CSVSource for filtering after read
+            # Combine with any existing predicate
+            if input_plan.predicate is not None:
+                combined_ir = Call("and_", (input_plan.predicate._ir, predicate._ir))
+                combined_pred = Expr(combined_ir)
+            else:
+                combined_pred = predicate
+
+            return CSVSource(
+                path=input_plan.path,
+                columns=input_plan.columns,
+                predicate=combined_pred,
+                sep=input_plan.sep,
+                header=input_plan.header,
+                skip_rows=input_plan.skip_rows,
+                n_rows=input_plan.n_rows,
+            )
+
         elif isinstance(input_plan, Concat):
             # Push filter through Concat to all inputs
             # This enables predicate pushdown to each source independently
@@ -502,13 +522,50 @@ class ProjectionPruning(PlanVisitor):
             # Only select columns that are actually needed
             full_schema = plan.resolve_schema()
             available = set(full_schema.names)
-            columns_to_read = tuple(sorted(needed & available))
+
+            # Include columns needed by the predicate
+            predicate_cols = (
+                get_referenced_columns(plan.predicate._ir)
+                if plan.predicate is not None
+                else set()
+            )
+            all_needed = needed | predicate_cols
+
+            columns_to_read = tuple(sorted(all_needed & available))
 
             if columns_to_read and columns_to_read != plan.columns:
                 return ParquetSource(
                     path=plan.path,
                     columns=columns_to_read if columns_to_read else None,
                     predicate=plan.predicate,
+                )
+            return plan
+
+        elif isinstance(plan, CSVSource):
+            # Push column selection into CSVSource
+            # Only select columns that are actually needed
+            full_schema = plan.resolve_schema()
+            available = set(full_schema.names)
+
+            # Include columns needed by the predicate
+            predicate_cols = (
+                get_referenced_columns(plan.predicate._ir)
+                if plan.predicate is not None
+                else set()
+            )
+            all_needed = needed | predicate_cols
+
+            columns_to_read = tuple(sorted(all_needed & available))
+
+            if columns_to_read and columns_to_read != plan.columns:
+                return CSVSource(
+                    path=plan.path,
+                    columns=columns_to_read if columns_to_read else None,
+                    predicate=plan.predicate,
+                    sep=plan.sep,
+                    header=plan.header,
+                    skip_rows=plan.skip_rows,
+                    n_rows=plan.n_rows,
                 )
             return plan
 

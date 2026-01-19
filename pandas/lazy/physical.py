@@ -705,6 +705,206 @@ class PhysicalParquetScan(PhysicalPlan):
         return self.schema
 
 
+@dataclass
+class PhysicalCSVScan(PhysicalPlan):
+    """
+    Physical scan of CSV file(s).
+
+    Supports projection pushdown to minimize I/O. Predicates are applied
+    after reading since CSV doesn't support native predicate pushdown.
+
+    Uses PyArrow CSV reader for efficient batch processing.
+
+    Parameters
+    ----------
+    path : str
+        Path to CSV file(s). Supports local paths and globs.
+    schema : Schema
+        Output schema (after column pruning if applicable).
+    columns : tuple[str, ...] | None
+        Columns to read. None means all columns.
+    predicate : Expr | None
+        Filter predicate to apply after reading.
+    limit : int | None
+        Maximum number of rows to return. Enables early termination.
+    sep : str
+        Delimiter/separator character.
+    header : bool
+        Whether the file has a header row.
+    skip_rows : int
+        Number of rows to skip at the start.
+    n_rows : int | None
+        Maximum number of rows to read from source.
+    """
+
+    path: str
+    schema: Schema
+    columns: tuple[str, ...] | None = None
+    predicate: Expr | None = None
+    limit: int | None = None
+    sep: str = ","
+    header: bool = True
+    skip_rows: int = 0
+    n_rows: int | None = None
+
+    @property
+    def supports_streaming(self) -> bool:
+        return True
+
+    def _resolve_paths(self) -> str | list[str]:
+        """Resolve path, expanding glob patterns if needed."""
+        path = self.path
+        if "*" in path and "://" not in path:
+            import glob as glob_module
+
+            files = sorted(glob_module.glob(path))
+            if not files:
+                raise FileNotFoundError(f"No files found matching pattern: {path}")
+            return files
+        return path
+
+    def execute_batches(self, context: ExecutionContext) -> Iterator[ArrayDict]:
+        """
+        Stream batches from CSV file(s).
+
+        Uses PyArrow's CSV streaming reader for efficient batch iteration.
+        Supports early termination when a limit is set.
+
+        Yields
+        ------
+        ArrayDict
+            Batches of data from the CSV file(s).
+        """
+        import pyarrow as pa
+        from pyarrow import csv
+
+        from pandas.lazy.backends.types import INDEX_COL_NAME
+
+        # Resolve file paths
+        paths = self._resolve_paths()
+        if isinstance(paths, str):
+            paths = [paths]
+
+        # Configure CSV read options
+        read_options = csv.ReadOptions(
+            skip_rows=self.skip_rows,
+            autogenerate_column_names=not self.header,
+            block_size=context.batch_size * 1024,  # Approximate bytes per batch
+        )
+        parse_options = csv.ParseOptions(delimiter=self.sep)
+
+        rows_yielded = 0
+        row_offset = 0
+
+        for file_path in paths:
+            # Create streaming reader
+            reader = csv.open_csv(
+                file_path,
+                read_options=read_options,
+                parse_options=parse_options,
+            )
+
+            for batch in reader:
+                batch_len = batch.num_rows
+                if batch_len == 0:
+                    continue
+
+                # Apply n_rows limit from source
+                if self.n_rows is not None:
+                    remaining = self.n_rows - rows_yielded
+                    if remaining <= 0:
+                        return
+                    if batch_len > remaining:
+                        batch = batch.slice(0, remaining)
+                        batch_len = remaining
+
+                # Check limit for early termination
+                if self.limit is not None:
+                    remaining = self.limit - rows_yielded
+                    if remaining <= 0:
+                        return
+                    if batch_len > remaining:
+                        batch = batch.slice(0, remaining)
+                        batch_len = remaining
+
+                # Convert RecordBatch to ArrayDict
+                arrays: ArrayDict = {}
+
+                # If columns specified, only include those
+                columns_to_read = (
+                    list(self.columns) if self.columns else batch.schema.names
+                )
+                for col_name in columns_to_read:
+                    if col_name in batch.schema.names:
+                        arrays[col_name] = batch.column(col_name)
+
+                # Generate index column for this batch
+                arrays[INDEX_COL_NAME] = pa.array(
+                    range(row_offset, row_offset + batch_len)
+                )
+                context.index_is_multi = False
+                context.index_names = [None]
+
+                yield arrays
+
+                rows_yielded += batch_len
+                row_offset += batch_len
+
+                # Early termination check
+                if self.limit is not None and rows_yielded >= self.limit:
+                    return
+                if self.n_rows is not None and rows_yielded >= self.n_rows:
+                    return
+
+    def execute(self, context: ExecutionContext) -> ArrayDict:
+        """
+        Execute and return all data at once.
+
+        For non-streaming execution or when downstream operators need
+        all data. Materializes batches from execute_batches() into
+        a single ArrayDict.
+        """
+        import pyarrow as pa
+
+        from pandas.lazy.backends.types import INDEX_COL_NAME
+
+        # Collect all batches
+        batches = list(self.execute_batches(context))
+
+        if not batches:
+            # Return empty ArrayDict with correct schema
+            arrays: ArrayDict = {}
+            for col_name in self.schema.fields:
+                arrays[col_name] = pa.array([])
+            arrays[INDEX_COL_NAME] = pa.array([], type=pa.int64())
+            return arrays
+
+        if len(batches) == 1:
+            return batches[0]
+
+        # Concatenate all batches
+        result: ArrayDict = {}
+        all_columns = set()
+        for batch in batches:
+            all_columns.update(batch.keys())
+
+        for col_name in all_columns:
+            chunks = [batch[col_name] for batch in batches if col_name in batch]
+            if chunks:
+                # Combine into single contiguous array
+                chunked = pa.chunked_array(chunks)
+                result[col_name] = chunked.combine_chunks()
+
+        return result
+
+    def children(self) -> list[PhysicalPlan]:
+        return []
+
+    @property
+    def output_schema(self) -> Schema:
+        return self.schema
+
+
 # =============================================================================
 # Projection Nodes
 # =============================================================================
@@ -3782,6 +3982,7 @@ class PhysicalPlanner:
             Aggregate,
             Concat,
             Convert,
+            CSVSource,
             DataFrameSource,
             Distinct,
             Filter,
@@ -3800,6 +4001,9 @@ class PhysicalPlanner:
 
         elif isinstance(logical_plan, ParquetSource):
             return self._plan_parquet_scan(logical_plan)
+
+        elif isinstance(logical_plan, CSVSource):
+            return self._plan_csv_scan(logical_plan)
 
         elif isinstance(logical_plan, Project):
             return self._plan_project(logical_plan)
@@ -3857,6 +4061,34 @@ class PhysicalPlanner:
             columns=node.columns,
             predicate=node.predicate,
         )
+
+    def _plan_csv_scan(self, node) -> PhysicalPlan:
+        """Plan a CSVSource.
+
+        Unlike Parquet, CSV doesn't support native predicate pushdown.
+        If there's a predicate, we wrap the scan with a PhysicalFilter.
+        """
+        scan = PhysicalCSVScan(
+            path=node.path,
+            schema=node.resolve_schema(),
+            columns=node.columns,
+            predicate=None,  # Predicate applied by filter, not scan
+            sep=node.sep,
+            header=node.header,
+            skip_rows=node.skip_rows,
+            n_rows=node.n_rows,
+        )
+
+        # If there's a predicate, add a filter step after scanning
+        if node.predicate is not None:
+            return PhysicalFilter(
+                input=scan,
+                predicate=node.predicate,
+                schema=node.resolve_schema(),
+                backend=self._choose_backend_for_exprs((node.predicate,)),
+            )
+
+        return scan
 
     def _plan_project(self, node) -> PhysicalProject:
         """Plan a Project."""

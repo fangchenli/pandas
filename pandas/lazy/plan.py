@@ -229,6 +229,211 @@ class ParquetSource(LogicalPlan):
 
 
 @dataclass
+class CSVSource(LogicalPlan):
+    """
+    Source node for reading CSV files lazily.
+
+    Supports projection pushdown to minimize I/O. Predicate pushdown
+    is also supported but filtering happens after reading (CSV doesn't
+    have native pushdown like Parquet row group filtering).
+
+    Parameters
+    ----------
+    path : str
+        Path to CSV file or directory. Supports:
+        - Local paths: "/path/to/data.csv"
+        - Glob patterns: "/path/to/*.csv"
+        - Compressed files: "/path/to/data.csv.gz"
+    columns : tuple[str, ...] | None
+        Columns to read. None means all columns.
+        Set by ProjectionPruning optimization pass.
+    predicate : Expr | None
+        Filter predicate to apply after reading.
+        Set by PredicatePushdown optimization pass.
+    sep : str
+        Delimiter/separator character.
+    header : bool
+        Whether the file has a header row.
+    skip_rows : int
+        Number of rows to skip at the start.
+    n_rows : int | None
+        Maximum number of rows to read. None means all rows.
+    """
+
+    path: str
+    columns: tuple[str, ...] | None = None
+    predicate: Expr | None = None
+    sep: str = ","
+    header: bool = True
+    skip_rows: int = 0
+    n_rows: int | None = None
+
+    # Cached schema from CSV header/inference
+    _csv_schema: Schema | None = None
+
+    def __post_init__(self) -> None:
+        self._cached_schema = None
+        # Don't set _csv_schema here - it will be resolved lazily
+
+    def _resolve_schema_impl(self) -> Schema:
+        from pandas.lazy.types import Schema
+
+        if self._csv_schema is not None:
+            schema = self._csv_schema
+        else:
+            # Read schema from CSV header/first rows
+            schema = self._read_csv_schema()
+            # Cache it for future use
+            object.__setattr__(self, "_csv_schema", schema)
+
+        # If columns are specified, filter schema
+        if self.columns is not None:
+            return Schema({c: schema[c] for c in self.columns if c in schema})
+        return schema
+
+    def _read_csv_schema(self) -> Schema:
+        """Read schema from CSV file by scanning first rows."""
+        import pyarrow as pa
+        from pyarrow import csv
+
+        from pandas.lazy.types import (
+            LazyDtype,
+            Schema,
+        )
+
+        # Handle glob patterns
+        path = self.path
+        if "*" in path:
+            import glob
+
+            files = glob.glob(path)
+            if not files:
+                raise FileNotFoundError(f"No files match pattern: {path}")
+            path = files[0]  # Use first file for schema
+
+        # Configure CSV read options
+        read_options = csv.ReadOptions(
+            skip_rows=self.skip_rows,
+            autogenerate_column_names=not self.header,
+        )
+        parse_options = csv.ParseOptions(delimiter=self.sep)
+
+        # Read a small sample to infer schema (just read first batch)
+        # Using block_size to limit how much data we read
+        try:
+            reader = csv.open_csv(
+                path,
+                read_options=read_options,
+                parse_options=parse_options,
+            )
+            # Get schema from reader
+            arrow_schema = reader.schema
+        except pa.ArrowInvalid as e:
+            raise ValueError(f"Cannot read CSV schema from {path}: {e}") from e
+
+        # Convert Arrow schema to lazy Schema
+        columns = {}
+        for field in arrow_schema:
+            columns[field.name] = LazyDtype.from_arrow_type(field.type)
+
+        return Schema(columns)
+
+    def children(self) -> list[LogicalPlan]:
+        return []
+
+    def _estimate_row_count_impl(self) -> int | None:
+        """
+        Estimate row count from CSV file.
+
+        CSV files don't have row count metadata like Parquet, so we estimate
+        based on file size and average row length from a sample.
+        """
+        try:
+            path = self.path
+            if "*" in path:
+                import glob
+
+                files = glob.glob(path)
+                if not files:
+                    return None
+                # Sum estimated row counts from all files
+                total = 0
+                for f in files:
+                    count = self._estimate_single_file_rows(f)
+                    if count is not None:
+                        total += count
+                return total if total > 0 else None
+
+            return self._estimate_single_file_rows(path)
+        except Exception:
+            return None
+
+    def _estimate_single_file_rows(self, path: str) -> int | None:
+        """Estimate row count for a single CSV file."""
+        import os
+
+        try:
+            file_size = os.path.getsize(path)
+
+            # For compressed files, estimate is less accurate
+            if path.endswith(".gz"):
+                # Assume ~5x compression ratio
+                file_size *= 5
+
+            # Sample first 64KB to estimate average row length
+            sample_size = min(65536, file_size)
+            with open(path, "rb") as f:
+                sample = f.read(sample_size)
+
+            # Handle gzip
+            if path.endswith(".gz"):
+                import gzip
+
+                with gzip.open(path, "rb") as f:
+                    sample = f.read(sample_size)
+                    # For gzip, use decompressed sample size ratio
+                    decompressed_size = len(sample)
+                    if decompressed_size > 0:
+                        file_size = int(
+                            file_size * (decompressed_size / sample_size) * 5
+                        )
+                    sample_size = decompressed_size
+
+            # Count newlines in sample
+            newlines = sample.count(b"\n")
+            if newlines == 0:
+                return None
+
+            # Estimate average row length
+            avg_row_len = sample_size / newlines
+
+            # Estimate total rows
+            estimated_rows = int(file_size / avg_row_len)
+
+            # Subtract header row if present
+            if self.header:
+                estimated_rows -= 1
+
+            # Apply selectivity estimate if predicate is present
+            if self.predicate is not None:
+                estimated_rows = int(estimated_rows * 0.3)
+
+            return max(1, estimated_rows)
+        except Exception:
+            return None
+
+    def __repr__(self) -> str:
+        parts = [f"path={self.path!r}"]
+        if self.columns is not None:
+            parts.append(f"columns={list(self.columns)}")
+        if self.predicate is not None:
+            parts.append(f"predicate={self.predicate!r}")
+        if self.sep != ",":
+            parts.append(f"sep={self.sep!r}")
+        return f"CSVSource({', '.join(parts)})"
+
+
+@dataclass
 class Project(LogicalPlan):
     """Projection (column selection/computation)."""
 

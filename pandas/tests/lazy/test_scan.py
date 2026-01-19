@@ -12,7 +12,10 @@ from pandas.lazy import (
     col,
     scan,
 )
-from pandas.lazy.plan import ParquetSource
+from pandas.lazy.plan import (
+    CSVSource,
+    ParquetSource,
+)
 
 
 class TestScan:
@@ -99,10 +102,29 @@ class TestScan:
         with pytest.raises(ValueError, match="Cannot infer file format"):
             scan("/path/to/file.unknown")
 
-    def test_scan_csv_not_implemented(self):
-        """Test that CSV scanning raises NotImplementedError."""
-        with pytest.raises(NotImplementedError, match="CSV scanning not yet"):
-            scan("data.csv")
+    def test_scan_csv_basic(self):
+        """Test basic CSV scanning."""
+        df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
+            df.to_csv(f.name, index=False)
+
+            ldf = scan(f.name)
+            assert isinstance(ldf._plan, CSVSource)
+
+            result = ldf.collect(use_physical_planner=True)
+            assert len(result) == 3
+            assert list(result.columns) == ["a", "b"]
+
+    def test_scan_csv_infers_format(self):
+        """Test that scan() infers CSV format from extension."""
+        df = pd.DataFrame({"a": [1, 2, 3]})
+
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
+            df.to_csv(f.name, index=False)
+
+            ldf = scan(f.name)
+            assert isinstance(ldf._plan, CSVSource)
 
     def test_scan_json_not_implemented(self):
         """Test that JSON scanning raises NotImplementedError."""
@@ -354,6 +376,235 @@ class TestParquetSourceSchema:
             df.to_parquet(f.name, index=False)
 
             source = ParquetSource(path=f.name, columns=("a", "c"))
+            schema = source.resolve_schema()
+
+            assert "a" in schema
+            assert "c" in schema
+            assert "b" not in schema
+
+
+class TestCSVScan:
+    """Tests for CSV scanning functionality."""
+
+    def test_csv_scan_basic(self):
+        """Test basic CSV scanning."""
+        df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
+            df.to_csv(f.name, index=False)
+
+            ldf = scan(f.name)
+            assert isinstance(ldf._plan, CSVSource)
+
+            result = ldf.collect(use_physical_planner=True)
+            assert len(result) == 3
+            assert list(result.columns) == ["a", "b"]
+
+    def test_csv_scan_with_filter(self):
+        """Test CSV scanning with filter."""
+        df = pd.DataFrame({"a": range(100), "b": range(100, 200)})
+
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
+            df.to_csv(f.name, index=False)
+
+            ldf = scan(f.name).filter(col("a") > 50)
+            result = ldf.collect(use_physical_planner=True)
+
+            assert len(result) == 49
+            assert result["a"].min() == 51
+
+    def test_csv_scan_with_select(self):
+        """Test CSV scanning with column selection."""
+        df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6], "c": [7, 8, 9]})
+
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
+            df.to_csv(f.name, index=False)
+
+            ldf = scan(f.name).select("a", "c")
+            result = ldf.collect(use_physical_planner=True)
+
+            assert list(result.columns) == ["a", "c"]
+            assert len(result) == 3
+
+    def test_csv_scan_filter_and_select(self):
+        """Test CSV scanning with both filter and select."""
+        df = pd.DataFrame({"a": range(100), "b": range(100, 200), "c": range(200, 300)})
+
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
+            df.to_csv(f.name, index=False)
+
+            ldf = scan(f.name).filter(col("a") > 50).select("a", "c")
+            result = ldf.collect(use_physical_planner=True)
+
+            assert list(result.columns) == ["a", "c"]
+            assert len(result) == 49
+            assert result["a"].min() == 51
+
+    def test_csv_scan_custom_separator(self):
+        """Test CSV scanning with custom separator."""
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
+            f.write("a;b;c\n")
+            f.write("1;4;7\n")
+            f.write("2;5;8\n")
+            f.write("3;6;9\n")
+            f.flush()
+
+            ldf = scan(f.name, sep=";")
+            result = ldf.collect(use_physical_planner=True)
+
+            assert list(result.columns) == ["a", "b", "c"]
+            assert len(result) == 3
+            assert result["a"].tolist() == [1, 2, 3]
+
+
+class TestCSVGlobPatterns:
+    """Tests for CSV glob pattern scanning."""
+
+    def test_csv_scan_glob_pattern(self):
+        """Test scanning multiple CSV files with glob pattern."""
+        df1 = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+        df2 = pd.DataFrame({"a": [7, 8, 9], "b": [10, 11, 12]})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            df1.to_csv(os.path.join(tmpdir, "part1.csv"), index=False)
+            df2.to_csv(os.path.join(tmpdir, "part2.csv"), index=False)
+
+            ldf = scan(os.path.join(tmpdir, "*.csv"))
+            result = ldf.collect(use_physical_planner=True)
+
+            assert len(result) == 6
+            assert set(result["a"].tolist()) == {1, 2, 3, 7, 8, 9}
+
+    def test_csv_scan_glob_with_filter(self):
+        """Test CSV glob pattern scanning with filter."""
+        df1 = pd.DataFrame({"a": range(50), "b": range(50)})
+        df2 = pd.DataFrame({"a": range(50, 100), "b": range(50, 100)})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            df1.to_csv(os.path.join(tmpdir, "part1.csv"), index=False)
+            df2.to_csv(os.path.join(tmpdir, "part2.csv"), index=False)
+
+            ldf = scan(os.path.join(tmpdir, "*.csv")).filter(col("a") > 80)
+            result = ldf.collect(use_physical_planner=True)
+
+            assert len(result) == 19  # 81-99
+            assert result["a"].min() == 81
+
+
+class TestCSVSourcePushdown:
+    """Tests for predicate and projection pushdown to CSVSource."""
+
+    def test_predicate_pushdown_to_csv(self):
+        """Test that predicates are pushed into CSVSource."""
+        from pandas.lazy.optimize.passes import PredicatePushdown
+
+        df = pd.DataFrame({"a": range(10), "b": range(10, 20)})
+
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
+            df.to_csv(f.name, index=False)
+
+            ldf = scan(f.name).filter(col("a") > 5)
+
+            # Apply predicate pushdown
+            pushdown = PredicatePushdown()
+            optimized = pushdown.optimize(ldf._plan)
+
+            # Should be CSVSource with predicate
+            assert isinstance(optimized, CSVSource)
+            assert optimized.predicate is not None
+
+    def test_projection_pushdown_to_csv(self):
+        """Test that column selection is pushed into CSVSource."""
+        from pandas.lazy.optimize.passes import ProjectionPruning
+
+        df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6], "c": [7, 8, 9]})
+
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
+            df.to_csv(f.name, index=False)
+
+            ldf = scan(f.name).select("a", "c")
+
+            # Apply projection pruning
+            pruning = ProjectionPruning()
+            optimized = pruning.optimize(ldf._plan)
+
+            # Find the CSVSource
+            def find_source(plan):
+                if isinstance(plan, CSVSource):
+                    return plan
+                if hasattr(plan, "input"):
+                    return find_source(plan.input)
+                return None
+
+            source = find_source(optimized)
+            assert source is not None
+            assert source.columns == ("a", "c")
+
+    def test_combined_pushdown_csv(self):
+        """Test combined predicate and projection pushdown for CSV."""
+        from pandas.lazy.optimize.passes import (
+            PredicatePushdown,
+            ProjectionPruning,
+        )
+
+        df = pd.DataFrame({"a": range(100), "b": range(100), "c": range(100)})
+
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
+            df.to_csv(f.name, index=False)
+
+            ldf = scan(f.name).filter(col("a") > 50).select("a", "c")
+
+            # Apply both optimizations
+            pushdown = PredicatePushdown()
+            pruning = ProjectionPruning()
+
+            optimized = pruning.optimize(pushdown.optimize(ldf._plan))
+
+            # Find the CSVSource
+            def find_source(plan):
+                if isinstance(plan, CSVSource):
+                    return plan
+                if hasattr(plan, "input"):
+                    return find_source(plan.input)
+                return None
+
+            source = find_source(optimized)
+            assert source is not None
+            assert source.columns == ("a", "c")
+            assert source.predicate is not None
+
+
+class TestCSVSourceSchema:
+    """Tests for CSVSource schema resolution."""
+
+    def test_schema_from_csv(self):
+        """Test that schema is correctly inferred from CSV."""
+        df = pd.DataFrame(
+            {
+                "int_col": [1, 2, 3],
+                "float_col": [1.0, 2.0, 3.0],
+                "str_col": ["a", "b", "c"],
+            }
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
+            df.to_csv(f.name, index=False)
+
+            ldf = scan(f.name)
+            schema = ldf._plan.resolve_schema()
+
+            assert "int_col" in schema
+            assert "float_col" in schema
+            assert "str_col" in schema
+
+    def test_schema_with_column_selection(self):
+        """Test schema resolution with column selection."""
+        df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6], "c": [7, 8, 9]})
+
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
+            df.to_csv(f.name, index=False)
+
+            source = CSVSource(path=f.name, columns=("a", "c"))
             schema = source.resolve_schema()
 
             assert "a" in schema
