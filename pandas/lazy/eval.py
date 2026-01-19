@@ -290,6 +290,15 @@ class Evaluator:
             return args[0].str.istitle()
         elif func == "str_is_numeric":
             return args[0].str.isnumeric()
+        elif func == "str_split":
+            pattern = args[1]
+            n = args[2] if len(args) > 2 else -1
+            regex = node.kwargs.get("regex", False)
+            return args[0].str.split(pattern, n=n, regex=regex)
+        elif func == "str_rsplit":
+            pattern = args[1]
+            n = args[2] if len(args) > 2 else -1
+            return args[0].str.rsplit(pattern, n=n)
 
         # Aggregation operations
         elif func == "sum":

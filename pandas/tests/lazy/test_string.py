@@ -355,3 +355,111 @@ class TestNullMethods:
         result = df.select().filter(col("a").is_not_null()).collect()
         expected = df[df["a"].notna()].reset_index(drop=True)
         tm.assert_frame_equal(result, expected)
+
+
+class TestStringSplitMethods:
+    """Tests for str.split and str.rsplit methods."""
+
+    def test_str_split_ir(self):
+        expr = col("s").str.split("_")
+        assert isinstance(expr._ir, Call)
+        assert expr._ir.function == "str_split"
+
+    def test_str_rsplit_ir(self):
+        expr = col("s").str.rsplit("_")
+        assert isinstance(expr._ir, Call)
+        assert expr._ir.function == "str_rsplit"
+
+    def test_str_split_no_limit(self):
+        """Test split without limit."""
+        df = pd.DataFrame({"text": ["a_b_c_d", "e_f_g", "x"]})
+        result = (
+            df.select()
+            .with_columns(col("text").str.split("_").alias("parts"))
+            .collect()
+        )
+        expected = df.copy()
+        expected["parts"] = df["text"].str.split("_")
+        tm.assert_frame_equal(result, expected)
+
+    def test_str_split_with_limit(self):
+        """Test split with limit n=1."""
+        df = pd.DataFrame({"text": ["a_b_c_d", "e_f_g", "x"]})
+        result = (
+            df.select()
+            .with_columns(col("text").str.split("_", n=1).alias("parts"))
+            .collect()
+        )
+        expected = df.copy()
+        expected["parts"] = df["text"].str.split("_", n=1)
+        tm.assert_frame_equal(result, expected)
+
+    def test_str_rsplit_no_limit(self):
+        """Test rsplit without limit (same as split)."""
+        df = pd.DataFrame({"text": ["a_b_c_d", "e_f_g", "x"]})
+        result = (
+            df.select()
+            .with_columns(col("text").str.rsplit("_").alias("parts"))
+            .collect()
+        )
+        expected = df.copy()
+        expected["parts"] = df["text"].str.rsplit("_")
+        tm.assert_frame_equal(result, expected)
+
+    def test_str_rsplit_with_limit(self):
+        """Test rsplit with limit n=1 - splits from right."""
+        df = pd.DataFrame({"text": ["a_b_c_d", "e_f_g", "x"]})
+        result = (
+            df.select()
+            .with_columns(col("text").str.rsplit("_", n=1).alias("parts"))
+            .collect()
+        )
+        expected = df.copy()
+        expected["parts"] = df["text"].str.rsplit("_", n=1)
+        # Verify rsplit behavior: "a_b_c_d" -> ["a_b_c", "d"] (split from right)
+        assert result["parts"].iloc[0] == ["a_b_c", "d"]
+        tm.assert_frame_equal(result, expected)
+
+    def test_str_rsplit_with_limit_n2(self):
+        """Test rsplit with limit n=2."""
+        df = pd.DataFrame({"text": ["a_b_c_d", "e_f_g", "x"]})
+        result = (
+            df.select()
+            .with_columns(col("text").str.rsplit("_", n=2).alias("parts"))
+            .collect()
+        )
+        expected = df.copy()
+        expected["parts"] = df["text"].str.rsplit("_", n=2)
+        # Verify rsplit behavior: "a_b_c_d" -> ["a_b", "c", "d"] (2 splits from right)
+        assert result["parts"].iloc[0] == ["a_b", "c", "d"]
+        tm.assert_frame_equal(result, expected)
+
+    def test_str_rsplit_with_nulls(self):
+        """Test rsplit handles null values correctly."""
+        df = pd.DataFrame({"text": ["a_b_c", None, "x_y"]})
+        result = (
+            df.select()
+            .with_columns(col("text").str.rsplit("_", n=1).alias("parts"))
+            .collect()
+        )
+        expected = df.copy()
+        expected["parts"] = df["text"].str.rsplit("_", n=1)
+        # Check that null is preserved
+        assert result["parts"].iloc[0] == ["a_b", "c"]
+        assert pd.isna(result["parts"].iloc[1])
+        assert result["parts"].iloc[2] == ["x", "y"]
+        tm.assert_frame_equal(result, expected)
+
+    def test_str_rsplit_multichar_pattern(self):
+        """Test rsplit with multi-character pattern."""
+        df = pd.DataFrame({"text": ["a::b::c::d", "e::f"]})
+        result = (
+            df.select()
+            .with_columns(col("text").str.rsplit("::", n=1).alias("parts"))
+            .collect()
+        )
+        expected = df.copy()
+        expected["parts"] = df["text"].str.rsplit("::", n=1)
+        # Verify: "a::b::c::d" -> ["a::b::c", "d"]
+        assert result["parts"].iloc[0] == ["a::b::c", "d"]
+        tm.assert_frame_equal(result, expected)

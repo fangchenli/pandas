@@ -66,11 +66,51 @@ def arrow_str_rsplit(
 
     Notes
     -----
-    PyArrow doesn't have native rsplit; this falls back to forward split.
+    PyArrow doesn't have native rsplit. When n >= 0 (limited splits), this
+    implements rsplit via: reverse strings -> reverse pattern -> split ->
+    reverse each element -> reverse list order.
     """
-    # PyArrow doesn't have rsplit directly - use forward split
-    # TODO: Implement proper rsplit with reverse + split + reverse logic
-    return pc.split_pattern(arr, pattern=pattern, max_splits=n if n >= 0 else None)
+    # If no limit, rsplit produces same result as split
+    if n < 0:
+        return pc.split_pattern(arr, pattern=pattern, max_splits=None)
+
+    # For limited splits, implement rsplit via reverse-split-reverse
+    # 1. Reverse each string
+    reversed_strings = pc.utf8_reverse(arr)
+
+    # 2. Reverse the pattern
+    reversed_pattern = pattern[::-1]
+
+    # 3. Split with reversed pattern
+    split_result = pc.split_pattern(
+        reversed_strings, pattern=reversed_pattern, max_splits=n
+    )
+
+    # 4. Reverse each element in each list and reverse list order
+    import pyarrow as pa
+
+    # Get the offsets and values from the list array
+    offsets = split_result.offsets.to_pylist()
+    flat_values = split_result.values
+
+    # Reverse each string element
+    reversed_elements = pc.utf8_reverse(flat_values)
+
+    # Track null positions
+    null_mask = pc.is_null(arr)
+
+    # Rebuild lists with reversed order, preserving nulls
+    result_lists = []
+    for i in range(len(offsets) - 1):
+        if null_mask[i].as_py():
+            result_lists.append(None)
+        else:
+            start, end = offsets[i], offsets[i + 1]
+            # Get elements and reverse their order
+            elements = reversed_elements.slice(start, end - start).to_pylist()
+            result_lists.append(elements[::-1])
+
+    return pa.array(result_lists)
 
 
 @register_kernel("str_repeat", "arrow")
