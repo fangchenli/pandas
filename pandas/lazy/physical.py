@@ -1604,9 +1604,11 @@ class PhysicalHashAggregate(PhysicalPlan):
         )
 
         def _factorize(arr):
-            """Factorize array using appropriate backend."""
+            """Factorize array using appropriate backend, returning NumPy codes."""
             if isinstance(arr, (pa.Array, pa.ChunkedArray)):
-                return dispatch_kernel("factorize", "arrow", arr)
+                codes, uniques, n_uniques = dispatch_kernel("factorize", "arrow", arr)
+                # Convert Arrow codes to NumPy for downstream indexing operations
+                return codes.to_numpy(), uniques, n_uniques
             else:
                 if hasattr(arr, "to_numpy"):
                     arr = arr.to_numpy(zero_copy_only=False)

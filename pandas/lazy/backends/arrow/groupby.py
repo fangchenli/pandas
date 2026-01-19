@@ -14,8 +14,6 @@ import pyarrow.compute as pc
 from pandas.lazy.backends import register_kernel
 
 if TYPE_CHECKING:
-    import numpy as np
-
     from pandas.lazy.backends.types import PyArrowArray
 
 # Factorization
@@ -25,7 +23,7 @@ if TYPE_CHECKING:
 @register_kernel("factorize", "arrow")
 def factorize(
     arr: pa.Array | pa.ChunkedArray,
-) -> tuple[np.ndarray, pa.Array, int]:
+) -> tuple[pa.Array, pa.Array, int]:
     """
     Factorize an Arrow array using dictionary encoding.
 
@@ -39,8 +37,8 @@ def factorize(
 
     Returns
     -------
-    tuple[np.ndarray, pa.Array, int]
-        - codes: Integer codes as numpy array (int32)
+    tuple[pa.Array, pa.Array, int]
+        - codes: Integer codes as Arrow array
         - uniques: Unique values as PyArrow array
         - n_uniques: Number of unique values
     """
@@ -52,7 +50,7 @@ def factorize(
     if isinstance(dict_arr, pa.ChunkedArray):
         dict_arr = dict_arr.combine_chunks()
 
-    codes = dict_arr.indices.to_numpy()
+    codes = dict_arr.indices
     uniques = dict_arr.dictionary
     return codes, uniques, len(uniques)
 
