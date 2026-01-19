@@ -13,6 +13,147 @@ from pandas.lazy.backends.types import PyArrowArray
 # =============================================================================
 
 
+@register_kernel("str_split", "arrow")
+def arrow_str_split(
+    arr: PyArrowArray, pattern: str = " ", n: int = -1, regex: bool = False
+) -> PyArrowArray:
+    """
+    Split strings by pattern.
+
+    Parameters
+    ----------
+    arr : PyArrowArray
+        Input string array.
+    pattern : str, default " "
+        String or regex pattern to split on.
+    n : int, default -1
+        Maximum number of splits. -1 means no limit.
+    regex : bool, default False
+        Whether to treat pattern as regex.
+
+    Returns
+    -------
+    PyArrowArray
+        List array of split strings.
+    """
+    if regex:
+        return pc.split_pattern_regex(
+            arr, pattern=pattern, max_splits=n if n >= 0 else None
+        )
+    return pc.split_pattern(arr, pattern=pattern, max_splits=n if n >= 0 else None)
+
+
+@register_kernel("str_rsplit", "arrow")
+def arrow_str_rsplit(
+    arr: PyArrowArray, pattern: str = " ", n: int = -1
+) -> PyArrowArray:
+    """
+    Split strings by pattern from the right.
+
+    Parameters
+    ----------
+    arr : PyArrowArray
+        Input string array.
+    pattern : str, default " "
+        String pattern to split on.
+    n : int, default -1
+        Maximum number of splits. -1 means no limit.
+
+    Returns
+    -------
+    PyArrowArray
+        List array of split strings.
+
+    Notes
+    -----
+    PyArrow doesn't have native rsplit; this falls back to forward split.
+    """
+    # PyArrow doesn't have rsplit directly - use forward split
+    # TODO: Implement proper rsplit with reverse + split + reverse logic
+    return pc.split_pattern(arr, pattern=pattern, max_splits=n if n >= 0 else None)
+
+
+@register_kernel("str_repeat", "arrow")
+def arrow_str_repeat(arr: PyArrowArray, repeats: int) -> PyArrowArray:
+    """
+    Repeat strings a specified number of times.
+
+    Parameters
+    ----------
+    arr : PyArrowArray
+        Input string array.
+    repeats : int
+        Number of times to repeat each string.
+
+    Returns
+    -------
+    PyArrowArray
+        Array with repeated strings.
+    """
+    return pc.binary_repeat(arr, repeats)
+
+
+@register_kernel("str_get", "arrow")
+def arrow_str_get(arr: PyArrowArray, index: int) -> PyArrowArray:
+    """
+    Extract character at specified position.
+
+    Parameters
+    ----------
+    arr : PyArrowArray
+        Input string array.
+    index : int
+        Position of character to extract (supports negative indexing).
+
+    Returns
+    -------
+    PyArrowArray
+        Array of single characters.
+    """
+    if index >= 0:
+        return pc.utf8_slice_codeunits(arr, index, 1)
+    else:
+        # For negative indices, we need length - abs(index)
+        lengths = pc.utf8_length(arr)
+        # Use if_else to handle strings shorter than abs(index)
+        start = pc.subtract(lengths, -index)
+        # Clamp to 0 if negative
+        start = pc.if_else(pc.less(start, 0), 0, start)
+        return pc.utf8_slice_codeunits(arr, start, 1)
+
+
+@register_kernel("str_ljust", "arrow")
+def arrow_str_ljust(arr: PyArrowArray, width: int, fillchar: str = " ") -> PyArrowArray:
+    """Left-justify strings in a field of given width."""
+    return pc.utf8_rpad(arr, width, padding=fillchar)
+
+
+@register_kernel("str_rjust", "arrow")
+def arrow_str_rjust(arr: PyArrowArray, width: int, fillchar: str = " ") -> PyArrowArray:
+    """Right-justify strings in a field of given width."""
+    return pc.utf8_lpad(arr, width, padding=fillchar)
+
+
+@register_kernel("str_normalize", "arrow")
+def arrow_str_normalize(arr: PyArrowArray, form: str = "NFC") -> PyArrowArray:
+    """
+    Normalize Unicode strings.
+
+    Parameters
+    ----------
+    arr : PyArrowArray
+        Input string array.
+    form : str, default "NFC"
+        Unicode normalization form: "NFC", "NFKC", "NFD", or "NFKD".
+
+    Returns
+    -------
+    PyArrowArray
+        Normalized string array.
+    """
+    return pc.utf8_normalize(arr, form=form)
+
+
 @register_kernel("str_capitalize", "arrow")
 def arrow_str_capitalize(arr: PyArrowArray) -> PyArrowArray:
     """Capitalize strings (first char uppercase, rest lowercase)."""

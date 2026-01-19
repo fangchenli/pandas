@@ -219,6 +219,147 @@ def arrow_bfill(arr: PyArrowArray, limit: int | None = None) -> PyArrowArray:
     return pa.array(result)
 
 
+# =============================================================================
+# Clip/Between Kernels
+# =============================================================================
+
+
+@register_kernel("clip", "arrow")
+def arrow_clip(arr: PyArrowArray, lower=None, upper=None) -> PyArrowArray:
+    """
+    Clip (limit) array values to a given range.
+
+    Parameters
+    ----------
+    arr : PyArrowArray
+        Input array.
+    lower : scalar, optional
+        Minimum value. Values below this will be set to lower.
+    upper : scalar, optional
+        Maximum value. Values above this will be set to upper.
+
+    Returns
+    -------
+    PyArrowArray
+        Clipped array.
+    """
+    result = arr
+    if lower is not None:
+        result = pc.if_else(pc.less(result, lower), lower, result)
+    if upper is not None:
+        result = pc.if_else(pc.greater(result, upper), upper, result)
+    return result
+
+
+@register_kernel("between", "arrow")
+def arrow_between(
+    arr: PyArrowArray, left, right, inclusive: str = "both"
+) -> PyArrowArray:
+    """
+    Check if values are between left and right bounds.
+
+    Parameters
+    ----------
+    arr : PyArrowArray
+        Input array.
+    left : scalar
+        Left bound.
+    right : scalar
+        Right bound.
+    inclusive : str, default "both"
+        Include boundaries: "both", "neither", "left", or "right".
+
+    Returns
+    -------
+    PyArrowArray
+        Boolean array indicating if values are in range.
+    """
+    if inclusive == "both":
+        return pc.and_(pc.greater_equal(arr, left), pc.less_equal(arr, right))
+    elif inclusive == "neither":
+        return pc.and_(pc.greater(arr, left), pc.less(arr, right))
+    elif inclusive == "left":
+        return pc.and_(pc.greater_equal(arr, left), pc.less(arr, right))
+    elif inclusive == "right":
+        return pc.and_(pc.greater(arr, left), pc.less_equal(arr, right))
+    else:
+        raise ValueError(f"Invalid inclusive value: {inclusive}")
+
+
+# =============================================================================
+# Diff/Pct_change Kernels
+# =============================================================================
+
+
+@register_kernel("diff", "arrow")
+def arrow_diff(arr: PyArrowArray, periods: int = 1) -> PyArrowArray:
+    """
+    Calculate the difference between consecutive values.
+
+    Parameters
+    ----------
+    arr : PyArrowArray
+        Input numeric array.
+    periods : int, default 1
+        Number of periods to shift for calculating difference.
+
+    Returns
+    -------
+    PyArrowArray
+        Array of differences.
+    """
+    np_arr = arr.to_numpy(zero_copy_only=False).astype(float)
+    n = len(np_arr)
+    result = np.full(n, np.nan)
+
+    if periods > 0 and periods < n:
+        result[periods:] = np_arr[periods:] - np_arr[:-periods]
+    elif periods < 0 and -periods < n:
+        result[:periods] = np_arr[:periods] - np_arr[-periods:]
+
+    return pa.array(result)
+
+
+@register_kernel("pct_change", "arrow")
+def arrow_pct_change(arr: PyArrowArray, periods: int = 1) -> PyArrowArray:
+    """
+    Calculate percentage change between consecutive values.
+
+    Parameters
+    ----------
+    arr : PyArrowArray
+        Input numeric array.
+    periods : int, default 1
+        Number of periods to shift for calculating change.
+
+    Returns
+    -------
+    PyArrowArray
+        Array of percentage changes.
+    """
+    np_arr = arr.to_numpy(zero_copy_only=False).astype(float)
+    n = len(np_arr)
+    result = np.full(n, np.nan)
+
+    if periods > 0 and periods < n:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            result[periods:] = (np_arr[periods:] - np_arr[:-periods]) / np_arr[
+                :-periods
+            ]
+    elif periods < 0 and -periods < n:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            result[:periods] = (np_arr[:periods] - np_arr[-periods:]) / np_arr[
+                -periods:
+            ]
+
+    return pa.array(result)
+
+
+# =============================================================================
+# Fill NA Variant Kernels
+# =============================================================================
+
+
 @register_kernel("interpolate_linear", "arrow")
 def arrow_interpolate_linear(arr: PyArrowArray) -> PyArrowArray:
     """

@@ -325,3 +325,194 @@ def numpy_dt_strftime(arr: np.ndarray, format: str) -> np.ndarray:
 
 
 # =============================================================================
+# Datetime Rounding/Truncation Functions
+# =============================================================================
+
+
+@register_kernel("dt_floor", "numpy")
+def numpy_dt_floor(arr: np.ndarray, unit: str) -> np.ndarray:
+    """
+    Floor datetime to specified unit.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input datetime64 array.
+    unit : str
+        Unit to floor to.
+
+    Returns
+    -------
+    np.ndarray
+        Floored datetime array.
+    """
+    import pandas as pd
+
+    return pd.DatetimeIndex(arr).floor(unit).to_numpy()
+
+
+@register_kernel("dt_ceil", "numpy")
+def numpy_dt_ceil(arr: np.ndarray, unit: str) -> np.ndarray:
+    """
+    Ceil datetime to specified unit.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input datetime64 array.
+    unit : str
+        Unit to ceil to.
+
+    Returns
+    -------
+    np.ndarray
+        Ceiled datetime array.
+    """
+    import pandas as pd
+
+    return pd.DatetimeIndex(arr).ceil(unit).to_numpy()
+
+
+@register_kernel("dt_round", "numpy")
+def numpy_dt_round(arr: np.ndarray, unit: str) -> np.ndarray:
+    """
+    Round datetime to specified unit.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input datetime64 array.
+    unit : str
+        Unit to round to.
+
+    Returns
+    -------
+    np.ndarray
+        Rounded datetime array.
+    """
+    import pandas as pd
+
+    return pd.DatetimeIndex(arr).round(unit).to_numpy()
+
+
+@register_kernel("dt_date", "numpy")
+def numpy_dt_date(arr: np.ndarray) -> np.ndarray:
+    """
+    Extract date component from datetime array.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input datetime64 array.
+
+    Returns
+    -------
+    np.ndarray
+        Array of date objects.
+    """
+    import pandas as pd
+
+    return pd.DatetimeIndex(arr).date
+
+
+@register_kernel("dt_time", "numpy")
+def numpy_dt_time(arr: np.ndarray) -> np.ndarray:
+    """
+    Extract time component from datetime array.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input datetime64 array.
+
+    Returns
+    -------
+    np.ndarray
+        Array of time objects.
+    """
+    import pandas as pd
+
+    return pd.DatetimeIndex(arr).time
+
+
+@register_kernel("dt_normalize", "numpy")
+def numpy_dt_normalize(arr: np.ndarray) -> np.ndarray:
+    """
+    Normalize datetime to midnight (remove time component).
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input datetime64 array.
+
+    Returns
+    -------
+    np.ndarray
+        Normalized datetime array.
+    """
+    import pandas as pd
+
+    return pd.DatetimeIndex(arr).normalize().to_numpy()
+
+
+@register_kernel("dt_weekday", "numpy")
+def numpy_dt_weekday(arr: np.ndarray) -> np.ndarray:
+    """
+    Extract weekday as integer (0=Monday, 6=Sunday).
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input datetime64 array.
+
+    Returns
+    -------
+    np.ndarray
+        Array of weekday values (0-6).
+    """
+    import pandas as pd
+
+    return pd.DatetimeIndex(arr).weekday.to_numpy()
+
+
+@register_kernel("dt_is_month_start", "numpy")
+def numpy_dt_is_month_start(arr: np.ndarray) -> np.ndarray:
+    """Check if datetime is first day of month."""
+    import pandas as pd
+
+    return pd.DatetimeIndex(arr).is_month_start.to_numpy()
+
+
+@register_kernel("dt_is_month_end", "numpy")
+def numpy_dt_is_month_end(arr: np.ndarray) -> np.ndarray:
+    """Check if datetime is last day of month."""
+    import pandas as pd
+
+    return pd.DatetimeIndex(arr).is_month_end.to_numpy()
+
+
+@register_kernel("dt_is_year_start", "numpy")
+def numpy_dt_is_year_start(arr: np.ndarray) -> np.ndarray:
+    """Check if datetime is first day of year."""
+    import pandas as pd
+
+    return pd.DatetimeIndex(arr).is_year_start.to_numpy()
+
+
+@register_kernel("dt_is_year_end", "numpy")
+def numpy_dt_is_year_end(arr: np.ndarray) -> np.ndarray:
+    """Check if datetime is last day of year."""
+    import pandas as pd
+
+    return pd.DatetimeIndex(arr).is_year_end.to_numpy()
+
+
+@register_kernel("dt_days_in_month", "numpy")
+def numpy_dt_days_in_month(arr: np.ndarray) -> np.ndarray:
+    """Get number of days in the month."""
+    import pandas as pd
+
+    return pd.DatetimeIndex(arr).days_in_month.to_numpy()
+
+
+# =============================================================================

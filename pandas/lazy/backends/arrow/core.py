@@ -439,6 +439,86 @@ def arrow_n_unique(arr: PyArrowArray) -> int:
     return len(unique)
 
 
+@register_kernel("median", "arrow")
+def arrow_median(arr: PyArrowArray):
+    """Median of array elements."""
+    # PyArrow doesn't have direct median; use approximate or exact computation
+    result = pc.approximate_median(arr)
+    return result.as_py()
+
+
+@register_kernel("any", "arrow")
+def arrow_any(arr: PyArrowArray) -> bool:
+    """Check if any element is True/truthy."""
+    result = pc.any(arr)
+    return result.as_py()
+
+
+@register_kernel("all", "arrow")
+def arrow_all(arr: PyArrowArray) -> bool:
+    """Check if all elements are True/truthy."""
+    result = pc.all(arr)
+    return result.as_py()
+
+
+@register_kernel("quantile", "arrow")
+def arrow_quantile(arr: PyArrowArray, q: float = 0.5, interpolation: str = "linear"):
+    """
+    Compute quantile of array elements.
+
+    Parameters
+    ----------
+    arr : PyArrowArray
+        Input array.
+    q : float, default 0.5
+        Quantile to compute (0.0 to 1.0).
+    interpolation : str, default "linear"
+        Interpolation method.
+
+    Returns
+    -------
+    scalar
+        Quantile value.
+    """
+    result = pc.quantile(arr, q=q, interpolation=interpolation)
+    # pc.quantile returns an array; get the first element
+    if hasattr(result, "__len__") and len(result) > 0:
+        return result[0].as_py()
+    return result.as_py() if hasattr(result, "as_py") else result
+
+
+@register_kernel("product", "arrow")
+def arrow_product(arr: PyArrowArray):
+    """Product of array elements."""
+    result = pc.product(arr)
+    return result.as_py()
+
+
+@register_kernel("first", "arrow")
+def arrow_first(arr: PyArrowArray):
+    """Get first non-null value."""
+    # Find first non-null
+    if len(arr) == 0:
+        return None
+    for i in range(len(arr)):
+        val = arr[i]
+        if val.is_valid:
+            return val.as_py()
+    return None
+
+
+@register_kernel("last", "arrow")
+def arrow_last(arr: PyArrowArray):
+    """Get last non-null value."""
+    if len(arr) == 0:
+        return None
+    for i in range(len(arr) - 1, -1, -1):
+        val = arr[i]
+        if val.is_valid:
+            return val.as_py()
+    return None
+
+
 # =============================================================================
 # Filter Operation
 # =============================================================================

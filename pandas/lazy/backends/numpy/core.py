@@ -264,6 +264,86 @@ def numpy_n_unique(arr: np.ndarray) -> int:
     return len(np.unique(arr))
 
 
+@register_kernel("median", "numpy")
+def numpy_median(arr: np.ndarray):
+    """Median of array elements (ignoring NaN)."""
+    return np.nanmedian(arr)
+
+
+@register_kernel("any", "numpy")
+def numpy_any(arr: np.ndarray) -> bool:
+    """Check if any element is True/truthy."""
+    return bool(np.any(arr))
+
+
+@register_kernel("all", "numpy")
+def numpy_all(arr: np.ndarray) -> bool:
+    """Check if all elements are True/truthy."""
+    return bool(np.all(arr))
+
+
+@register_kernel("quantile", "numpy")
+def numpy_quantile(arr: np.ndarray, q: float = 0.5, interpolation: str = "linear"):
+    """
+    Compute quantile of array elements.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input array.
+    q : float, default 0.5
+        Quantile to compute (0.0 to 1.0).
+    interpolation : str, default "linear"
+        Interpolation method.
+
+    Returns
+    -------
+    scalar
+        Quantile value.
+    """
+    return np.nanquantile(arr, q, method=interpolation)
+
+
+@register_kernel("product", "numpy")
+def numpy_product(arr: np.ndarray):
+    """Product of array elements (ignoring NaN)."""
+    return np.nanprod(arr)
+
+
+@register_kernel("first", "numpy")
+def numpy_first(arr: np.ndarray):
+    """Get first non-null value."""
+    if len(arr) == 0:
+        return None
+    # Find first non-NaN for numeric, or first non-None for object
+    if arr.dtype == object:
+        for val in arr:
+            if val is not None:
+                return val
+    else:
+        for val in arr:
+            if not np.isnan(val):
+                return val
+    return None
+
+
+@register_kernel("last", "numpy")
+def numpy_last(arr: np.ndarray):
+    """Get last non-null value."""
+    if len(arr) == 0:
+        return None
+    # Find last non-NaN for numeric, or last non-None for object
+    if arr.dtype == object:
+        for i in range(len(arr) - 1, -1, -1):
+            if arr[i] is not None:
+                return arr[i]
+    else:
+        for i in range(len(arr) - 1, -1, -1):
+            if not np.isnan(arr[i]):
+                return arr[i]
+    return None
+
+
 # =============================================================================
 # Filter Operation
 # =============================================================================

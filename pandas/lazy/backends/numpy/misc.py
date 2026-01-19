@@ -896,6 +896,136 @@ def numpy_bfill(arr: np.ndarray, limit: int | None = None) -> np.ndarray:
     return result_rev[::-1].copy()
 
 
+# =============================================================================
+# Clip/Between Kernels
+# =============================================================================
+
+
+@register_kernel("clip", "numpy")
+def numpy_clip(arr: np.ndarray, lower=None, upper=None) -> np.ndarray:
+    """
+    Clip (limit) array values to a given range.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input array.
+    lower : scalar, optional
+        Minimum value. Values below this will be set to lower.
+    upper : scalar, optional
+        Maximum value. Values above this will be set to upper.
+
+    Returns
+    -------
+    np.ndarray
+        Clipped array.
+    """
+    return np.clip(arr, lower, upper)
+
+
+@register_kernel("between", "numpy")
+def numpy_between(arr: np.ndarray, left, right, inclusive: str = "both") -> np.ndarray:
+    """
+    Check if values are between left and right bounds.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input array.
+    left : scalar
+        Left bound.
+    right : scalar
+        Right bound.
+    inclusive : str, default "both"
+        Include boundaries: "both", "neither", "left", or "right".
+
+    Returns
+    -------
+    np.ndarray
+        Boolean array indicating if values are in range.
+    """
+    if inclusive == "both":
+        return (arr >= left) & (arr <= right)
+    elif inclusive == "neither":
+        return (arr > left) & (arr < right)
+    elif inclusive == "left":
+        return (arr >= left) & (arr < right)
+    elif inclusive == "right":
+        return (arr > left) & (arr <= right)
+    else:
+        raise ValueError(f"Invalid inclusive value: {inclusive}")
+
+
+# =============================================================================
+# Diff/Pct_change Kernels
+# =============================================================================
+
+
+@register_kernel("diff", "numpy")
+def numpy_diff(arr: np.ndarray, periods: int = 1) -> np.ndarray:
+    """
+    Calculate the difference between consecutive values.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input numeric array.
+    periods : int, default 1
+        Number of periods to shift for calculating difference.
+
+    Returns
+    -------
+    np.ndarray
+        Array of differences.
+    """
+    arr = arr.astype(float)
+    n = len(arr)
+    result = np.full(n, np.nan)
+
+    if periods > 0 and periods < n:
+        result[periods:] = arr[periods:] - arr[:-periods]
+    elif periods < 0 and -periods < n:
+        result[:periods] = arr[:periods] - arr[-periods:]
+
+    return result
+
+
+@register_kernel("pct_change", "numpy")
+def numpy_pct_change(arr: np.ndarray, periods: int = 1) -> np.ndarray:
+    """
+    Calculate percentage change between consecutive values.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input numeric array.
+    periods : int, default 1
+        Number of periods to shift for calculating change.
+
+    Returns
+    -------
+    np.ndarray
+        Array of percentage changes.
+    """
+    arr = arr.astype(float)
+    n = len(arr)
+    result = np.full(n, np.nan)
+
+    if periods > 0 and periods < n:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            result[periods:] = (arr[periods:] - arr[:-periods]) / arr[:-periods]
+    elif periods < 0 and -periods < n:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            result[:periods] = (arr[:periods] - arr[-periods:]) / arr[-periods:]
+
+    return result
+
+
+# =============================================================================
+# Fill NA Variant Kernels
+# =============================================================================
+
+
 @register_kernel("interpolate_linear", "numpy")
 def numpy_interpolate_linear(arr: np.ndarray) -> np.ndarray:
     """

@@ -13,6 +13,145 @@ from pandas.lazy.backends import register_kernel
 # =============================================================================
 
 
+@register_kernel("str_split", "numpy")
+def numpy_str_split(
+    arr: np.ndarray, pattern: str = " ", n: int = -1, regex: bool = False
+) -> np.ndarray:
+    """
+    Split strings by pattern.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input string array.
+    pattern : str, default " "
+        String or regex pattern to split on.
+    n : int, default -1
+        Maximum number of splits. -1 means no limit.
+    regex : bool, default False
+        Whether to treat pattern as regex.
+
+    Returns
+    -------
+    np.ndarray
+        Object array of lists of split strings.
+    """
+    import re
+
+    max_split = n if n >= 0 else 0  # 0 means no limit for str.split
+
+    if regex:
+        compiled = re.compile(pattern)
+        return np.array(
+            [compiled.split(s, maxsplit=max_split) for s in arr], dtype=object
+        )
+    return np.array([s.split(pattern, maxsplit=max_split) for s in arr], dtype=object)
+
+
+@register_kernel("str_rsplit", "numpy")
+def numpy_str_rsplit(arr: np.ndarray, pattern: str = " ", n: int = -1) -> np.ndarray:
+    """
+    Split strings by pattern from the right.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input string array.
+    pattern : str, default " "
+        String pattern to split on.
+    n : int, default -1
+        Maximum number of splits. -1 means no limit.
+
+    Returns
+    -------
+    np.ndarray
+        Object array of lists of split strings.
+    """
+    max_split = n if n >= 0 else -1  # -1 means no limit for str.rsplit
+    return np.array([s.rsplit(pattern, maxsplit=max_split) for s in arr], dtype=object)
+
+
+@register_kernel("str_repeat", "numpy")
+def numpy_str_repeat(arr: np.ndarray, repeats: int) -> np.ndarray:
+    """
+    Repeat strings a specified number of times.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input string array.
+    repeats : int
+        Number of times to repeat each string.
+
+    Returns
+    -------
+    np.ndarray
+        Array with repeated strings.
+    """
+    return np.char.multiply(arr, repeats)
+
+
+@register_kernel("str_get", "numpy")
+def numpy_str_get(arr: np.ndarray, index: int) -> np.ndarray:
+    """
+    Extract character at specified position.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input string array.
+    index : int
+        Position of character to extract (supports negative indexing).
+
+    Returns
+    -------
+    np.ndarray
+        Array of single characters.
+    """
+
+    def safe_get(s, i):
+        try:
+            return s[i]
+        except IndexError:
+            return ""
+
+    return np.array([safe_get(s, index) for s in arr], dtype=object)
+
+
+@register_kernel("str_ljust", "numpy")
+def numpy_str_ljust(arr: np.ndarray, width: int, fillchar: str = " ") -> np.ndarray:
+    """Left-justify strings in a field of given width."""
+    return np.char.ljust(arr, width, fillchar)
+
+
+@register_kernel("str_rjust", "numpy")
+def numpy_str_rjust(arr: np.ndarray, width: int, fillchar: str = " ") -> np.ndarray:
+    """Right-justify strings in a field of given width."""
+    return np.char.rjust(arr, width, fillchar)
+
+
+@register_kernel("str_normalize", "numpy")
+def numpy_str_normalize(arr: np.ndarray, form: str = "NFC") -> np.ndarray:
+    """
+    Normalize Unicode strings.
+
+    Parameters
+    ----------
+    arr : np.ndarray
+        Input string array.
+    form : str, default "NFC"
+        Unicode normalization form: "NFC", "NFKC", "NFD", or "NFKD".
+
+    Returns
+    -------
+    np.ndarray
+        Normalized string array.
+    """
+    import unicodedata
+
+    return np.array([unicodedata.normalize(form, s) for s in arr], dtype=object)
+
+
 @register_kernel("str_capitalize", "numpy")
 def numpy_str_capitalize(arr: np.ndarray) -> np.ndarray:
     """Capitalize strings (first char uppercase, rest lowercase)."""

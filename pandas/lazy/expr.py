@@ -513,6 +513,260 @@ class Expr:
         """
         return Expr(Call("n_unique", (self._node,), is_aggregate=True))
 
+    def median(self) -> Expr:
+        """
+        Compute the median value.
+
+        Returns
+        -------
+        Expr
+            Aggregation expression.
+
+        Examples
+        --------
+        >>> col("a").median()
+        """
+        return Expr(Call("median", (self._node,), is_aggregate=True))
+
+    def quantile(self, q: float = 0.5, interpolation: str = "linear") -> Expr:
+        """
+        Compute the quantile value.
+
+        Parameters
+        ----------
+        q : float, default 0.5
+            Quantile to compute (0.0 to 1.0).
+        interpolation : str, default "linear"
+            Interpolation method.
+
+        Returns
+        -------
+        Expr
+            Aggregation expression.
+
+        Examples
+        --------
+        >>> col("a").quantile(0.75)
+        """
+        return Expr(
+            Call(
+                "quantile",
+                (self._node,),
+                {"q": q, "interpolation": interpolation},
+                is_aggregate=True,
+            )
+        )
+
+    def any(self) -> Expr:
+        """
+        Check if any value is True.
+
+        Returns
+        -------
+        Expr
+            Aggregation expression.
+
+        Examples
+        --------
+        >>> col("flag").any()
+        """
+        return Expr(Call("any", (self._node,), is_aggregate=True))
+
+    def all(self) -> Expr:
+        """
+        Check if all values are True.
+
+        Returns
+        -------
+        Expr
+            Aggregation expression.
+
+        Examples
+        --------
+        >>> col("flag").all()
+        """
+        return Expr(Call("all", (self._node,), is_aggregate=True))
+
+    def product(self) -> Expr:
+        """
+        Compute the product of values.
+
+        Returns
+        -------
+        Expr
+            Aggregation expression.
+
+        Examples
+        --------
+        >>> col("a").product()
+        """
+        return Expr(Call("product", (self._node,), is_aggregate=True))
+
+    # -------------------------------------------------------------------------
+    # General transforms
+    # -------------------------------------------------------------------------
+
+    def clip(self, lower=None, upper=None) -> Expr:
+        """
+        Clip (limit) values to a given range.
+
+        Parameters
+        ----------
+        lower : scalar, optional
+            Minimum value. Values below this will be set to lower.
+        upper : scalar, optional
+            Maximum value. Values above this will be set to upper.
+
+        Returns
+        -------
+        Expr
+            Expression with clipped values.
+
+        Examples
+        --------
+        >>> col("a").clip(lower=0, upper=100)
+        """
+        return Expr(Call("clip", (self._node,), {"lower": lower, "upper": upper}))
+
+    def diff(self, periods: int = 1) -> Expr:
+        """
+        Calculate the difference between consecutive values.
+
+        Parameters
+        ----------
+        periods : int, default 1
+            Number of periods to shift for calculating difference.
+
+        Returns
+        -------
+        Expr
+            Expression with differences.
+
+        Examples
+        --------
+        >>> col("a").diff()
+        >>> col("a").diff(periods=2)
+        """
+        return Expr(Call("diff", (self._node,), {"periods": periods}))
+
+    def pct_change(self, periods: int = 1) -> Expr:
+        """
+        Calculate percentage change between consecutive values.
+
+        Parameters
+        ----------
+        periods : int, default 1
+            Number of periods to shift for calculating change.
+
+        Returns
+        -------
+        Expr
+            Expression with percentage changes.
+
+        Examples
+        --------
+        >>> col("price").pct_change()
+        """
+        return Expr(Call("pct_change", (self._node,), {"periods": periods}))
+
+    def shift(self, periods: int = 1, fill_value: Any = None) -> Expr:
+        """
+        Shift values by specified number of periods.
+
+        Parameters
+        ----------
+        periods : int, default 1
+            Number of periods to shift. Positive shifts forward.
+        fill_value : Any, optional
+            Value to use for filling gaps.
+
+        Returns
+        -------
+        Expr
+            Expression with shifted values.
+
+        Examples
+        --------
+        >>> col("a").shift(1)
+        >>> col("a").shift(-1, fill_value=0)
+        """
+        return Expr(
+            Call("shift", (self._node,), {"periods": periods, "fill_value": fill_value})
+        )
+
+    def between(self, left, right, inclusive: str = "both") -> Expr:
+        """
+        Check if values are between left and right bounds.
+
+        Parameters
+        ----------
+        left : scalar
+            Left bound.
+        right : scalar
+            Right bound.
+        inclusive : str, default "both"
+            Include boundaries: "both", "neither", "left", or "right".
+
+        Returns
+        -------
+        Expr
+            Boolean expression indicating if values are in range.
+
+        Examples
+        --------
+        >>> col("a").between(0, 100)
+        >>> col("a").between(0, 100, inclusive="left")
+        """
+        return Expr(
+            Call(
+                "between",
+                (self._node,),
+                {"left": left, "right": right, "inclusive": inclusive},
+            )
+        )
+
+    def ffill(self, limit: int | None = None) -> Expr:
+        """
+        Forward fill missing values.
+
+        Parameters
+        ----------
+        limit : int, optional
+            Maximum number of consecutive NaN values to forward fill.
+
+        Returns
+        -------
+        Expr
+            Expression with forward-filled values.
+
+        Examples
+        --------
+        >>> col("a").ffill()
+        >>> col("a").ffill(limit=2)
+        """
+        return Expr(Call("ffill", (self._node,), {"limit": limit}))
+
+    def bfill(self, limit: int | None = None) -> Expr:
+        """
+        Backward fill missing values.
+
+        Parameters
+        ----------
+        limit : int, optional
+            Maximum number of consecutive NaN values to backward fill.
+
+        Returns
+        -------
+        Expr
+            Expression with backward-filled values.
+
+        Examples
+        --------
+        >>> col("a").bfill()
+        >>> col("a").bfill(limit=2)
+        """
+        return Expr(Call("bfill", (self._node,), {"limit": limit}))
+
     # -------------------------------------------------------------------------
     # Window functions
     # -------------------------------------------------------------------------
@@ -1606,6 +1860,158 @@ class ExprStringAccessor:
         """
         return self._make_call("str_is_numeric")
 
+    def split(self, pattern: str = " ", n: int = -1, *, regex: bool = False) -> Expr:
+        """
+        Split strings by pattern.
+
+        Parameters
+        ----------
+        pattern : str, default " "
+            String or regex pattern to split on.
+        n : int, default -1
+            Maximum number of splits. -1 means no limit.
+        regex : bool, default False
+            Whether to treat pattern as regex.
+
+        Returns
+        -------
+        Expr
+            Expression with list of split strings.
+
+        Examples
+        --------
+        >>> col("text").str.split(" ")
+        >>> col("text").str.split(",", n=2)
+        """
+        return self._make_call("str_split", pattern, n, regex=regex)
+
+    def rsplit(self, pattern: str = " ", n: int = -1) -> Expr:
+        """
+        Split strings by pattern from the right.
+
+        Parameters
+        ----------
+        pattern : str, default " "
+            String pattern to split on.
+        n : int, default -1
+            Maximum number of splits. -1 means no limit.
+
+        Returns
+        -------
+        Expr
+            Expression with list of split strings.
+
+        Examples
+        --------
+        >>> col("text").str.rsplit(" ", n=2)
+        """
+        return self._make_call("str_rsplit", pattern, n)
+
+    def repeat(self, repeats: int) -> Expr:
+        """
+        Repeat strings a specified number of times.
+
+        Parameters
+        ----------
+        repeats : int
+            Number of times to repeat each string.
+
+        Returns
+        -------
+        Expr
+            Expression with repeated strings.
+
+        Examples
+        --------
+        >>> col("text").str.repeat(3)
+        """
+        return self._make_call("str_repeat", repeats)
+
+    def get(self, index: int) -> Expr:
+        """
+        Extract character at specified position.
+
+        Parameters
+        ----------
+        index : int
+            Position of character to extract (supports negative indexing).
+
+        Returns
+        -------
+        Expr
+            Expression with single characters.
+
+        Examples
+        --------
+        >>> col("text").str.get(0)  # First character
+        >>> col("text").str.get(-1)  # Last character
+        """
+        return self._make_call("str_get", index)
+
+    def ljust(self, width: int, fillchar: str = " ") -> Expr:
+        """
+        Left-justify strings in a field of given width.
+
+        Parameters
+        ----------
+        width : int
+            Minimum width of resulting string.
+        fillchar : str, default " "
+            Character to use for padding.
+
+        Returns
+        -------
+        Expr
+            Expression with left-justified strings.
+
+        Examples
+        --------
+        >>> col("text").str.ljust(10)
+        """
+        return self._make_call("str_ljust", width, fillchar)
+
+    def rjust(self, width: int, fillchar: str = " ") -> Expr:
+        """
+        Right-justify strings in a field of given width.
+
+        Parameters
+        ----------
+        width : int
+            Minimum width of resulting string.
+        fillchar : str, default " "
+            Character to use for padding.
+
+        Returns
+        -------
+        Expr
+            Expression with right-justified strings.
+
+        Examples
+        --------
+        >>> col("text").str.rjust(10)
+        """
+        return self._make_call("str_rjust", width, fillchar)
+
+    def normalize(self, form: str = "NFC") -> Expr:
+        """
+        Normalize Unicode strings.
+
+        Parameters
+        ----------
+        form : str, default "NFC"
+            Unicode normalization form: "NFC", "NFKC", "NFD", or "NFKD".
+
+        Returns
+        -------
+        Expr
+            Expression with normalized strings.
+
+        Examples
+        --------
+        >>> col("text").str.normalize("NFC")
+        """
+        return self._make_call("str_normalize", form)
+
 
 class ExprDatetimeAccessor:
     """
@@ -1858,6 +2264,136 @@ class ExprDatetimeAccessor:
         >>> col("timestamp").dt.date
         """
         return self._make_call("dt_date")
+
+    @property
+    def time(self) -> Expr:
+        """
+        Extract the time part (without date).
+
+        Returns
+        -------
+        Expr
+            Expression with time values.
+
+        Examples
+        --------
+        >>> col("timestamp").dt.time
+        """
+        return self._make_call("dt_time")
+
+    @property
+    def days_in_month(self) -> Expr:
+        """
+        Get the number of days in the month.
+
+        Returns
+        -------
+        Expr
+            Expression with days in month values.
+
+        Examples
+        --------
+        >>> col("date").dt.days_in_month
+        """
+        return self._make_call("dt_days_in_month")
+
+    def floor(self, unit: str) -> Expr:
+        """
+        Floor datetime to specified unit.
+
+        Parameters
+        ----------
+        unit : str
+            Unit to floor to (e.g., "D" for day, "h" for hour).
+
+        Returns
+        -------
+        Expr
+            Expression with floored datetimes.
+
+        Examples
+        --------
+        >>> col("timestamp").dt.floor("D")
+        >>> col("timestamp").dt.floor("h")
+        """
+        return Expr(Call("dt_floor", (self._expr._node,), {"unit": unit}))
+
+    def ceil(self, unit: str) -> Expr:
+        """
+        Ceil datetime to specified unit.
+
+        Parameters
+        ----------
+        unit : str
+            Unit to ceil to (e.g., "D" for day, "h" for hour).
+
+        Returns
+        -------
+        Expr
+            Expression with ceiled datetimes.
+
+        Examples
+        --------
+        >>> col("timestamp").dt.ceil("D")
+        >>> col("timestamp").dt.ceil("h")
+        """
+        return Expr(Call("dt_ceil", (self._expr._node,), {"unit": unit}))
+
+    def round(self, unit: str) -> Expr:
+        """
+        Round datetime to specified unit.
+
+        Parameters
+        ----------
+        unit : str
+            Unit to round to (e.g., "D" for day, "h" for hour).
+
+        Returns
+        -------
+        Expr
+            Expression with rounded datetimes.
+
+        Examples
+        --------
+        >>> col("timestamp").dt.round("D")
+        >>> col("timestamp").dt.round("h")
+        """
+        return Expr(Call("dt_round", (self._expr._node,), {"unit": unit}))
+
+    def normalize(self) -> Expr:
+        """
+        Normalize datetime to midnight (remove time component).
+
+        Returns
+        -------
+        Expr
+            Expression with normalized datetimes.
+
+        Examples
+        --------
+        >>> col("timestamp").dt.normalize()
+        """
+        return self._make_call("dt_normalize")
+
+    def strftime(self, format: str) -> Expr:
+        """
+        Format datetime as string.
+
+        Parameters
+        ----------
+        format : str
+            strftime format string.
+
+        Returns
+        -------
+        Expr
+            Expression with formatted strings.
+
+        Examples
+        --------
+        >>> col("timestamp").dt.strftime("%Y-%m-%d")
+        """
+        return Expr(Call("dt_strftime", (self._expr._node,), {"format": format}))
 
 
 # =============================================================================
