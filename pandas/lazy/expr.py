@@ -1287,6 +1287,233 @@ class Expr:
             )
         )
 
+    def rolling_count(self, window: int, min_periods: int | None = None) -> Expr:
+        """
+        Count non-null values in a rolling window.
+
+        Parameters
+        ----------
+        window : int
+            Size of the rolling window.
+        min_periods : int or None, default None
+            Minimum number of observations required. Defaults to 1.
+
+        Returns
+        -------
+        Expr
+            Expression with rolling counts.
+
+        Examples
+        --------
+        >>> col("value").rolling_count(window=5)
+        """
+        return Expr(
+            Call(
+                "rolling_count",
+                (self._node,),
+                {"window": window, "min_periods": min_periods},
+            )
+        )
+
+    def rolling_quantile(
+        self, window: int, quantile: float, min_periods: int | None = None
+    ) -> Expr:
+        """
+        Compute rolling quantile over a window.
+
+        Parameters
+        ----------
+        window : int
+            Size of the rolling window.
+        quantile : float
+            Quantile to compute (0.0 to 1.0).
+        min_periods : int or None, default None
+            Minimum number of observations required. Defaults to window size.
+
+        Returns
+        -------
+        Expr
+            Expression with rolling quantiles.
+
+        Examples
+        --------
+        >>> col("value").rolling_quantile(window=5, quantile=0.5)
+        >>> col("value").rolling_quantile(window=10, quantile=0.75)
+        """
+        return Expr(
+            Call(
+                "rolling_quantile",
+                (self._node,),
+                {"window": window, "quantile": quantile, "min_periods": min_periods},
+            )
+        )
+
+    def rolling_skew(self, window: int, min_periods: int | None = None) -> Expr:
+        """
+        Compute rolling skewness over a window.
+
+        Parameters
+        ----------
+        window : int
+            Size of the rolling window.
+        min_periods : int or None, default None
+            Minimum number of observations required. Defaults to 3.
+
+        Returns
+        -------
+        Expr
+            Expression with rolling skewness values.
+
+        Examples
+        --------
+        >>> col("value").rolling_skew(window=10)
+        """
+        return Expr(
+            Call(
+                "rolling_skew",
+                (self._node,),
+                {"window": window, "min_periods": min_periods},
+            )
+        )
+
+    def rolling_kurt(self, window: int, min_periods: int | None = None) -> Expr:
+        """
+        Compute rolling kurtosis over a window.
+
+        Parameters
+        ----------
+        window : int
+            Size of the rolling window.
+        min_periods : int or None, default None
+            Minimum number of observations required. Defaults to 4.
+
+        Returns
+        -------
+        Expr
+            Expression with rolling kurtosis values (excess kurtosis).
+
+        Examples
+        --------
+        >>> col("value").rolling_kurt(window=10)
+        """
+        return Expr(
+            Call(
+                "rolling_kurt",
+                (self._node,),
+                {"window": window, "min_periods": min_periods},
+            )
+        )
+
+    def rolling_apply(
+        self, window: int, func, min_periods: int | None = None, raw: bool = True
+    ) -> Expr:
+        """
+        Apply a custom function to a rolling window.
+
+        Parameters
+        ----------
+        window : int
+            Size of the rolling window.
+        func : callable
+            Function to apply to each window. Should accept an array
+            and return a scalar.
+        min_periods : int or None, default None
+            Minimum number of observations required. Defaults to window size.
+        raw : bool, default True
+            If True, pass raw numpy array to function.
+
+        Returns
+        -------
+        Expr
+            Expression with custom rolling function results.
+
+        Examples
+        --------
+        >>> col("value").rolling_apply(window=5, func=np.nanmean)
+        """
+        return Expr(
+            Call(
+                "rolling_apply",
+                (self._node,),
+                {
+                    "window": window,
+                    "func": func,
+                    "min_periods": min_periods,
+                    "raw": raw,
+                },
+            )
+        )
+
+    def rolling_cov(
+        self, other: Expr | str, window: int, min_periods: int | None = None
+    ) -> Expr:
+        """
+        Compute rolling covariance with another column.
+
+        Parameters
+        ----------
+        other : Expr or str
+            The other column to compute covariance with.
+        window : int
+            Size of the rolling window.
+        min_periods : int or None, default None
+            Minimum number of observations required. Defaults to window size.
+
+        Returns
+        -------
+        Expr
+            Expression with rolling covariance values.
+
+        Examples
+        --------
+        >>> col("x").rolling_cov(col("y"), window=10)
+        >>> col("x").rolling_cov("y", window=10)
+        """
+        # Treat string as column reference for convenience
+        other_expr = col(other) if isinstance(other, str) else other
+        return Expr(
+            Call(
+                "rolling_cov",
+                (self._node, other_expr._node),
+                {"window": window, "min_periods": min_periods},
+            )
+        )
+
+    def rolling_corr(
+        self, other: Expr | str, window: int, min_periods: int | None = None
+    ) -> Expr:
+        """
+        Compute rolling Pearson correlation with another column.
+
+        Parameters
+        ----------
+        other : Expr or str
+            The other column to compute correlation with.
+        window : int
+            Size of the rolling window.
+        min_periods : int or None, default None
+            Minimum number of observations required. Defaults to window size.
+
+        Returns
+        -------
+        Expr
+            Expression with rolling correlation values.
+
+        Examples
+        --------
+        >>> col("x").rolling_corr(col("y"), window=10)
+        >>> col("x").rolling_corr("y", window=10)
+        """
+        # Treat string as column reference for convenience
+        other_expr = col(other) if isinstance(other, str) else other
+        return Expr(
+            Call(
+                "rolling_corr",
+                (self._node, other_expr._node),
+                {"window": window, "min_periods": min_periods},
+            )
+        )
+
     # -------------------------------------------------------------------------
     # Accessors
     # -------------------------------------------------------------------------
