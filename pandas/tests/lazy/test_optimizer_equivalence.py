@@ -18,7 +18,6 @@ Note: Some tests are marked xfail to document known limitations or bugs.
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 import pandas as pd
 from pandas import testing as tm
@@ -48,7 +47,6 @@ class TestEagerVsPhysicalEquivalence:
             physical_result.reset_index(drop=True),
         )
 
-    @pytest.mark.xfail(reason="Nullable Int64 NA values not preserved in physical")
     def test_filter_with_na_values(self):
         """Filter with NA values should handle nulls consistently."""
         df = pd.DataFrame(
@@ -202,7 +200,6 @@ class TestNaNNASemantics:
         assert result_values[0] == 1.0
         assert result_values[2] == 3.0
 
-    @pytest.mark.xfail(reason="Nullable Int64 NA values not preserved in physical")
     def test_expression_simplification_with_nullable_int(self):
         """ExpressionSimplification must preserve pd.NA propagation."""
         df = pd.DataFrame({"a": pd.array([1, None, 3, None, 5], dtype="Int64")})
@@ -436,9 +433,6 @@ class TestLimitOffsetInteractions:
         assert len(result) == 5
         assert list(result["a"]) == [45, 46, 47, 48, 49]
 
-    @pytest.mark.xfail(
-        reason="head().tail() combination not yet properly handled by optimizer"
-    )
     def test_head_then_tail(self):
         """head() then tail() should work correctly."""
         df = pd.DataFrame({"a": list(range(100))})
@@ -450,9 +444,6 @@ class TestLimitOffsetInteractions:
         # Last 10 of first 50 = rows 40-49
         assert list(result["a"]) == list(range(40, 50))
 
-    @pytest.mark.xfail(
-        reason="tail().head() combination not yet properly handled by optimizer"
-    )
     def test_tail_then_head(self):
         """tail() then head() should work correctly."""
         df = pd.DataFrame({"a": list(range(100))})
@@ -510,9 +501,6 @@ class TestSchemaPushdownCorrectness:
         # Schema should be [a, c] not [a, b, c]
         assert list(result.columns) == ["a", "c"]
 
-    @pytest.mark.xfail(
-        reason="Join suffix columns not properly tracked through projection pruning"
-    )
     def test_join_suffix_with_pruning(self):
         """Join suffixing combined with pruning should maintain correct schema."""
         left = pd.DataFrame({"key": [1, 2, 3], "value": [10, 20, 30]})

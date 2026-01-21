@@ -3335,12 +3335,16 @@ class PhysicalHashJoin(PhysicalPlan):
 
         # Try Arrow kernel for Arrow backend
         if backend == "arrow" and has_kernel("hash_join", "arrow"):
-            result = self._execute_arrow_join(join_left_data, join_right_data)
+            result = self._execute_arrow_join(
+                join_left_data, join_right_data, swapped=swapped
+            )
             return self._reorder_columns(result)
 
         # Try NumPy kernel for NumPy backend
         if backend == "numpy" and has_kernel("hash_join", "numpy"):
-            result = self._execute_numpy_join(join_left_data, join_right_data)
+            result = self._execute_numpy_join(
+                join_left_data, join_right_data, swapped=swapped
+            )
             return self._reorder_columns(result)
 
         # Fallback to DataFrame-based join
@@ -3468,6 +3472,7 @@ class PhysicalHashJoin(PhysicalPlan):
         self,
         left_data: ArrayDict,
         right_data: ArrayDict,
+        swapped: bool = False,
     ) -> ArrayDict:
         """Execute join using Arrow's native join."""
         import pyarrow as pa
@@ -3488,6 +3493,16 @@ class PhysicalHashJoin(PhysicalPlan):
             left_keys = list(self.left_on) if self.left_on else None
             right_keys = list(self.right_on) if self.right_on else None
 
+        # When sides are swapped for build/probe optimization, we need to swap
+        # the suffixes too so that the original left side still gets _x suffix
+        # and original right side still gets _y suffix
+        if swapped:
+            left_suffix = self.suffix[1]  # Original right -> now left, use _y
+            right_suffix = self.suffix[0]  # Original left -> now right, use _x
+        else:
+            left_suffix = self.suffix[0]
+            right_suffix = self.suffix[1]
+
         # Execute join
         result_table = dispatch_kernel(
             "hash_join",
@@ -3498,8 +3513,8 @@ class PhysicalHashJoin(PhysicalPlan):
             left_keys=left_keys,
             right_keys=right_keys,
             join_type=self.how,
-            left_suffix=self.suffix[0],
-            right_suffix=self.suffix[1],
+            left_suffix=left_suffix,
+            right_suffix=right_suffix,
         )
 
         # Convert result table to ArrayDict
@@ -3513,6 +3528,7 @@ class PhysicalHashJoin(PhysicalPlan):
         self,
         left_data: ArrayDict,
         right_data: ArrayDict,
+        swapped: bool = False,
     ) -> ArrayDict:
         """Execute join using NumPy kernel."""
         import numpy as np
@@ -3537,6 +3553,16 @@ class PhysicalHashJoin(PhysicalPlan):
             left_keys = list(self.left_on) if self.left_on else None
             right_keys = list(self.right_on) if self.right_on else None
 
+        # When sides are swapped for build/probe optimization, we need to swap
+        # the suffixes too so that the original left side still gets _x suffix
+        # and original right side still gets _y suffix
+        if swapped:
+            left_suffix = self.suffix[1]  # Original right -> now left, use _y
+            right_suffix = self.suffix[0]  # Original left -> now right, use _x
+        else:
+            left_suffix = self.suffix[0]
+            right_suffix = self.suffix[1]
+
         # Execute join
         result = dispatch_kernel(
             "hash_join",
@@ -3547,8 +3573,8 @@ class PhysicalHashJoin(PhysicalPlan):
             left_keys=left_keys,
             right_keys=right_keys,
             join_type=self.how,
-            left_suffix=self.suffix[0],
-            right_suffix=self.suffix[1],
+            left_suffix=left_suffix,
+            right_suffix=right_suffix,
         )
 
         return result

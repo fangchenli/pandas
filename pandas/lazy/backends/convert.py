@@ -147,8 +147,13 @@ def extract_array(obj) -> ArrayLike:
         ):
             return arr._ndarray
         # Other ExtensionArrays - try to get underlying
-        if hasattr(arr, "_data") and isinstance(
-            arr._data, (np.ndarray, pa.Array, pa.ChunkedArray)
+        # IMPORTANT: Do NOT extract _data from masked arrays (IntegerArray, etc.)
+        # because _data is the raw backing array without the null mask.
+        # For masked arrays, np.asarray() correctly converts to float64 with NaN.
+        if (
+            hasattr(arr, "_data")
+            and isinstance(arr._data, (np.ndarray, pa.Array, pa.ChunkedArray))
+            and not hasattr(arr, "_mask")  # Skip masked arrays
         ):
             return arr._data
         # NumPy-backed - convert to ndarray
@@ -387,10 +392,15 @@ def arrays_to_dataframe(
     index_is_multi : bool, default False
         Whether the index is a MultiIndex.
     preserve_index : bool, default False
-        If True, reconstruct the original DataFrame index from the
-        stored index columns. If False (default), use a fresh RangeIndex.
-        The default matches Polars-style behavior where lazy execution
-        returns positional indexes.
+        If True, reconstruct the DataFrame index from stored index columns.
+        If False (default), use a fresh RangeIndex (Polars-style behavior).
+
+        Note: The caller (execute_physical_plan) sets this to True if either:
+        1. User passed preserve_index=True to collect(), OR
+        2. User explicitly called set_index() (which sets context.user_set_index)
+
+        This ensures that explicit set_index() calls always work regardless
+        of the preserve_index parameter passed to collect().
     use_arrow_dtype : bool, default True
         If True and all columns are Arrow-backed, use Arrow-backed pandas
         dtypes (pd.ArrowDtype) for near-zero-copy conversion. This is much
@@ -490,6 +500,10 @@ def arrays_to_dataframe(
         df = pd.DataFrame(pandas_data)
 
     # Index reconstruction
+    # Reconstruct index if preserve_index=True AND index columns exist
+    # The caller (execute_physical_plan) sets preserve_index=True if either:
+    # 1. User passed preserve_index=True to collect(), OR
+    # 2. User explicitly called set_index() (context.user_set_index=True)
     if preserve_index and index_cols:
         # Convert index arrays to pandas-compatible format
         def to_pandas_index_array(arr):
@@ -518,7 +532,7 @@ def arrays_to_dataframe(
             else:
                 df.index = pd.RangeIndex(len(df))
     else:
-        # Default: fresh RangeIndex (Polars-style behavior)
+        # No index reconstruction - use fresh RangeIndex (Polars-style behavior)
         df.index = pd.RangeIndex(len(df))
 
     return df

@@ -734,14 +734,21 @@ class ProjectionPruning(PlanVisitor):
         # Map downstream columns back to source sides
         for col in needed_downstream:
             # Handle suffixed columns
+            # IMPORTANT: Suffixes are only generated when a column exists on BOTH
+            # sides. So if we need value_x, we must keep 'value' on both sides
+            # to ensure the suffix is still generated after pruning.
             if col.endswith(join.suffix[0]):
                 base = col[: -len(join.suffix[0])]
-                if base in left_schema.names:
+                if base in left_schema.names and base in right_schema.names:
+                    # Need base on both sides to trigger suffix generation
                     left_required.add(base)
+                    right_required.add(base)
                     continue
             if col.endswith(join.suffix[1]):
                 base = col[: -len(join.suffix[1])]
-                if base in right_schema.names:
+                if base in right_schema.names and base in left_schema.names:
+                    # Need base on both sides to trigger suffix generation
+                    left_required.add(base)
                     right_required.add(base)
                     continue
 
@@ -786,14 +793,21 @@ class LimitPushdown(PlanVisitor):
             return Project(new_input, input_plan.exprs)
 
         elif isinstance(input_plan, Limit):
-            # Combine limits: take the more restrictive one
-            # If outer has offset, it's complex - just use outer
-            if offset > 0:
-                return Limit(input_plan.input, n, offset)
-            # No outer offset: combine
-            combined_n = min(n, input_plan.n)
-            combined_offset = input_plan.offset
-            return Limit(input_plan.input, combined_n, combined_offset)
+            # Combine limits carefully - only safe when both are simple head() ops
+            # with no offset (offset=0 means head, offset=-1 means tail, offset>0
+            # means skip)
+            #
+            # Safe to combine: head(50).head(10) -> head(10)
+            # NOT safe to combine:
+            #   - head(50).tail(10) - need rows 40-49, not rows 0-9
+            #   - tail(50).head(10) - need first 10 of last 50
+            #   - head(50).skip(5).head(10) - need rows 5-14
+            if offset == 0 and input_plan.offset == 0:
+                # Both are simple head() with no offset - can combine
+                combined_n = min(n, input_plan.n)
+                return Limit(input_plan.input, combined_n, 0)
+            # Otherwise, keep both limits - cannot safely combine
+            return Limit(input_plan, n, offset)
 
         # Cannot push through other nodes
         return Limit(input_plan, n, offset)
