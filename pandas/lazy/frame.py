@@ -1072,6 +1072,7 @@ class LazyDataFrame:
         self,
         *,
         optimized: bool = True,
+        physical: bool = False,
         format: Literal["text", "tree", "json"] = "text",
     ) -> str:
         """
@@ -1081,6 +1082,10 @@ class LazyDataFrame:
         ----------
         optimized : bool, default True
             Show optimized plan. If False, shows raw logical plan.
+        physical : bool, default False
+            Show physical execution plan instead of logical plan.
+            Physical plans show explicit materialization boundaries,
+            backend choices, and algorithm selection.
         format : {"text", "tree", "json"}, default "text"
             Output format.
 
@@ -1091,10 +1096,13 @@ class LazyDataFrame:
 
         Examples
         --------
-        >>> print(ldf.explain())  # Show optimized plan
+        >>> print(ldf.explain())  # Show optimized logical plan
         >>> print(ldf.explain(optimized=False))  # Show unoptimized plan
+        >>> print(ldf.explain(physical=True))  # Show physical plan
         """
-        if format == "text":
+        if physical:
+            return self._explain_physical(format=format)
+        elif format == "text":
             return self._explain_text(optimized=optimized)
         elif format == "tree":
             return self._explain_tree(optimized=optimized)
@@ -1229,6 +1237,62 @@ class LazyDataFrame:
         }
 
         return json.dumps(result, indent=2)
+
+    def _explain_physical(
+        self, format: Literal["text", "tree", "json"] = "text"
+    ) -> str:
+        """
+        Explain the physical execution plan.
+
+        Shows the physical plan with explicit materialization boundaries,
+        backend choices, and algorithm selection.
+        """
+        from pandas.lazy.physical import (
+            PhysicalMaterialize,
+            PhysicalPlanner,
+        )
+
+        # Get optimized logical plan and convert to physical
+        plan = self._get_optimized_plan()
+        planner = PhysicalPlanner()
+        physical_plan = planner.plan(plan)
+
+        lines = []
+        lines.append("=" * 60)
+        lines.append("LAZY PANDAS PHYSICAL PLAN")
+        lines.append("=" * 60)
+        lines.append("")
+        lines.append(f"Output columns: {self.columns}")
+        lines.append("")
+        lines.append("Physical plan tree:")
+        lines.append("  [BREAKER] = pipeline breaker (materializes input)")
+        lines.append("-" * 40)
+
+        def format_node(node, indent: int = 0) -> None:
+            prefix = "  " * indent
+
+            # Build node description
+            node_name = type(node).__name__
+
+            # Special handling for PhysicalMaterialize to show boundary
+            if isinstance(node, PhysicalMaterialize):
+                lines.append(f"{prefix}[BREAKER] Materialize (reason={node.reason})")
+            elif node.is_pipeline_breaker:
+                lines.append(f"{prefix}[BREAKER] {node_name}")
+            else:
+                # Add streaming indicator for nodes that support it
+                streaming = " [streaming]" if node.supports_streaming else ""
+                lines.append(f"{prefix}{node_name}{streaming}")
+
+            # Recurse to children
+            for child in node.children():
+                format_node(child, indent + 1)
+
+        format_node(physical_plan)
+
+        lines.append("")
+        lines.append("=" * 60)
+        return "\n".join(lines)
 
     def row_group_stats(self) -> DataFrame | None:
         """

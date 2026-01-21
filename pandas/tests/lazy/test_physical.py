@@ -17,6 +17,7 @@ from pandas.lazy.physical import (
     PhysicalHashAggregate,
     PhysicalHashJoin,
     PhysicalLimit,
+    PhysicalMaterialize,
     PhysicalPlanner,
     PhysicalProject,
     PhysicalScan,
@@ -127,10 +128,26 @@ class TestPhysicalPlanner:
         planner = PhysicalPlanner()
         physical = planner.plan(lf._plan)
 
-        # Should be: Limit -> Sort -> Aggregate -> Filter -> Project -> Scan
+        # Should be:
+        # Limit -> Sort -> Materialize(sort) -> Aggregate -> Materialize(agg) -> ...
+        # Each pipeline breaker (Sort, Aggregate) has explicit Materialize input
         assert isinstance(physical, PhysicalLimit)
         assert isinstance(physical.input, PhysicalSort)
-        assert isinstance(physical.input.input, PhysicalHashAggregate)
+        assert physical.input.is_pipeline_breaker  # Sort is a breaker
+
+        # Sort's input should be Materialize (for sort)
+        sort_input = physical.input.input
+        assert isinstance(sort_input, PhysicalMaterialize)
+        assert sort_input.reason == "sort"
+
+        # Materialize's input should be Aggregate
+        assert isinstance(sort_input.input, PhysicalHashAggregate)
+        assert sort_input.input.is_pipeline_breaker  # Aggregate is a breaker
+
+        # Aggregate's input should be Materialize (for aggregate)
+        agg_input = sort_input.input.input
+        assert isinstance(agg_input, PhysicalMaterialize)
+        assert agg_input.reason == "aggregate"
 
 
 class TestPhysicalPlanExecution:

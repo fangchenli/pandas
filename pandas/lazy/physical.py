@@ -178,6 +178,25 @@ class PhysicalPlan(ABC):
         """
         return False
 
+    @property
+    def is_pipeline_breaker(self) -> bool:
+        """
+        Whether this operator breaks the streaming pipeline.
+
+        Pipeline breakers are operators that must consume ALL input data
+        before producing ANY output. This creates a materialization boundary
+        in the execution pipeline.
+
+        The physical planner wraps inputs to breaker operators with explicit
+        PhysicalMaterialize nodes, making boundaries visible in the plan.
+
+        Returns
+        -------
+        bool
+            True if this operator requires all input before producing output.
+        """
+        return False
+
     def _materialize_input(
         self, input_plan: PhysicalPlan, context: ExecutionContext
     ) -> ArrayDict:
@@ -355,6 +374,146 @@ class ExecutionContext:
             from pandas.lazy.optimize.adaptive import record_execution
 
             record_execution(operation, backend, rows, time_ms)
+
+
+# =============================================================================
+# Materialization Boundary
+# =============================================================================
+
+
+@dataclass
+class PhysicalMaterialize(PhysicalPlan):
+    """
+    Explicit materialization boundary in the execution pipeline.
+
+    This node forces full materialization of its input, converting a streaming
+    iterator into a complete in-memory (or spilled) dataset. It serves as an
+    explicit boundary between streaming pipelines.
+
+    Purpose
+    -------
+    Making materialization explicit enables:
+
+    1. **Clear pipeline boundaries**: The plan clearly shows where streaming
+       stops and full data access is required.
+
+    2. **Centralized spill management**: All spill logic happens here, not
+       scattered across operator implementations.
+
+    3. **Operator fusion boundaries**: Fusion can safely combine operators
+       within a pipeline but knows not to cross Materialize nodes.
+
+    4. **Backend conversion points**: Backend switches can be pinned to
+       materialization points for efficiency.
+
+    5. **Explain/debug clarity**: Query plans clearly show where data
+       is fully buffered.
+
+    When Materialize is Inserted
+    ----------------------------
+    The physical planner inserts Materialize nodes before:
+
+    - **Sort**: Needs all rows to determine global order
+    - **Distinct**: Needs all values to deduplicate globally
+    - **Aggregate**: Needs all rows per group (without partial agg)
+    - **HashJoin build side**: Must build complete hash table before probe
+
+    Example
+    -------
+    Before (implicit materialization inside Sort):
+        Sort(input=Filter(Project(Scan)))
+
+    After (explicit boundary):
+        Sort(input=Materialize(Filter(Project(Scan)), reason="sort"))
+
+    The execution result is identical, but now:
+    - Spill decisions are centralized in Materialize
+    - explain() shows the boundary clearly
+    - Fusion knows not to cross it
+
+    Parameters
+    ----------
+    input : PhysicalPlan
+        The input plan to materialize.
+    reason : str
+        Why materialization is required. Used for debugging and explain().
+        Common values: "sort", "distinct", "aggregate", "hash_join_build",
+        "backend_convert".
+
+    Attributes
+    ----------
+    is_pipeline_breaker : bool
+        Always True - this node is the pipeline breaker.
+    supports_streaming : bool
+        Always False - output is fully materialized.
+    """
+
+    input: PhysicalPlan
+    reason: str
+
+    def execute(self, context: ExecutionContext) -> ArrayDict:
+        """
+        Materialize all input batches into a single result.
+
+        This consumes the entire input (via execute_batches if streaming,
+        otherwise via execute) and returns the complete dataset.
+        """
+        import numpy as np
+        import pyarrow as pa
+
+        # If input doesn't support streaming, just execute directly
+        if not self.input.supports_streaming:
+            return self.input.execute(context)
+
+        # Consume all batches from streaming input
+        batches: list[ArrayDict] = list(self.input.execute_batches(context))
+
+        if not batches:
+            return {}
+
+        if len(batches) == 1:
+            return batches[0]
+
+        # Concatenate all batches
+        columns = _get_ordered_columns(batches)
+        result: ArrayDict = {}
+
+        for col in columns:
+            arrays_to_concat = [batch[col] for batch in batches if col in batch]
+            if not arrays_to_concat:
+                continue
+
+            first = arrays_to_concat[0]
+            if isinstance(first, (pa.Array, pa.ChunkedArray)):
+                # Arrow concat
+                result[col] = pa.concat_arrays(
+                    [
+                        arr if isinstance(arr, pa.Array) else arr.combine_chunks()
+                        for arr in arrays_to_concat
+                    ]
+                )
+            else:
+                # NumPy concat
+                result[col] = np.concatenate(arrays_to_concat)
+
+        return result
+
+    def children(self) -> list[PhysicalPlan]:
+        return [self.input]
+
+    @property
+    def output_schema(self) -> Schema:
+        return self.input.output_schema
+
+    @property
+    def is_pipeline_breaker(self) -> bool:
+        """Materialize is always a pipeline breaker by definition."""
+        return True
+
+    @property
+    def supports_streaming(self) -> bool:
+        """Materialize does not support streaming output."""
+        return False
 
 
 # =============================================================================
@@ -2204,6 +2363,11 @@ class PhysicalHashAggregate(PhysicalPlan):
     def output_schema(self) -> Schema:
         return self.schema
 
+    @property
+    def is_pipeline_breaker(self) -> bool:
+        """Aggregate requires all rows per group before emitting results."""
+        return True
+
 
 # =============================================================================
 # Sort Nodes
@@ -2500,6 +2664,11 @@ class PhysicalSort(PhysicalPlan):
     @property
     def output_schema(self) -> Schema:
         return self.schema
+
+    @property
+    def is_pipeline_breaker(self) -> bool:
+        """Sort requires all input to determine global order."""
+        return True
 
 
 # =============================================================================
@@ -3217,6 +3386,11 @@ class PhysicalDistinct(PhysicalPlan):
     def output_schema(self) -> Schema:
         return self.schema
 
+    @property
+    def is_pipeline_breaker(self) -> bool:
+        """Distinct requires all input to deduplicate globally."""
+        return True
+
 
 # =============================================================================
 # Join Nodes
@@ -3770,6 +3944,11 @@ class PhysicalHashJoin(PhysicalPlan):
     def output_schema(self) -> Schema:
         return self.schema
 
+    @property
+    def is_pipeline_breaker(self) -> bool:
+        """HashJoin requires build side fully materialized before probe."""
+        return True
+
 
 # =============================================================================
 # Convert Node
@@ -4019,6 +4198,17 @@ class PhysicalPlanner:
     - Data characteristics
     - Operation requirements
     - User preferences
+
+    Pipeline Boundaries
+    -------------------
+    The planner inserts explicit PhysicalMaterialize nodes before pipeline
+    breaker operators (sort, aggregate, distinct, join build side). This
+    makes materialization points visible in the physical plan for:
+
+    - Clear debugging and explain output
+    - Centralized spill management
+    - Correct fusion boundaries
+    - Backend conversion points
     """
 
     def __init__(
@@ -4026,6 +4216,33 @@ class PhysicalPlanner:
         preferred_backend: Literal["auto", "arrow", "numpy"] = "auto",
     ) -> None:
         self.preferred_backend = preferred_backend
+
+    def _materialize_for_breaker(
+        self,
+        logical_input: LogicalPlan,
+        reason: str,
+    ) -> PhysicalPlan:
+        """
+        Plan an input and wrap in Materialize node for a pipeline breaker.
+
+        This ensures inputs to pipeline breakers (sort, aggregate, distinct,
+        join) are explicitly materialized, making the boundary visible in
+        the plan.
+
+        Parameters
+        ----------
+        logical_input : LogicalPlan
+            The logical input to plan and materialize.
+        reason : str
+            Why materialization is needed (for debugging/explain).
+
+        Returns
+        -------
+        PhysicalPlan
+            The input wrapped in PhysicalMaterialize.
+        """
+        physical_input = self.plan(logical_input)
+        return PhysicalMaterialize(input=physical_input, reason=reason)
 
     def plan(self, logical_plan: LogicalPlan) -> PhysicalPlan:
         """
@@ -4173,10 +4390,10 @@ class PhysicalPlanner:
 
     def _plan_aggregate(self, node) -> PhysicalHashAggregate:
         """Plan an Aggregate."""
-        # For now, always use hash aggregate
-        # Future: could choose between hash/sort aggregate based on statistics
+        # Aggregate is a pipeline breaker - needs all rows per group
+        # Wrap input in Materialize to make boundary explicit
         return PhysicalHashAggregate(
-            input=self.plan(node.input),
+            input=self._materialize_for_breaker(node.input, "aggregate"),
             group_by=node.group_by,
             agg_exprs=node.agg_exprs,
             schema=node.resolve_schema(),
@@ -4184,9 +4401,10 @@ class PhysicalPlanner:
 
     def _plan_sort(self, node) -> PhysicalSort:
         """Plan a Sort."""
-        # Future: choose algorithm based on data size
+        # Sort is a pipeline breaker - needs all data for global ordering
+        # Wrap input in Materialize to make boundary explicit
         return PhysicalSort(
-            input=self.plan(node.input),
+            input=self._materialize_for_breaker(node.input, "sort"),
             by=node.by,
             descending=node.descending,
             schema=node.resolve_schema(),
@@ -4214,8 +4432,10 @@ class PhysicalPlanner:
 
     def _plan_distinct(self, node) -> PhysicalDistinct:
         """Plan a Distinct."""
+        # Distinct is a pipeline breaker - needs all values to deduplicate
+        # Wrap input in Materialize to make boundary explicit
         return PhysicalDistinct(
-            input=self.plan(node.input),
+            input=self._materialize_for_breaker(node.input, "distinct"),
             subset=node.subset,
             schema=node.resolve_schema(),
         )
@@ -4226,11 +4446,15 @@ class PhysicalPlanner:
         left_rows = node.left.estimate_row_count()
         right_rows = node.right.estimate_row_count()
 
-        # For now, always use hash join
-        # Future: could choose between hash/merge/nested-loop based on statistics
+        # Hash join: build side must be fully materialized to build hash table
+        # Currently we materialize both sides; future optimization could stream
+        # the probe side through the join.
+        #
+        # Note: PhysicalHashJoin internally chooses which side is build vs probe
+        # based on row estimates. Both sides need materialization for now.
         return PhysicalHashJoin(
-            left=self.plan(node.left),
-            right=self.plan(node.right),
+            left=self._materialize_for_breaker(node.left, "hash_join_build"),
+            right=self._materialize_for_breaker(node.right, "hash_join_build"),
             on=node.on,
             left_on=node.left_on,
             right_on=node.right_on,
