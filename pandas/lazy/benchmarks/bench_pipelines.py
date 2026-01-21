@@ -6,65 +6,12 @@ Tests realistic query patterns that chain multiple operations.
 These scenarios benefit most from lazy execution optimizations.
 """
 
-from collections.abc import Callable
-import time
-
-import numpy as np
-
 import pandas as pd
-
-
-def timeit(func: Callable, n_runs: int = 5, warmup: int = 1) -> tuple[float, float]:
-    """Run function multiple times and return (mean, std) in milliseconds."""
-    for _ in range(warmup):
-        func()
-
-    times = []
-    for _ in range(n_runs):
-        start = time.perf_counter()
-        func()
-        end = time.perf_counter()
-        times.append((end - start) * 1000)
-
-    return np.mean(times), np.std(times)
-
-
-def create_sales_data(n_rows: int, use_arrow: bool = False) -> pd.DataFrame:
-    """Create realistic sales data."""
-    rng = np.random.default_rng(42)
-
-    regions = ["North", "South", "East", "West"]
-    categories = ["Electronics", "Clothing", "Food", "Home", "Sports"]
-
-    df = pd.DataFrame(
-        {
-            "order_id": np.arange(n_rows),
-            "region": rng.choice(regions, n_rows),
-            "category": rng.choice(categories, n_rows),
-            "quantity": rng.integers(1, 100, n_rows),
-            "unit_price": rng.uniform(10, 500, n_rows).round(2),
-            "discount": rng.uniform(0, 0.3, n_rows).round(2),
-            "year": rng.choice([2022, 2023, 2024], n_rows),
-            "month": rng.integers(1, 13, n_rows),
-        }
-    )
-
-    if use_arrow:
-        df = df.astype(
-            {
-                "order_id": "int64[pyarrow]",
-                "region": "string[pyarrow]",
-                "category": "string[pyarrow]",
-                "quantity": "int64[pyarrow]",
-                "unit_price": "double[pyarrow]",
-                "discount": "double[pyarrow]",
-                "year": "int64[pyarrow]",
-                "month": "int64[pyarrow]",
-            }
-        )
-
-    return df
-
+from pandas.lazy.benchmarks.shared import (
+    create_sales_data,
+    create_wide_data,
+    timeit,
+)
 
 # =============================================================================
 # Pipeline 1: Filter -> Compute -> Filter
@@ -276,22 +223,6 @@ def lazy_pipeline_sequential_filters(
 # =============================================================================
 # Pipeline 7: Wide to narrow projection
 # =============================================================================
-
-
-def create_wide_data(
-    n_rows: int, n_cols: int = 50, use_arrow: bool = False
-) -> pd.DataFrame:
-    """Create wide DataFrame with many columns."""
-    rng = np.random.default_rng(42)
-
-    data = {f"col_{i}": rng.random(n_rows) for i in range(n_cols)}
-    data["filter_col"] = rng.random(n_rows)
-    df = pd.DataFrame(data)
-
-    if use_arrow:
-        df = df.astype(dict.fromkeys(df.columns, "double[pyarrow]"))
-
-    return df
 
 
 def eager_pipeline_wide_to_narrow(df: pd.DataFrame) -> pd.DataFrame:

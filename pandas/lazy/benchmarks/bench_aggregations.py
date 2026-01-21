@@ -7,58 +7,11 @@ Note: The lazy API returns DataFrames, so aggregations that return scalars
 work differently than in eager mode.
 """
 
-from collections.abc import Callable
-import time
-
-import numpy as np
-
 import pandas as pd
-
-
-def timeit(func: Callable, n_runs: int = 5, warmup: int = 1) -> tuple[float, float]:
-    """Run function multiple times and return (mean, std) in milliseconds."""
-    for _ in range(warmup):
-        func()
-
-    times = []
-    for _ in range(n_runs):
-        start = time.perf_counter()
-        func()
-        end = time.perf_counter()
-        times.append((end - start) * 1000)
-
-    return np.mean(times), np.std(times)
-
-
-def create_grouped_data(
-    n_rows: int, n_groups: int = 100, use_arrow: bool = False
-) -> pd.DataFrame:
-    """Create data with grouping columns."""
-    rng = np.random.default_rng(42)
-
-    df = pd.DataFrame(
-        {
-            "group_a": rng.integers(0, n_groups, n_rows),
-            "group_b": rng.choice(["X", "Y", "Z"], n_rows),
-            "value1": rng.random(n_rows) * 100,
-            "value2": rng.random(n_rows) * 1000,
-            "value3": rng.integers(0, 100, n_rows),
-        }
-    )
-
-    if use_arrow:
-        df = df.astype(
-            {
-                "group_a": "int64[pyarrow]",
-                "group_b": "string[pyarrow]",
-                "value1": "double[pyarrow]",
-                "value2": "double[pyarrow]",
-                "value3": "int64[pyarrow]",
-            }
-        )
-
-    return df
-
+from pandas.lazy.benchmarks.shared import (
+    create_grouped_data,
+    timeit,
+)
 
 # =============================================================================
 # Filter then compute (common aggregation-like pipeline)

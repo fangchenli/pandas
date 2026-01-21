@@ -5,53 +5,11 @@ Benchmark: Filter operations
 Compares lazy vs eager execution for filter/where operations.
 """
 
-from collections.abc import Callable
-import time
-
-import numpy as np
-
 import pandas as pd
-
-
-def timeit(func: Callable, n_runs: int = 5, warmup: int = 1) -> tuple[float, float]:
-    """Run function multiple times and return (mean, std) in milliseconds."""
-    # Warmup
-    for _ in range(warmup):
-        func()
-
-    times = []
-    for _ in range(n_runs):
-        start = time.perf_counter()
-        func()
-        end = time.perf_counter()
-        times.append((end - start) * 1000)  # Convert to ms
-
-    return np.mean(times), np.std(times)
-
-
-def create_test_data(n_rows: int, use_arrow: bool = False) -> pd.DataFrame:
-    """Create test DataFrame with specified size."""
-    rng = np.random.default_rng(42)
-
-    data = {
-        "a": rng.integers(0, 100, n_rows),
-        "b": rng.random(n_rows),
-        "c": rng.choice(["foo", "bar", "baz"], n_rows),
-    }
-
-    df = pd.DataFrame(data)
-
-    if use_arrow:
-        # Convert to Arrow-backed dtypes
-        df = df.astype(
-            {
-                "a": "int64[pyarrow]",
-                "b": "double[pyarrow]",
-                "c": "string[pyarrow]",
-            }
-        )
-
-    return df
+from pandas.lazy.benchmarks.shared import (
+    create_test_data,
+    timeit,
+)
 
 
 def bench_eager_filter(df: pd.DataFrame) -> pd.DataFrame:

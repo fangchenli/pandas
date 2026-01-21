@@ -5,27 +5,13 @@ Benchmark: Advanced operations (GroupBy, Joins, Window functions).
 Tests operations that weren't comprehensively benchmarked before.
 """
 
-from collections.abc import Callable
-import time
-
 import numpy as np
 
 import pandas as pd
-
-
-def timeit(func: Callable, n_runs: int = 5, warmup: int = 1) -> tuple[float, float]:
-    """Run function multiple times and return (mean, std) in milliseconds."""
-    for _ in range(warmup):
-        func()
-
-    times = []
-    for _ in range(n_runs):
-        start = time.perf_counter()
-        func()
-        end = time.perf_counter()
-        times.append((end - start) * 1000)
-
-    return np.mean(times), np.std(times)
+from pandas.lazy.benchmarks.shared import (
+    create_join_data,
+    timeit,
+)
 
 
 def create_test_data(n_rows: int, n_groups: int = 100) -> pd.DataFrame:
@@ -43,31 +29,6 @@ def create_test_data(n_rows: int, n_groups: int = 100) -> pd.DataFrame:
             "timestamp": pd.date_range("2020-01-01", periods=n_rows, freq="s"),
         }
     )
-
-
-def create_join_data(
-    n_left: int, n_right: int, n_keys: int
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Create two DataFrames for join testing."""
-    rng = np.random.default_rng(42)
-
-    left = pd.DataFrame(
-        {
-            "key": rng.integers(0, n_keys, n_left),
-            "left_val1": rng.random(n_left),
-            "left_val2": rng.random(n_left),
-        }
-    )
-
-    right = pd.DataFrame(
-        {
-            "key": rng.integers(0, n_keys, n_right),
-            "right_val1": rng.random(n_right),
-            "right_val2": rng.random(n_right),
-        }
-    )
-
-    return left, right
 
 
 # =============================================================================

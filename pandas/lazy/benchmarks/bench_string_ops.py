@@ -6,48 +6,11 @@ Compares Arrow vs NumPy string operations.
 String ops are a key area where Arrow excels.
 """
 
-from collections.abc import Callable
-import time
-
-import numpy as np
-
 import pandas as pd
-
-
-def timeit(func: Callable, n_runs: int = 5, warmup: int = 1) -> tuple[float, float]:
-    """Run function multiple times and return (mean, std) in milliseconds."""
-    for _ in range(warmup):
-        func()
-
-    times = []
-    for _ in range(n_runs):
-        start = time.perf_counter()
-        func()
-        end = time.perf_counter()
-        times.append((end - start) * 1000)
-
-    return np.mean(times), np.std(times)
-
-
-def create_string_data(n_rows: int, use_arrow: bool = False) -> pd.DataFrame:
-    """Create DataFrame with string columns."""
-    rng = np.random.default_rng(42)
-
-    # Generate random strings
-    prefixes = ["foo", "bar", "baz", "qux"]
-    suffixes = ["_a", "_b", "_c", "_d"]
-
-    strings = [
-        rng.choice(prefixes) + str(i % 1000) + rng.choice(suffixes)
-        for i in range(n_rows)
-    ]
-
-    df = pd.DataFrame({"text": strings, "id": np.arange(n_rows)})
-
-    if use_arrow:
-        df = df.astype({"text": "string[pyarrow]", "id": "int64[pyarrow]"})
-
-    return df
+from pandas.lazy.benchmarks.shared import (
+    create_string_data,
+    timeit,
+)
 
 
 def bench_eager_str_lower(df: pd.DataFrame) -> pd.DataFrame:

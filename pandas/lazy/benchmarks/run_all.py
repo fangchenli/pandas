@@ -14,6 +14,7 @@ import subprocess
 import sys
 
 BENCHMARKS = [
+    # Core operations
     "bench_kernel_overhead.py",
     "bench_conversion.py",
     "bench_filter.py",
@@ -25,6 +26,15 @@ BENCHMARKS = [
     "bench_pipelines.py",
     "bench_advanced_ops.py",
     "bench_kernels.py",
+    # Advanced benchmarks
+    "bench_join.py",
+    "bench_streaming.py",
+]
+
+# Benchmarks that require external data or dependencies
+OPTIONAL_BENCHMARKS = [
+    "bench_vs_polars.py",  # Requires polars
+    "bench_nyc_taxi.py",  # Requires NYC taxi data
 ]
 
 
@@ -56,20 +66,26 @@ def main():
         default=sys.executable,
         help="Python interpreter to use",
     )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Include optional benchmarks (polars comparison, NYC taxi)",
+    )
     args = parser.parse_args()
 
     benchmark_dir = Path(__file__).parent
+    all_benchmarks = BENCHMARKS + (OPTIONAL_BENCHMARKS if args.all else [])
 
     # Filter benchmarks if specific one requested
     if args.benchmark:
-        matching = [b for b in BENCHMARKS if args.benchmark in b]
+        matching = [b for b in all_benchmarks if args.benchmark in b]
         if not matching:
             print(f"No benchmark matching '{args.benchmark}'")
-            print(f"Available: {', '.join(BENCHMARKS)}")
+            print(f"Available: {', '.join(all_benchmarks)}")
             return 1
         benchmarks = matching
     else:
-        benchmarks = BENCHMARKS
+        benchmarks = all_benchmarks if args.all else BENCHMARKS
 
     # Run benchmarks
     failed = []
