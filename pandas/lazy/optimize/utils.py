@@ -36,14 +36,14 @@ if TYPE_CHECKING:
 # =============================================================================
 
 
-def get_referenced_columns(node: IRNode | Expr) -> set[str]:
+def get_referenced_columns(expr: Expr) -> set[str]:
     """
     Extract all column names referenced in an expression.
 
     Parameters
     ----------
-    node : IRNode or Expr
-        The expression to analyze.
+    expr : Expr
+        The expression to analyze. Must be an Expr object, not raw IRNode.
 
     Returns
     -------
@@ -52,17 +52,26 @@ def get_referenced_columns(node: IRNode | Expr) -> set[str]:
 
     Examples
     --------
-    >>> get_referenced_columns(FieldRef("a"))
+    >>> from pandas.lazy import col
+    >>> get_referenced_columns(col("a"))
     {'a'}
-    >>> get_referenced_columns(Call("add", (FieldRef("a"), FieldRef("b"))))
+    >>> get_referenced_columns(col("a") + col("b"))
     {'a', 'b'}
+
+    Raises
+    ------
+    TypeError
+        If expr is not an Expr object.
     """
-    # Handle Expr wrapper
-    if hasattr(node, "_ir"):
-        node = node._ir
+    if not hasattr(expr, "_ir"):
+        raise TypeError(
+            f"get_referenced_columns expects Expr, got {type(expr).__name__}. "
+            "If you have an IRNode, wrap it with Expr() first or use "
+            "_collect_columns() directly."
+        )
 
     columns: set[str] = set()
-    _collect_columns(node, columns)
+    _collect_columns(expr._ir, columns)
     return columns
 
 
@@ -311,7 +320,7 @@ def rewrite_predicate_through_project(
     max_complexity: int = 20,
 ) -> IRNode | None:
     """
-    Rewrite a predicate by substituting computed column references with their expressions.
+    Rewrite a predicate by substituting computed column references.
 
     This enables pushing predicates through Projects even when columns are computed.
     For example:
@@ -391,7 +400,9 @@ def rewrite_predicate_through_project(
                 new_args.append(new_arg)
 
             if tuple(new_args) != node.args:
-                return Call(node.function, tuple(new_args), node.kwargs, node.is_aggregate)
+                return Call(
+                    node.function, tuple(new_args), node.kwargs, node.is_aggregate
+                )
             return node
 
         return node
@@ -470,6 +481,7 @@ def build_join_column_mapping(join: Join) -> JoinColumnMapping:
 def can_push_predicate_through_join(
     predicate_cols: set[str],
     join_mapping: JoinColumnMapping,
+    join_how: str = "inner",
 ) -> tuple[bool, bool, set[str], set[str]]:
     """
     Determine if/how predicate can be pushed through join.
@@ -480,17 +492,41 @@ def can_push_predicate_through_join(
         Column names referenced in the predicate.
     join_mapping : JoinColumnMapping
         Column mapping from build_join_column_mapping.
+    join_how : str, default "inner"
+        The join type: "inner", "left", "right", "outer", "cross".
 
     Returns
     -------
     tuple[bool, bool, set[str], set[str]]
         (can_push_left, can_push_right, left_cols, right_cols)
 
-    Rules:
-    - Predicate on only left columns -> push to left
-    - Predicate on only right columns -> push to right
-    - Predicate on join columns -> push to BOTH sides
-    - Predicate mixing left/right non-join columns -> cannot push
+    Join-Type Aware Rules:
+    ----------------------
+    The key insight is that outer joins produce NULL values for non-matching
+    rows on the "extended" side. Pushing a null-rejecting predicate (like
+    `col > 0`) to that side before the join changes semantics.
+
+    - inner: Can push to either side if predicate references only that side
+    - left: Can push predicates referencing ONLY left columns
+             (right side is null-extended, pushing there changes semantics)
+    - right: Can push predicates referencing ONLY right columns
+             (left side is null-extended, pushing there changes semantics)
+    - outer/full: Cannot push to either side (both are null-extended)
+    - cross: Can push to either side (no null extension)
+
+    Example of why this matters:
+        SELECT * FROM left LEFT JOIN right ON ...
+        WHERE right.col > 0
+
+    If we push `right.col > 0` into right before the join, we filter out rows
+    that would have matched. But after a LEFT JOIN, unmatched left rows have
+    NULL for right.col, so `right.col > 0` is False and those rows are
+    filtered out post-join. This effectively converts it to an inner-like join.
+    The semantics are different!
+
+    Conservative MVP: We don't analyze if predicates are null-rejecting vs
+    null-accepting (e.g., IS NULL, COALESCE). We assume all predicates are
+    null-rejecting and use the safe rules above.
     """
     left_refs: set[str] = set()
     right_refs: set[str] = set()
@@ -508,8 +544,49 @@ def can_push_predicate_through_join(
             # Column doesn't exist in join output
             return (False, False, set(), set())
 
-    # Can only push if ALL columns are from one side (or join columns)
-    only_left = len(right_refs - join_mapping.join_columns) == 0
-    only_right = len(left_refs - join_mapping.join_columns) == 0
+    # Determine which columns come from which side (excluding join columns)
+    has_left_only = len(left_refs - join_mapping.join_columns) > 0
+    has_right_only = len(right_refs - join_mapping.join_columns) > 0
 
-    return (only_left, only_right, left_refs, right_refs)
+    # Check if predicate uses only columns from one side
+    only_left_cols = not has_right_only
+    only_right_cols = not has_left_only
+
+    # Apply join-type aware rules
+    can_push_left = False
+    can_push_right = False
+
+    if join_how == "inner":
+        # Inner join: can push to either side if predicate references only that side
+        can_push_left = only_left_cols
+        can_push_right = only_right_cols
+
+    elif join_how == "left":
+        # Left join: only push predicates on left columns
+        # Right side is null-extended, so pushing there changes semantics
+        can_push_left = only_left_cols
+        can_push_right = False
+
+    elif join_how == "right":
+        # Right join: only push predicates on right columns
+        # Left side is null-extended, so pushing there changes semantics
+        can_push_left = False
+        can_push_right = only_right_cols
+
+    elif join_how in ("outer", "full"):
+        # Outer/full join: cannot push to either side
+        # Both sides are null-extended
+        can_push_left = False
+        can_push_right = False
+
+    elif join_how == "cross":
+        # Cross join: can push to either side (no null extension)
+        can_push_left = only_left_cols
+        can_push_right = only_right_cols
+
+    else:
+        # Unknown join type - be conservative
+        can_push_left = False
+        can_push_right = False
+
+    return (can_push_left, can_push_right, left_refs, right_refs)

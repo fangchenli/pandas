@@ -863,8 +863,11 @@ class SetIndex(LogicalPlan):
     """
     Set column(s) as the DataFrame index.
 
-    This is a lazy operation - the index is set when .collect() is called
-    with preserve_index=True.
+    This operation always sets the specified column(s) as the index when
+    executed. The ``preserve_index`` parameter in ``.collect()`` controls
+    whether the *source DataFrame's original index* is preserved through
+    other operations (like Filter, Join, etc.), not whether SetIndex takes
+    effect.
 
     Parameters
     ----------
@@ -912,6 +915,11 @@ class SetIndex(LogicalPlan):
 class ResetIndex(LogicalPlan):
     """
     Reset the index to default RangeIndex.
+
+    This operation always resets the index when executed. The ``preserve_index``
+    parameter in ``.collect()`` controls whether the *source DataFrame's original
+    index* is preserved through other operations, not whether ResetIndex takes
+    effect.
 
     Parameters
     ----------
