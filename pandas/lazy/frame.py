@@ -311,9 +311,14 @@ class LazyDataFrame:
         """
         Set column(s) as the DataFrame index.
 
-        This is a lazy operation. The index is set when .collect() is called
-        with preserve_index=True. If drop=True (default), the columns used
-        as index are removed from the result.
+        This is a lazy operation that always takes effect when .collect() is
+        called. If drop=True (default), the columns used as index are removed
+        from the result.
+
+        Note: The ``preserve_index`` parameter in ``.collect()`` controls
+        whether the *source DataFrame's original index* is preserved through
+        operations, not whether ``set_index()`` takes effect. An explicit
+        ``set_index()`` call always sets the index.
 
         Parameters
         ----------
@@ -330,7 +335,7 @@ class LazyDataFrame:
         Examples
         --------
         >>> df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
-        >>> df.select().set_index("a").collect(preserve_index=True)
+        >>> df.select().set_index("a").collect()
            b
         a
         1  4
@@ -1189,8 +1194,10 @@ class LazyDataFrame:
                 node_dict["predicate"] = repr(plan_node.predicate)
             if hasattr(plan_node, "keys") and plan_node.keys:
                 node_dict["keys"] = list(plan_node.keys)
-            if hasattr(plan_node, "aggs") and plan_node.aggs:
-                node_dict["aggregations"] = [repr(a) for a in plan_node.aggs]
+            if hasattr(plan_node, "group_by") and plan_node.group_by:
+                node_dict["group_by"] = [repr(g) for g in plan_node.group_by]
+            if hasattr(plan_node, "agg_exprs") and plan_node.agg_exprs:
+                node_dict["aggregations"] = [repr(a) for a in plan_node.agg_exprs]
             if hasattr(plan_node, "by") and plan_node.by:
                 node_dict["sort_by"] = [repr(b) for b in plan_node.by]
             if hasattr(plan_node, "source"):

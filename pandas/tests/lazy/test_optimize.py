@@ -45,19 +45,18 @@ from pandas.lazy.plan import (
 class TestGetReferencedColumns:
     """Tests for get_referenced_columns utility."""
 
-    def test_single_field_ref(self):
-        result = get_referenced_columns(FieldRef("a"))
+    def test_single_column(self):
+        result = get_referenced_columns(col("a"))
         assert result == {"a"}
 
-    def test_call_with_multiple_refs(self):
-        ir = Call("add", (FieldRef("a"), FieldRef("b")))
-        result = get_referenced_columns(ir)
+    def test_binary_op_with_multiple_refs(self):
+        expr = col("a") + col("b")
+        result = get_referenced_columns(expr)
         assert result == {"a", "b"}
 
-    def test_nested_calls(self):
-        inner = Call("add", (FieldRef("a"), FieldRef("b")))
-        outer = Call("multiply", (inner, FieldRef("c")))
-        result = get_referenced_columns(outer)
+    def test_nested_ops(self):
+        expr = (col("a") + col("b")) * col("c")
+        result = get_referenced_columns(expr)
         assert result == {"a", "b", "c"}
 
     def test_expr_wrapper(self):
@@ -67,9 +66,16 @@ class TestGetReferencedColumns:
 
     def test_duplicate_refs(self):
         # col("a") + col("a")
-        ir = Call("add", (FieldRef("a"), FieldRef("a")))
-        result = get_referenced_columns(ir)
+        expr = col("a") + col("a")
+        result = get_referenced_columns(expr)
         assert result == {"a"}
+
+    def test_rejects_raw_irnode(self):
+        """get_referenced_columns should reject raw IRNode to prevent API misuse."""
+        import pytest
+
+        with pytest.raises(TypeError, match="expects Expr"):
+            get_referenced_columns(FieldRef("a"))
 
 
 class TestSubstituteColumns:
@@ -656,8 +662,8 @@ class TestEdgeCaseSelfReferential:
 
     def test_self_referential_column_refs(self):
         """get_referenced_columns should deduplicate self-referential refs."""
-        ir = Call("add", (FieldRef("x"), FieldRef("x")))
-        refs = get_referenced_columns(ir)
+        expr = col("x") + col("x")
+        refs = get_referenced_columns(expr)
         assert refs == {"x"}
 
 
@@ -1241,6 +1247,33 @@ class TestConstantFolding:
         expected = pd.DataFrame({"a": [1, 2, 3], "sum": [5, 7, 9]})
         tm.assert_frame_equal(result, expected)
 
+    def test_kwargs_are_constant_helper(self):
+        """Test _kwargs_are_constant helper function."""
+        from pandas.lazy.ir import Literal
+        from pandas.lazy.optimize.passes import ConstantFolding
+
+        folder = ConstantFolding()
+
+        # Empty kwargs is constant
+        assert folder._kwargs_are_constant({}) is True
+
+        # Plain Python values are constant
+        assert folder._kwargs_are_constant({"n": 5, "ascending": True}) is True
+
+        # Literal IR nodes are constant
+        assert folder._kwargs_are_constant({"value": Literal(10)}) is True
+
+        # Non-Literal IR nodes are NOT constant
+        assert folder._kwargs_are_constant({"column": FieldRef("a")}) is False
+
+        # Tuple with non-Literal is NOT constant
+        assert (
+            folder._kwargs_are_constant({"items": (Literal(1), FieldRef("a"))}) is False
+        )
+
+        # Tuple with only Literals is constant
+        assert folder._kwargs_are_constant({"items": (Literal(1), Literal(2))}) is True
+
 
 # =============================================================================
 # SORT + LIMIT -> TOPK TESTS
@@ -1521,6 +1554,69 @@ class TestCommonSubexpressionElimination:
             result_opt[["a", "squared1", "squared2"]],
             result_no_opt[["a", "squared1", "squared2"]],
         )
+
+    def test_cse_two_stage_projection_hides_internal_columns(self):
+        """CSE should use two-stage projection to hide __cse_* columns."""
+        from pandas.lazy.ir import Alias
+
+        df = pd.DataFrame({"a": [1, 2, 3]})
+        # Same expression twice with different aliases
+        ldf = df.select(
+            "a",
+            (col("a") * 2).alias("doubled1"),
+            (col("a") * 2).alias("doubled2"),
+        )
+
+        # Apply CSE
+        cse = CommonSubexpressionElimination()
+        original_plan = ldf._plan
+        optimized_plan = cse.optimize(original_plan)
+
+        # Result should have exactly the columns we asked for, no __cse_*
+        result = ldf.collect()
+        assert list(result.columns) == ["a", "doubled1", "doubled2"]
+        assert "__cse_0" not in result.columns
+
+        # Verify the optimized plan uses two-stage projection
+        # The outer Project should only produce user-visible columns
+        assert isinstance(optimized_plan, Project)
+        outer_output_names = [
+            expr._ir.name if isinstance(expr._ir, Alias) else None
+            for expr in optimized_plan.exprs
+        ]
+        for name in outer_output_names:
+            if name is not None:
+                assert not name.startswith("__cse_")
+
+    def test_cse_does_not_cse_volatile_functions(self):
+        """Volatile functions like row_number should not be CSE'd."""
+        from pandas.lazy.ir import Call
+        from pandas.lazy.optimize.passes import (
+            VOLATILE_FUNCTIONS,
+            _is_volatile,
+        )
+
+        # Test the _is_volatile helper
+        volatile_call = Call("row_number", ())
+        assert _is_volatile(volatile_call) is True
+
+        non_volatile_call = Call("add", (FieldRef("a"), FieldRef("b")))
+        assert _is_volatile(non_volatile_call) is False
+
+        # Test nested volatile function
+        nested_volatile = Call("add", (FieldRef("a"), Call("random", ())))
+        assert _is_volatile(nested_volatile) is True
+
+        # Verify all expected functions are in the set
+        expected_volatile = {
+            "row_index",
+            "row_number",
+            "random",
+            "now",
+            "today",
+            "uuid",
+        }
+        assert expected_volatile.issubset(VOLATILE_FUNCTIONS)
 
 
 # =============================================================================
@@ -2041,6 +2137,155 @@ class TestPredicatePushdownThroughJoin:
         )
         tm.assert_frame_equal(result, expected)
 
+    def test_left_join_filter_on_left_column_pushed(self):
+        """Left join: filter on left column can be pushed."""
+        left = pd.DataFrame({"id": [1, 2, 3, 4], "a": [10, 20, 30, 40]})
+        right = pd.DataFrame({"id": [1, 2], "b": [100, 200]})
+
+        # Filter on left column should be pushed through left join
+        ldf = (
+            left.select()
+            .join(right.select(), on="id", how="left")
+            .filter(col("a") > 15)
+        )
+
+        result = ldf.collect()
+        # After left join: id=1,2,3,4, a=10,20,30,40, b=100,200,NA,NA
+        # After filter a > 15: id=2,3,4
+        expected = pd.DataFrame(
+            {
+                "id": [2, 3, 4],
+                "a": [20, 30, 40],
+                "b": [200.0, float("nan"), float("nan")],
+            }
+        )
+        tm.assert_frame_equal(result, expected)
+
+    def test_left_join_filter_on_right_column_not_pushed(self):
+        """Left join: filter on right column should NOT be pushed.
+
+        This is the key semantic correctness test. If we pushed the filter
+        to the right side before the join, we'd filter out rows that would
+        have been NaN-filled after the left join.
+        """
+        left = pd.DataFrame({"id": [1, 2, 3, 4], "a": [10, 20, 30, 40]})
+        right = pd.DataFrame({"id": [1, 2], "b": [100, 200]})
+
+        # Filter on right column should NOT be pushed through left join
+        ldf = (
+            left.select()
+            .join(right.select(), on="id", how="left")
+            .filter(col("b") > 150)
+        )
+
+        result = ldf.collect()
+        # After left join: id=1,2,3,4, a=10,20,30,40, b=100,200,NA,NA
+        # After filter b > 150: only id=2 (b=200 > 150)
+        # NA values don't pass b > 150
+        expected = pd.DataFrame(
+            {
+                "id": [2],
+                "a": [20],
+                "b": [200.0],
+            }
+        )
+        tm.assert_frame_equal(result, expected)
+
+    def test_right_join_filter_on_right_column_pushed(self):
+        """Right join: filter on right column can be pushed."""
+        left = pd.DataFrame({"id": [1, 2], "a": [10, 20]})
+        right = pd.DataFrame({"id": [1, 2, 3, 4], "b": [100, 200, 300, 400]})
+
+        # Filter on right column should be pushed through right join
+        ldf = (
+            left.select()
+            .join(right.select(), on="id", how="right")
+            .filter(col("b") > 150)
+        )
+
+        result = ldf.collect()
+        # After right join: id=1,2,3,4, a=10,20,NA,NA, b=100,200,300,400
+        # After filter b > 150: id=2,3,4
+        expected = pd.DataFrame(
+            {
+                "id": [2, 3, 4],
+                "a": [20.0, float("nan"), float("nan")],
+                "b": [200, 300, 400],
+            }
+        )
+        tm.assert_frame_equal(result, expected)
+
+    def test_right_join_filter_on_left_column_not_pushed(self):
+        """Right join: filter on left column should NOT be pushed."""
+        left = pd.DataFrame({"id": [1, 2], "a": [10, 20]})
+        right = pd.DataFrame({"id": [1, 2, 3, 4], "b": [100, 200, 300, 400]})
+
+        # Filter on left column should NOT be pushed through right join
+        ldf = (
+            left.select()
+            .join(right.select(), on="id", how="right")
+            .filter(col("a") > 15)
+        )
+
+        result = ldf.collect()
+        # After right join: id=1,2,3,4, a=10,20,NA,NA, b=100,200,300,400
+        # After filter a > 15: only id=2 (a=20 > 15)
+        # NA values don't pass a > 15
+        expected = pd.DataFrame(
+            {
+                "id": [2],
+                "a": [20.0],
+                "b": [200],
+            }
+        )
+        tm.assert_frame_equal(result, expected)
+
+    def test_outer_join_filter_not_pushed_either_side(self):
+        """Outer join: filters should NOT be pushed to either side."""
+        left = pd.DataFrame({"id": [1, 2], "a": [10, 20]})
+        right = pd.DataFrame({"id": [2, 3], "b": [200, 300]})
+
+        # Filter on left column should NOT be pushed through outer join
+        ldf = (
+            left.select()
+            .join(right.select(), on="id", how="outer")
+            .filter(col("a") > 5)
+        )
+
+        result = ldf.collect()
+        # After outer join: id=1,2,3, a=10,20,NA, b=NA,200,300
+        # After filter a > 5: id=1,2 (NA doesn't pass)
+        expected = pd.DataFrame(
+            {
+                "id": [1, 2],
+                "a": [10.0, 20.0],
+                "b": [float("nan"), 200.0],
+            }
+        )
+        tm.assert_frame_equal(result, expected)
+
+    def test_inner_join_filter_on_either_side_pushed(self):
+        """Inner join: filter can be pushed to either side."""
+        left = pd.DataFrame({"id": [1, 2, 3], "a": [10, 20, 30]})
+        right = pd.DataFrame({"id": [1, 2, 3], "b": [100, 200, 300]})
+
+        # Both left and right filters should work with inner join
+        ldf = (
+            left.select()
+            .join(right.select(), on="id", how="inner")
+            .filter(col("b") > 150)
+        )
+
+        result = ldf.collect()
+        expected = pd.DataFrame(
+            {
+                "id": [2, 3],
+                "a": [20, 30],
+                "b": [200, 300],
+            }
+        )
+        tm.assert_frame_equal(result, expected)
+
 
 class TestExpressionSimplificationAdvanced:
     """Tests for advanced expression simplification patterns."""
@@ -2099,168 +2344,168 @@ class TestExpressionSimplificationAdvanced:
         assert isinstance(result.args[1], Call)
         assert result.args[1].function == "invert"
 
-    def test_self_subtraction(self):
-        """Test x - x -> 0."""
+    def test_self_subtraction_not_simplified(self):
+        """Test x - x is NOT simplified (unsafe for NaN/pd.NA)."""
         from pandas.lazy.ir import (
             Call,
             FieldRef,
-            Literal,
         )
         from pandas.lazy.optimize.passes import ExpressionSimplification
 
         simplifier = ExpressionSimplification()
 
-        # a - a
+        # a - a should NOT become 0 (NaN - NaN = NaN, not 0)
         a = FieldRef("a")
         subtract = Call("subtract", (a, a))
 
         result = simplifier._simplify_ir(subtract)
 
-        assert isinstance(result, Literal)
-        assert result.value == 0
+        # Expression should NOT be simplified
+        assert isinstance(result, Call)
+        assert result.function == "subtract"
 
-    def test_self_division(self):
-        """Test x / x -> 1."""
+    def test_self_division_not_simplified(self):
+        """Test x / x is NOT simplified (unsafe for 0/0, NaN/NaN)."""
         from pandas.lazy.ir import (
             Call,
             FieldRef,
-            Literal,
         )
         from pandas.lazy.optimize.passes import ExpressionSimplification
 
         simplifier = ExpressionSimplification()
 
-        # a / a
+        # a / a should NOT become 1 (0/0 = NaN, NaN/NaN = NaN)
         a = FieldRef("a")
         divide = Call("divide", (a, a))
 
         result = simplifier._simplify_ir(divide)
 
-        assert isinstance(result, Literal)
-        assert result.value == 1
+        # Expression should NOT be simplified
+        assert isinstance(result, Call)
+        assert result.function == "divide"
 
-    def test_self_equality(self):
-        """Test x == x -> True."""
+    def test_self_equality_not_simplified(self):
+        """Test x == x is NOT simplified (unsafe for NaN)."""
         from pandas.lazy.ir import (
             Call,
             FieldRef,
-            Literal,
         )
         from pandas.lazy.optimize.passes import ExpressionSimplification
 
         simplifier = ExpressionSimplification()
 
-        # a == a
+        # a == a should NOT become True (NaN == NaN is False or pd.NA)
         a = FieldRef("a")
         equal = Call("equal", (a, a))
 
         result = simplifier._simplify_ir(equal)
 
-        assert isinstance(result, Literal)
-        assert result.value is True
+        # Expression should NOT be simplified
+        assert isinstance(result, Call)
+        assert result.function == "equal"
 
-    def test_self_inequality(self):
-        """Test x != x -> False."""
+    def test_self_inequality_not_simplified(self):
+        """Test x != x is NOT simplified (unsafe for NaN)."""
         from pandas.lazy.ir import (
             Call,
             FieldRef,
-            Literal,
         )
         from pandas.lazy.optimize.passes import ExpressionSimplification
 
         simplifier = ExpressionSimplification()
 
-        # a != a
+        # a != a should NOT become False (NaN != NaN is True)
         a = FieldRef("a")
         not_equal = Call("not_equal", (a, a))
 
         result = simplifier._simplify_ir(not_equal)
 
-        assert isinstance(result, Literal)
-        assert result.value is False
+        # Expression should NOT be simplified
+        assert isinstance(result, Call)
+        assert result.function == "not_equal"
 
-    def test_self_less_than(self):
-        """Test x < x -> False."""
+    def test_self_less_than_not_simplified(self):
+        """Test x < x is NOT simplified (unsafe for NaN)."""
         from pandas.lazy.ir import (
             Call,
             FieldRef,
-            Literal,
         )
         from pandas.lazy.optimize.passes import ExpressionSimplification
 
         simplifier = ExpressionSimplification()
 
-        # a < a
+        # a < a should NOT become False (NaN < NaN is pd.NA with nullable)
         a = FieldRef("a")
         less = Call("less", (a, a))
 
         result = simplifier._simplify_ir(less)
 
-        assert isinstance(result, Literal)
-        assert result.value is False
+        # Expression should NOT be simplified
+        assert isinstance(result, Call)
+        assert result.function == "less"
 
-    def test_self_greater_than(self):
-        """Test x > x -> False."""
+    def test_self_greater_than_not_simplified(self):
+        """Test x > x is NOT simplified (unsafe for NaN)."""
         from pandas.lazy.ir import (
             Call,
             FieldRef,
-            Literal,
         )
         from pandas.lazy.optimize.passes import ExpressionSimplification
 
         simplifier = ExpressionSimplification()
 
-        # a > a
+        # a > a should NOT become False (NaN > NaN is pd.NA with nullable)
         a = FieldRef("a")
         greater = Call("greater", (a, a))
 
         result = simplifier._simplify_ir(greater)
 
-        assert isinstance(result, Literal)
-        assert result.value is False
+        # Expression should NOT be simplified
+        assert isinstance(result, Call)
+        assert result.function == "greater"
 
-    def test_self_less_equal(self):
-        """Test x <= x -> True."""
+    def test_self_less_equal_not_simplified(self):
+        """Test x <= x is NOT simplified (unsafe for NaN)."""
         from pandas.lazy.ir import (
             Call,
             FieldRef,
-            Literal,
         )
         from pandas.lazy.optimize.passes import ExpressionSimplification
 
         simplifier = ExpressionSimplification()
 
-        # a <= a
+        # a <= a should NOT become True (NaN <= NaN is pd.NA with nullable)
         a = FieldRef("a")
         le = Call("less_equal", (a, a))
 
         result = simplifier._simplify_ir(le)
 
-        assert isinstance(result, Literal)
-        assert result.value is True
+        # Expression should NOT be simplified
+        assert isinstance(result, Call)
+        assert result.function == "less_equal"
 
-    def test_self_greater_equal(self):
-        """Test x >= x -> True."""
+    def test_self_greater_equal_not_simplified(self):
+        """Test x >= x is NOT simplified (unsafe for NaN)."""
         from pandas.lazy.ir import (
             Call,
             FieldRef,
-            Literal,
         )
         from pandas.lazy.optimize.passes import ExpressionSimplification
 
         simplifier = ExpressionSimplification()
 
-        # a >= a
+        # a >= a should NOT become True (NaN >= NaN is pd.NA with nullable)
         a = FieldRef("a")
         ge = Call("greater_equal", (a, a))
 
         result = simplifier._simplify_ir(ge)
 
-        assert isinstance(result, Literal)
-        assert result.value is True
+        # Expression should NOT be simplified
+        assert isinstance(result, Call)
+        assert result.function == "greater_equal"
 
-    def test_self_and_idempotent(self):
-        """Test x & x -> x."""
+    def test_self_and_not_simplified(self):
+        """Test x & x is NOT simplified (unsafe for nullable 3-valued logic)."""
         from pandas.lazy.ir import (
             Call,
             FieldRef,
@@ -2269,17 +2514,18 @@ class TestExpressionSimplificationAdvanced:
 
         simplifier = ExpressionSimplification()
 
-        # a & a
+        # a & a should NOT become a (pd.NA & pd.NA = pd.NA, behavior unclear)
         a = FieldRef("a")
         and_node = Call("and_", (a, a))
 
         result = simplifier._simplify_ir(and_node)
 
-        assert isinstance(result, FieldRef)
-        assert result.name == "a"
+        # Expression should NOT be simplified
+        assert isinstance(result, Call)
+        assert result.function == "and_"
 
-    def test_self_or_idempotent(self):
-        """Test x | x -> x."""
+    def test_self_or_not_simplified(self):
+        """Test x | x is NOT simplified (unsafe for nullable 3-valued logic)."""
         from pandas.lazy.ir import (
             Call,
             FieldRef,
@@ -2288,21 +2534,21 @@ class TestExpressionSimplificationAdvanced:
 
         simplifier = ExpressionSimplification()
 
-        # a | a
+        # a | a should NOT become a (pd.NA | pd.NA = pd.NA, behavior unclear)
         a = FieldRef("a")
         or_node = Call("or_", (a, a))
 
         result = simplifier._simplify_ir(or_node)
 
-        assert isinstance(result, FieldRef)
-        assert result.name == "a"
+        # Expression should NOT be simplified
+        assert isinstance(result, Call)
+        assert result.function == "or_"
 
-    def test_complex_self_expression(self):
-        """Test (a + b) - (a + b) -> 0."""
+    def test_complex_self_expression_not_simplified(self):
+        """Test (a + b) - (a + b) is NOT simplified (unsafe for NaN)."""
         from pandas.lazy.ir import (
             Call,
             FieldRef,
-            Literal,
         )
         from pandas.lazy.optimize.passes import ExpressionSimplification
 
@@ -2318,62 +2564,45 @@ class TestExpressionSimplificationAdvanced:
 
         result = simplifier._simplify_ir(subtract)
 
-        assert isinstance(result, Literal)
-        assert result.value == 0
+        # Expression should NOT be simplified (NaN considerations)
+        assert isinstance(result, Call)
+        assert result.function == "subtract"
 
-    def test_ir_equal_literals(self):
-        """Test _ir_equal for Literal nodes."""
-        from pandas.lazy.ir import Literal
-        from pandas.lazy.optimize.passes import ExpressionSimplification
+    def test_end_to_end_self_subtraction_with_nan(self):
+        """Integration test: x - x does NOT simplify for NaN safety."""
+        import numpy as np
 
-        simplifier = ExpressionSimplification()
+        # With NaN values, x - x should NOT produce all zeros
+        df = pd.DataFrame({"a": [1.0, np.nan, 3.0], "b": [4, 5, 6]})
 
-        assert simplifier._ir_equal(Literal(5), Literal(5)) is True
-        assert simplifier._ir_equal(Literal(5), Literal(10)) is False
-        assert simplifier._ir_equal(Literal("a"), Literal("a")) is True
-        assert simplifier._ir_equal(Literal("a"), Literal("b")) is False
+        result = df.select(
+            col("b"),
+            (col("a") - col("a")).alias("diff"),
+        ).collect()
 
-    def test_ir_equal_field_refs(self):
-        """Test _ir_equal for FieldRef nodes."""
-        from pandas.lazy.ir import FieldRef
-        from pandas.lazy.optimize.passes import ExpressionSimplification
+        # NaN - NaN = NaN, not 0
+        assert np.isnan(result["diff"].iloc[1])
+        assert result["diff"].iloc[0] == 0.0
+        assert result["diff"].iloc[2] == 0.0
 
-        simplifier = ExpressionSimplification()
+    def test_end_to_end_self_equality_filter_with_nan(self):
+        """Integration test: x == x should NOT simplify for NaN safety."""
+        import numpy as np
 
-        assert simplifier._ir_equal(FieldRef("a"), FieldRef("a")) is True
-        assert simplifier._ir_equal(FieldRef("a"), FieldRef("b")) is False
+        # With NaN values, x == x should NOT return all rows
+        df = pd.DataFrame({"a": [1.0, np.nan, 3.0], "b": [4, 5, 6]})
 
-    def test_ir_equal_calls(self):
-        """Test _ir_equal for Call nodes."""
-        from pandas.lazy.ir import (
-            Call,
-            FieldRef,
-        )
-        from pandas.lazy.optimize.passes import ExpressionSimplification
+        result = df.select().filter(col("a") == col("a")).collect()
 
-        simplifier = ExpressionSimplification()
+        # NaN == NaN is False, so that row should be filtered out
+        expected = pd.DataFrame({"a": [1.0, 3.0], "b": [4, 6]})
+        tm.assert_frame_equal(result, expected)
 
-        a = FieldRef("a")
-        b = FieldRef("b")
-
-        # Same call
-        call1 = Call("add", (a, b))
-        call2 = Call("add", (FieldRef("a"), FieldRef("b")))
-        assert simplifier._ir_equal(call1, call2) is True
-
-        # Different function
-        call3 = Call("subtract", (a, b))
-        assert simplifier._ir_equal(call1, call3) is False
-
-        # Different args
-        call4 = Call("add", (a, FieldRef("c")))
-        assert simplifier._ir_equal(call1, call4) is False
-
-    def test_end_to_end_self_subtraction(self):
-        """Integration test: x - x simplification through full pipeline."""
+    def test_self_subtraction_optimized_for_non_nullable_int(self):
+        """Test x - x IS simplified for non-nullable integer types."""
+        # Non-nullable integers cannot have NaN, so x - x = 0 is safe
         df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
 
-        # (a - a) should become 0
         result = df.select(
             col("b"),
             (col("a") - col("a")).alias("zero"),
@@ -2382,11 +2611,53 @@ class TestExpressionSimplificationAdvanced:
         expected = pd.DataFrame({"b": [4, 5, 6], "zero": [0, 0, 0]})
         tm.assert_frame_equal(result, expected)
 
-    def test_end_to_end_self_equality_filter(self):
-        """Integration test: x == x in filter should return all rows."""
+    def test_self_equality_optimized_for_non_nullable_int(self):
+        """Test x == x IS simplified for non-nullable integer types."""
+        # Non-nullable integers cannot have NaN, so x == x = True is safe
         df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
 
-        # Filter on (a == a) which is always True -> should return all rows
+        # All rows should be returned since a == a is always True for ints
         result = df.select().filter(col("a") == col("a")).collect()
 
         tm.assert_frame_equal(result, df)
+
+    def test_self_division_not_optimized_even_for_int(self):
+        """Test x / x is NOT simplified even for integers (0/0 is undefined)."""
+        df = pd.DataFrame({"a": [1, 0, 3], "b": [4, 5, 6]})
+
+        result = df.select(
+            col("b"),
+            (col("a") / col("a")).alias("div"),
+        ).collect()
+
+        # 0/0 should be NaN, not 1
+        import numpy as np
+
+        assert np.isnan(result["div"].iloc[1])
+        assert result["div"].iloc[0] == 1.0
+        assert result["div"].iloc[2] == 1.0
+
+    def test_self_subtraction_not_optimized_for_nullable_int(self):
+        """Test x - x is NOT simplified for nullable integer types."""
+        # Nullable Int64 can have pd.NA
+        df = pd.DataFrame({"a": pd.array([1, pd.NA, 3], dtype="Int64"), "b": [4, 5, 6]})
+
+        result = df.select(
+            col("b"),
+            (col("a") - col("a")).alias("diff"),
+        ).collect()
+
+        # pd.NA - pd.NA should stay as pd.NA, not become 0
+        assert pd.isna(result["diff"].iloc[1])
+
+    def test_self_equality_not_optimized_for_float(self):
+        """Test x == x is NOT simplified for float types (can have NaN)."""
+        import numpy as np
+
+        df = pd.DataFrame({"a": [1.0, np.nan, 3.0], "b": [4, 5, 6]})
+
+        # Filter should NOT return all rows because NaN == NaN is False
+        result = df.select().filter(col("a") == col("a")).collect()
+
+        # Row with NaN should be filtered out
+        assert len(result) == 2

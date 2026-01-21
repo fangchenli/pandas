@@ -153,9 +153,14 @@ class ConstantFolding(PlanVisitor):
             # First, fold children
             new_args = tuple(self._fold_ir(arg) for arg in node.args)
 
-            # Check if all args are literals
-            if all(isinstance(arg, Literal) for arg in new_args):
-                folded = self._fold_call(node.function, new_args)
+            # Check if all args are literals AND kwargs doesn't contain non-Literal
+            # IR nodes (kwargs can contain plain Python values or IR nodes)
+            kwargs_are_constant = self._kwargs_are_constant(node.kwargs)
+            if (
+                all(isinstance(arg, Literal) for arg in new_args)
+                and kwargs_are_constant
+            ):
+                folded = self._fold_call(node.function, new_args, node.kwargs)
                 if folded is not None:
                     return folded
 
@@ -181,7 +186,30 @@ class ConstantFolding(PlanVisitor):
 
         return None
 
-    def _fold_call(self, function: str, args: tuple[IRNode, ...]) -> IRNode | None:
+    def _kwargs_are_constant(self, kwargs: dict) -> bool:
+        """
+        Check if all kwargs values are constant (no non-Literal IR nodes).
+
+        kwargs can contain:
+        - Plain Python values (int, str, bool, etc.) - always constant
+        - IR nodes - only constant if they are Literal nodes
+        - Tuples/lists of the above
+
+        Returns True if kwargs can be considered constant for folding purposes.
+        """
+        for value in kwargs.values():
+            if isinstance(value, IRNode):
+                if not isinstance(value, Literal):
+                    return False
+            elif isinstance(value, (tuple, list)):
+                for item in value:
+                    if isinstance(item, IRNode) and not isinstance(item, Literal):
+                        return False
+        return True
+
+    def _fold_call(
+        self, function: str, args: tuple[IRNode, ...], kwargs: dict | None = None
+    ) -> IRNode | None:
         """Try to fold a function call with literal arguments."""
         # Extract values from literals
         values = [arg.value for arg in args if isinstance(arg, Literal)]
@@ -388,10 +416,12 @@ class PredicatePushdown(PlanVisitor):
             return Filter(input_plan, predicate)
 
         elif isinstance(input_plan, Join):
-            # Try to push to appropriate side
+            # Try to push to appropriate side (join-type aware)
             join_mapping = build_join_column_mapping(input_plan)
             can_left, can_right, left_cols, right_cols = (
-                can_push_predicate_through_join(pred_cols, join_mapping)
+                can_push_predicate_through_join(
+                    pred_cols, join_mapping, join_how=input_plan.how
+                )
             )
 
             if can_left and not can_right:
@@ -525,7 +555,7 @@ class ProjectionPruning(PlanVisitor):
 
             # Include columns needed by the predicate
             predicate_cols = (
-                get_referenced_columns(plan.predicate._ir)
+                get_referenced_columns(plan.predicate)
                 if plan.predicate is not None
                 else set()
             )
@@ -549,7 +579,7 @@ class ProjectionPruning(PlanVisitor):
 
             # Include columns needed by the predicate
             predicate_cols = (
-                get_referenced_columns(plan.predicate._ir)
+                get_referenced_columns(plan.predicate)
                 if plan.predicate is not None
                 else set()
             )
@@ -809,6 +839,40 @@ class SortLimitToTopK(PlanVisitor):
 # Common Subexpression Elimination (CSE) Pass
 # =============================================================================
 
+# Volatile functions that should never be CSE'd because they may return
+# different values each time they're called, even with the same inputs.
+VOLATILE_FUNCTIONS = frozenset(
+    {
+        "row_index",  # Returns position, changes per row
+        "row_number",  # Window function, context-dependent
+        "random",  # Non-deterministic
+        "now",  # Time-dependent
+        "today",  # Date-dependent
+        "uuid",  # Unique per call
+    }
+)
+
+
+def _is_volatile(ir: IRNode) -> bool:
+    """
+    Check if an IR node contains any volatile (non-deterministic) functions.
+
+    Volatile functions should never be CSE'd because they may return different
+    values each time they're called.
+    """
+    if isinstance(ir, Call):
+        if ir.function in VOLATILE_FUNCTIONS:
+            return True
+        # Check arguments recursively
+        for arg in ir.args:
+            if _is_volatile(arg):
+                return True
+    elif isinstance(ir, Alias):
+        return _is_volatile(ir.arg)
+    elif isinstance(ir, Cast):
+        return _is_volatile(ir.arg)
+    return False
+
 
 class CommonSubexpressionElimination(PlanVisitor):
     """
@@ -816,6 +880,15 @@ class CommonSubexpressionElimination(PlanVisitor):
 
     When the same expression appears multiple times in a Project node,
     we can compute it once and reuse the result.
+
+    Implementation uses a two-stage projection pattern:
+        Stage 1: Project(input, cse_defs + passthrough_cols_needed_for_final)
+        Stage 2: Project(stage1, original_exprs_rewritten_to_use_cse_refs)
+
+    This ensures that internal __cse_* columns never leak to user-visible output.
+
+    Volatile functions (row_index, random, now, etc.) are excluded from CSE
+    because they may return different values each time they're called.
 
     Note: This is a simplified CSE that works within a single Project node.
     A more sophisticated version could track expressions across nodes.
@@ -836,17 +909,31 @@ class CommonSubexpressionElimination(PlanVisitor):
 
     def visit_project(self, plan: Project) -> LogicalPlan:
         new_input = self.visit(plan.input)
-        new_exprs = self._eliminate_cse_in_project(plan.exprs)
-        if new_input is not plan.input or new_exprs != plan.exprs:
-            return Project(new_input, new_exprs)
+        result = self._eliminate_cse_in_project(new_input, plan.exprs)
+        if result is not None:
+            return result
+        if new_input is not plan.input:
+            return Project(new_input, plan.exprs)
         return plan
 
-    def _eliminate_cse_in_project(self, exprs: tuple[Expr, ...]) -> tuple[Expr, ...]:
-        """Find and eliminate common subexpressions within a Project."""
+    def _eliminate_cse_in_project(
+        self, input_plan: LogicalPlan, exprs: tuple[Expr, ...]
+    ) -> LogicalPlan | None:
+        """
+        Find and eliminate common subexpressions using two-stage projection.
+
+        Returns a new plan if CSE was applied, or None if no CSE was found.
+
+        Two-stage approach:
+        1. Stage 1: Compute CSE values + passthrough columns needed by final exprs
+        2. Stage 2: Project the final user-visible columns using CSE refs
+
+        This ensures __cse_* columns are internal and never leak to output.
+        """
         from pandas.lazy.expr import Expr
 
         # Build a map of IR node fingerprints to their occurrences
-        ir_to_exprs: dict[str, list[tuple[int, Expr]]] = {}
+        ir_to_exprs: dict[str, list[tuple[int, Expr, IRNode]]] = {}
 
         for i, expr in enumerate(exprs):
             ir = expr._ir
@@ -859,44 +946,90 @@ class CommonSubexpressionElimination(PlanVisitor):
             if isinstance(core_ir, (FieldRef, Literal)):
                 continue
 
+            # Skip volatile functions - they must not be CSE'd
+            if _is_volatile(core_ir):
+                continue
+
             fingerprint = self._fingerprint_ir(core_ir)
             if fingerprint not in ir_to_exprs:
                 ir_to_exprs[fingerprint] = []
-            ir_to_exprs[fingerprint].append((i, expr))
+            ir_to_exprs[fingerprint].append((i, expr, core_ir))
 
-        # Find duplicates
+        # Find duplicates (expressions that appear more than once)
         duplicates = {
-            fp: indices for fp, indices in ir_to_exprs.items() if len(indices) > 1
+            fp: occurrences
+            for fp, occurrences in ir_to_exprs.items()
+            if len(occurrences) > 1
         }
 
         if not duplicates:
-            return exprs
+            return None
 
-        # Build the new expression list
-        new_exprs = list(exprs)
-        cse_exprs: list[Expr] = []
+        # Build CSE definitions and track which columns from input we need
+        cse_defs: list[Expr] = []  # __cse_N = expr definitions
+        cse_mapping: dict[str, str] = {}  # fingerprint -> __cse_N name
+        input_cols_needed: set[str] = set()
 
         for fingerprint, occurrences in duplicates.items():
             cse_name = self._next_cse_name()
+            cse_mapping[fingerprint] = cse_name
 
-            first_idx, first_expr = occurrences[0]
-            first_ir = first_expr._ir
-            if isinstance(first_ir, Alias):
-                core_ir = first_ir.arg
-            else:
-                core_ir = first_ir
-
+            # Use the core IR from the first occurrence
+            _, _, core_ir = occurrences[0]
             cse_def = Expr(Alias(core_ir, cse_name))
-            cse_exprs.append(cse_def)
+            cse_defs.append(cse_def)
 
-            for idx, expr in occurrences:
-                ir = expr._ir
-                if isinstance(ir, Alias):
-                    new_exprs[idx] = Expr(Alias(FieldRef(cse_name), ir.name))
-                else:
-                    new_exprs[idx] = Expr(FieldRef(cse_name))
+            # Track input columns needed by this CSE expression
+            input_cols_needed |= get_referenced_columns(cse_def)
 
-        return tuple(cse_exprs) + tuple(new_exprs)
+        # Build the final (Stage 2) expressions by rewriting CSE occurrences
+        final_exprs: list[Expr] = []
+        for i, expr in enumerate(exprs):
+            ir = expr._ir
+            if isinstance(ir, Alias):
+                core_ir = ir.arg
+                output_name = ir.name
+            else:
+                core_ir = ir
+                output_name = None
+
+            # Check if this expression matches a CSE'd subexpression
+            if not isinstance(core_ir, (FieldRef, Literal)) and not _is_volatile(
+                core_ir
+            ):
+                fingerprint = self._fingerprint_ir(core_ir)
+                if fingerprint in cse_mapping:
+                    cse_name = cse_mapping[fingerprint]
+                    if output_name is not None:
+                        # Preserve the original alias: __cse_N -> original_name
+                        final_exprs.append(Expr(Alias(FieldRef(cse_name), output_name)))
+                    else:
+                        # No alias, just reference the CSE column
+                        final_exprs.append(Expr(FieldRef(cse_name)))
+                    continue
+
+            # Not a CSE'd expression - keep original and track its input deps
+            final_exprs.append(expr)
+            input_cols_needed |= get_referenced_columns(expr)
+
+        # Stage 1: Compute CSE values + passthrough columns needed by final
+        # We need to pass through input columns that final_exprs reference
+        stage1_exprs: list[Expr] = list(cse_defs)
+
+        # Add passthrough columns for non-CSE expressions in final
+        input_schema = input_plan.resolve_schema()
+        stage1_exprs.extend(
+            Expr(FieldRef(col_name))
+            for col_name in sorted(input_cols_needed)
+            if col_name in input_schema
+        )
+
+        stage1 = Project(input_plan, tuple(stage1_exprs))
+
+        # Stage 2: Project final user-visible columns
+        stage2 = Project(stage1, tuple(final_exprs))
+
+        return stage2
 
     def _fingerprint_ir(self, ir: IRNode) -> str:
         """Create a fingerprint string for an IR node."""
@@ -1102,14 +1235,13 @@ class ExpressionSimplification(PlanVisitor):
     """
     Simplify algebraic expressions to reduce runtime computation.
 
-    Arithmetic Transformations:
+    Identity-with-Literal Transformations (always safe):
         x * 1 -> x           x * 0 -> 0
         x / 1 -> x           x + 0 -> x
         x - 0 -> x           x ** 1 -> x
-        x ** 0 -> 1          x - x -> 0
-        x / x -> 1           x + x -> x * 2
+        x ** 0 -> 1
 
-    Logical Transformations:
+    Logical Transformations (always safe with boolean literals):
         x & True -> x        x & False -> False
         x | False -> x       x | True -> True
         !!x -> x             --x -> x (double negation)
@@ -1118,17 +1250,33 @@ class ExpressionSimplification(PlanVisitor):
         !(a & b) -> !a | !b
         !(a | b) -> !a & !b
 
-    Comparison Simplifications:
-        x == x -> True       x != x -> False
-        x < x -> False       x > x -> False
-        x <= x -> True       x >= x -> True
+    Self-referential Transformations (only for non-nullable integer types):
+        x - x -> 0           (safe for non-nullable integers, no NaN)
+        x == x -> True       (safe for non-nullable integers)
+        x != x -> False      (safe for non-nullable integers)
+        x < x -> False       (safe for non-nullable integers)
+        x > x -> False       (safe for non-nullable integers)
+        x <= x -> True       (safe for non-nullable integers)
+        x >= x -> True       (safe for non-nullable integers)
+        x & x -> x           (safe for non-nullable booleans)
+        x | x -> x           (safe for non-nullable booleans)
+
+    Note: Self-referential patterns are NOT safe for:
+        - Floating-point types (NaN behavior)
+        - Nullable types (pd.NA behavior)
+        - x / x (even integers: 0/0 is undefined)
 
     This pass complements ConstantFolding, which only handles
     expressions where ALL operands are constants.
     """
 
+    def __init__(self) -> None:
+        self._current_schema = None
+
     def visit_project(self, plan: Project) -> LogicalPlan:
         new_input = self.visit(plan.input)
+        # Set schema context for expression simplification
+        self._current_schema = new_input.resolve_schema()
         new_exprs = tuple(self._simplify_expr(e) for e in plan.exprs)
         if new_input is not plan.input or new_exprs != plan.exprs:
             return Project(new_input, new_exprs)
@@ -1136,6 +1284,8 @@ class ExpressionSimplification(PlanVisitor):
 
     def visit_filter(self, plan: Filter) -> LogicalPlan:
         new_input = self.visit(plan.input)
+        # Set schema context for expression simplification
+        self._current_schema = new_input.resolve_schema()
         new_pred = self._simplify_expr(plan.predicate)
         if new_input is not plan.input or new_pred is not plan.predicate:
             return Filter(new_input, new_pred)
@@ -1143,6 +1293,8 @@ class ExpressionSimplification(PlanVisitor):
 
     def visit_aggregate(self, plan: Aggregate) -> LogicalPlan:
         new_input = self.visit(plan.input)
+        # Set schema context for expression simplification
+        self._current_schema = new_input.resolve_schema()
         new_group_by = tuple(self._simplify_expr(e) for e in plan.group_by)
         new_agg_exprs = tuple(self._simplify_expr(e) for e in plan.agg_exprs)
         if (
@@ -1155,6 +1307,8 @@ class ExpressionSimplification(PlanVisitor):
 
     def visit_sort(self, plan: Sort) -> LogicalPlan:
         new_input = self.visit(plan.input)
+        # Set schema context for expression simplification
+        self._current_schema = new_input.resolve_schema()
         new_by = tuple(self._simplify_expr(e) for e in plan.by)
         if new_input is not plan.input or new_by != plan.by:
             return Sort(new_input, new_by, plan.descending)
@@ -1162,6 +1316,8 @@ class ExpressionSimplification(PlanVisitor):
 
     def visit_topk(self, plan: TopK) -> LogicalPlan:
         new_input = self.visit(plan.input)
+        # Set schema context for expression simplification
+        self._current_schema = new_input.resolve_schema()
         new_by = tuple(self._simplify_expr(e) for e in plan.by)
         if new_input is not plan.input or new_by != plan.by:
             return TopK(new_input, plan.k, new_by, plan.descending)
@@ -1221,6 +1377,7 @@ class ExpressionSimplification(PlanVisitor):
         left, right = args
 
         # Check for self-referential patterns (x op x)
+        # Only safe for non-nullable, non-floating-point types
         if self._ir_equal(left, right):
             result = self._simplify_self_op(function, left)
             if result is not None:
@@ -1338,24 +1495,31 @@ class ExpressionSimplification(PlanVisitor):
         """
         Simplify operations where both operands are the same (x op x).
 
-        Patterns:
-            x - x -> 0
-            x / x -> 1 (note: doesn't handle x=0, but neither does runtime)
+        SAFETY: Only applies to non-nullable, non-floating-point types.
+        This is critical because:
+            - NaN - NaN = NaN (not 0)
+            - NaN / NaN = NaN (not 1)
+            - NaN == NaN = False (not True)
+            - pd.NA has similar 3-valued logic issues
+
+        Patterns (when safe):
+            x - x -> 0           (NOT x / x, since 0/0 is undefined)
             x == x -> True
             x != x -> False
             x < x -> False
             x > x -> False
             x <= x -> True
             x >= x -> True
-            x & x -> x
-            x | x -> x
+            x & x -> x           (boolean idempotence)
+            x | x -> x           (boolean idempotence)
         """
-        # Arithmetic self-cancellation
+        # Check if the operand type is safe for self-referential optimization
+        if not self._is_safe_for_self_op(operand, function):
+            return None
+
+        # Arithmetic self-cancellation (NOT division - 0/0 is undefined)
         if function == "subtract":
             return Literal(0)  # x - x -> 0
-
-        elif function == "divide":
-            return Literal(1)  # x / x -> 1
 
         # Comparison tautologies/contradictions
         elif function == "equal":
@@ -1376,7 +1540,7 @@ class ExpressionSimplification(PlanVisitor):
         elif function == "greater_equal":
             return Literal(True)  # x >= x -> True
 
-        # Logical idempotence
+        # Logical idempotence (for non-nullable booleans)
         elif function == "and_":
             return operand  # x & x -> x
 
@@ -1384,6 +1548,49 @@ class ExpressionSimplification(PlanVisitor):
             return operand  # x | x -> x
 
         return None
+
+    def _is_safe_for_self_op(self, node: IRNode, function: str) -> bool:
+        """
+        Check if a node's dtype is safe for self-referential optimization.
+
+        Safe types are:
+        - Non-nullable integer types (no NaN, no pd.NA)
+        - Non-nullable boolean types (for logical operations)
+
+        Unsafe types are:
+        - Floating-point types (can have NaN)
+        - Nullable types (can have pd.NA)
+        - String types (comparison semantics may vary)
+        - Object types (unknown behavior)
+        """
+        import numpy as np
+
+        from pandas.lazy.types import infer_expr_dtype
+
+        # Need schema context to determine dtype
+        if self._current_schema is None:
+            return False
+
+        try:
+            dtype = infer_expr_dtype(node, self._current_schema)
+        except (KeyError, TypeError):
+            # Cannot determine dtype - not safe
+            return False
+
+        # Reject nullable types
+        if dtype.nullable:
+            return False
+
+        # For logical operations, require boolean type
+        if function in {"and_", "or_"}:
+            return dtype.is_boolean()
+
+        # For arithmetic/comparison operations, require non-float numeric
+        if dtype.is_numeric() and dtype.numpy_dtype is not None:
+            # Only allow integer types (no NaN possible)
+            return np.issubdtype(dtype.numpy_dtype, np.integer)
+
+        return False
 
     def _ir_equal(self, a: IRNode, b: IRNode) -> bool:
         """

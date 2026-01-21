@@ -47,6 +47,42 @@ if TYPE_CHECKING:
 
 
 # =============================================================================
+# Helper Functions
+# =============================================================================
+
+
+def _get_ordered_columns(batches: list) -> list[str]:
+    """
+    Get column names in deterministic order from a list of batches.
+
+    When concatenating batches, we need to iterate over columns in a
+    consistent order. Simply using `set()` would produce non-deterministic
+    ordering because set iteration order depends on hash values.
+
+    This function preserves the column order from the first batch that
+    contains each column, ensuring deterministic output column order.
+
+    Parameters
+    ----------
+    batches : list of ArrayDict
+        List of batches to get column names from.
+
+    Returns
+    -------
+    list of str
+        Column names in deterministic order (preserving first occurrence order).
+    """
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for batch in batches:
+        for col_name in batch.keys():
+            if col_name not in seen:
+                seen.add(col_name)
+                ordered.append(col_name)
+    return ordered
+
+
+# =============================================================================
 # Physical Plan Nodes
 # =============================================================================
 
@@ -209,6 +245,9 @@ class ExecutionContext:
     index_is_multi: bool = False
     # Whether to preserve index during operations (for groupby, join)
     preserve_index: bool = False
+    # Whether user explicitly set an index via set_index()
+    # When True, index is always reconstructed regardless of preserve_index
+    user_set_index: bool = False
 
     # Parallelism configuration
     # Number of workers for parallel execution (None = auto based on CPU count)
@@ -346,7 +385,13 @@ class PhysicalScan(PhysicalPlan):
         for col in self.df.columns:
             arrays[col] = extract_array(self.df[col])
 
-        # Extract index as special column(s)
+        # Always extract source index as special column(s)
+        # This is needed for:
+        # 1. reset_index() to work (adds index as column)
+        # 2. Filters/joins to track row correspondence
+        # Whether the index is reconstructed at the end depends on preserve_index
+        # OR whether there's an explicit set_index() in the plan (which marks
+        # the context as having a user-specified index).
         if isinstance(self.df.index, pd.MultiIndex):
             context.index_is_multi = True
             context.index_names = list(self.df.index.names)
@@ -518,13 +563,9 @@ class PhysicalParquetScan(PhysicalPlan):
         if len(batches) == 1:
             return batches[0]
 
-        # Concatenate all batches
+        # Concatenate all batches preserving column order
         result: ArrayDict = {}
-        all_columns = set()
-        for batch in batches:
-            all_columns.update(batch.keys())
-
-        for col_name in all_columns:
+        for col_name in _get_ordered_columns(batches):
             chunks = [batch[col_name] for batch in batches if col_name in batch]
             if chunks:
                 # Combine into single contiguous array
@@ -882,13 +923,9 @@ class PhysicalCSVScan(PhysicalPlan):
         if len(batches) == 1:
             return batches[0]
 
-        # Concatenate all batches
+        # Concatenate all batches preserving column order
         result: ArrayDict = {}
-        all_columns = set()
-        for batch in batches:
-            all_columns.update(batch.keys())
-
-        for col_name in all_columns:
+        for col_name in _get_ordered_columns(batches):
             chunks = [batch[col_name] for batch in batches if col_name in batch]
             if chunks:
                 # Combine into single contiguous array
@@ -3050,13 +3087,9 @@ class PhysicalLimit(PhysicalPlan):
         if len(batches) == 1:
             return batches[0]
 
-        # Concatenate all batches
+        # Concatenate all batches preserving column order
         result: ArrayDict = {}
-        all_columns = set()
-        for batch in batches:
-            all_columns.update(batch.keys())
-
-        for col_name in all_columns:
+        for col_name in _get_ordered_columns(batches):
             chunks = [batch[col_name] for batch in batches if col_name in batch]
             if chunks:
                 if hasattr(chunks[0], "type"):
@@ -3772,6 +3805,10 @@ class PhysicalSetIndex(PhysicalPlan):
         input_arrays = self.input.execute(context)
         result: ArrayDict = {}
 
+        # Mark that user explicitly set an index
+        # This ensures the index is reconstructed even if preserve_index=False
+        context.user_set_index = True
+
         # Copy all non-key columns to result
         for name, arr in input_arrays.items():
             if name in self.keys and self.drop:
@@ -4276,9 +4313,11 @@ def execute_physical_plan(
     arrays = plan.execute(context)
 
     # Convert ArrayDict back to DataFrame with proper index
+    # Reconstruct index if preserve_index=True OR user explicitly called set_index()
+    should_reconstruct_index = preserve_index or context.user_set_index
     return arrays_to_dataframe(
         arrays,
         index_names=context.index_names,
         index_is_multi=context.index_is_multi,
-        preserve_index=preserve_index,
+        preserve_index=should_reconstruct_index,
     )

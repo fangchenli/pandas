@@ -244,21 +244,30 @@ class Optimizer:
 
         IMPORTANT: Order matters! Rationale for each position:
 
+        Phase 1 - Normalize expressions early:
         1. ConstantFolding - Evaluate constants first to simplify expressions
         2. ExpressionSimplification - Algebraic simplifications (x*1->x, etc.)
-        3. DeadCodeElimination - Remove no-op nodes early (Filter(True), etc.)
-        4. FilterFusion - Combine filters first so pushdown sees single filters
-        5. PredicatePushdown - Push filters down while plan is still wide
-           (before projection pruning removes columns that filters might need)
-        6. AggregatePushdown - Push aggregates through pass-through projects
-        7. ProjectionPruning - After pushdown, so we don't prune needed columns
-        8. LimitPushdown - After pruning; push limits toward sources
-        9. SortLimitToTopK - After limit pushdown, combine Sort+Limit into TopK
-        10. EngineSelection - Analyze backend requirements, insert Convert nodes
-        11. ConversionElimination - Remove redundant/unnecessary conversions
 
-        Note: CommonSubexpressionElimination is available but not in default
-        passes because it requires evaluator support for intermediate columns.
+        Phase 2 - Make filters simple and close to source:
+        3. FilterFusion - Combine filters so pushdown sees single filters
+        4. PredicatePushdown - Push filters down while plan is still wide
+           (before projection pruning removes columns that filters might need)
+        5. AggregatePushdown - Push aggregates through pass-through projects
+
+        Phase 3 - Prune columns late (after we know what's needed):
+        6. ProjectionPruning - After pushdown, so we don't prune needed columns
+        7. LimitPushdown - After pruning; push limits toward sources
+        8. SortLimitToTopK - After limit pushdown, combine Sort+Limit into TopK
+
+        Phase 4 - Structural cleanups at the end:
+        9. CommonSubexpressionElimination - Late because folding/simplification
+           increases exact matches. Uses two-stage projection to hide temps.
+        10. DeadCodeElimination - After structural rewrites to remove no-ops
+            introduced by earlier passes (e.g., identity projections from CSE)
+
+        Phase 5 - Backend selection:
+        11. EngineSelection - Analyze backend requirements, insert Convert nodes
+        12. ConversionElimination - Remove redundant/unnecessary conversions
         """
         # Import here to avoid circular imports
         from pandas.lazy.optimize.engine import (
@@ -267,6 +276,7 @@ class Optimizer:
         )
         from pandas.lazy.optimize.passes import (
             AggregatePushdown,
+            CommonSubexpressionElimination,
             ConstantFolding,
             DeadCodeElimination,
             ExpressionSimplification,
@@ -278,15 +288,21 @@ class Optimizer:
         )
 
         return [
+            # Phase 1: Normalize expressions
             ConstantFolding(),
             ExpressionSimplification(),
-            DeadCodeElimination(),
+            # Phase 2: Push filters toward sources
             FilterFusion(),
             PredicatePushdown(),
             AggregatePushdown(),
+            # Phase 3: Prune and limit
             ProjectionPruning(),
             LimitPushdown(),
             SortLimitToTopK(),
+            # Phase 4: Structural cleanups
+            CommonSubexpressionElimination(),
+            DeadCodeElimination(),
+            # Phase 5: Backend selection
             EngineSelection(),
             ConversionElimination(),
         ]
