@@ -35,6 +35,8 @@ from typing import (
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    import numpy as np
+
     from pandas import DataFrame
     from pandas.lazy.backends.spill import (
         SpillConfig,
@@ -3759,6 +3761,12 @@ class PhysicalHashJoin(PhysicalPlan):
 
         Grace hash join partitions both sides by hash of join keys, spills
         partitions to disk, then joins matching partition pairs in memory.
+
+        Runtime Adaptation
+        ------------------
+        After partitioning, if the join detects pathological behavior
+        (skewed partitions, max partition exceeds budget), it falls back
+        to sort-merge join which has more predictable I/O patterns.
         """
         from pandas.lazy.backends.spill import GraceHashJoiner
         from pandas.lazy.backends.types import is_index_col
@@ -3814,6 +3822,24 @@ class PhysicalHashJoin(PhysicalPlan):
         joiner.partition_left(left_data, left_keys)
         joiner.partition_right(right_data, right_keys)
 
+        # Check for pathological behavior after partitioning
+        # If detected, fall back to sort-merge join
+        if joiner.is_pathological(operator_budget):
+            import warnings
+
+            stats = joiner.get_stats()
+            warnings.warn(
+                f"Hash join detected pathological spill behavior "
+                f"(skew_ratio={stats['skew_ratio']:.1f}, "
+                f"empty_partitions={stats['empty_partitions']}/{num_partitions * 2}). "
+                f"Falling back to sort-merge join.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return self._execute_sort_merge_fallback(
+                left_data, right_data, left_keys, right_keys, context
+            )
+
         # Perform join across all partition pairs
         result = joiner.join(how=self.how)
 
@@ -3825,6 +3851,56 @@ class PhysicalHashJoin(PhysicalPlan):
             pass
 
         return self._reorder_columns(result)
+
+    def _execute_sort_merge_fallback(
+        self,
+        left_data: ArrayDict,
+        right_data: ArrayDict,
+        left_keys: list[str],
+        right_keys: list[str],
+        context: ExecutionContext,
+    ) -> ArrayDict:
+        """
+        Fall back to sort-merge join when hash join becomes pathological.
+
+        Sort-merge join has more predictable I/O patterns and handles
+        skewed data better than hash join with many partitions.
+        """
+        from pandas.lazy.backends import dispatch_kernel
+        from pandas.lazy.backends.convert import get_array_backend
+
+        # Sort both sides by join keys
+        def sort_by_keys(arrays: ArrayDict, keys: list[str]) -> ArrayDict:
+            if not keys:
+                return arrays
+            key_arr = arrays[keys[0]]
+            backend = get_array_backend(key_arr)
+            sort_indices = dispatch_kernel("argsort", backend, key_arr)
+            result: ArrayDict = {}
+            for name, arr in arrays.items():
+                arr_backend = get_array_backend(arr)
+                result[name] = dispatch_kernel("take", arr_backend, arr, sort_indices)
+            return result
+
+        left_sorted = sort_by_keys(left_data, left_keys)
+        right_sorted = sort_by_keys(right_data, right_keys)
+
+        # Use PhysicalSortMergeJoin's merge logic
+        # Create a temporary instance to reuse the merge code
+        temp_join = PhysicalSortMergeJoin(
+            left=self.left,  # Not used, just for schema
+            right=self.right,
+            on=self.on,
+            left_on=self.left_on,
+            right_on=self.right_on,
+            how=self.how,
+            suffix=self.suffix,
+            schema=self.schema,
+        )
+
+        return temp_join._merge_sorted(
+            left_sorted, right_sorted, left_keys, right_keys, context
+        )
 
     def _execute_dataframe_join(
         self,
@@ -3947,6 +4023,305 @@ class PhysicalHashJoin(PhysicalPlan):
     @property
     def is_pipeline_breaker(self) -> bool:
         """HashJoin requires build side fully materialized before probe."""
+        return True
+
+
+@dataclass
+class PhysicalSortMergeJoin(PhysicalPlan):
+    """
+    Sort-merge join implementation.
+
+    This join algorithm:
+    1. Sorts both sides by join keys
+    2. Merges the sorted streams using a merge cursor
+
+    Use Cases
+    ---------
+    Sort-merge join is preferred when:
+    - Data is already sorted on join keys (free sort)
+    - Hash join spilling becomes pathological (many recursive spills)
+    - Join keys have high cardinality with few duplicates
+    - Memory is constrained and predictable I/O is preferred
+
+    The PhysicalHashJoin can fall back to this implementation at runtime
+    when it detects pathological spill behavior.
+
+    Parameters
+    ----------
+    left : PhysicalPlan
+        Left input (will be sorted if not already).
+    right : PhysicalPlan
+        Right input (will be sorted if not already).
+    on : tuple[str, ...] or None
+        Column names to join on (same name in both sides).
+    left_on : tuple[str, ...] or None
+        Column names from left side for join.
+    right_on : tuple[str, ...] or None
+        Column names from right side for join.
+    how : str
+        Join type: "inner", "left", "right", "outer".
+    suffix : tuple[str, str]
+        Suffixes for overlapping column names.
+    schema : Schema
+        Output schema.
+    """
+
+    left: PhysicalPlan
+    right: PhysicalPlan
+    on: tuple[str, ...] | None
+    left_on: tuple[str, ...] | None
+    right_on: tuple[str, ...] | None
+    how: Literal["inner", "left", "right", "outer"]
+    suffix: tuple[str, str]
+    schema: Schema
+
+    def execute(self, context: ExecutionContext) -> ArrayDict:
+        """Execute sort-merge join."""
+        # Execute both sides
+        left_arrays = self.left.execute(context)
+        right_arrays = self.right.execute(context)
+
+        # Determine join keys
+        if self.on is not None:
+            left_keys = list(self.on)
+            right_keys = list(self.on)
+        else:
+            left_keys = list(self.left_on) if self.left_on else []
+            right_keys = list(self.right_on) if self.right_on else []
+
+        if not left_keys or not right_keys:
+            raise ValueError("Sort-merge join requires join keys")
+
+        # Sort both sides by join keys
+        left_sorted = self._sort_by_keys(left_arrays, left_keys, context)
+        right_sorted = self._sort_by_keys(right_arrays, right_keys, context)
+
+        # Perform merge join
+        result = self._merge_sorted(
+            left_sorted, right_sorted, left_keys, right_keys, context
+        )
+
+        return result
+
+    def _sort_by_keys(
+        self,
+        arrays: ArrayDict,
+        keys: list[str],
+        context: ExecutionContext,
+    ) -> ArrayDict:
+        """Sort arrays by the specified keys."""
+        from pandas.lazy.backends import dispatch_kernel
+        from pandas.lazy.backends.convert import get_array_backend
+
+        if not keys:
+            return arrays
+
+        # Get sort key array
+        key_arr = arrays[keys[0]]
+        backend = get_array_backend(key_arr)
+
+        # Get sort indices
+        sort_indices = dispatch_kernel("argsort", backend, key_arr)
+
+        # Apply sort indices to all arrays
+        result: ArrayDict = {}
+        for name, arr in arrays.items():
+            arr_backend = get_array_backend(arr)
+            result[name] = dispatch_kernel("take", arr_backend, arr, sort_indices)
+
+        return result
+
+    def _merge_sorted(
+        self,
+        left: ArrayDict,
+        right: ArrayDict,
+        left_keys: list[str],
+        right_keys: list[str],
+        context: ExecutionContext,
+    ) -> ArrayDict:
+        """Merge two sorted arrays on join keys."""
+        import numpy as np
+
+        from pandas.lazy.backends.types import is_index_col
+
+        # Get key arrays (use first key for now)
+        left_key = left[left_keys[0]]
+        right_key = right[right_keys[0]]
+
+        # Convert to numpy for merge logic
+        if hasattr(left_key, "to_numpy"):
+            left_key_np = left_key.to_numpy()
+        else:
+            left_key_np = np.asarray(left_key)
+
+        if hasattr(right_key, "to_numpy"):
+            right_key_np = right_key.to_numpy()
+        else:
+            right_key_np = np.asarray(right_key)
+
+        # Perform merge to get matching indices
+        left_indices, right_indices = self._merge_indices(
+            left_key_np, right_key_np, self.how
+        )
+
+        # Build result arrays
+        result: ArrayDict = {}
+
+        # Add left columns
+        for name, arr in left.items():
+            if is_index_col(name):
+                continue
+            # Handle null indices (-1) for outer joins
+            if hasattr(arr, "to_numpy"):
+                arr_np = arr.to_numpy()
+            else:
+                arr_np = np.asarray(arr)
+
+            # Create result array
+            out_name = name
+            if name in right and name not in left_keys:
+                out_name = name + self.suffix[0]
+
+            result[out_name] = self._take_with_nulls(arr_np, left_indices)
+
+        # Add right columns
+        for name, arr in right.items():
+            if is_index_col(name):
+                continue
+            if name in right_keys and name in left_keys:
+                # Join key already added from left
+                continue
+
+            if hasattr(arr, "to_numpy"):
+                arr_np = arr.to_numpy()
+            else:
+                arr_np = np.asarray(arr)
+
+            out_name = name
+            if name in left and name not in right_keys:
+                out_name = name + self.suffix[1]
+
+            result[out_name] = self._take_with_nulls(arr_np, right_indices)
+
+        return result
+
+    def _merge_indices(
+        self,
+        left_key: np.ndarray,
+        right_key: np.ndarray,
+        how: str,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Compute matching indices for sorted arrays using merge algorithm.
+
+        Returns (left_indices, right_indices) where -1 indicates null (no match).
+        """
+        import numpy as np
+
+        left_idx = []
+        right_idx = []
+
+        i, j = 0, 0
+        n_left, n_right = len(left_key), len(right_key)
+
+        while i < n_left and j < n_right:
+            left_val = left_key[i]
+            right_val = right_key[j]
+
+            # Handle NaN comparison
+            left_is_nan = left_val != left_val  # NaN check
+            right_is_nan = right_val != right_val
+
+            if left_is_nan and right_is_nan:
+                # Both NaN - don't match (SQL semantics)
+                if how in ("left", "outer"):
+                    left_idx.append(i)
+                    right_idx.append(-1)
+                i += 1
+                if how in ("right", "outer"):
+                    left_idx.append(-1)
+                    right_idx.append(j)
+                j += 1
+            elif left_is_nan or left_val < right_val:
+                # Left value is smaller or NaN
+                if how in ("left", "outer"):
+                    left_idx.append(i)
+                    right_idx.append(-1)
+                i += 1
+            elif right_is_nan or left_val > right_val:
+                # Right value is smaller or NaN
+                if how in ("right", "outer"):
+                    left_idx.append(-1)
+                    right_idx.append(j)
+                j += 1
+            else:
+                # Equal values - find all matches
+                # Count duplicates on both sides
+                left_start = i
+                while i < n_left and left_key[i] == left_val:
+                    i += 1
+                left_end = i
+
+                right_start = j
+                while j < n_right and right_key[j] == right_val:
+                    j += 1
+                right_end = j
+
+                # Cross product of matching rows
+                for li in range(left_start, left_end):
+                    for ri in range(right_start, right_end):
+                        left_idx.append(li)
+                        right_idx.append(ri)
+
+        # Handle remaining left rows
+        while i < n_left:
+            if how in ("left", "outer"):
+                left_idx.append(i)
+                right_idx.append(-1)
+            i += 1
+
+        # Handle remaining right rows
+        while j < n_right:
+            if how in ("right", "outer"):
+                left_idx.append(-1)
+                right_idx.append(j)
+            j += 1
+
+        return np.array(left_idx, dtype=np.intp), np.array(right_idx, dtype=np.intp)
+
+    def _take_with_nulls(self, arr: np.ndarray, indices: np.ndarray) -> np.ndarray:
+        """Take from array, handling -1 as null."""
+        import numpy as np
+
+        # Create output array
+        if np.issubdtype(arr.dtype, np.floating):
+            result = np.empty(len(indices), dtype=arr.dtype)
+            result[:] = np.nan
+        elif np.issubdtype(arr.dtype, np.integer):
+            # Convert to float to support NaN
+            result = np.empty(len(indices), dtype=np.float64)
+            result[:] = np.nan
+        else:
+            # Object dtype for strings etc
+            result = np.empty(len(indices), dtype=object)
+            result[:] = None
+
+        # Fill valid indices
+        valid = indices >= 0
+        result[valid] = arr[indices[valid]]
+
+        return result
+
+    def children(self) -> list[PhysicalPlan]:
+        return [self.left, self.right]
+
+    @property
+    def output_schema(self) -> Schema:
+        return self.schema
+
+    @property
+    def is_pipeline_breaker(self) -> bool:
+        """Sort-merge join requires both sides sorted (pipeline breaker)."""
         return True
 
 

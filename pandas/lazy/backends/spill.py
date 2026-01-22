@@ -1149,14 +1149,23 @@ class GraceHashJoiner:
         spill_manager: SpillManager,
         num_partitions: int = 64,
         name: str = "grace_join",
+        max_partition_skew_ratio: float = 10.0,
     ):
         self.spill_manager = spill_manager
         self.num_partitions = num_partitions
         self.name = name
+        self.max_partition_skew_ratio = max_partition_skew_ratio
 
         self._left_partitioned = False
         self._right_partitioned = False
         self._join_keys: list[str] = []
+
+        # Statistics for pathological detection
+        self._left_partition_sizes: list[int] = []
+        self._right_partition_sizes: list[int] = []
+        self._total_spill_bytes = 0
+        self._empty_partitions = 0
+        self._max_partition_size = 0
 
     def partition_left(
         self, arrays: ArrayDict, join_keys: list[str]
@@ -1168,6 +1177,12 @@ class GraceHashJoiner:
             f"{self.name}_left", arrays, join_keys[0], self.num_partitions
         )
         self._left_partitioned = True
+
+        # Track partition sizes for pathological detection
+        self._left_partition_sizes = [f.size_bytes for f in files]
+        self._total_spill_bytes += sum(self._left_partition_sizes)
+        self._update_partition_stats(self._left_partition_sizes)
+
         return files
 
     def partition_right(
@@ -1178,7 +1193,78 @@ class GraceHashJoiner:
             f"{self.name}_right", arrays, join_keys[0], self.num_partitions
         )
         self._right_partitioned = True
+
+        # Track partition sizes for pathological detection
+        self._right_partition_sizes = [f.size_bytes for f in files]
+        self._total_spill_bytes += sum(self._right_partition_sizes)
+        self._update_partition_stats(self._right_partition_sizes)
+
         return files
+
+    def _update_partition_stats(self, sizes: list[int]) -> None:
+        """Update statistics from partition sizes."""
+        for size in sizes:
+            if size == 0:
+                self._empty_partitions += 1
+            if size > self._max_partition_size:
+                self._max_partition_size = size
+
+    def is_pathological(self, operator_budget_bytes: int) -> bool:
+        """
+        Check if the hash join has become pathological.
+
+        Pathological conditions indicate sort-merge join may be better:
+        1. Very skewed partitions (max >> average) - indicates bad hash distribution
+        2. Many empty partitions (> 50%) - wasted work
+        3. Max partition still exceeds memory budget - will cause recursive spills
+
+        Parameters
+        ----------
+        operator_budget_bytes : int
+            Memory budget for the operator in bytes.
+
+        Returns
+        -------
+        bool
+            True if spill behavior is pathological and fallback recommended.
+        """
+        if not self._left_partitioned or not self._right_partitioned:
+            return False
+
+        # Check 1: Max partition exceeds budget (will cause recursive spills)
+        if self._max_partition_size > operator_budget_bytes:
+            return True
+
+        # Check 2: Very skewed partitions
+        all_sizes = self._left_partition_sizes + self._right_partition_sizes
+        non_empty = [s for s in all_sizes if s > 0]
+        if non_empty:
+            avg_size = sum(non_empty) / len(non_empty)
+            skew_threshold = avg_size * self.max_partition_skew_ratio
+            if avg_size > 0 and self._max_partition_size > skew_threshold:
+                return True
+
+        # Check 3: Too many empty partitions (> 50%)
+        total_partitions = 2 * self.num_partitions
+        if self._empty_partitions > total_partitions * 0.5:
+            return True
+
+        return False
+
+    def get_stats(self) -> dict:
+        """Get statistics about the join for debugging/monitoring."""
+        all_sizes = self._left_partition_sizes + self._right_partition_sizes
+        non_empty = [s for s in all_sizes if s > 0]
+        avg_size = sum(non_empty) / len(non_empty) if non_empty else 0
+
+        return {
+            "num_partitions": self.num_partitions,
+            "total_spill_bytes": self._total_spill_bytes,
+            "empty_partitions": self._empty_partitions,
+            "max_partition_size": self._max_partition_size,
+            "avg_partition_size": avg_size,
+            "skew_ratio": self._max_partition_size / avg_size if avg_size > 0 else 0,
+        }
 
     def join(self, how: str = "inner") -> ArrayDict:
         """
