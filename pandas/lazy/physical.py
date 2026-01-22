@@ -519,6 +519,272 @@ class PhysicalMaterialize(PhysicalPlan):
 
 
 # =============================================================================
+# Fused Pipeline (Operator Fusion)
+# =============================================================================
+
+
+@dataclass
+class FusedOperation:
+    """
+    A single operation within a fused pipeline.
+
+    Parameters
+    ----------
+    op_type : str
+        Type of operation: "filter", "project", or "limit".
+    predicate : Expr or None
+        For filters: the predicate to evaluate.
+    exprs : tuple[Expr, ...] or None
+        For projects: the expressions to compute.
+    limit_n : int or None
+        For limits: number of rows to return.
+    """
+
+    op_type: Literal["filter", "project", "limit"]
+    predicate: Expr | None = None
+    exprs: tuple[Expr, ...] | None = None
+    limit_n: int | None = None
+
+
+@dataclass
+class PhysicalFusedPipeline(PhysicalPlan):
+    """
+    Fused execution of multiple operators in a single pass.
+
+    Operator fusion combines chains of Filter, Project, and Limit operators
+    into a single physical operator that processes data in one pass. This
+    provides significant performance benefits:
+
+    1. **Reduced allocations**: No intermediate arrays between operators
+    2. **Better cache locality**: Data stays hot in CPU cache
+    3. **Early termination**: Filter+Limit can stop as soon as enough rows pass
+    4. **Simplified spilling**: Fewer intermediates to track
+
+    Fuseable Patterns
+    -----------------
+    - Filter → Project: Evaluate predicate first, only compute expressions
+      for rows that pass the filter
+    - Project → Project: Combine expressions into single evaluation
+    - Filter → Limit: Stop processing as soon as limit is reached
+    - Filter → Filter: Combine predicates with AND
+
+    Example
+    -------
+    Before fusion:
+        Scan → Filter(x > 0) → Project(x, y*2) → Filter(y < 10) → Limit(100)
+
+    After fusion:
+        Scan → FusedPipeline([
+            filter(x > 0),
+            project(x, y*2),
+            filter(y < 10),
+            limit(100)
+        ])
+
+    The fused pipeline processes batches:
+    1. Load batch from scan
+    2. Apply filter(x > 0) to get mask
+    3. For passing rows, compute y*2
+    4. Apply filter(y < 10) on computed values
+    5. Emit rows until 100 reached, then stop
+
+    Parameters
+    ----------
+    input : PhysicalPlan
+        The input plan (typically a scan or another non-fuseable operator).
+    operations : tuple[FusedOperation, ...]
+        Sequence of operations to apply in order.
+    schema : Schema
+        Output schema after all operations.
+    """
+
+    input: PhysicalPlan
+    operations: tuple[FusedOperation, ...]
+    schema: Schema
+
+    @property
+    def supports_streaming(self) -> bool:
+        # Fused pipeline supports streaming if input does
+        return self.input.supports_streaming
+
+    def execute(self, context: ExecutionContext) -> ArrayDict:
+        """Execute fused pipeline on full input."""
+        input_arrays = self.input.execute(context)
+        return self._execute_fused(input_arrays, context)
+
+    def execute_batches(self, context: ExecutionContext) -> Iterator[ArrayDict]:
+        """Stream fused pipeline with early termination for limits."""
+        # Check if we have a limit operation
+        limit_n = None
+        for op in self.operations:
+            if op.op_type == "limit" and op.limit_n is not None:
+                limit_n = op.limit_n
+                break
+
+        rows_yielded = 0
+
+        for batch in self.input.execute_batches(context):
+            if not batch:
+                continue
+
+            remaining = limit_n - rows_yielded if limit_n else None
+            result = self._execute_fused(batch, context, remaining=remaining)
+
+            if result:
+                first_arr = next(iter(result.values()))
+                batch_len = len(first_arr)
+                if batch_len > 0:
+                    yield result
+                    rows_yielded += batch_len
+
+                    # Early termination for limit
+                    if limit_n and rows_yielded >= limit_n:
+                        return
+
+    def _execute_fused(
+        self,
+        input_arrays: ArrayDict,
+        context: ExecutionContext,
+        remaining: int | None = None,
+    ) -> ArrayDict:
+        """
+        Execute all fused operations on input arrays.
+
+        Parameters
+        ----------
+        input_arrays : ArrayDict
+            Input arrays to process.
+        context : ExecutionContext
+            Execution context.
+        remaining : int or None
+            For streaming with limit: how many more rows we need.
+
+        Returns
+        -------
+        ArrayDict
+            Result after applying all operations.
+        """
+        import numpy as np
+        import pyarrow as pa
+
+        from pandas.lazy.backends.array_eval import ArrayEvaluator
+        from pandas.lazy.backends.types import is_index_col
+        from pandas.lazy.expr import extract_output_name
+
+        if not input_arrays:
+            return {}
+
+        # Track current arrays and mask through the pipeline
+        current_arrays = input_arrays
+        current_mask: np.ndarray | None = None  # Boolean mask of valid rows
+
+        for op in self.operations:
+            if op.op_type == "filter":
+                # Evaluate predicate
+                evaluator = ArrayEvaluator(current_arrays, preferred_backend="auto")
+                pred_result = evaluator.evaluate(op.predicate._ir)
+
+                # Convert to numpy mask
+                if isinstance(pred_result, (pa.Array, pa.ChunkedArray)):
+                    new_mask = pred_result.to_numpy(zero_copy_only=False)
+                else:
+                    new_mask = np.asarray(pred_result)
+
+                # Combine with existing mask
+                if current_mask is not None:
+                    current_mask = current_mask & new_mask
+                else:
+                    current_mask = new_mask
+
+            elif op.op_type == "project":
+                # Apply current mask to arrays before projection
+                if current_mask is not None:
+                    current_arrays = self._apply_mask(current_arrays, current_mask)
+                    current_mask = None  # Mask is now applied
+
+                # Evaluate expressions
+                evaluator = ArrayEvaluator(current_arrays, preferred_backend="auto")
+                result: ArrayDict = {}
+
+                # Keep index columns
+                for name, arr in current_arrays.items():
+                    if is_index_col(name):
+                        result[name] = arr
+
+                # Evaluate projection expressions
+                if current_arrays:
+                    arr_len = len(next(iter(current_arrays.values())))
+                else:
+                    arr_len = 0
+                for expr in op.exprs:
+                    name = extract_output_name(expr)
+                    value = evaluator.evaluate(expr._ir)
+                    if not isinstance(value, (np.ndarray, pa.Array, pa.ChunkedArray)):
+                        value = np.full(arr_len, value)
+                    result[name] = value
+
+                current_arrays = result
+
+            elif op.op_type == "limit":
+                # Apply any pending mask first
+                if current_mask is not None:
+                    current_arrays = self._apply_mask(current_arrays, current_mask)
+                    current_mask = None
+
+                # Apply limit
+                limit_n = op.limit_n
+                if remaining is not None:
+                    limit_n = min(limit_n, remaining)
+
+                if current_arrays:
+                    first_arr = next(iter(current_arrays.values()))
+                    if len(first_arr) > limit_n:
+                        current_arrays = self._slice_arrays(current_arrays, 0, limit_n)
+
+        # Apply any remaining mask
+        if current_mask is not None:
+            current_arrays = self._apply_mask(current_arrays, current_mask)
+
+        return current_arrays
+
+    def _apply_mask(self, arrays: ArrayDict, mask: np.ndarray) -> ArrayDict:
+        """Apply boolean mask to all arrays."""
+        import pyarrow as pa
+
+        from pandas.lazy.backends.convert import get_array_backend
+
+        result: ArrayDict = {}
+        for name, arr in arrays.items():
+            backend = get_array_backend(arr)
+            if backend == "arrow":
+                # Arrow filter
+                if isinstance(arr, pa.ChunkedArray):
+                    arr = arr.combine_chunks()
+                pa_mask = pa.array(mask)
+                import pyarrow.compute as pc
+                result[name] = pc.filter(arr, pa_mask)
+            else:
+                # NumPy boolean indexing
+                result[name] = arr[mask]
+
+        return result
+
+    def _slice_arrays(self, arrays: ArrayDict, start: int, end: int) -> ArrayDict:
+        """Slice all arrays."""
+        result: ArrayDict = {}
+        for name, arr in arrays.items():
+            result[name] = arr[start:end]
+        return result
+
+    def children(self) -> list[PhysicalPlan]:
+        return [self.input]
+
+    @property
+    def output_schema(self) -> Schema:
+        return self.schema
+
+
+# =============================================================================
 # Scan Nodes (Data Sources)
 # =============================================================================
 
@@ -4616,10 +4882,12 @@ class PhysicalPlanner:
         PhysicalPlan
             The input wrapped in PhysicalMaterialize.
         """
-        physical_input = self.plan(logical_input)
+        physical_input = self._plan_recursive(logical_input)
         return PhysicalMaterialize(input=physical_input, reason=reason)
 
-    def plan(self, logical_plan: LogicalPlan) -> PhysicalPlan:
+    def plan(
+        self, logical_plan: LogicalPlan, *, enable_fusion: bool = True
+    ) -> PhysicalPlan:
         """
         Convert a logical plan to a physical plan.
 
@@ -4627,12 +4895,25 @@ class PhysicalPlanner:
         ----------
         logical_plan : LogicalPlan
             The optimized logical plan.
+        enable_fusion : bool, default True
+            If True, apply operator fusion as a post-processing step.
+            Fusion combines chains of Filter/Project/Limit into single
+            fused operators for better performance.
 
         Returns
         -------
         PhysicalPlan
             The physical execution plan.
         """
+        physical_plan = self._plan_recursive(logical_plan)
+
+        if enable_fusion:
+            physical_plan = self._apply_fusion(physical_plan)
+
+        return physical_plan
+
+    def _plan_recursive(self, logical_plan: LogicalPlan) -> PhysicalPlan:
+        """Recursively convert logical plan to physical plan."""
         from pandas.lazy.plan import (
             Aggregate,
             Concat,
@@ -4748,7 +5029,7 @@ class PhysicalPlanner:
     def _plan_project(self, node) -> PhysicalProject:
         """Plan a Project."""
         return PhysicalProject(
-            input=self.plan(node.input),
+            input=self._plan_recursive(node.input),
             exprs=node.exprs,
             schema=node.resolve_schema(),
             backend=self._choose_backend_for_exprs(node.exprs),
@@ -4757,7 +5038,7 @@ class PhysicalPlanner:
     def _plan_filter(self, node) -> PhysicalFilter:
         """Plan a Filter."""
         return PhysicalFilter(
-            input=self.plan(node.input),
+            input=self._plan_recursive(node.input),
             predicate=node.predicate,
             schema=node.resolve_schema(),
             backend=self._choose_backend_for_exprs((node.predicate,)),
@@ -4789,7 +5070,7 @@ class PhysicalPlanner:
     def _plan_topk(self, node) -> PhysicalTopK:
         """Plan a TopK."""
         return PhysicalTopK(
-            input=self.plan(node.input),
+            input=self._plan_recursive(node.input),
             k=node.k,
             by=node.by,
             descending=node.descending,
@@ -4799,7 +5080,7 @@ class PhysicalPlanner:
     def _plan_limit(self, node) -> PhysicalLimit:
         """Plan a Limit."""
         return PhysicalLimit(
-            input=self.plan(node.input),
+            input=self._plan_recursive(node.input),
             n=node.n,
             offset=node.offset,
             schema=node.resolve_schema(),
@@ -4843,7 +5124,7 @@ class PhysicalPlanner:
     def _plan_convert(self, node) -> PhysicalConvert:
         """Plan a Convert (backend conversion)."""
         return PhysicalConvert(
-            input=self.plan(node.input),
+            input=self._plan_recursive(node.input),
             target_backend=node.target_backend,
             schema=node.resolve_schema(),
         )
@@ -4851,7 +5132,7 @@ class PhysicalPlanner:
     def _plan_set_index(self, node) -> PhysicalSetIndex:
         """Plan a SetIndex."""
         return PhysicalSetIndex(
-            input=self.plan(node.input),
+            input=self._plan_recursive(node.input),
             keys=node.keys,
             drop=node.drop,
             schema=node.resolve_schema(),
@@ -4860,7 +5141,7 @@ class PhysicalPlanner:
     def _plan_reset_index(self, node) -> PhysicalResetIndex:
         """Plan a ResetIndex."""
         return PhysicalResetIndex(
-            input=self.plan(node.input),
+            input=self._plan_recursive(node.input),
             drop=node.drop,
             schema=node.resolve_schema(),
         )
@@ -4868,8 +5149,155 @@ class PhysicalPlanner:
     def _plan_concat(self, node) -> PhysicalConcat:
         """Plan a Concat."""
         return PhysicalConcat(
-            inputs=tuple(self.plan(inp) for inp in node.inputs),
+            inputs=tuple(self._plan_recursive(inp) for inp in node.inputs),
             schema=node.resolve_schema(),
+        )
+
+    def _apply_fusion(self, plan: PhysicalPlan) -> PhysicalPlan:
+        """
+        Apply operator fusion to optimize the physical plan.
+
+        Detects chains of fuseable operators (Filter, Project, Limit) and
+        combines them into single PhysicalFusedPipeline operators.
+
+        Fusion Rules
+        ------------
+        1. Filter → Project: Fuse to evaluate predicate before expressions
+        2. Project → Project: Combine into single projection
+        3. Filter → Filter: Combine predicates (AND)
+        4. Filter → Limit: Short-circuit when limit is reached
+        5. Project → Limit: Fuse to stop early
+        6. Any combination of above
+
+        Fusion Boundaries
+        -----------------
+        Fusion stops at:
+        - Pipeline breakers (Sort, Aggregate, Join, Distinct)
+        - Materialize nodes
+        - Scan nodes (fusion starts fresh after)
+
+        Parameters
+        ----------
+        plan : PhysicalPlan
+            The physical plan to optimize.
+
+        Returns
+        -------
+        PhysicalPlan
+            Optimized plan with fused operators.
+        """
+        # First, recursively apply fusion to children
+        plan = self._apply_fusion_to_children(plan)
+
+        # Then check if this node can be fused with its input
+        return self._try_fuse(plan)
+
+    def _apply_fusion_to_children(self, plan: PhysicalPlan) -> PhysicalPlan:
+        """Recursively apply fusion to all children of a plan node."""
+        from dataclasses import replace
+
+        children = plan.children()
+        if not children:
+            return plan
+
+        # Recursively optimize children
+        new_children = [self._apply_fusion(child) for child in children]
+
+        # If no changes, return original
+        if all(new is old for new, old in zip(new_children, children)):
+            return plan
+
+        # Create new node with optimized children
+        if hasattr(plan, "input") and len(new_children) == 1:
+            return replace(plan, input=new_children[0])
+        elif hasattr(plan, "left") and hasattr(plan, "right"):
+            if len(new_children) == 2:
+                return replace(plan, left=new_children[0], right=new_children[1])
+        elif hasattr(plan, "inputs"):
+            return replace(plan, inputs=tuple(new_children))
+        else:
+            # Unknown structure, return as-is
+            return plan
+
+    def _try_fuse(self, plan: PhysicalPlan) -> PhysicalPlan:
+        """
+        Try to fuse this plan node with its input(s) into a FusedPipeline.
+
+        Only Filter, Project, and Limit can be fused.
+        """
+        # Check if this is a fuseable operator
+        if not isinstance(plan, (PhysicalFilter, PhysicalProject, PhysicalLimit)):
+            return plan
+
+        # Don't fuse tail operations (offset=-1)
+        if isinstance(plan, PhysicalLimit) and plan.offset == -1:
+            return plan
+
+        # Collect the chain of fuseable operations
+        operations: list[FusedOperation] = []
+        current = plan
+        base_input = None
+
+        while True:
+            if isinstance(current, PhysicalFilter):
+                operations.append(
+                    FusedOperation(op_type="filter", predicate=current.predicate)
+                )
+                current = current.input
+
+            elif isinstance(current, PhysicalProject):
+                operations.append(
+                    FusedOperation(op_type="project", exprs=current.exprs)
+                )
+                current = current.input
+
+            elif isinstance(current, PhysicalLimit) and current.offset != -1:
+                # Only fuse head() operations, not tail()
+                operations.append(
+                    FusedOperation(op_type="limit", limit_n=current.n)
+                )
+                current = current.input
+
+            elif isinstance(current, PhysicalFusedPipeline):
+                # Already fused - extend with its operations
+                operations.extend(current.operations)
+                current = current.input
+
+            else:
+                # Not fuseable - this is the base input
+                base_input = current
+                break
+
+        # Reverse to get operations in execution order (bottom-up to top-down)
+        operations.reverse()
+
+        # If only one operation and no fusion benefit, return original
+        if len(operations) == 1:
+            return plan
+
+        # Check if fusion is beneficial
+        # At minimum we need: Filter+Project, Filter+Limit, or Project+Limit
+        has_filter = any(op.op_type == "filter" for op in operations)
+        has_project = any(op.op_type == "project" for op in operations)
+        has_limit = any(op.op_type == "limit" for op in operations)
+
+        # Fusion is beneficial if we have at least two different types
+        # or multiple of the same type that can be combined
+        beneficial = (
+            (has_filter and has_project)
+            or (has_filter and has_limit)
+            or (has_project and has_limit)
+            or sum(1 for op in operations if op.op_type == "filter") > 1
+            or sum(1 for op in operations if op.op_type == "project") > 1
+        )
+
+        if not beneficial:
+            return plan
+
+        return PhysicalFusedPipeline(
+            input=base_input,
+            operations=tuple(operations),
+            schema=plan.output_schema,
         )
 
     def _choose_backend_for_exprs(

@@ -381,7 +381,8 @@ class TestPhysicalPlan:
         """Filter should produce PhysicalFilter."""
         lf = simple_df.select().filter(col("a") > 2)
         planner = PhysicalPlanner()
-        physical = planner.plan(lf._plan)
+        # Disable fusion to test individual operator type
+        physical = planner.plan(lf._plan, enable_fusion=False)
 
         assert isinstance(physical, PhysicalFilter)
 
@@ -425,7 +426,8 @@ class TestBackendSelection:
         lf = simple_df.select().with_columns((col("a") + col("b")).alias("sum"))
 
         planner = PhysicalPlanner(preferred_backend="auto")
-        physical = planner.plan(lf._plan)
+        # Disable fusion to test individual operator type
+        physical = planner.plan(lf._plan, enable_fusion=False)
 
         assert isinstance(physical, PhysicalProject)
         # Backend selection is "auto" which should work with NumPy data
@@ -435,7 +437,8 @@ class TestBackendSelection:
         lf = arrow_df.select().with_columns((col("a") + col("b")).alias("sum"))
 
         planner = PhysicalPlanner(preferred_backend="auto")
-        physical = planner.plan(lf._plan)
+        # Disable fusion to test individual operator type
+        physical = planner.plan(lf._plan, enable_fusion=False)
 
         assert isinstance(physical, PhysicalProject)
 

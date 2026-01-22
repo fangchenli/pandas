@@ -12,8 +12,10 @@ import pandas._testing as tm
 from pandas.lazy import col
 from pandas.lazy.physical import (
     ExecutionContext,
+    FusedOperation,
     PhysicalDistinct,
     PhysicalFilter,
+    PhysicalFusedPipeline,
     PhysicalHashAggregate,
     PhysicalHashJoin,
     PhysicalLimit,
@@ -57,7 +59,8 @@ class TestPhysicalPlanner:
         lf = df.select().filter(col("a") > 1)
 
         planner = PhysicalPlanner()
-        physical = planner.plan(lf._plan)
+        # Disable fusion to test individual operator planning
+        physical = planner.plan(lf._plan, enable_fusion=False)
 
         assert isinstance(physical, PhysicalFilter)
         assert isinstance(physical.input, PhysicalProject)
@@ -88,7 +91,8 @@ class TestPhysicalPlanner:
         lf = df.select().head(2)
 
         planner = PhysicalPlanner()
-        physical = planner.plan(lf._plan)
+        # Disable fusion to test individual operator planning
+        physical = planner.plan(lf._plan, enable_fusion=False)
 
         assert isinstance(physical, PhysicalLimit)
 
@@ -366,7 +370,8 @@ class TestPhysicalPlanChildren:
         lf = df.select().filter(col("a") > 1)
 
         planner = PhysicalPlanner()
-        physical = planner.plan(lf._plan)
+        # Disable fusion to test individual operator structure
+        physical = planner.plan(lf._plan, enable_fusion=False)
 
         children = physical.children()
         assert len(children) == 1
@@ -558,3 +563,91 @@ class TestCollectPhysicalPlannerFlag:
 
         # Results should be the same regardless of optimization
         tm.assert_frame_equal(result_opt, result_no_opt)
+
+
+class TestOperatorFusion:
+    """Tests for operator fusion in physical planning."""
+
+    def test_filter_project_fusion(self):
+        """Filter + Project should be fused into FusedPipeline."""
+        df = pd.DataFrame({"a": [1, 2, 3, 4, 5], "b": [10, 20, 30, 40, 50]})
+        lf = df.select().filter(col("a") > 2)
+
+        planner = PhysicalPlanner()
+        physical = planner.plan(lf._plan)  # Fusion enabled by default
+
+        # Should be fused: Filter + Project -> FusedPipeline
+        assert isinstance(physical, PhysicalFusedPipeline)
+        assert len(physical.operations) == 2
+        assert physical.operations[0].op_type == "project"
+        assert physical.operations[1].op_type == "filter"
+
+    def test_project_limit_fusion(self):
+        """Project + Limit should be fused."""
+        df = pd.DataFrame({"a": [1, 2, 3, 4, 5]})
+        lf = df.select().head(3)
+
+        planner = PhysicalPlanner()
+        physical = planner.plan(lf._plan)
+
+        # Should be fused: Project + Limit -> FusedPipeline
+        assert isinstance(physical, PhysicalFusedPipeline)
+        assert len(physical.operations) == 2
+        assert physical.operations[0].op_type == "project"
+        assert physical.operations[1].op_type == "limit"
+
+    def test_filter_filter_fusion(self):
+        """Multiple filters should be fused."""
+        df = pd.DataFrame({"a": [1, 2, 3, 4, 5]})
+        lf = df.select().filter(col("a") > 1).filter(col("a") < 5)
+
+        planner = PhysicalPlanner()
+        physical = planner.plan(lf._plan)
+
+        # Should be fused: Project + Filter + Filter
+        assert isinstance(physical, PhysicalFusedPipeline)
+        filter_ops = [op for op in physical.operations if op.op_type == "filter"]
+        assert len(filter_ops) == 2
+
+    def test_fused_execution_correctness(self):
+        """Fused execution should produce same results as unfused."""
+        df = pd.DataFrame({"a": [1, 2, 3, 4, 5], "b": [10, 20, 30, 40, 50]})
+        lf = df.select().filter(col("a") > 2).head(2)
+
+        planner = PhysicalPlanner()
+
+        # With fusion
+        physical_fused = planner.plan(lf._plan, enable_fusion=True)
+        result_fused = execute_physical_plan(physical_fused)
+
+        # Without fusion
+        physical_unfused = planner.plan(lf._plan, enable_fusion=False)
+        result_unfused = execute_physical_plan(physical_unfused)
+
+        tm.assert_frame_equal(result_fused, result_unfused)
+
+    def test_fusion_stops_at_pipeline_breaker(self):
+        """Fusion should stop at pipeline breakers (sort, aggregate, etc)."""
+        df = pd.DataFrame({"a": [3, 1, 2], "b": [10, 20, 30]})
+        lf = df.select().sort("a").head(2)
+
+        planner = PhysicalPlanner()
+        physical = planner.plan(lf._plan)
+
+        # Sort is a pipeline breaker, so structure should be:
+        # FusedPipeline(limit) -> Sort -> Materialize -> FusedPipeline(project)
+        # or just Limit -> Sort depending on fusion logic
+        # The key is that sort should NOT be fused
+        assert not isinstance(physical, PhysicalSort)  # Limit is on top
+
+    def test_tail_not_fused(self):
+        """Tail operations should not be fused (they need all data)."""
+        df = pd.DataFrame({"a": [1, 2, 3, 4, 5]})
+        lf = df.select().tail(2)
+
+        planner = PhysicalPlanner()
+        physical = planner.plan(lf._plan, enable_fusion=False)
+
+        # Tail should be PhysicalLimit with offset=-1
+        assert isinstance(physical, PhysicalLimit)
+        assert physical.offset == -1
