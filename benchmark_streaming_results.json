@@ -5,10 +5,10 @@
     "data_rows": 2964624,
     "limit_size": 10,
     "batch_size": null,
-    "streaming_time_ms": 82.6922919950448,
-    "full_read_time_ms": 126.7694589914754,
-    "lazy_nonstreaming_time_ms": 82.6922919950448,
-    "speedup_vs_full": 1.53302630672121,
+    "streaming_time_ms": 48.958417028188705,
+    "full_read_time_ms": 82.29420892894268,
+    "lazy_nonstreaming_time_ms": 48.958417028188705,
+    "speedup_vs_full": 1.6809001173702223,
     "speedup_vs_lazy": 1.0
   },
   {
@@ -17,10 +17,10 @@
     "data_rows": 2964624,
     "limit_size": 100,
     "batch_size": null,
-    "streaming_time_ms": 53.733957989607006,
-    "full_read_time_ms": 88.19787501124665,
-    "lazy_nonstreaming_time_ms": 53.733957989607006,
-    "speedup_vs_full": 1.6413805777773807,
+    "streaming_time_ms": 49.112832988612354,
+    "full_read_time_ms": 118.60320903360844,
+    "lazy_nonstreaming_time_ms": 49.112832988612354,
+    "speedup_vs_full": 2.4149128001047835,
     "speedup_vs_lazy": 1.0
   },
   {
@@ -29,10 +29,10 @@
     "data_rows": 2964624,
     "limit_size": 1000,
     "batch_size": null,
-    "streaming_time_ms": 54.74012502236292,
-    "full_read_time_ms": 90.38466698257253,
-    "lazy_nonstreaming_time_ms": 54.74012502236292,
-    "speedup_vs_full": 1.6511593085629195,
+    "streaming_time_ms": 50.33133295364678,
+    "full_read_time_ms": 82.75170903652906,
+    "lazy_nonstreaming_time_ms": 50.33133295364678,
+    "speedup_vs_full": 1.644139031897689,
     "speedup_vs_lazy": 1.0
   },
   {
@@ -41,10 +41,10 @@
     "data_rows": 2964624,
     "limit_size": 10000,
     "batch_size": null,
-    "streaming_time_ms": 53.33604203769937,
-    "full_read_time_ms": 158.21650001453236,
-    "lazy_nonstreaming_time_ms": 53.33604203769937,
-    "speedup_vs_full": 2.9664087166929374,
+    "streaming_time_ms": 48.92691597342491,
+    "full_read_time_ms": 82.16574997641146,
+    "lazy_nonstreaming_time_ms": 48.92691597342491,
+    "speedup_vs_full": 1.6793568190776733,
     "speedup_vs_lazy": 1.0
   },
   {
@@ -53,10 +53,10 @@
     "data_rows": 2964624,
     "limit_size": 10,
     "batch_size": null,
-    "streaming_time_ms": 74.07158298883587,
-    "full_read_time_ms": 138.61566595733166,
+    "streaming_time_ms": 52.09424998611212,
+    "full_read_time_ms": 118.94545797258615,
     "lazy_nonstreaming_time_ms": null,
-    "speedup_vs_full": 1.8713744240922179,
+    "speedup_vs_full": 2.2832742194060955,
     "speedup_vs_lazy": null
   },
   {
@@ -65,10 +65,10 @@
     "data_rows": 2964624,
     "limit_size": 100,
     "batch_size": null,
-    "streaming_time_ms": 130.08650002302602,
-    "full_read_time_ms": 159.19404104351997,
+    "streaming_time_ms": 58.47579205874354,
+    "full_read_time_ms": 118.67416591849178,
     "lazy_nonstreaming_time_ms": null,
-    "speedup_vs_full": 1.2237552783366588,
+    "speedup_vs_full": 2.029458032809102,
     "speedup_vs_lazy": null
   },
   {
@@ -77,10 +77,10 @@
     "data_rows": 2964624,
     "limit_size": 1000,
     "batch_size": null,
-    "streaming_time_ms": 57.05262499395758,
-    "full_read_time_ms": 140.44279203517362,
+    "streaming_time_ms": 51.187834003940225,
+    "full_read_time_ms": 122.57445801515132,
     "lazy_nonstreaming_time_ms": null,
-    "speedup_vs_full": 2.4616359378739867,
+    "speedup_vs_full": 2.3946013813695664,
     "speedup_vs_lazy": null
   },
   {
@@ -89,10 +89,10 @@
     "data_rows": 2964624,
     "limit_size": 10000,
     "batch_size": null,
-    "streaming_time_ms": 55.19624997396022,
-    "full_read_time_ms": 149.90650000981987,
+    "streaming_time_ms": 53.56091691646725,
+    "full_read_time_ms": 126.64641696028411,
     "lazy_nonstreaming_time_ms": null,
-    "speedup_vs_full": 2.715881968078281,
+    "speedup_vs_full": 2.364530412311646,
     "speedup_vs_lazy": null
   },
   {
@@ -101,11 +101,11 @@
     "data_rows": 2964624,
     "limit_size": 10,
     "batch_size": null,
-    "streaming_time_ms": 9.605332976207137,
-    "full_read_time_ms": 24.292042013257742,
-    "lazy_nonstreaming_time_ms": 141.78720803465694,
-    "speedup_vs_full": 2.52901612816862,
-    "speedup_vs_lazy": 14.76130066348252
+    "streaming_time_ms": 8.80354200489819,
+    "full_read_time_ms": 23.31095898989588,
+    "lazy_nonstreaming_time_ms": 123.97449999116361,
+    "speedup_vs_full": 2.6479068285158323,
+    "speedup_vs_lazy": 14.08234321165113
   },
   {
     "category": "project_filter_head",
@@ -113,11 +113,11 @@
     "data_rows": 2964624,
     "limit_size": 100,
     "batch_size": null,
-    "streaming_time_ms": 9.344707999844104,
-    "full_read_time_ms": 25.140249985270202,
-    "lazy_nonstreaming_time_ms": 212.06495899241418,
-    "speedup_vs_full": 2.6903194819666503,
-    "speedup_vs_lazy": 22.69358860608079
+    "streaming_time_ms": 8.563375100493431,
+    "full_read_time_ms": 23.454374982975423,
+    "lazy_nonstreaming_time_ms": 118.85083292145282,
+    "speedup_vs_full": 2.738917156814018,
+    "speedup_vs_lazy": 13.878970794424795
   },
   {
     "category": "project_filter_head",
@@ -125,11 +125,11 @@
     "data_rows": 2964624,
     "limit_size": 1000,
     "batch_size": null,
-    "streaming_time_ms": 17.30866701109335,
-    "full_read_time_ms": 24.832708993926644,
-    "lazy_nonstreaming_time_ms": 154.26479105371982,
-    "speedup_vs_full": 1.434697945139914,
-    "speedup_vs_lazy": 8.912574894118046
+    "streaming_time_ms": 8.464375045150518,
+    "full_read_time_ms": 22.64870807994157,
+    "lazy_nonstreaming_time_ms": 120.6817498896271,
+    "speedup_vs_full": 2.6757684955037124,
+    "speedup_vs_lazy": 14.257609007858072
   },
   {
     "category": "project_filter_head",
@@ -137,11 +137,11 @@
     "data_rows": 2964624,
     "limit_size": 10000,
     "batch_size": null,
-    "streaming_time_ms": 11.297832999844104,
-    "full_read_time_ms": 27.161374979186803,
-    "lazy_nonstreaming_time_ms": 162.56883402820677,
-    "speedup_vs_full": 2.4041225409830007,
-    "speedup_vs_lazy": 14.389381931070321
+    "streaming_time_ms": 8.290875004604459,
+    "full_read_time_ms": 22.77337503619492,
+    "lazy_nonstreaming_time_ms": 116.92883307114244,
+    "speedup_vs_full": 2.746799948563619,
+    "speedup_vs_lazy": 14.103316357586419
   },
   {
     "category": "streaming_collect",
@@ -149,10 +149,10 @@
     "data_rows": 2964624,
     "limit_size": 0,
     "batch_size": 1024,
-    "streaming_time_ms": 969.8727920185775,
-    "full_read_time_ms": 22.560874989721924,
+    "streaming_time_ms": 894.7880000341684,
+    "full_read_time_ms": 22.64437498524785,
     "lazy_nonstreaming_time_ms": null,
-    "speedup_vs_full": 0.023261684599653953,
+    "speedup_vs_full": 0.025306972136844876,
     "speedup_vs_lazy": null
   },
   {
@@ -161,10 +161,10 @@
     "data_rows": 2964624,
     "limit_size": 0,
     "batch_size": 8192,
-    "streaming_time_ms": 392.9247499909252,
-    "full_read_time_ms": 27.162417012732476,
+    "streaming_time_ms": 363.9847079757601,
+    "full_read_time_ms": 20.99687501322478,
     "lazy_nonstreaming_time_ms": null,
-    "speedup_vs_full": 0.06912880141390891,
+    "speedup_vs_full": 0.05768614601969236,
     "speedup_vs_lazy": null
   },
   {
@@ -173,10 +173,10 @@
     "data_rows": 2964624,
     "limit_size": 0,
     "batch_size": 65536,
-    "streaming_time_ms": 324.6138749527745,
-    "full_read_time_ms": 21.343291038647294,
+    "streaming_time_ms": 295.15737504698336,
+    "full_read_time_ms": 20.510207978077233,
     "lazy_nonstreaming_time_ms": null,
-    "speedup_vs_full": 0.06574978054081133,
+    "speedup_vs_full": 0.06948905808236167,
     "speedup_vs_lazy": null
   },
   {
@@ -185,10 +185,10 @@
     "data_rows": 20332093,
     "limit_size": 100,
     "batch_size": null,
-    "streaming_time_ms": 163.01858302904293,
-    "full_read_time_ms": 1822.7912500151433,
+    "streaming_time_ms": 147.20520796254277,
+    "full_read_time_ms": 1534.9167919484898,
     "lazy_nonstreaming_time_ms": null,
-    "speedup_vs_full": 11.181493644135037,
+    "speedup_vs_full": 10.427054947261501,
     "speedup_vs_lazy": null
   },
   {
@@ -197,10 +197,10 @@
     "data_rows": 20332093,
     "limit_size": 1000,
     "batch_size": null,
-    "streaming_time_ms": 238.15858294256032,
-    "full_read_time_ms": 2012.6218750374392,
+    "streaming_time_ms": 137.28291599545628,
+    "full_read_time_ms": 1564.821333042346,
     "lazy_nonstreaming_time_ms": null,
-    "speedup_vs_full": 8.450763563380995,
+    "speedup_vs_full": 11.398514678214859,
     "speedup_vs_lazy": null
   }
 ]

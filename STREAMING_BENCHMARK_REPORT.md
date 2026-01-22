@@ -12,63 +12,63 @@
 
 | Category | Avg Speedup vs Full Read | Max Speedup | Min Speedup |
 |----------|--------------------------|-------------|-------------|
-| filter_head | 2.1x | 2.7x | 1.2x |
-| head | 1.9x | 3.0x | 1.5x |
-| multi_file | 9.8x | 11.2x | 8.5x |
-| project_filter_head | 2.3x | 2.7x | 1.4x |
+| filter_head | 2.3x | 2.4x | 2.0x |
+| head | 1.9x | 2.4x | 1.6x |
+| multi_file | 10.9x | 11.4x | 10.4x |
+| project_filter_head | 2.7x | 2.7x | 2.6x |
 | streaming_collect | 0.1x | 0.1x | 0.0x |
 
 ## Filter Head
 
 | Operation | Data Rows | Streaming (ms) | Full Read (ms) | Speedup |
 |-----------|-----------|----------------|----------------|---------|
-| filter.head(10) | 2,964,624 | 74.07 | 138.62 | 1.9x |
-| filter.head(100) | 2,964,624 | 130.09 | 159.19 | 1.2x |
-| filter.head(1000) | 2,964,624 | 57.05 | 140.44 | **2.5x** |
-| filter.head(10000) | 2,964,624 | 55.20 | 149.91 | **2.7x** |
+| filter.head(10) | 2,964,624 | 52.09 | 118.95 | **2.3x** |
+| filter.head(100) | 2,964,624 | 58.48 | 118.67 | **2.0x** |
+| filter.head(1000) | 2,964,624 | 51.19 | 122.57 | **2.4x** |
+| filter.head(10000) | 2,964,624 | 53.56 | 126.65 | **2.4x** |
 
 ## Head
 
 | Operation | Data Rows | Streaming (ms) | Full Read (ms) | Speedup |
 |-----------|-----------|----------------|----------------|---------|
-| head(10) | 2,964,624 | 82.69 | 126.77 | 1.5x |
-| head(100) | 2,964,624 | 53.73 | 88.20 | 1.6x |
-| head(1000) | 2,964,624 | 54.74 | 90.38 | 1.7x |
-| head(10000) | 2,964,624 | 53.34 | 158.22 | **3.0x** |
+| head(10) | 2,964,624 | 48.96 | 82.29 | 1.7x |
+| head(100) | 2,964,624 | 49.11 | 118.60 | **2.4x** |
+| head(1000) | 2,964,624 | 50.33 | 82.75 | 1.6x |
+| head(10000) | 2,964,624 | 48.93 | 82.17 | 1.7x |
 
 ## Multi File
 
 | Operation | Data Rows | Streaming (ms) | Full Read (ms) | Speedup |
 |-----------|-----------|----------------|----------------|---------|
-| glob.head(100) | 20,332,093 | 163.02 | 1822.79 | **11.2x** |
-| glob.head(1000) | 20,332,093 | 238.16 | 2012.62 | **8.5x** |
+| glob.head(100) | 20,332,093 | 147.21 | 1534.92 | **10.4x** |
+| glob.head(1000) | 20,332,093 | 137.28 | 1564.82 | **11.4x** |
 
 ## Project Filter Head
 
 | Operation | Data Rows | Streaming (ms) | Full Read (ms) | Speedup |
 |-----------|-----------|----------------|----------------|---------|
-| select.filter.head(10) | 2,964,624 | 9.61 | 24.29 | **2.5x** |
-| select.filter.head(100) | 2,964,624 | 9.34 | 25.14 | **2.7x** |
-| select.filter.head(1000) | 2,964,624 | 17.31 | 24.83 | 1.4x |
-| select.filter.head(10000) | 2,964,624 | 11.30 | 27.16 | **2.4x** |
+| select.filter.head(10) | 2,964,624 | 8.80 | 23.31 | **2.6x** |
+| select.filter.head(100) | 2,964,624 | 8.56 | 23.45 | **2.7x** |
+| select.filter.head(1000) | 2,964,624 | 8.46 | 22.65 | **2.7x** |
+| select.filter.head(10000) | 2,964,624 | 8.29 | 22.77 | **2.7x** |
 
 ## Streaming Collect
 
 | Batch Size | Data Rows | Streaming (ms) | Full Read (ms) | Ratio |
 |------------|-----------|----------------|----------------|-------|
-| 1,024 | 2,964,624 | 969.87 | 22.56 | 0.02x |
-| 8,192 | 2,964,624 | 392.92 | 27.16 | 0.07x |
-| 65,536 | 2,964,624 | 324.61 | 21.34 | 0.07x |
+| 1,024 | 2,964,624 | 894.79 | 22.64 | 0.03x |
+| 8,192 | 2,964,624 | 363.98 | 21.00 | 0.06x |
+| 65,536 | 2,964,624 | 295.16 | 20.51 | 0.07x |
 
 ## Key Findings
 
 ### Top 5 Speedups
 
-1. **glob.head(100)** (multi_file): 11.2x faster (163.02ms vs 1822.79ms)
-2. **glob.head(1000)** (multi_file): 8.5x faster (238.16ms vs 2012.62ms)
-3. **head(10000)** (head): 3.0x faster (53.34ms vs 158.22ms)
-4. **filter.head(10000)** (filter_head): 2.7x faster (55.20ms vs 149.91ms)
-5. **select.filter.head(100)** (project_filter_head): 2.7x faster (9.34ms vs 25.14ms)
+1. **glob.head(1000)** (multi_file): 11.4x faster (137.28ms vs 1564.82ms)
+2. **glob.head(100)** (multi_file): 10.4x faster (147.21ms vs 1534.92ms)
+3. **select.filter.head(10000)** (project_filter_head): 2.7x faster (8.29ms vs 22.77ms)
+4. **select.filter.head(100)** (project_filter_head): 2.7x faster (8.56ms vs 23.45ms)
+5. **select.filter.head(1000)** (project_filter_head): 2.7x faster (8.46ms vs 22.65ms)
 
 ### Conclusions
 
