@@ -14,6 +14,13 @@ import subprocess
 import sys
 
 BENCHMARKS = [
+    # Planning overhead analysis (diagnostic)
+    "bench_planning_phases.py",
+    "bench_optimizer_quality.py",
+    "bench_cache_effects.py",
+    "bench_selectivity.py",
+    "bench_join_edge_cases.py",
+    "bench_user_stories.py",
     # Core operations
     "bench_kernel_overhead.py",
     "bench_conversion.py",

@@ -478,3 +478,311 @@ def print_speedup(
     """Print speedup ratio."""
     speedup = baseline_ms / test_ms if test_ms > 0 else float("inf")
     print(f"  {label}: {speedup:.2f}x")
+
+
+# =============================================================================
+# Hardware info collection
+# =============================================================================
+
+
+def get_hardware_info() -> dict[str, Any]:
+    """
+    Collect hardware and environment info for benchmark reproducibility.
+
+    Returns
+    -------
+    dict[str, Any]
+        Dictionary with system info including:
+        - platform, python_version, numpy_version, pandas_version
+        - cpu_count, cpu_brand (if available)
+        - memory_total_gb
+        - timestamp
+    """
+    from datetime import (
+        datetime,
+        timezone,
+    )
+    import platform
+    import sys
+
+    info: dict[str, Any] = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "platform": platform.system(),
+        "platform_release": platform.release(),
+        "python_version": sys.version.split()[0],
+        "numpy_version": np.__version__,
+        "pandas_version": pd.__version__,
+        "cpu_count": None,
+        "cpu_brand": None,
+        "memory_total_gb": None,
+    }
+
+    # CPU count
+    try:
+        import os
+
+        info["cpu_count"] = os.cpu_count()
+    except Exception:
+        pass
+
+    # CPU brand (macOS/Linux)
+    try:
+        import subprocess
+
+        if platform.system() == "Darwin":
+            result = subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                info["cpu_brand"] = result.stdout.strip()
+        elif platform.system() == "Linux":
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if line.startswith("model name"):
+                        info["cpu_brand"] = line.split(":")[1].strip()
+                        break
+    except Exception:
+        pass
+
+    # Total memory
+    try:
+        if platform.system() == "Darwin":
+            import subprocess
+
+            result = subprocess.run(
+                ["sysctl", "-n", "hw.memsize"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                info["memory_total_gb"] = round(int(result.stdout.strip()) / 1e9, 1)
+        elif platform.system() == "Linux":
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemTotal"):
+                        kb = int(line.split()[1])
+                        info["memory_total_gb"] = round(kb / 1e6, 1)
+                        break
+    except Exception:
+        pass
+
+    return info
+
+
+# =============================================================================
+# JSON result utilities
+# =============================================================================
+
+
+def save_benchmark_results(
+    results: dict[str, Any],
+    output_path: Path | str,
+    include_hardware: bool = True,
+) -> Path:
+    """
+    Save benchmark results to JSON with optional hardware info.
+
+    Parameters
+    ----------
+    results : dict[str, Any]
+        Benchmark results to save
+    output_path : Path or str
+        Path to output JSON file
+    include_hardware : bool, default True
+        Whether to include hardware info in output
+
+    Returns
+    -------
+    Path
+        Path to saved file
+    """
+    import json
+
+    output_path = Path(output_path)
+
+    output = {
+        "results": results,
+    }
+
+    if include_hardware:
+        output["hardware"] = get_hardware_info()
+
+    with open(output_path, "w") as f:
+        json.dump(output, f, indent=2, default=str)
+
+    return output_path
+
+
+def load_benchmark_results(input_path: Path | str) -> dict[str, Any]:
+    """
+    Load benchmark results from JSON.
+
+    Parameters
+    ----------
+    input_path : Path or str
+        Path to input JSON file
+
+    Returns
+    -------
+    dict[str, Any]
+        Loaded benchmark results
+    """
+    import json
+
+    with open(input_path) as f:
+        return json.load(f)
+
+
+# =============================================================================
+# CI baseline comparison
+# =============================================================================
+
+
+def compare_to_baseline(
+    current: dict[str, float],
+    baseline: dict[str, float],
+    threshold_pct: float = 10.0,
+) -> tuple[bool, list[dict[str, Any]]]:
+    """
+    Compare current results to baseline and detect regressions.
+
+    Parameters
+    ----------
+    current : dict[str, float]
+        Current benchmark results (metric_name -> value_ms)
+    baseline : dict[str, float]
+        Baseline benchmark results (metric_name -> value_ms)
+    threshold_pct : float, default 10.0
+        Regression threshold as percentage (fail if slower by more than this)
+
+    Returns
+    -------
+    tuple[bool, list[dict]]
+        (passed, comparisons) where passed is False if any regression detected
+        comparisons is a list of dicts with metric, baseline, current, diff_pct, status
+    """
+    comparisons = []
+    passed = True
+
+    for metric in sorted(set(current.keys()) & set(baseline.keys())):
+        curr_val = current[metric]
+        base_val = baseline[metric]
+
+        if base_val > 0:
+            diff_pct = ((curr_val - base_val) / base_val) * 100
+        else:
+            diff_pct = 0.0
+
+        if diff_pct > threshold_pct:
+            status = "REGRESSION"
+            passed = False
+        elif diff_pct < -threshold_pct:
+            status = "IMPROVEMENT"
+        else:
+            status = "OK"
+
+        comparisons.append(
+            {
+                "metric": metric,
+                "baseline_ms": base_val,
+                "current_ms": curr_val,
+                "diff_pct": diff_pct,
+                "status": status,
+            }
+        )
+
+    return passed, comparisons
+
+
+def print_comparison_table(comparisons: list[dict[str, Any]]) -> None:
+    """Print comparison results as a table."""
+    print(
+        f"\n{'Metric':<40} {'Baseline':>10} {'Current':>10} {'Diff':>10} {'Status':>12}"
+    )
+    print("-" * 85)
+
+    for c in comparisons:
+        diff_str = f"{c['diff_pct']:+.1f}%"
+        status_color = (
+            "❌"
+            if c["status"] == "REGRESSION"
+            else "✅"
+            if c["status"] == "IMPROVEMENT"
+            else "  "
+        )
+        print(
+            f"{c['metric']:<40} {c['baseline_ms']:>10.2f} {c['current_ms']:>10.2f} "
+            f"{diff_str:>10} {status_color} {c['status']}"
+        )
+
+
+def run_ci_comparison(
+    current_results: dict[str, float],
+    baseline_path: Path | str,
+    threshold_pct: float = 10.0,
+    output_path: Path | str | None = None,
+) -> bool:
+    """
+    Run CI comparison against baseline file.
+
+    Parameters
+    ----------
+    current_results : dict[str, float]
+        Current benchmark results
+    baseline_path : Path or str
+        Path to baseline JSON file
+    threshold_pct : float, default 10.0
+        Regression threshold percentage
+    output_path : Path or str, optional
+        Path to save comparison results
+
+    Returns
+    -------
+    bool
+        True if all checks passed (no regressions), False otherwise
+    """
+    baseline_path = Path(baseline_path)
+
+    if not baseline_path.exists():
+        print(f"⚠️  No baseline found at {baseline_path}, saving current as baseline")
+        save_benchmark_results({"metrics": current_results}, baseline_path)
+        return True
+
+    baseline_data = load_benchmark_results(baseline_path)
+    baseline_metrics = baseline_data.get("results", {}).get("metrics", {})
+
+    if not baseline_metrics:
+        print("⚠️  Baseline file has no metrics, saving current as baseline")
+        save_benchmark_results({"metrics": current_results}, baseline_path)
+        return True
+
+    passed, comparisons = compare_to_baseline(
+        current_results, baseline_metrics, threshold_pct
+    )
+
+    print_comparison_table(comparisons)
+
+    if output_path:
+        save_benchmark_results(
+            {
+                "metrics": current_results,
+                "comparisons": comparisons,
+                "passed": passed,
+                "threshold_pct": threshold_pct,
+            },
+            output_path,
+        )
+
+    if passed:
+        print(f"\n✅ All benchmarks within {threshold_pct}% threshold")
+    else:
+        regressions = [c for c in comparisons if c["status"] == "REGRESSION"]
+        print(f"\n❌ {len(regressions)} regression(s) detected (>{threshold_pct}%)")
+
+    return passed
