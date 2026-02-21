@@ -264,6 +264,8 @@ class Aggregate(IRNode):
         for out_name, src_col, func in self.agg_specs:
             if func == "count":
                 cols[out_name] = DType.INT64
+            elif func in ("avg", "std", "var"):
+                cols[out_name] = DType.FLOAT64
             else:
                 cols[out_name] = parent.columns[src_col]
         return Schema(cols)
@@ -399,6 +401,26 @@ class UnaryOp(Expr):
         self.operand = operand
 
 
+class FunctionCall(Expr):
+    """Named function call with arguments and options.
+
+    Used for functions like ``extract(component, timestamp)`` or
+    ``str_upper(col)`` that don't fit the BinOp/UnaryOp pattern.
+    """
+
+    def __init__(
+        self,
+        func_name: str,
+        args: list[Expr],
+        options: dict[str, str] | None = None,
+        return_dtype: DType = DType.INT64,
+    ):
+        self.func_name = func_name
+        self.args = args
+        self.options = options or {}
+        self.return_dtype = return_dtype
+
+
 def _wrap_literal(v):
     if isinstance(v, Expr):
         return v
@@ -475,5 +497,11 @@ def explain_expr(expr: Expr) -> str:
             return f"({explain_expr(left)} {sym} {explain_expr(right)})"
         case UnaryOp(op=op, operand=operand):
             return f"{op}({explain_expr(operand)})"
+        case FunctionCall(func_name=name, args=args, options=opts):
+            args_str = ", ".join(explain_expr(a) for a in args)
+            if opts:
+                opts_str = ", ".join(f"{k}={v}" for k, v in opts.items())
+                return f"{name}({args_str}, {opts_str})"
+            return f"{name}({args_str})"
         case _:
             return "?"

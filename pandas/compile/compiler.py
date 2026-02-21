@@ -40,6 +40,7 @@ from pandas.compile.ir import (
     DType,
     Expr,
     Filter,
+    FunctionCall,
     IRNode,
     Join,
     Limit,
@@ -146,6 +147,8 @@ COMPARISON_URI = SUBSTRAIT_FUNC_URI + "functions_comparison.yaml"
 ARITHMETIC_URI = SUBSTRAIT_FUNC_URI + "functions_arithmetic.yaml"
 BOOLEAN_URI = SUBSTRAIT_FUNC_URI + "functions_boolean.yaml"
 AGGREGATE_URI = SUBSTRAIT_FUNC_URI + "functions_aggregate_generic.yaml"
+DATETIME_URI = SUBSTRAIT_FUNC_URI + "functions_datetime.yaml"
+STRING_URI = SUBSTRAIT_FUNC_URI + "functions_string.yaml"
 
 FUNC_REGISTRY: dict[str, tuple[str, str]] = {
     # Comparison
@@ -176,6 +179,10 @@ FUNC_REGISTRY: dict[str, tuple[str, str]] = {
     "min": ("min:i64", ARITHMETIC_URI),
     "max": ("max:i64", ARITHMETIC_URI),
     "count": ("count:any", AGGREGATE_URI),
+    "std": ("std_dev:fp64", ARITHMETIC_URI),
+    "var": ("variance:fp64", ARITHMETIC_URI),
+    # Datetime
+    "extract": ("extract:req_ts", DATETIME_URI),
 }
 
 
@@ -536,6 +543,8 @@ class SubstraitCompiler:
             return self._compile_binop(expr, schema)
         elif isinstance(expr, UnaryOp):
             return self._compile_unaryop(expr, schema)
+        elif isinstance(expr, FunctionCall):
+            return self._compile_function_call(expr, schema)
         else:
             raise TypeError(f"Unknown expression type: {type(expr)}")
 
@@ -620,6 +629,31 @@ class SubstraitCompiler:
             )
         )
 
+    def _compile_function_call(
+        self, expr: FunctionCall, schema: Schema
+    ) -> stalg.Expression:
+        func_anchor = self._get_func_anchor(expr.func_name)
+
+        # Build arguments: enum options come first, then value args
+        arguments = []
+        for k, v in expr.options.items():
+            arguments.append(stalg.FunctionArgument(enum=v))
+        arguments.extend(
+            stalg.FunctionArgument(value=self._compile_expr(a, schema))
+            for a in expr.args
+        )
+
+        output_type = _DTYPE_TO_SUBSTRAIT.get(
+            expr.return_dtype, _DTYPE_TO_SUBSTRAIT[DType.INT64]
+        )()
+        return stalg.Expression(
+            scalar_function=stalg.Expression.ScalarFunction(
+                function_reference=func_anchor,
+                arguments=arguments,
+                output_type=output_type,
+            )
+        )
+
 
 # ---------------------------------------------------------------------------
 # 3. Execution backends
@@ -694,7 +728,7 @@ class PandasBackend(Backend):
             agg_dict = {}
             rename_map = {}
             for out_name, src_col, func in node.agg_specs:
-                pandas_func = func if func != "avg" else "mean"
+                pandas_func = {"avg": "mean"}.get(func, func)
                 agg_dict[src_col] = pandas_func
                 rename_map[src_col] = out_name
             result = df.groupby(node.group_keys, as_index=False).agg(agg_dict)
@@ -759,8 +793,40 @@ class PandasBackend(Backend):
                 return -val
             else:
                 raise TypeError(f"Unknown unary op: {expr.op}")
+        elif isinstance(expr, FunctionCall):
+            return self._eval_function_call(expr, df)
         else:
             raise TypeError(f"Unknown expr: {type(expr)}")
+
+    def _eval_function_call(self, expr: FunctionCall, df: pd.DataFrame):
+        if expr.func_name == "extract":
+            series = self._eval_expr(expr.args[0], df)
+            component = expr.options.get("component", "YEAR")
+            _COMPONENT_MAP = {
+                "YEAR": "year",
+                "MONTH": "month",
+                "DAY": "day",
+                "HOUR": "hour",
+                "MINUTE": "minute",
+                "SECOND": "second",
+                "QUARTER": "quarter",
+                "MONDAY_DAY_OF_WEEK": "dayofweek",
+                "DAY_OF_YEAR": "dayofyear",
+            }
+            return getattr(series.dt, _COMPONENT_MAP[component])
+        elif expr.func_name.startswith("str_"):
+            return self._eval_str_func(expr, df)
+        raise TypeError(f"Unknown function: {expr.func_name}")
+
+    def _eval_str_func(self, expr: FunctionCall, df: pd.DataFrame):
+        series = self._eval_expr(expr.args[0], df)
+        extra_args = [self._eval_expr(a, df) for a in expr.args[1:]]
+        method = expr.func_name[4:]  # strip "str_" prefix
+        str_method = getattr(series.str, method)
+        kwargs = {}
+        if "regex" in expr.options:
+            kwargs["regex"] = expr.options["regex"] == "true"
+        return str_method(*extra_args, **kwargs)
 
     def _agg_fn(self, name):
         return {
@@ -770,6 +836,8 @@ class PandasBackend(Backend):
             "min": pd.Series.min,
             "max": pd.Series.max,
             "count": pd.Series.count,
+            "std": pd.Series.std,
+            "var": pd.Series.var,
         }[name]
 
 

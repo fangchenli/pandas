@@ -58,6 +58,7 @@ from pandas.compile.ir import (
     DType,
     Expr,
     Filter,
+    FunctionCall,
     IRNode,
     Join,
     Limit,
@@ -381,6 +382,12 @@ class TracedSeries:
     def count(self):
         return self._materialize_agg("count")
 
+    def std(self):
+        return self._materialize_agg("std")
+
+    def var(self):
+        return self._materialize_agg("var")
+
     # -- Non-materializing pandas methods --
 
     def isin(self, values) -> TracedSeries:
@@ -461,6 +468,16 @@ class TracedSeries:
             dtype=DType.BOOL,
         )
 
+    # -- Accessor properties --
+
+    @property
+    def dt(self) -> TracedDatetimeAccessor:
+        return TracedDatetimeAccessor(self)
+
+    @property
+    def str(self) -> TracedStringAccessor:
+        return TracedStringAccessor(self)
+
     # -- Graph-breaking Series methods --
 
     def apply(self, func, **kwargs):
@@ -522,6 +539,8 @@ class TracedSeries:
             "min": "min",
             "max": "max",
             "count": "count",
+            "std": "std",
+            "var": "var",
         }
         return getattr(df[col], agg_map[func])()
 
@@ -529,6 +548,224 @@ class TracedSeries:
         if self._column_name:
             return f"TracedSeries({self._column_name})"
         return f"TracedSeries({explain_expr(self._expr)})"
+
+
+# ---------------------------------------------------------------------------
+# Accessors — .dt and .str on TracedSeries
+# ---------------------------------------------------------------------------
+
+
+class TracedDatetimeAccessor:
+    """Proxy for Series.dt — maps to extract() IR expressions."""
+
+    def __init__(self, series: TracedSeries):
+        self._series = series
+
+    def _extract(self, component: str) -> TracedSeries:
+        expr = FunctionCall(
+            "extract",
+            args=[self._series._expr],
+            options={"component": component},
+            return_dtype=DType.INT64,
+        )
+        return TracedSeries(
+            self._series._ctx,
+            self._series._source_ir,
+            expr=expr,
+            dtype=DType.INT64,
+        )
+
+    @property
+    def year(self) -> TracedSeries:
+        return self._extract("YEAR")
+
+    @property
+    def month(self) -> TracedSeries:
+        return self._extract("MONTH")
+
+    @property
+    def day(self) -> TracedSeries:
+        return self._extract("DAY")
+
+    @property
+    def hour(self) -> TracedSeries:
+        return self._extract("HOUR")
+
+    @property
+    def minute(self) -> TracedSeries:
+        return self._extract("MINUTE")
+
+    @property
+    def second(self) -> TracedSeries:
+        return self._extract("SECOND")
+
+    @property
+    def quarter(self) -> TracedSeries:
+        return self._extract("QUARTER")
+
+    @property
+    def dayofweek(self) -> TracedSeries:
+        return self._extract("MONDAY_DAY_OF_WEEK")
+
+    @property
+    def day_of_week(self) -> TracedSeries:
+        return self._extract("MONDAY_DAY_OF_WEEK")
+
+    @property
+    def dayofyear(self) -> TracedSeries:
+        return self._extract("DAY_OF_YEAR")
+
+    @property
+    def day_of_year(self) -> TracedSeries:
+        return self._extract("DAY_OF_YEAR")
+
+
+class TracedStringAccessor:
+    """Proxy for Series.str — maps to str_* IR expressions."""
+
+    def __init__(self, series: TracedSeries):
+        self._series = series
+
+    def _str_func(
+        self,
+        method: str,
+        *extra_args,
+        return_dtype: DType = DType.STRING,
+        **options,
+    ) -> TracedSeries:
+        args = [self._series._expr] + [_to_expr(a) for a in extra_args]
+        expr = FunctionCall(
+            f"str_{method}", args, options=options, return_dtype=return_dtype
+        )
+        return TracedSeries(
+            self._series._ctx,
+            self._series._source_ir,
+            expr=expr,
+            dtype=return_dtype,
+        )
+
+    def upper(self) -> TracedSeries:
+        return self._str_func("upper")
+
+    def lower(self) -> TracedSeries:
+        return self._str_func("lower")
+
+    def strip(self) -> TracedSeries:
+        return self._str_func("strip")
+
+    def lstrip(self) -> TracedSeries:
+        return self._str_func("lstrip")
+
+    def rstrip(self) -> TracedSeries:
+        return self._str_func("rstrip")
+
+    def len(self) -> TracedSeries:
+        return self._str_func("len", return_dtype=DType.INT64)
+
+    def contains(self, pat, regex=True) -> TracedSeries:
+        return self._str_func(
+            "contains", pat, return_dtype=DType.BOOL, regex=str(regex).lower()
+        )
+
+    def startswith(self, pat) -> TracedSeries:
+        return self._str_func("startswith", pat, return_dtype=DType.BOOL)
+
+    def endswith(self, pat) -> TracedSeries:
+        return self._str_func("endswith", pat, return_dtype=DType.BOOL)
+
+    def replace(self, pat, repl, regex=True) -> TracedSeries:
+        return self._str_func("replace", pat, repl, regex=str(regex).lower())
+
+    def slice(self, start=None, stop=None) -> TracedSeries:
+        args = []
+        if start is not None:
+            args.append(start)
+        if stop is not None:
+            args.append(stop)
+        return self._str_func("slice", *args)
+
+
+# ---------------------------------------------------------------------------
+# TracedRolling / TracedExpanding — window proxies (graph break)
+# ---------------------------------------------------------------------------
+
+
+class TracedRolling:
+    """Proxy for DataFrame.rolling() — graph-breaks on aggregation."""
+
+    def __init__(self, ctx, source_ir, window, **kwargs):
+        self._ctx = ctx
+        self._source_ir = source_ir
+        self._window = window
+        self._kwargs = kwargs
+
+    def _apply(self, method, **method_kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        result = getattr(df.rolling(self._window, **self._kwargs), method)(
+            **method_kwargs
+        )
+        if isinstance(result, pd.DataFrame):
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        return result
+
+    def mean(self, **kwargs):
+        return self._apply("mean", **kwargs)
+
+    def sum(self, **kwargs):
+        return self._apply("sum", **kwargs)
+
+    def std(self, **kwargs):
+        return self._apply("std", **kwargs)
+
+    def var(self, **kwargs):
+        return self._apply("var", **kwargs)
+
+    def min(self, **kwargs):
+        return self._apply("min", **kwargs)
+
+    def max(self, **kwargs):
+        return self._apply("max", **kwargs)
+
+    def count(self, **kwargs):
+        return self._apply("count", **kwargs)
+
+
+class TracedExpanding:
+    """Proxy for DataFrame.expanding() — graph-breaks on aggregation."""
+
+    def __init__(self, ctx, source_ir, **kwargs):
+        self._ctx = ctx
+        self._source_ir = source_ir
+        self._kwargs = kwargs
+
+    def _apply(self, method, **method_kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        result = getattr(df.expanding(**self._kwargs), method)(**method_kwargs)
+        if isinstance(result, pd.DataFrame):
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        return result
+
+    def mean(self, **kwargs):
+        return self._apply("mean", **kwargs)
+
+    def sum(self, **kwargs):
+        return self._apply("sum", **kwargs)
+
+    def std(self, **kwargs):
+        return self._apply("std", **kwargs)
+
+    def var(self, **kwargs):
+        return self._apply("var", **kwargs)
+
+    def min(self, **kwargs):
+        return self._apply("min", **kwargs)
+
+    def max(self, **kwargs):
+        return self._apply("max", **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -596,6 +833,26 @@ class TracedGroupBy:
     def max(self):
         return self._simple_agg("max")
 
+    def std(self):
+        return self._simple_agg("std")
+
+    def var(self):
+        return self._simple_agg("var")
+
+    def first(self):
+        _, df = self._ctx.materialize(self._source_ir)
+        result = df.groupby(self._keys, as_index=False).first()
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def last(self):
+        _, df = self._ctx.materialize(self._source_ir)
+        result = df.groupby(self._keys, as_index=False).last()
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
     def _simple_agg(self, func):
         agg_specs = []
         for col, dtype in self._source_schema.columns.items():
@@ -641,6 +898,12 @@ class TracedGroupBySeries:
     def max(self):
         return self._agg("max")
 
+    def std(self):
+        return self._agg("std")
+
+    def var(self):
+        return self._agg("var")
+
     def _agg(self, func):
         return TracedDataFrame(
             self._ctx,
@@ -665,6 +928,12 @@ class TracedGroupByMulti:
 
     def mean(self):
         return self._agg("avg")
+
+    def std(self):
+        return self._agg("std")
+
+    def var(self):
+        return self._agg("var")
 
     def _agg(self, func):
         agg_specs = [(c, c, func) for c in self._columns]
@@ -936,6 +1205,69 @@ class TracedDataFrame:
         result = df.drop_duplicates(subset=subset, keep=keep, **kwargs).reset_index(
             drop=True
         )
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def rolling(self, window, **kwargs) -> TracedRolling:
+        return TracedRolling(self._ctx, self._ir, window, **kwargs)
+
+    def expanding(self, **kwargs) -> TracedExpanding:
+        return TracedExpanding(self._ctx, self._ir, **kwargs)
+
+    def pivot_table(self, **kwargs) -> TracedDataFrame:
+        df = self._materialize()
+        result = df.pivot_table(**kwargs).reset_index()
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def melt(self, **kwargs) -> TracedDataFrame:
+        df = self._materialize()
+        result = df.melt(**kwargs)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def stack(self, *args, **kwargs):
+        df = self._materialize()
+        result = df.stack(*args, **kwargs)
+        if isinstance(result, pd.DataFrame):
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        return result
+
+    def unstack(self, *args, **kwargs):
+        df = self._materialize()
+        result = df.unstack(*args, **kwargs)
+        if isinstance(result, pd.DataFrame):
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        return result
+
+    def astype(self, dtype) -> TracedDataFrame:
+        df = self._materialize()
+        result = df.astype(dtype)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def where(self, cond, other=None, **kwargs) -> TracedDataFrame:
+        df = self._materialize()
+        if isinstance(cond, TracedDataFrame):
+            cond = cond._materialize()
+        result = df.where(cond, other, **kwargs)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def mask(self, cond, other=None, **kwargs) -> TracedDataFrame:
+        df = self._materialize()
+        if isinstance(cond, TracedDataFrame):
+            cond = cond._materialize()
+        result = df.mask(cond, other, **kwargs)
         name = self._ctx.next_materialized_name()
         self._ctx.register_table(name, result)
         return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
