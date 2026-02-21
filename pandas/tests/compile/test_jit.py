@@ -25,49 +25,8 @@ from pandas.compile.jit import (
     TracedDataFrame,
     TracedSeries,
     Tracer,
-    _pandas_type_to_dtype,
     compile,
 )
-
-# ---------------------------------------------------------------------------
-# _pandas_type_to_dtype
-# ---------------------------------------------------------------------------
-
-
-class TestPandasTypeToDtype:
-    @pytest.mark.parametrize(
-        "t, expected",
-        [
-            (bool, DType.BOOL),
-            (np.bool_, DType.BOOL),
-            ("bool", DType.BOOL),
-            ("boolean", DType.BOOL),
-            (int, DType.INT64),
-            (np.int64, DType.INT64),
-            ("int64", DType.INT64),
-            (np.int32, DType.INT32),
-            ("int32", DType.INT32),
-            (np.int16, DType.INT16),
-            (np.int8, DType.INT8),
-            (np.uint8, DType.UINT8),
-            (np.uint16, DType.UINT16),
-            (np.uint32, DType.UINT32),
-            (np.uint64, DType.UINT64),
-            (float, DType.FLOAT64),
-            (np.float64, DType.FLOAT64),
-            (np.float32, DType.FLOAT32),
-            (str, DType.STRING),
-            ("string", DType.STRING),
-            (object, DType.STRING),
-            (bytes, DType.BINARY),
-        ],
-    )
-    def test_mapping(self, t, expected):
-        assert _pandas_type_to_dtype(t) is expected
-
-    def test_unknown_returns_string(self):
-        assert _pandas_type_to_dtype(complex) is DType.STRING
-
 
 # ---------------------------------------------------------------------------
 # TracedDataFrame — basic IR construction

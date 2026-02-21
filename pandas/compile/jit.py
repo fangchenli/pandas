@@ -92,37 +92,6 @@ def _to_expr(value) -> Expr:
     raise TypeError(f"Cannot convert {type(value)} to expression")
 
 
-def _pandas_type_to_dtype(t) -> DType:
-    """Map pandas/numpy type to our DType."""
-    if t in (bool, np.bool_, "bool", "boolean"):
-        return DType.BOOL
-    if t in (np.int8, "int8", "Int8"):
-        return DType.INT8
-    if t in (np.int16, "int16", "Int16"):
-        return DType.INT16
-    if t in (np.int32, "int32", "Int32"):
-        return DType.INT32
-    if t in (int, np.int64, "int64", "Int64"):
-        return DType.INT64
-    if t in (np.uint8, "uint8", "UInt8"):
-        return DType.UINT8
-    if t in (np.uint16, "uint16", "UInt16"):
-        return DType.UINT16
-    if t in (np.uint32, "uint32", "UInt32"):
-        return DType.UINT32
-    if t in (np.uint64, "uint64", "UInt64"):
-        return DType.UINT64
-    if t in (np.float32, "float32", "Float32"):
-        return DType.FLOAT32
-    if t in (float, np.float64, "float64", "Float64"):
-        return DType.FLOAT64
-    if t in (str, "str", "string", object):
-        return DType.STRING
-    if t in (bytes, "bytes"):
-        return DType.BINARY
-    return DType.STRING
-
-
 # ---------------------------------------------------------------------------
 # Query string parser (for df.query())
 # ---------------------------------------------------------------------------
