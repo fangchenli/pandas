@@ -275,6 +275,7 @@ __all__ = [
     "arrays",
     "bdate_range",
     "col",
+    "compile",
     "concat",
     "crosstab",
     "cut",
@@ -342,3 +343,11 @@ __all__ = [
     "unique",
     "wide_to_long",
 ]
+
+
+def __getattr__(name: str):
+    if name == "compile":
+        import pandas.compile as _compile
+
+        return _compile
+    raise AttributeError(f"module 'pandas' has no attribute '{name}'")
