@@ -1105,6 +1105,31 @@ class _LocProxy:
 
 
 # ---------------------------------------------------------------------------
+# Substrait export helpers
+# ---------------------------------------------------------------------------
+
+
+def _extract_substrait_plans(ctx: TraceContext) -> list[Any]:
+    """Extract Substrait Plan protobufs from a TraceContext."""
+    plans = []
+    for seg in ctx.segments:
+        if isinstance(seg, CompiledSegment):
+            compiler = SubstraitCompiler()
+            plans.append(compiler.compile(seg.ir_node))
+    return plans
+
+
+def _plans_to_json(plans: list[Any]) -> str:
+    """Serialize a list of Substrait Plan protobufs to a JSON string."""
+    from google.protobuf.json_format import MessageToJson
+
+    if len(plans) == 1:
+        return MessageToJson(plans[0])
+    parts = [MessageToJson(p) for p in plans]
+    return "[\n" + ",\n".join(parts) + "\n]"
+
+
+# ---------------------------------------------------------------------------
 # @compile decorator
 # ---------------------------------------------------------------------------
 
@@ -1144,8 +1169,14 @@ class CompiledFunction:
             {name: arg for name, arg in kwargs.items() if isinstance(arg, pd.DataFrame)}
         )
 
+        # Capture non-DataFrame arguments for guard comparison
+        scalar_args = tuple(a for a in args if not isinstance(a, pd.DataFrame))
+        scalar_kwargs = {
+            k: v for k, v in kwargs.items() if not isinstance(v, pd.DataFrame)
+        }
+
         for guard, plan in self._cached_plans:
-            if guard.check(df_args):
+            if guard.check(df_args, scalar_args, scalar_kwargs):
                 has_eager = any(isinstance(s, EagerSegment) for s in plan.segments)
                 if not has_eager:
                     log.info(
@@ -1176,7 +1207,7 @@ class CompiledFunction:
             return result
 
         guard_schemas = {name: infer_schema(df) for name, df in df_args.items()}
-        guard = SchemaGuard(guard_schemas)
+        guard = SchemaGuard(guard_schemas, scalar_args, scalar_kwargs)
         self._cached_plans.append((guard, plan))
 
         return result_df
@@ -1241,6 +1272,49 @@ class CompiledFunction:
     @property
     def last_context(self) -> TraceContext | None:
         return self._last_ctx
+
+    def to_substrait(self, *sample_args: Any, **kwargs: Any) -> list[Any]:
+        """
+        Export Substrait plans for the given sample inputs.
+
+        Traces the function with the provided arguments and returns
+        a list of ``substrait.plan_pb2.Plan`` protobuf objects, one
+        per compiled segment.
+
+        Parameters
+        ----------
+        *sample_args : positional arguments
+            Sample inputs (DataFrames and scalars) for tracing.
+        **kwargs : keyword arguments
+            Additional keyword arguments passed to the function.
+
+        Returns
+        -------
+        list of substrait.plan_pb2.Plan
+            Substrait plans that can be serialized via
+            ``.SerializeToString()`` or inspected directly.
+        """
+        ctx = self.trace(*sample_args, **kwargs)
+        return _extract_substrait_plans(ctx)
+
+    def to_substrait_json(self, *sample_args: Any, **kwargs: Any) -> str:
+        """
+        Export Substrait plans as a JSON string.
+
+        Parameters
+        ----------
+        *sample_args : positional arguments
+            Sample inputs (DataFrames and scalars) for tracing.
+        **kwargs : keyword arguments
+            Additional keyword arguments passed to the function.
+
+        Returns
+        -------
+        str
+            JSON representation of all Substrait plans.
+        """
+        plans = self.to_substrait(*sample_args, **kwargs)
+        return _plans_to_json(plans)
 
 
 @overload
@@ -1349,10 +1423,28 @@ class Tracer:
         plan = self._ctx.build_plan(self._output_name)
         return plan.explain()
 
-    def to_substrait_plans(self):
-        plans = []
-        for seg in self._ctx.segments:
-            if isinstance(seg, CompiledSegment):
-                compiler = SubstraitCompiler()
-                plans.append(compiler.compile(seg.ir_node))
-        return plans
+    def to_substrait(self) -> list[Any]:
+        """
+        Export Substrait plans from traced operations.
+
+        Returns
+        -------
+        list of substrait.plan_pb2.Plan
+            Substrait plans that can be serialized via
+            ``.SerializeToString()`` or inspected directly.
+        """
+        return _extract_substrait_plans(self._ctx)
+
+    # Keep old name as alias for backward compat
+    to_substrait_plans = to_substrait
+
+    def to_substrait_json(self) -> str:
+        """
+        Export Substrait plans as a JSON string.
+
+        Returns
+        -------
+        str
+            JSON representation of all Substrait plans.
+        """
+        return _plans_to_json(self.to_substrait())

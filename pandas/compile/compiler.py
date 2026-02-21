@@ -908,15 +908,33 @@ class ExecutionPlan:
 
 @dataclass
 class SchemaGuard:
-    """A guard that checks if input DataFrames match expected schemas."""
+    """
+    A guard that checks if input DataFrames match expected schemas
+    and non-DataFrame arguments match their traced values.
+    """
 
     expected: dict[str, Schema]
+    scalar_args: tuple[Any, ...] = ()
+    scalar_kwargs: dict[str, Any] | None = None
 
-    def check(self, args: dict[str, pd.DataFrame]) -> bool:
+    def check(
+        self,
+        df_args: dict[str, pd.DataFrame],
+        scalar_args: tuple[Any, ...] = (),
+        scalar_kwargs: dict[str, Any] | None = None,
+    ) -> bool:
+        if scalar_kwargs is None:
+            scalar_kwargs = {}
+        # Check non-DataFrame arguments first (cheap)
+        if scalar_args != self.scalar_args:
+            return False
+        if (scalar_kwargs or {}) != (self.scalar_kwargs or {}):
+            return False
+        # Check DataFrame schemas
         for name, expected_schema in self.expected.items():
-            if name not in args:
+            if name not in df_args:
                 return False
-            actual = infer_schema(args[name])
+            actual = infer_schema(df_args[name])
             if actual.column_names() != expected_schema.column_names():
                 return False
             if list(actual.columns.values()) != list(expected_schema.columns.values()):
@@ -928,7 +946,12 @@ class SchemaGuard:
         for name, schema in self.expected.items():
             cols = ", ".join(f"{c}:{t.name}" for c, t in schema.columns.items())
             parts.append(f"{name}[{cols}]")
-        return f"SchemaGuard({', '.join(parts)})"
+        extra = ""
+        if self.scalar_args:
+            extra += f", scalar_args={self.scalar_args!r}"
+        if self.scalar_kwargs:
+            extra += f", scalar_kwargs={self.scalar_kwargs!r}"
+        return f"SchemaGuard({', '.join(parts)}{extra})"
 
 
 def infer_schema(df: pd.DataFrame) -> Schema:
