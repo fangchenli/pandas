@@ -60,6 +60,7 @@ from pandas.compile.ir import (
     BinOp,
     CastExpr,
     ColRef,
+    Distinct,
     DType,
     Expr,
     Filter,
@@ -1364,6 +1365,17 @@ class TracedDataFrame:
         return result
 
     def drop_duplicates(self, subset=None, keep="first", **kwargs) -> TracedDataFrame:
+        schema = self._ir.output_schema()
+        all_cols = list(schema.columns.keys())
+        cols = (
+            all_cols
+            if subset is None
+            else ([subset] if isinstance(subset, str) else list(subset))
+        )
+        # Trace when keep="first" and subset covers all columns
+        if keep == "first" and set(cols) == set(all_cols):
+            return TracedDataFrame(self._ctx, Distinct(self._ir, cols))
+        # Graph break for partial subsets or non-first keep
         df = self._materialize()
         result = df.drop_duplicates(subset=subset, keep=keep, **kwargs).reset_index(
             drop=True

@@ -310,6 +310,17 @@ class Union(IRNode):
         return self.inputs[0].output_schema()
 
 
+class Distinct(IRNode):
+    """Remove duplicate rows."""
+
+    def __init__(self, input: IRNode, columns: list[str]):
+        self.input = input
+        self.columns = list(columns)
+
+    def output_schema(self) -> Schema:
+        return self.input.output_schema()
+
+
 @dataclass
 class WindowSpec:
     """Window frame specification."""
@@ -593,6 +604,10 @@ def explain_ir(ir: IRNode, indent: int = 0) -> str:
         case Union(inputs=inputs):
             children = "\n".join(explain_ir(inp, indent + 1) for inp in inputs)
             return f"{prefix}Union({len(inputs)} inputs)\n{children}"
+        case Distinct(input=inp, columns=cols):
+            child = explain_ir(inp, indent + 1)
+            col_str = ", ".join(cols)
+            return f"{prefix}Distinct({col_str})\n{child}"
         case Window(
             input=inp,
             window_funcs=funcs,

@@ -28,6 +28,7 @@ from pandas.compile.ir import (
     BinOp,
     CastExpr,
     ColRef,
+    Distinct,
     DType,
     Filter,
     FunctionCall,
@@ -310,6 +311,17 @@ class TestSubstraitCompiler:
         assert rel.HasField("set")
         assert rel.set.op == stalg.SetRel.SET_OP_UNION_ALL
         assert len(rel.set.inputs) == 2
+
+    def test_compile_distinct(self):
+        base = self._make_base()
+        node = Distinct(base, ["id", "name", "price"])
+        compiler = SubstraitCompiler()
+        plan = compiler.compile(node)
+        rel = plan.relations[0].root.input
+        assert rel.HasField("aggregate")
+        assert len(rel.aggregate.groupings) == 1
+        assert len(rel.aggregate.groupings[0].grouping_expressions) == 3
+        assert len(rel.aggregate.measures) == 0
 
     def test_compile_rename_is_passthrough(self):
         node = RenameColumns(self._make_base(), {"id": "row_id"})
@@ -626,6 +638,14 @@ class TestPandasBackend:
         assert len(result) == 3
         assert set(result["v"]) == {1, 2, 3}
 
+    def test_distinct(self, backend):
+        df = DataFrame({"x": [1, 2, 1, 2], "y": ["a", "b", "a", "b"]})
+        tables = {"t": df}
+        ir = ReadTable("t", infer_schema(df))
+        node = Distinct(ir, ["x", "y"])
+        result = backend.execute(node, tables)
+        assert len(result) == 2
+
     def test_rename(self, backend, tables, base_ir):
         node = RenameColumns(base_ir, {"id": "row_id"})
         result = backend.execute(node, tables)
@@ -830,6 +850,14 @@ class TestAceroBackend:
         result = backend.execute(node, tables)
         assert len(result) == 4
         assert set(result["x"]) == {1.0, 2.0, 3.0, 4.0}
+
+    def test_distinct(self, backend):
+        df = DataFrame({"x": [1.0, 2.0, 1.0, 2.0], "y": ["a", "b", "a", "b"]})
+        tables = {"t": df}
+        ir = ReadTable("t", infer_schema(df))
+        node = Distinct(ir, ["x", "y"])
+        result = backend.execute(node, tables)
+        assert len(result) == 2
 
     def test_rename(self, backend, tables, base_ir):
         node = RenameColumns(base_ir, {"price": "cost"})
@@ -1084,6 +1112,14 @@ class TestDataFusionBackend:
         result = backend.execute(node, tables)
         assert len(result) == 4
         assert set(result["x"]) == {1.0, 2.0, 3.0, 4.0}
+
+    def test_distinct(self, backend):
+        df = DataFrame({"x": [1.0, 2.0, 1.0, 2.0], "y": ["a", "b", "a", "b"]})
+        tables = {"t": df}
+        ir = ReadTable("t", infer_schema(df))
+        node = Distinct(ir, ["x", "y"])
+        result = backend.execute(node, tables)
+        assert len(result) == 2
 
     def test_rename(self, backend, tables, base_ir):
         node = RenameColumns(base_ir, {"price": "cost"})

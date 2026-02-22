@@ -514,6 +514,45 @@ class TestIloc:
         assert list(result["x"]) == [10, 30]
 
 
+# drop_duplicates — Distinct tracing
+# ---------------------------------------------------------------------------
+
+
+class TestDropDuplicates:
+    def test_drop_duplicates_all_columns(self):
+        """drop_duplicates() with no subset stays traced."""
+        df = DataFrame({"x": [1, 2, 1, 2], "y": ["a", "b", "a", "b"]})
+
+        @compile
+        def dedup(df):
+            return df.drop_duplicates()
+
+        result = dedup(df)
+        assert len(result) == 2
+
+    def test_drop_duplicates_partial_subset_graph_break(self):
+        """drop_duplicates(subset=["x"]) graph breaks for partial subset."""
+        df = DataFrame({"x": [1, 1, 2], "y": ["a", "b", "c"]})
+
+        @compile
+        def dedup(df):
+            return df.drop_duplicates(subset=["x"])
+
+        result = dedup(df)
+        assert len(result) == 2
+
+    def test_drop_duplicates_keep_last_graph_break(self):
+        """keep='last' graph breaks."""
+        df = DataFrame({"x": [1, 2, 1], "y": ["a", "b", "a"]})
+
+        @compile
+        def dedup(df):
+            return df.drop_duplicates(keep="last")
+
+        result = dedup(df)
+        assert len(result) == 2
+
+
 # DeferredScalar — lazy aggregation proxies
 # ---------------------------------------------------------------------------
 

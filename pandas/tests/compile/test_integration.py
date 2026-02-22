@@ -1142,7 +1142,7 @@ class TestCompileGraphBreaks:
         result = f(sales_df)
         assert len(result) == 2
 
-    def test_drop_duplicates_graph_break(self, sales_df):
+    def test_drop_duplicates_traced(self, sales_df):
         @compile
         def f(df):
             return df[["region", "product"]].drop_duplicates()
@@ -1151,6 +1151,16 @@ class TestCompileGraphBreaks:
         assert len(result) <= len(sales_df)
         # No duplicate region+product pairs
         assert not result.duplicated().any()
+
+    def test_filter_then_drop_duplicates(self, sales_df):
+        @compile
+        def f(df):
+            big = df[df["price"] > 100]
+            return big[["region"]].drop_duplicates()
+
+        result = f(sales_df)
+        assert not result.duplicated().any()
+        assert "region" in result.columns
 
 
 # ---------------------------------------------------------------------------

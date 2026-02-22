@@ -38,6 +38,7 @@ from pandas.compile.ir import (
     BinOp,
     CastExpr,
     ColRef,
+    Distinct,
     DType,
     Expr,
     Filter,
@@ -311,6 +312,8 @@ class SubstraitCompiler:
             return self._compile_window(ir)
         elif isinstance(ir, Union):
             return self._compile_union(ir)
+        elif isinstance(ir, Distinct):
+            return self._compile_distinct(ir)
         elif isinstance(ir, RenameColumns):
             # Rename is a pass-through — Substrait RelRoot handles naming
             return self._compile_rel(ir.input)
@@ -710,6 +713,39 @@ class SubstraitCompiler:
             )
         )
 
+    def _compile_distinct(self, ir: Distinct) -> stalg.Rel:
+        input_rel = self._compile_rel(ir.input)
+        input_schema = ir.input.output_schema()
+
+        grouping_exprs = []
+        for col in ir.columns:
+            idx = input_schema.column_index(col)
+            grouping_exprs.append(
+                stalg.Expression(
+                    selection=stalg.Expression.FieldReference(
+                        direct_reference=stalg.Expression.ReferenceSegment(
+                            struct_field=stalg.Expression.ReferenceSegment.StructField(
+                                field=idx
+                            )
+                        ),
+                        root_reference=stalg.Expression.FieldReference.RootReference(),
+                    )
+                )
+            )
+
+        return stalg.Rel(
+            aggregate=stalg.AggregateRel(
+                common=stalg.RelCommon(direct=stalg.RelCommon.Direct()),
+                input=input_rel,
+                groupings=[
+                    stalg.AggregateRel.Grouping(
+                        grouping_expressions=grouping_exprs,
+                    )
+                ],
+                measures=[],
+            )
+        )
+
     def _compile_expr(self, expr: Expr, schema: Schema) -> stalg.Expression:
         if isinstance(expr, ColRef):
             idx = schema.column_index(expr.name)
@@ -999,6 +1035,10 @@ class PandasBackend(Backend):
         elif isinstance(node, Union):
             dfs = [self._exec(inp, tables) for inp in node.inputs]
             return pd.concat(dfs, ignore_index=True)
+
+        elif isinstance(node, Distinct):
+            df = self._exec(node.input, tables)
+            return df.drop_duplicates(subset=node.columns).reset_index(drop=True)
 
         elif isinstance(node, Window):
             df = self._exec(node.input, tables)
