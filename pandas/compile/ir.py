@@ -232,11 +232,12 @@ class Sort(IRNode):
 
 
 class Limit(IRNode):
-    """Take first N rows."""
+    """Take N rows, optionally skipping the first *offset* rows."""
 
-    def __init__(self, input: IRNode, n: int):
+    def __init__(self, input: IRNode, n: int, offset: int = 0):
         self.input = input
         self.n = n
+        self.offset = offset
 
     def output_schema(self) -> Schema:
         return self.input.output_schema()
@@ -272,30 +273,41 @@ class Aggregate(IRNode):
 
 
 class Join(IRNode):
-    """Join two relations."""
+    """Join two relations on one or more key columns."""
 
     def __init__(
         self,
         left: IRNode,
         right: IRNode,
-        left_on: str,
-        right_on: str,
+        left_on: str | list[str],
+        right_on: str | list[str],
         how: str = "inner",
     ):
         self.left = left
         self.right = right
-        self.left_on = left_on
-        self.right_on = right_on
+        self.left_on = [left_on] if isinstance(left_on, str) else list(left_on)
+        self.right_on = [right_on] if isinstance(right_on, str) else list(right_on)
         self.how = how
 
     def output_schema(self) -> Schema:
         left_schema = self.left.output_schema()
         right_schema = self.right.output_schema()
+        right_keys = set(self.right_on)
         cols = dict(left_schema.columns)
         for k, v in right_schema.columns.items():
-            if k not in cols:
+            if k not in cols and k not in right_keys:
                 cols[k] = v
         return Schema(cols)
+
+
+class Union(IRNode):
+    """Concatenate multiple relations (UNION ALL)."""
+
+    def __init__(self, inputs: list[IRNode]):
+        self.inputs = list(inputs)
+
+    def output_schema(self) -> Schema:
+        return self.inputs[0].output_schema()
 
 
 @dataclass
@@ -564,9 +576,10 @@ def explain_ir(ir: IRNode, indent: int = 0) -> str:
             child = explain_ir(inp, indent + 1)
             key_str = ", ".join(f"{k} {'ASC' if a else 'DESC'}" for k, a in keys)
             return f"{prefix}Sort({key_str})\n{child}"
-        case Limit(input=inp, n=n):
+        case Limit(input=inp, n=n, offset=off):
             child = explain_ir(inp, indent + 1)
-            return f"{prefix}Limit({n})\n{child}"
+            off_str = f", offset={off}" if off else ""
+            return f"{prefix}Limit({n}{off_str})\n{child}"
         case Aggregate(input=inp, group_keys=gk, agg_specs=specs):
             child = explain_ir(inp, indent + 1)
             groups = ", ".join(gk)
@@ -575,7 +588,11 @@ def explain_ir(ir: IRNode, indent: int = 0) -> str:
         case Join(left=left, right=right, left_on=lo, right_on=ro, how=how):
             left_str = explain_ir(left, indent + 1)
             right_str = explain_ir(right, indent + 1)
-            return f"{prefix}Join({how}, {lo}={ro})\n{left_str}\n{right_str}"
+            keys = ", ".join(f"{lk}={rk}" for lk, rk in zip(lo, ro, strict=True))
+            return f"{prefix}Join({how}, {keys})\n{left_str}\n{right_str}"
+        case Union(inputs=inputs):
+            children = "\n".join(explain_ir(inp, indent + 1) for inp in inputs)
+            return f"{prefix}Union({len(inputs)} inputs)\n{children}"
         case Window(
             input=inp,
             window_funcs=funcs,

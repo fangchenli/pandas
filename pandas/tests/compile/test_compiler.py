@@ -43,6 +43,7 @@ from pandas.compile.ir import (
     SingularOrList,
     Sort,
     UnaryOp,
+    Union,
     Window,
     WindowSpec,
 )
@@ -254,6 +255,15 @@ class TestSubstraitCompiler:
         rel = plan.relations[0].root.input
         assert rel.HasField("fetch")
 
+    def test_compile_limit_with_offset(self):
+        node = Limit(self._make_base(), 5, offset=3)
+        compiler = SubstraitCompiler()
+        plan = compiler.compile(node)
+        rel = plan.relations[0].root.input
+        assert rel.HasField("fetch")
+        assert rel.fetch.offset == 3
+        assert rel.fetch.count == 5
+
     def test_compile_aggregate(self):
         node = Aggregate(self._make_base(), ["name"], [("total", "price", "sum")])
         compiler = SubstraitCompiler()
@@ -269,6 +279,37 @@ class TestSubstraitCompiler:
         plan = compiler.compile(node)
         rel = plan.relations[0].root.input
         assert rel.HasField("join")
+
+    def test_compile_composite_join(self):
+        left = ReadTable(
+            "l",
+            Schema({"a": DType.INT64, "b": DType.STRING, "x": DType.FLOAT64}),
+        )
+        right = ReadTable(
+            "r",
+            Schema({"a": DType.INT64, "b": DType.STRING, "y": DType.FLOAT64}),
+        )
+        node = Join(left, right, ["a", "b"], ["a", "b"])
+        compiler = SubstraitCompiler()
+        plan = compiler.compile(node)
+        rel = plan.relations[0].root.input
+        assert rel.HasField("join")
+        # The join expression should be an AND of two equality checks.
+        expr = rel.join.expression
+        assert expr.HasField("scalar_function")
+        # Top-level should be the "and" function wrapping two eq calls.
+        assert len(expr.scalar_function.arguments) == 2
+
+    def test_compile_union(self):
+        a = ReadTable("a", Schema({"x": DType.INT64, "y": DType.STRING}))
+        b = ReadTable("b", Schema({"x": DType.INT64, "y": DType.STRING}))
+        node = Union([a, b])
+        compiler = SubstraitCompiler()
+        plan = compiler.compile(node)
+        rel = plan.relations[0].root.input
+        assert rel.HasField("set")
+        assert rel.set.op == stalg.SetRel.SET_OP_UNION_ALL
+        assert len(rel.set.inputs) == 2
 
     def test_compile_rename_is_passthrough(self):
         node = RenameColumns(self._make_base(), {"id": "row_id"})
@@ -522,6 +563,13 @@ class TestPandasBackend:
         result = backend.execute(node, tables)
         assert len(result) == 2
 
+    def test_limit_with_offset(self, backend, tables, base_ir):
+        node = Limit(base_ir, 2, offset=1)
+        result = backend.execute(node, tables)
+        assert len(result) == 2
+        # Should skip first row and take next 2
+        assert list(result["id"]) == [2, 3]
+
     def test_aggregate(self, backend, tables, base_ir):
         node = Aggregate(
             base_ir, ["region"], [("total", "price", "sum"), ("cnt", "id", "count")]
@@ -538,6 +586,45 @@ class TestPandasBackend:
         node = Join(left_ir, right_ir, "region", "region")
         result = backend.execute(node, tables)
         assert "mgr" in result.columns
+
+    def test_composite_join(self, backend):
+        left = DataFrame({"a": [1, 1, 2], "b": ["x", "y", "x"], "val": [10, 20, 30]})
+        right = DataFrame({"a": [1, 2], "b": ["x", "x"], "score": [100, 200]})
+        tables = {"l": left, "r": right}
+        left_ir = ReadTable("l", infer_schema(left))
+        right_ir = ReadTable("r", infer_schema(right))
+        node = Join(left_ir, right_ir, ["a", "b"], ["a", "b"])
+        result = backend.execute(node, tables)
+        assert "score" in result.columns
+        assert len(result) == 2
+        assert set(result["val"]) == {10, 30}
+
+    def test_union(self, backend):
+        a = DataFrame({"x": [1, 2], "y": ["a", "b"]})
+        b = DataFrame({"x": [3, 4], "y": ["c", "d"]})
+        tables = {"a": a, "b": b}
+        a_ir = ReadTable("a", infer_schema(a))
+        b_ir = ReadTable("b", infer_schema(b))
+        node = Union([a_ir, b_ir])
+        result = backend.execute(node, tables)
+        assert len(result) == 4
+        assert list(result["x"]) == [1, 2, 3, 4]
+
+    def test_union_three_inputs(self, backend):
+        a = DataFrame({"v": [1]})
+        b = DataFrame({"v": [2]})
+        c = DataFrame({"v": [3]})
+        tables = {"a": a, "b": b, "c": c}
+        node = Union(
+            [
+                ReadTable("a", infer_schema(a)),
+                ReadTable("b", infer_schema(b)),
+                ReadTable("c", infer_schema(c)),
+            ]
+        )
+        result = backend.execute(node, tables)
+        assert len(result) == 3
+        assert set(result["v"]) == {1, 2, 3}
 
     def test_rename(self, backend, tables, base_ir):
         node = RenameColumns(base_ir, {"id": "row_id"})
@@ -694,6 +781,12 @@ class TestAceroBackend:
         result = backend.execute(node, tables)
         assert len(result) == 2
 
+    def test_limit_with_offset(self, backend, tables, base_ir):
+        node = Limit(base_ir, 2, offset=1)
+        result = backend.execute(node, tables)
+        assert len(result) == 2
+        assert list(result["id"]) == [2, 3]
+
     def test_aggregate(self, backend, tables, base_ir):
         node = Aggregate(
             base_ir,
@@ -712,6 +805,31 @@ class TestAceroBackend:
         node = Join(left_ir, right_ir, "region", "region")
         result = backend.execute(node, tables)
         assert "mgr" in result.columns
+
+    def test_composite_join(self, backend):
+        left = DataFrame(
+            {"a": [1, 1, 2], "b": ["x", "y", "x"], "val": [10.0, 20.0, 30.0]}
+        )
+        right = DataFrame({"a": [1, 2], "b": ["x", "x"], "score": [100.0, 200.0]})
+        tables = {"l": left, "r": right}
+        left_ir = ReadTable("l", infer_schema(left))
+        right_ir = ReadTable("r", infer_schema(right))
+        node = Join(left_ir, right_ir, ["a", "b"], ["a", "b"])
+        result = backend.execute(node, tables)
+        assert "score" in result.columns
+        assert len(result) == 2
+        assert set(result["val"]) == {10.0, 30.0}
+
+    def test_union(self, backend):
+        a = DataFrame({"x": [1.0, 2.0], "y": ["a", "b"]})
+        b = DataFrame({"x": [3.0, 4.0], "y": ["c", "d"]})
+        tables = {"a": a, "b": b}
+        a_ir = ReadTable("a", infer_schema(a))
+        b_ir = ReadTable("b", infer_schema(b))
+        node = Union([a_ir, b_ir])
+        result = backend.execute(node, tables)
+        assert len(result) == 4
+        assert set(result["x"]) == {1.0, 2.0, 3.0, 4.0}
 
     def test_rename(self, backend, tables, base_ir):
         node = RenameColumns(base_ir, {"price": "cost"})
@@ -917,6 +1035,12 @@ class TestDataFusionBackend:
         result = backend.execute(node, tables)
         assert len(result) == 2
 
+    def test_limit_with_offset(self, backend, tables, base_ir):
+        node = Limit(base_ir, 2, offset=1)
+        result = backend.execute(node, tables)
+        assert len(result) == 2
+        assert list(result["id"]) == [2, 3]
+
     def test_aggregate(self, backend, tables, base_ir):
         node = Aggregate(
             base_ir,
@@ -935,6 +1059,31 @@ class TestDataFusionBackend:
         node = Join(left_ir, right_ir, "region", "region")
         result = backend.execute(node, tables)
         assert "mgr" in result.columns
+
+    def test_composite_join(self, backend):
+        left = DataFrame(
+            {"a": [1, 1, 2], "b": ["x", "y", "x"], "val": [10.0, 20.0, 30.0]}
+        )
+        right = DataFrame({"a": [1, 2], "b": ["x", "x"], "score": [100.0, 200.0]})
+        tables = {"l": left, "r": right}
+        left_ir = ReadTable("l", infer_schema(left))
+        right_ir = ReadTable("r", infer_schema(right))
+        node = Join(left_ir, right_ir, ["a", "b"], ["a", "b"])
+        result = backend.execute(node, tables)
+        assert "score" in result.columns
+        assert len(result) == 2
+        assert set(result["val"]) == {10.0, 30.0}
+
+    def test_union(self, backend):
+        a = DataFrame({"x": [1.0, 2.0], "y": ["a", "b"]})
+        b = DataFrame({"x": [3.0, 4.0], "y": ["c", "d"]})
+        tables = {"a": a, "b": b}
+        a_ir = ReadTable("a", infer_schema(a))
+        b_ir = ReadTable("b", infer_schema(b))
+        node = Union([a_ir, b_ir])
+        result = backend.execute(node, tables)
+        assert len(result) == 4
+        assert set(result["x"]) == {1.0, 2.0, 3.0, 4.0}
 
     def test_rename(self, backend, tables, base_ir):
         node = RenameColumns(base_ir, {"price": "cost"})

@@ -77,6 +77,7 @@ from pandas.compile.ir import (
     SingularOrList,
     Sort,
     UnaryOp,
+    Union,
     Window,
     WindowSpec,
     explain_expr,
@@ -85,6 +86,35 @@ from pandas.compile.ir import (
 )
 
 log = logging.getLogger("pandas.compile")
+
+# Save the real pd.concat so we can restore it after tracing.
+_original_concat = pd.concat
+
+# Active tracing context for the pd.concat interceptor.
+_active_trace_ctx: TraceContext | None = None
+
+
+def _traced_concat(objs, *args, **kwargs):
+    """Interceptor for pd.concat that builds a Union IR when tracing."""
+    ctx = _active_trace_ctx
+    objs_list = list(objs)
+    has_traced = any(isinstance(o, TracedDataFrame) for o in objs_list)
+    if ctx is None or not has_traced:
+        return _original_concat(objs_list, *args, **kwargs)
+
+    # Normalize all inputs to TracedDataFrame.
+    ir_inputs = []
+    for obj in objs_list:
+        if isinstance(obj, TracedDataFrame):
+            ir_inputs.append(obj._ir)
+        elif isinstance(obj, pd.DataFrame):
+            name = ctx.next_materialized_name()
+            ctx.register_table(name, obj)
+            ir_inputs.append(ReadTable(name, infer_schema(obj)))
+        else:
+            raise TypeError(f"Cannot concat {type(obj)} in traced context")
+
+    return TracedDataFrame(ctx, Union(ir_inputs))
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +380,9 @@ class TraceContext:
             acc.append(node.name)
         elif hasattr(node, "input"):
             self._walk_reads(node.input, acc)
+        elif hasattr(node, "inputs") and isinstance(node.inputs, list):
+            for inp in node.inputs:
+                self._walk_reads(inp, acc)
         elif hasattr(node, "left") and hasattr(node, "right"):
             self._walk_reads(node.left, acc)
             self._walk_reads(node.right, acc)
@@ -1258,7 +1291,13 @@ class TracedDataFrame:
             self._ctx.register_table(name, right)
             right = TracedDataFrame(self._ctx, ReadTable(name, infer_schema(right)))
         if on is not None:
-            left_on = right_on = on
+            left_on = [on] if isinstance(on, str) else list(on)
+            right_on = left_on
+        else:
+            if isinstance(left_on, str):
+                left_on = [left_on]
+            if isinstance(right_on, str):
+                right_on = [right_on]
         return TracedDataFrame(
             self._ctx,
             Join(self._ir, right._ir, left_on, right_on, how),
@@ -1492,8 +1531,7 @@ class TracedDataFrame:
 
     @property
     def iloc(self):
-        df = self._ensure_materialized()
-        return _IlocProxy(self._ctx, df)
+        return _IlocProxy(self._ctx, self)
 
     @property
     def loc(self):
@@ -1594,12 +1632,33 @@ class TracedDataFrame:
 
 
 class _IlocProxy:
-    def __init__(self, ctx, df):
+    def __init__(self, ctx, traced_df):
         self._ctx = ctx
-        self._df = df
+        self._traced_df = traced_df
 
     def __getitem__(self, key):
-        result = self._df.iloc[key]
+        # Try IR-based slicing for simple slice patterns
+        if isinstance(key, slice) and key.step is None:
+            start = key.start
+            stop = key.stop
+            # df.iloc[:n] → Limit(n)
+            if start is None and isinstance(stop, int) and stop > 0:
+                return TracedDataFrame(self._ctx, Limit(self._traced_df._ir, stop))
+            # df.iloc[start:stop] → Limit(stop-start, offset=start)
+            if (
+                isinstance(start, int)
+                and isinstance(stop, int)
+                and start >= 0
+                and stop > start
+            ):
+                return TracedDataFrame(
+                    self._ctx,
+                    Limit(self._traced_df._ir, stop - start, offset=start),
+                )
+
+        # Fall back to materialization for unsupported patterns
+        df = self._traced_df._ensure_materialized()
+        result = df.iloc[key]
         if isinstance(result, pd.DataFrame):
             name = self._ctx.next_materialized_name()
             self._ctx.register_table(name, result)
@@ -1797,7 +1856,14 @@ class CompiledFunction:
             else:
                 traced_kwargs[name] = arg
 
-        result = self._fn(*traced_args, **traced_kwargs)
+        global _active_trace_ctx
+        _active_trace_ctx = ctx
+        pd.concat = _traced_concat
+        try:
+            result = self._fn(*traced_args, **traced_kwargs)
+        finally:
+            pd.concat = _original_concat
+            _active_trace_ctx = None
         return ctx, result
 
     def trace(self, *sample_args: Any, **kwargs: Any) -> TraceContext:
@@ -1972,9 +2038,15 @@ class Tracer:
         self._output_name: str | None = None
 
     def __enter__(self):
+        global _active_trace_ctx
+        _active_trace_ctx = self._ctx
+        pd.concat = _traced_concat
         return self
 
     def __exit__(self, *exc_info):
+        global _active_trace_ctx
+        pd.concat = _original_concat
+        _active_trace_ctx = None
         return False
 
     def input(self, df: pd.DataFrame, name: str = "input") -> TracedDataFrame:

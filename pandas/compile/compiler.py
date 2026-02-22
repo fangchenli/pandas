@@ -55,6 +55,7 @@ from pandas.compile.ir import (
     SingularOrList,
     Sort,
     UnaryOp,
+    Union,
     Window,
     explain_ir,
     pandas_dtype_to_ir,
@@ -308,6 +309,8 @@ class SubstraitCompiler:
             return self._compile_join(ir)
         elif isinstance(ir, Window):
             return self._compile_window(ir)
+        elif isinstance(ir, Union):
+            return self._compile_union(ir)
         elif isinstance(ir, RenameColumns):
             # Rename is a pass-through — Substrait RelRoot handles naming
             return self._compile_rel(ir.input)
@@ -416,7 +419,7 @@ class SubstraitCompiler:
             fetch=stalg.FetchRel(
                 common=stalg.RelCommon(direct=stalg.RelCommon.Direct()),
                 input=input_rel,
-                offset=0,
+                offset=ir.offset,
                 count=ir.n,
             )
         )
@@ -490,46 +493,70 @@ class SubstraitCompiler:
         right_rel = self._compile_rel(ir.right)
         left_schema = ir.left.output_schema()
         right_schema = ir.right.output_schema()
-
-        left_idx = left_schema.column_index(ir.left_on)
-        right_idx = right_schema.column_index(ir.right_on)
         n_left = len(left_schema.columns)
 
         eq_anchor = self._get_func_anchor("eq")
-        join_expr = stalg.Expression(
-            scalar_function=stalg.Expression.ScalarFunction(
-                function_reference=eq_anchor,
-                arguments=[
-                    stalg.FunctionArgument(
-                        value=stalg.Expression(
-                            selection=stalg.Expression.FieldReference(
-                                direct_reference=stalg.Expression.ReferenceSegment(
-                                    struct_field=stalg.Expression.ReferenceSegment.StructField(
-                                        field=left_idx
-                                    )
-                                ),
-                                root_reference=stalg.Expression.FieldReference.RootReference(),
-                            )
-                        )
-                    ),
-                    stalg.FunctionArgument(
-                        value=stalg.Expression(
-                            selection=stalg.Expression.FieldReference(
-                                direct_reference=stalg.Expression.ReferenceSegment(
-                                    struct_field=stalg.Expression.ReferenceSegment.StructField(
-                                        field=n_left + right_idx
-                                    )
-                                ),
-                                root_reference=stalg.Expression.FieldReference.RootReference(),
-                            )
-                        )
-                    ),
-                ],
-                output_type=stt.Type(
-                    bool=stt.Type.Boolean(nullability=stt.Type.NULLABILITY_NULLABLE)
-                ),
-            )
+        bool_type = stt.Type(
+            bool=stt.Type.Boolean(nullability=stt.Type.NULLABILITY_NULLABLE)
         )
+
+        # Build one equality expression per key pair.
+        eq_exprs = []
+        right_key_indices = []
+        for lk, rk in zip(ir.left_on, ir.right_on, strict=True):
+            left_idx = left_schema.column_index(lk)
+            right_idx = right_schema.column_index(rk)
+            right_key_indices.append(right_idx)
+            eq_exprs.append(
+                stalg.Expression(
+                    scalar_function=stalg.Expression.ScalarFunction(
+                        function_reference=eq_anchor,
+                        arguments=[
+                            stalg.FunctionArgument(
+                                value=stalg.Expression(
+                                    selection=stalg.Expression.FieldReference(
+                                        direct_reference=stalg.Expression.ReferenceSegment(
+                                            struct_field=stalg.Expression.ReferenceSegment.StructField(
+                                                field=left_idx
+                                            )
+                                        ),
+                                        root_reference=stalg.Expression.FieldReference.RootReference(),
+                                    )
+                                )
+                            ),
+                            stalg.FunctionArgument(
+                                value=stalg.Expression(
+                                    selection=stalg.Expression.FieldReference(
+                                        direct_reference=stalg.Expression.ReferenceSegment(
+                                            struct_field=stalg.Expression.ReferenceSegment.StructField(
+                                                field=n_left + right_idx
+                                            )
+                                        ),
+                                        root_reference=stalg.Expression.FieldReference.RootReference(),
+                                    )
+                                )
+                            ),
+                        ],
+                        output_type=bool_type,
+                    )
+                )
+            )
+
+        # Combine with AND for composite keys.
+        join_expr = eq_exprs[0]
+        if len(eq_exprs) > 1:
+            and_anchor = self._get_func_anchor("and")
+            for extra in eq_exprs[1:]:
+                join_expr = stalg.Expression(
+                    scalar_function=stalg.Expression.ScalarFunction(
+                        function_reference=and_anchor,
+                        arguments=[
+                            stalg.FunctionArgument(value=join_expr),
+                            stalg.FunctionArgument(value=extra),
+                        ],
+                        output_type=bool_type,
+                    )
+                )
 
         join_type_map = {
             "inner": stalg.JoinRel.JOIN_TYPE_INNER,
@@ -538,13 +565,14 @@ class SubstraitCompiler:
             "outer": stalg.JoinRel.JOIN_TYPE_OUTER,
         }
 
-        # Build emit mapping that drops the duplicate right join-key column.
+        # Build emit mapping that drops duplicate right join-key columns.
         # JoinRel produces [left_col_0..left_col_n, right_col_0..right_col_m].
-        # We keep all left columns, then right columns except the join key.
+        # We keep all left columns, then right columns except the join keys.
+        right_key_set = set(right_key_indices)
         n_right = len(right_schema.columns)
         output_mapping = [
             *range(n_left),
-            *(n_left + i for i in range(n_right) if i != right_idx),
+            *(n_left + i for i in range(n_right) if i not in right_key_set),
         ]
 
         return stalg.Rel(
@@ -669,6 +697,16 @@ class SubstraitCompiler:
                 window_functions=window_functions,
                 partition_expressions=partition_exprs,
                 sorts=sorts,
+            )
+        )
+
+    def _compile_union(self, ir: Union) -> stalg.Rel:
+        input_rels = [self._compile_rel(inp) for inp in ir.inputs]
+        return stalg.Rel(
+            set=stalg.SetRel(
+                common=stalg.RelCommon(direct=stalg.RelCommon.Direct()),
+                inputs=input_rels,
+                op=stalg.SetRel.SET_OP_UNION_ALL,
             )
         )
 
@@ -922,6 +960,10 @@ class PandasBackend(Backend):
 
         elif isinstance(node, Limit):
             df = self._exec(node.input, tables)
+            if node.offset:
+                return df.iloc[node.offset : node.offset + node.n].reset_index(
+                    drop=True
+                )
             return df.head(node.n)
 
         elif isinstance(node, Aggregate):
@@ -953,6 +995,10 @@ class PandasBackend(Backend):
                 right_on=node.right_on,
                 how=node.how,
             )
+
+        elif isinstance(node, Union):
+            dfs = [self._exec(inp, tables) for inp in node.inputs]
+            return pd.concat(dfs, ignore_index=True)
 
         elif isinstance(node, Window):
             df = self._exec(node.input, tables)

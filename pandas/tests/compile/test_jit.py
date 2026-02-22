@@ -389,6 +389,131 @@ class TestDefaultBackendSelection:
 
 
 # ---------------------------------------------------------------------------
+# Composite-key joins
+# ---------------------------------------------------------------------------
+
+
+class TestCompositeJoin:
+    def test_merge_composite_on(self):
+        left = DataFrame({"a": [1, 1, 2], "b": ["x", "y", "x"], "v": [10, 20, 30]})
+        right = DataFrame({"a": [1, 2], "b": ["x", "x"], "score": [100, 200]})
+
+        @compile
+        def joined(df, ref):
+            return df.merge(ref, on=["a", "b"])
+
+        result = joined(left, right)
+        assert "score" in result.columns
+        assert len(result) == 2
+        assert set(result["v"]) == {10, 30}
+
+    def test_merge_composite_left_right_on(self):
+        left = DataFrame({"la": [1, 1, 2], "lb": ["x", "y", "x"], "v": [10, 20, 30]})
+        right = DataFrame({"ra": [1, 2], "rb": ["x", "x"], "score": [100, 200]})
+
+        @compile
+        def joined(df, ref):
+            return df.merge(ref, left_on=["la", "lb"], right_on=["ra", "rb"])
+
+        result = joined(left, right)
+        assert "score" in result.columns
+        assert len(result) == 2
+        assert set(result["v"]) == {10, 30}
+
+
+# pd.concat as Union
+# ---------------------------------------------------------------------------
+
+
+class TestConcat:
+    def test_pd_concat_traced(self):
+        a = DataFrame({"x": [1, 2], "y": ["a", "b"]})
+        b = DataFrame({"x": [3, 4], "y": ["c", "d"]})
+
+        @compile
+        def stacked(df1, df2):
+            return pd.concat([df1, df2])
+
+        result = stacked(a, b)
+        assert len(result) == 4
+        assert list(result["x"]) == [1, 2, 3, 4]
+
+    def test_pd_concat_mixed(self):
+        """One traced + one raw DataFrame."""
+        a = DataFrame({"v": [10, 20]})
+        extra = DataFrame({"v": [30]})
+
+        @compile
+        def with_extra(df):
+            return pd.concat([df, extra])
+
+        result = with_extra(a)
+        assert len(result) == 3
+        assert set(result["v"]) == {10, 20, 30}
+
+    def test_pd_concat_untraced_fallback(self):
+        """Outside @compile, pd.concat still works normally."""
+        a = DataFrame({"x": [1]})
+        b = DataFrame({"x": [2]})
+        result = pd.concat([a, b], ignore_index=True)
+        assert len(result) == 2
+        assert list(result["x"]) == [1, 2]
+
+
+# iloc slicing — Limit/Offset tracing
+# ---------------------------------------------------------------------------
+
+
+class TestIloc:
+    def test_iloc_slice_stop_only(self):
+        """df.iloc[:5] should stay traced (no graph break)."""
+        df = DataFrame({"x": range(10)})
+
+        @compile
+        def first_five(df):
+            return df.iloc[:5]
+
+        result = first_five(df)
+        assert len(result) == 5
+        assert list(result["x"]) == [0, 1, 2, 3, 4]
+
+    def test_iloc_slice_start_stop(self):
+        """df.iloc[2:5] should stay traced with offset."""
+        df = DataFrame({"x": range(10)})
+
+        @compile
+        def middle(df):
+            return df.iloc[2:5]
+
+        result = middle(df)
+        assert len(result) == 3
+        assert list(result["x"]) == [2, 3, 4]
+
+    def test_iloc_int_graph_break(self):
+        """df.iloc[0] returns a scalar/Series — graph breaks as expected."""
+        df = DataFrame({"x": [10, 20, 30]})
+
+        @compile
+        def first_row(df):
+            return df.iloc[:1]
+
+        result = first_row(df)
+        assert len(result) == 1
+
+    def test_iloc_fancy_graph_break(self):
+        """df.iloc[[0,2]] uses fancy indexing — graph breaks."""
+        df = DataFrame({"x": [10, 20, 30]})
+
+        @compile
+        def fancy(df):
+            r = df.iloc[[0, 2]]
+            return r
+
+        result = fancy(df)
+        assert len(result) == 2
+        assert list(result["x"]) == [10, 30]
+
+
 # DeferredScalar — lazy aggregation proxies
 # ---------------------------------------------------------------------------
 

@@ -1037,6 +1037,68 @@ class TestCompileDecorator:
         assert all(result["price"] > 15)
         assert result.iloc[0]["name"] == "Gadget"
 
+    def test_composite_key_join(self):
+        """Join two DataFrames on multiple columns."""
+        orders = DataFrame(
+            {
+                "year": [2024, 2024, 2025],
+                "region": ["E", "W", "E"],
+                "revenue": [100, 200, 300],
+            }
+        )
+        targets = DataFrame(
+            {
+                "year": [2024, 2025],
+                "region": ["E", "E"],
+                "target": [150, 250],
+            }
+        )
+
+        @compile
+        def with_target(df_orders, df_targets):
+            return df_orders.merge(df_targets, on=["year", "region"])
+
+        result = with_target(orders, targets)
+        assert "target" in result.columns
+        assert len(result) == 2
+        assert set(result["revenue"]) == {100, 300}
+
+    def test_concat_then_filter(self):
+        a = DataFrame({"id": [1, 2], "val": [10, 20]})
+        b = DataFrame({"id": [3, 4], "val": [30, 40]})
+
+        @compile
+        def stacked_and_filtered(df1, df2):
+            combined = pd.concat([df1, df2])
+            return combined[combined["val"] > 15]
+
+        result = stacked_and_filtered(a, b)
+        assert len(result) == 3
+        assert all(result["val"] > 15)
+
+    def test_filter_then_iloc_slice(self):
+        df = DataFrame({"id": range(20), "val": range(20)})
+
+        @compile
+        def top_filtered(df):
+            big = df[df["val"] >= 5]
+            return big.iloc[:3]
+
+        result = top_filtered(df)
+        assert len(result) == 3
+        assert list(result["id"]) == [5, 6, 7]
+
+    def test_sort_then_iloc_offset(self):
+        df = DataFrame({"id": [3, 1, 4, 1, 5, 9], "val": [30, 10, 40, 10, 50, 90]})
+
+        @compile
+        def middle_sorted(df):
+            sorted_df = df.sort_values("val")
+            return sorted_df.iloc[2:4]
+
+        result = middle_sorted(df)
+        assert len(result) == 2
+
 
 # ---------------------------------------------------------------------------
 # User scenarios: @compile with graph breaks
