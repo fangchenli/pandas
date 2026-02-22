@@ -70,54 +70,80 @@ IR graph  (ReadTable → Filter → AddColumn → Sort → Limit → ...)
 | `PandasBackend` | Interprets the IR tree using pandas operations directly | Fallback, or when explicitly requested |
 
 `default_backend()` selects the best available: DataFusion > Acero > Pandas.
+All Substrait-based backends fall back to PandasBackend on errors.
 
-## Supported operations
-
-### Fully traced (IR nodes)
+## Supported operations — fully traced
 
 These operations are captured in the IR and compiled to Substrait / executed on
-either backend without materialization.
+any backend without materialization.
+
+### DataFrame operations
 
 | pandas API | IR node | Notes |
 |-----------|---------|-------|
 | `df[col]` | `ColRef` | Column access returns `TracedSeries` |
 | `df[[col1, col2]]` | `Project` | Column subset |
-| `df[bool_series]` | `Filter` | Boolean indexing |
+| `df[bool_series]` | `Filter` | Boolean indexing with `TracedSeries` |
 | `df["new"] = expr` | `AddColumn` | Add/replace column |
-| `df.assign(col=expr)` | `AddColumn` | Same, functional style |
-| `df.sort_values(by)` | `Sort` | Single or multi-column |
+| `df.assign(col=expr)` | `AddColumn` | Functional style; supports callables that return `TracedSeries` |
+| `df.sort_values(by)` | `Sort` | Single or multi-column, ascending/descending |
 | `df.head(n)` | `Limit` | Take first N rows |
-| `df.nlargest(n, col)` | `Sort` + `Limit` | |
-| `df.nsmallest(n, col)` | `Sort` + `Limit` | |
-| `df.query("price > 100")` | `Filter` | Parses query string to expression |
-| `df.drop(columns=[...])` | `Project` | |
-| `df.rename(columns={...})` | `RenameColumns` | |
-| `df.dropna(subset=[...])` | `Filter(NOT IS_NULL)` | |
+| `df.iloc[:n]` | `Limit` | Equivalent to head |
+| `df.iloc[start:stop]` | `Limit(offset=start)` | Offset + count without materialization |
+| `df.nlargest(n, col)` | `Sort` + `Limit` | Descending sort then limit |
+| `df.nsmallest(n, col)` | `Sort` + `Limit` | Ascending sort then limit |
+| `df.query("price > 100")` | `Filter` | Parses query string via AST; supports comparisons, arithmetic, `and`/`or`, `~` |
+| `df.drop(columns=[...])` | `Project` | Keep remaining columns |
+| `df.rename(columns={...})` | `RenameColumns` | Column renaming |
+| `df.dropna(subset=[...])` | `Filter(NOT IS_NULL)` | Chained null checks per column |
 | `df.fillna(value)` | `AddColumn(COALESCE)` | Per-column or scalar |
-| `df.merge(right, on=...)` | `Join` | inner, left, right, outer |
-| `df.where(cond)` | `AddColumn(IfThenExpr)` | Conditional replacement |
-| `df.mask(cond)` | `AddColumn(IfThenExpr)` | Inverse of where |
+| `df.astype(dtype)` | `AddColumn(CastExpr)` | For recognized pandas/numpy dtypes |
+| `df.merge(right, on=...)` | `Join` | inner/left/right/outer; single or composite keys |
+| `df.where(cond, other)` | `AddColumn(IfThenExpr)` | Conditional replacement per column |
+| `df.mask(cond, other)` | `AddColumn(IfThenExpr)` | Inverse of where |
+| `df.rolling(w).mean()` | `Window` | See window functions below |
+| `df.expanding().sum()` | `Window` | Unbounded window |
+| `pd.concat([df1, df2])` | `Union` | UNION ALL; N-ary; mixed traced + raw DataFrames |
 | `df.groupby(by).sum()` | `Aggregate` | See aggregations below |
+| `df.reset_index(drop=True)` | no-op | Relational algebra has no row index |
+| `df.copy()` | no-op | Returns same proxy |
+| `df.pipe(func)` | pass-through | Calls `func(self)`, stays traced if func uses traced API |
+
+### Series operations
+
+| Method | IR expression | Returns |
+|--------|---------------|---------|
+| `series > x` (and `>=`, `<`, `<=`, `==`, `!=`) | `BinOp` | `TracedSeries[BOOL]` |
+| `series + x` (and `-`, `*`, `/`) | `BinOp` | `TracedSeries` |
+| `series & other`, `series \| other` | `BinOp("and"/"or")` | `TracedSeries[BOOL]` |
+| `~series` | `UnaryOp("not")` | `TracedSeries[BOOL]` |
+| `-series` | `UnaryOp("negate")` | `TracedSeries` |
+| `abs(series)` / `series.abs()` | `UnaryOp("abs")` | `TracedSeries` |
+| `series.isin(values)` | `SingularOrList` | `TracedSeries[BOOL]` |
+| `series.isna()` | `UnaryOp("is_null")` | `TracedSeries[BOOL]` |
+| `series.notna()` | `NOT(IS_NULL)` | `TracedSeries[BOOL]` |
+| `series.fillna(val)` | `BinOp("coalesce")` | `TracedSeries` |
+| `series.between(lo, hi)` | `AND(GTE, LTE)` | `TracedSeries[BOOL]` |
 
 ### Aggregation functions
 
-These are available on `groupby()`, `groupby()[col]`, and `groupby()[[cols]]`:
+Available on `groupby()`, `groupby()[col]`, and `groupby()[[cols]]`:
 
-| Method | Substrait function | Backend support |
-|--------|-------------------|-----------------|
-| `sum()` | `sum:i64` | All |
-| `mean()` | `avg:i64` | All |
-| `min()` | `min:i64` | All |
-| `max()` | `max:i64` | All |
-| `count()` | `count:any` | All |
-| `std()` | `std_dev:fp64` | All |
-| `var()` | `variance:fp64` | All |
-| `size()` | `count:any` | All |
-| `first()` | — | Graph break |
-| `last()` | — | Graph break |
-| `agg({col: func})` | varies | All |
+| Method | Substrait function | Notes |
+|--------|-------------------|-------|
+| `sum()` | `sum:i64` | Numeric columns only |
+| `mean()` | `avg:i64` | Returns FLOAT64 |
+| `min()` | `min:i64` | Preserves source dtype |
+| `max()` | `max:i64` | Preserves source dtype |
+| `count()` | `count:any` | Returns INT64; includes non-numeric columns |
+| `std()` | `std_dev:fp64` | Returns FLOAT64 |
+| `var()` | `variance:fp64` | Returns FLOAT64 |
+| `size()` | `count:any` | Returns single column named `"size"` |
+| `agg({col: func})` | varies | Dict mapping columns to function names |
+| `first()` | — | **Graph break** (no Substrait equivalent) |
+| `last()` | — | **Graph break** (no Substrait equivalent) |
 
-### DeferredScalar — series-level aggregations without graph breaks
+### DeferredScalar — series-level aggregations
 
 Series-level aggregations (`series.sum()`, `series.mean()`, etc.) return a
 `DeferredScalar` — a lazy proxy that stays symbolic as long as it's used in
@@ -138,53 +164,41 @@ plan and executed by the backend in a single pass.
 If Python needs the actual value (e.g., `if total > 0:`, `print(total)`), the
 scalar materializes on demand.
 
-| Method | Returns |
-|--------|---------|
-| `series.sum()` | `DeferredScalar` |
-| `series.mean()` | `DeferredScalar` |
-| `series.min()` | `DeferredScalar` |
-| `series.max()` | `DeferredScalar` |
-| `series.count()` | `DeferredScalar` |
-| `series.std()` | `DeferredScalar` |
-| `series.var()` | `DeferredScalar` |
+| Method | Returns | Stays lazy in arithmetic |
+|--------|---------|------------------------|
+| `series.sum()` | `DeferredScalar` | Yes |
+| `series.mean()` | `DeferredScalar` | Yes |
+| `series.min()` | `DeferredScalar` | Yes |
+| `series.max()` | `DeferredScalar` | Yes |
+| `series.count()` | `DeferredScalar` | Yes |
+| `series.std()` | `DeferredScalar` | Yes |
+| `series.var()` | `DeferredScalar` | Yes |
 
-### Arithmetic and comparison operators
+### Window functions
 
-All of these produce `BinOp` / `UnaryOp` expression nodes:
+Available on `df.rolling(window)` and `df.expanding()` for numeric columns:
 
-| Operator | IR op | | Operator | IR op |
-|----------|-------|-|----------|-------|
-| `>` | `gt` | | `+` | `add` |
-| `>=` | `gte` | | `-` | `sub` |
-| `<` | `lt` | | `*` | `mul` |
-| `<=` | `lte` | | `/` | `div` |
-| `==` | `eq` | | `&` | `and` |
-| `!=` | `ne` | | `\|` | `or` |
-| `-x` | `negate` | | `~x` | `not` |
-| `abs(x)` | `abs` | | | |
+| Method | Window spec | Notes |
+|--------|------------|-------|
+| `rolling(w).mean()` | `rows(w-1, 0)` | Fixed-width trailing window |
+| `rolling(w).sum()` | `rows(w-1, 0)` | |
+| `rolling(w).std()` | `rows(w-1, 0)` | |
+| `rolling(w).var()` | `rows(w-1, 0)` | |
+| `rolling(w).min()` | `rows(w-1, 0)` | |
+| `rolling(w).max()` | `rows(w-1, 0)` | |
+| `rolling(w).count()` | `rows(w-1, 0)` | |
+| `expanding().mean()` | `rows(unbounded, 0)` | Unbounded lower bound |
+| `expanding().sum()` | `rows(unbounded, 0)` | |
+| `expanding().std()` | `rows(unbounded, 0)` | |
+| `expanding().var()` | `rows(unbounded, 0)` | |
+| `expanding().min()` | `rows(unbounded, 0)` | |
+| `expanding().max()` | `rows(unbounded, 0)` | |
 
-### Series methods (traced)
-
-| Method | IR expression | Returns |
-|--------|---------------|---------|
-| `series.isin(values)` | `SingularOrList` | `TracedSeries[BOOL]` |
-| `series.isna()` | `is_null(col)` | `TracedSeries[BOOL]` |
-| `series.notna()` | `NOT(is_null(col))` | `TracedSeries[BOOL]` |
-| `series.fillna(val)` | `coalesce(col, val)` | `TracedSeries` |
-| `series.abs()` | `abs(col)` | `TracedSeries` |
-| `series.between(lo, hi)` | `AND(gte, lte)` | `TracedSeries[BOOL]` |
+Both support `partition_by` and `order_by` via the `Window` IR node.
 
 ### Datetime accessor (`.dt`)
 
 Traced via `FunctionCall("extract", ...)`. Supported on all backends.
-
-```python
-@pd.compile
-def f(df):
-    df["year"] = df["ts"].dt.year
-    df["month"] = df["ts"].dt.month
-    return df
-```
 
 | Property | Substrait component |
 |----------|-------------------|
@@ -200,67 +214,145 @@ def f(df):
 
 ### String accessor (`.str`)
 
-Traced via `FunctionCall("str_*", ...)`. **PandasBackend only** — Acero does
-not support these Substrait string functions.
+Traced via `FunctionCall("str_*", ...)`.
 
-```python
-@pd.compile(backend=PandasBackend())
-def f(df):
-    df["upper_name"] = df["name"].str.upper()
-    return df[df["name"].str.contains("Ali")]
-```
+| Method | Substrait function |
+|--------|-------------------|
+| `.str.upper()` | `upper:str` |
+| `.str.lower()` | `lower:str` |
+| `.str.strip()` | `trim:str` |
+| `.str.lstrip()` | `ltrim:str` |
+| `.str.rstrip()` | `rtrim:str` |
+| `.str.len()` | `char_length:str` |
+| `.str.contains(pat)` | `contains:str_str` |
+| `.str.startswith(pat)` | `starts_with:str_str` |
+| `.str.endswith(pat)` | `ends_with:str_str` |
+| `.str.replace(pat, repl)` | `replace:str_str_str` |
+| `.str.slice(start, stop)` | `substring:str_i32_i32` |
 
-| Method | IR function |
-|--------|------------|
-| `.str.upper()` | `str_upper` |
-| `.str.lower()` | `str_lower` |
-| `.str.strip()` | `str_strip` |
-| `.str.lstrip()` | `str_lstrip` |
-| `.str.rstrip()` | `str_rstrip` |
-| `.str.len()` | `str_len` |
-| `.str.contains(pat)` | `str_contains` |
-| `.str.startswith(pat)` | `str_startswith` |
-| `.str.endswith(pat)` | `str_endswith` |
-| `.str.replace(pat, repl)` | `str_replace` |
-| `.str.slice(start, stop)` | `str_slice` |
-
-### Graph-break operations
+## Graph-break operations
 
 These operations materialize the current IR, run the operation in plain pandas,
 then resume tracing with a fresh `ReadTable` from the result. They work
 transparently — the user doesn't need to do anything special.
 
+### DataFrame graph breaks
+
 | Operation | What happens |
 |-----------|-------------|
 | `len(df)`, `df.shape`, `df.empty` | Materialize, return scalar |
 | `df.values`, `df.to_numpy()` | Materialize, return array |
-| `df.iloc[...]`, `df.loc[...]` | Materialize, return slice |
+| `df.iloc[int]`, `df.iloc[[0,1,2]]` | Materialize, return slice (fancy/scalar indexing) |
+| `df.loc[...]` | Materialize, return slice |
 | `df.iterrows()`, `df.itertuples()` | Materialize, iterate |
-| `df.apply(func)`, `df.pipe(func)` | Materialize, apply, re-register |
+| `df.apply(func)` | Materialize, apply, re-wrap result |
+| `df.pipe(func)` | Tries traced first; materializes on failure |
 | `df.to_csv()`, `df.to_parquet()` | Materialize, write |
-| `df.describe()`, `df.info()` | Materialize, return |
-| `df.drop_duplicates()` | Materialize, deduplicate, re-register |
-| `df.rolling(w).mean()` | Materialize, apply rolling, re-register |
-| `df.expanding().sum()` | Materialize, apply expanding, re-register |
-| `df.pivot_table(...)` | Materialize, pivot, re-register |
-| `df.melt(...)` | Materialize, melt, re-register |
-| `df.stack()`, `df.unstack()` | Materialize, reshape, re-register |
-| `df.astype(dtype)` | Materialize, cast, re-register |
+| `df.describe()`, `df.info()`, `df.value_counts()` | Materialize, return |
+| `df.drop_duplicates()` | Materialize, deduplicate, re-wrap |
+| `df.pivot_table(...)` | Materialize, pivot, re-wrap |
+| `df.melt(...)` | Materialize, melt, re-wrap |
+| `df.stack()`, `df.unstack()` | Materialize, reshape |
+
+### Series graph breaks
+
+| Operation | What happens |
+|-----------|-------------|
 | `series.apply(func)` | Materialize, apply |
 | `series.map(func)` | Materialize, map |
-| `series.unique()`, `series.nunique()` | Materialize, return |
-| `series.value_counts()` | Materialize, return |
-| `bool(series)`, `series.item()` | Materialize scalar |
-| `groupby().first()`, `groupby().last()` | Materialize, apply, re-register |
+| `series.unique()` | Materialize, return array |
+| `series.nunique()` | Materialize, return int |
+| `series.value_counts()` | Materialize, return Series |
+| `bool(series)`, `series.item()` | Materialize scalar value |
+| `len(series)` | Materialize, return int |
 
 After a graph break, tracing continues automatically:
 
 ```python
 @pd.compile
 def f(df):
-    rolled = df[["id", "price"]].sort_values("id").rolling(2).mean()  # graph break
-    return rolled[rolled["price"] > 100]  # tracing resumes with filter
+    deduped = df.drop_duplicates(subset=["id"])    # graph break
+    return deduped[deduped["price"] > 100]          # tracing resumes with filter
 ```
+
+## What cannot be implemented
+
+Some operations fundamentally cannot be traced into relational algebra and will
+always require graph breaks. These are architectural limitations, not missing
+features.
+
+### Arbitrary Python UDFs
+
+`apply()`, `map()`, and `transform()` accept arbitrary Python callables that
+operate row-by-row or element-by-element. These cannot be expressed in
+Substrait or any relational algebra IR. They will always materialize.
+
+### Row iteration
+
+`iterrows()`, `itertuples()`, and `for row in df` are inherently row-iteration
+APIs with no relational equivalent.
+
+### Data-dependent schemas
+
+`pivot_table()`, `pivot()`, `unstack()`, and `crosstab()` produce output
+columns determined by the actual data values (e.g., unique categories become
+column names). Substrait plans require a fixed schema at compile time, so
+these operations cannot be expressed without materializing first.
+
+`melt()` and `stack()` (the inverses) have similar issues with Substrait's
+lack of an UNPIVOT operator.
+
+### Index-based operations
+
+The IR uses flat column names with no concept of row index. Operations
+that depend on row labels — `.loc`, label-based alignment, index joins,
+`set_index()`, `reset_index(drop=False)`, and MultiIndex — will always
+require materialization.
+
+### Operations requiring row count
+
+`tail(n)` and `iloc[start:]` (open-ended slices) need to know the total
+number of rows to compute the offset. Since the IR doesn't track cardinality,
+these materialize. (Contrast with `head(n)` and `iloc[:n]` which work without
+knowing row count.)
+
+### Chained comparisons in query strings
+
+The query parser supports single comparisons and `and`/`or` conjunctions, but
+rejects chained comparisons like `1 < x < 10`. Use `df.query("x > 1 and x < 10")`
+instead.
+
+### Operations without Substrait equivalents
+
+| Operation | Why it can't be compiled |
+|-----------|------------------------|
+| `drop_duplicates()` | No DISTINCT ON in Substrait; would need ROW_NUMBER window + filter |
+| `groupby().first()` / `last()` | No first/last aggregation function in Substrait |
+| `rank()`, `cumsum()`, `cumprod()` | Window function infrastructure exists but these aren't wired up yet |
+| `shift()`, `diff()` | Lag/lead window ops; infrastructure exists but not exposed |
+| `resample()` | Temporal bucketing has no Substrait equivalent |
+
+### Missing accessor methods
+
+Many `.dt` and `.str` methods are not yet traced. They fall through to pandas
+via graph break but produce correct results.
+
+**Not-yet-traced `.dt` methods:** `date`, `time`, `nanosecond`, `microsecond`,
+`is_month_start/end`, `is_quarter_start/end`, `is_year_start/end`,
+`is_leap_year`, `tz`, `freq`, `normalize()`, `strftime()`, `tz_localize()`,
+`tz_convert()`, `floor()`, `ceil()`, `round()`, `total_seconds()`.
+
+**Not-yet-traced `.str` methods:** `split`, `rsplit`, `extract`, `findall`,
+`match`, `pad`, `center`, `zfill`, `wrap`, `get`, `join`, `cat`, `repeat`,
+`normalize`, `encode`, `decode`, `translate`, `capitalize`, `title`,
+`swapcase`, `isnumeric`, `isalpha`, `isdigit`, `isspace`, `islower`,
+`isupper`, `istitle`.
+
+### Plan caching limitation
+
+When a cached plan contains graph breaks (eager segments), it is always
+re-traced because the eager functions may depend on runtime values. Only
+fully-compiled plans (zero graph breaks) benefit from caching.
 
 ## Introspection
 
@@ -374,7 +466,7 @@ the eager functions may depend on runtime values.
 
 ## IR types reference
 
-### Nodes (`ir.IRNode` subclasses)
+### Nodes (`ir.IRNode` subclasses) — 11 total
 
 | Node | Fields |
 |------|--------|
@@ -383,12 +475,14 @@ the eager functions may depend on runtime values.
 | `Project` | `input: IRNode`, `columns: list[str]` |
 | `AddColumn` | `input: IRNode`, `name: str`, `expr: Expr`, `dtype: DType` |
 | `Sort` | `input: IRNode`, `keys: list[tuple[str, bool]]` |
-| `Limit` | `input: IRNode`, `n: int` |
+| `Limit` | `input: IRNode`, `n: int`, `offset: int = 0` |
 | `Aggregate` | `input: IRNode`, `group_keys: list[str]`, `agg_specs: list[tuple[str, str, str]]` |
-| `Join` | `left: IRNode`, `right: IRNode`, `left_on: str`, `right_on: str`, `how: str` |
+| `Join` | `left: IRNode`, `right: IRNode`, `left_on: list[str]`, `right_on: list[str]`, `how: str` |
+| `Union` | `inputs: list[IRNode]` |
+| `Window` | `input: IRNode`, `window_funcs: list[tuple]`, `window_spec: WindowSpec`, `partition_by`, `order_by` |
 | `RenameColumns` | `input: IRNode`, `mapping: dict[str, str]` |
 
-### Expressions (`ir.Expr` subclasses)
+### Expressions (`ir.Expr` subclasses) — 9 total
 
 | Expr | Fields |
 |------|--------|
@@ -397,16 +491,27 @@ the eager functions may depend on runtime values.
 | `BinOp` | `op: str`, `left: Expr`, `right: Expr` |
 | `UnaryOp` | `op: str`, `operand: Expr` |
 | `IfThenExpr` | `condition: Expr`, `then_expr: Expr`, `else_expr: Expr` |
-| `CastExpr` | `expr: Expr`, `target_dtype: DType` |
+| `CastExpr` | `input: Expr`, `target_dtype: DType` |
 | `SingularOrList` | `value: Expr`, `options: list[Expr]` |
-| `FunctionCall` | `func_name: str`, `args: list[Expr]`, `options: dict[str, str]`, `return_dtype: DType` |
+| `FunctionCall` | `func_name: str`, `args: list[Expr]`, `options: dict`, `return_dtype: DType` |
 | `ScalarSubquery` | `agg_node: IRNode`, `dtype: DType` |
 
-### DType enum
+### DType enum — 19 values
 
 `INT8`, `INT16`, `INT32`, `INT64`, `UINT8`, `UINT16`, `UINT32`, `UINT64`,
 `FLOAT32`, `FLOAT64`, `STRING`, `BINARY`, `BOOL`, `DATE`, `TIME`,
 `TIMESTAMP`, `TIMESTAMP_TZ`, `TIMEDELTA`, `DECIMAL`
+
+### Substrait function registry — 30 entries
+
+| Category | Functions |
+|----------|----------|
+| Comparison | `gt`, `gte`, `lt`, `lte`, `eq`, `ne`, `is_null`, `coalesce` |
+| Arithmetic | `add`, `sub`, `mul`, `div`, `abs`, `negate` |
+| Boolean | `and`, `or`, `not` |
+| Aggregate | `sum`, `avg`/`mean`, `min`, `max`, `count`, `std`, `var` |
+| Datetime | `extract` |
+| String | `str_upper`, `str_lower`, `str_strip`, `str_lstrip`, `str_rstrip`, `str_len`, `str_contains`, `str_startswith`, `str_endswith`, `str_replace`, `str_slice` |
 
 ## Public API
 
@@ -429,3 +534,7 @@ from pandas.compile import (
     infer_schema,
 )
 ```
+
+Power-user modules (not re-exported but importable):
+- `pandas.compile.ir` — `DType`, `Schema`, `IRNode`, `Expr` subclasses
+- `pandas.compile.compiler` — `SubstraitCompiler`, `ExecutionPlan`
