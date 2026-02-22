@@ -1,8 +1,9 @@
 # pandas.compile — JIT Compilation for pandas
 
 `pandas.compile` traces pandas operations at runtime, builds a relational
-intermediate representation (IR), and executes the plan on an optimized backend
-(PyArrow Acero via Substrait, or a pure-pandas interpreter). Operations that
+intermediate representation (IR), and compiles the plan to
+[Substrait](https://substrait.io/) for execution on an optimized backend
+(DataFusion, PyArrow Acero, or a pure-pandas interpreter). Operations that
 cannot be represented in the IR trigger *graph breaks* — the traced computation
 is materialized and tracing resumes automatically.
 
@@ -45,6 +46,8 @@ TracedDataFrame / TracedSeries   (proxy objects)
      ▼
 IR graph  (ReadTable → Filter → AddColumn → Sort → Limit → ...)
      │
+     ├──► SubstraitCompiler  → Substrait protobuf  → DataFusionBackend (datafusion)
+     │
      ├──► SubstraitCompiler  → Substrait protobuf  → AceroBackend (pyarrow)
      │
      └──► PandasBackend      → direct pandas execution (fallback)
@@ -55,15 +58,18 @@ IR graph  (ReadTable → Filter → AddColumn → Sort → Limit → ...)
 | Module | Purpose |
 |--------|---------|
 | `ir.py` | IR types: `DType`, `Schema`, `IRNode` subclasses, `Expr` subclasses, `explain_ir`/`explain_expr` |
-| `compiler.py` | `SubstraitCompiler`, `PandasBackend`, `AceroBackend`, `ExecutionPlan`, `SchemaGuard` |
-| `jit.py` | `@pd.compile` decorator, `Tracer` context manager, all `Traced*` proxy classes |
+| `compiler.py` | `SubstraitCompiler`, backends, `ExecutionPlan`, `ConnectedPlan`, `SchemaGuard` |
+| `jit.py` | `@pd.compile` decorator, `Tracer`, `DeferredScalar`, all `Traced*` proxy classes |
 
 ### Backends
 
 | Backend | How it works | When used |
 |---------|-------------|-----------|
-| `AceroBackend` | Compiles IR → Substrait protobuf → `pyarrow.substrait.run_query()` | Default when pyarrow is installed |
+| `DataFusionBackend` | Compiles IR → Substrait protobuf → `datafusion.SessionContext` | Default when `datafusion` is installed |
+| `AceroBackend` | Compiles IR → Substrait protobuf → `pyarrow.substrait.run_query()` | Fallback when only pyarrow is installed |
 | `PandasBackend` | Interprets the IR tree using pandas operations directly | Fallback, or when explicitly requested |
+
+`default_backend()` selects the best available: DataFusion > Acero > Pandas.
 
 ## Supported operations
 
@@ -89,6 +95,8 @@ either backend without materialization.
 | `df.dropna(subset=[...])` | `Filter(NOT IS_NULL)` | |
 | `df.fillna(value)` | `AddColumn(COALESCE)` | Per-column or scalar |
 | `df.merge(right, on=...)` | `Join` | inner, left, right, outer |
+| `df.where(cond)` | `AddColumn(IfThenExpr)` | Conditional replacement |
+| `df.mask(cond)` | `AddColumn(IfThenExpr)` | Inverse of where |
 | `df.groupby(by).sum()` | `Aggregate` | See aggregations below |
 
 ### Aggregation functions
@@ -97,20 +105,48 @@ These are available on `groupby()`, `groupby()[col]`, and `groupby()[[cols]]`:
 
 | Method | Substrait function | Backend support |
 |--------|-------------------|-----------------|
-| `sum()` | `sum:i64` | Acero + Pandas |
-| `mean()` | `avg:i64` | Acero + Pandas |
-| `min()` | `min:i64` | Acero + Pandas |
-| `max()` | `max:i64` | Acero + Pandas |
-| `count()` | `count:any` | Acero + Pandas |
-| `std()` | `std_dev:fp64` | Acero + Pandas |
-| `var()` | `variance:fp64` | Acero + Pandas |
-| `size()` | `count:any` | Acero + Pandas |
+| `sum()` | `sum:i64` | All |
+| `mean()` | `avg:i64` | All |
+| `min()` | `min:i64` | All |
+| `max()` | `max:i64` | All |
+| `count()` | `count:any` | All |
+| `std()` | `std_dev:fp64` | All |
+| `var()` | `variance:fp64` | All |
+| `size()` | `count:any` | All |
 | `first()` | — | Graph break |
 | `last()` | — | Graph break |
-| `agg({col: func})` | varies | Acero + Pandas |
+| `agg({col: func})` | varies | All |
 
-Series-level aggregations (`series.sum()`, `series.mean()`, etc.) trigger a
-graph break — the IR is materialized and the scalar value is returned.
+### DeferredScalar — series-level aggregations without graph breaks
+
+Series-level aggregations (`series.sum()`, `series.mean()`, etc.) return a
+`DeferredScalar` — a lazy proxy that stays symbolic as long as it's used in
+arithmetic with traced objects. This avoids graph breaks for common patterns
+like normalization:
+
+```python
+@pd.compile
+def normalize(df):
+    df["pct"] = df["price"] / df["price"].sum()   # no graph break!
+    return df
+```
+
+Under the hood, `DeferredScalar` wraps a `ScalarSubquery` expression that maps
+to Substrait's `Expression.Subquery.Scalar`. The subquery is inlined into the
+plan and executed by the backend in a single pass.
+
+If Python needs the actual value (e.g., `if total > 0:`, `print(total)`), the
+scalar materializes on demand.
+
+| Method | Returns |
+|--------|---------|
+| `series.sum()` | `DeferredScalar` |
+| `series.mean()` | `DeferredScalar` |
+| `series.min()` | `DeferredScalar` |
+| `series.max()` | `DeferredScalar` |
+| `series.count()` | `DeferredScalar` |
+| `series.std()` | `DeferredScalar` |
+| `series.var()` | `DeferredScalar` |
 
 ### Arithmetic and comparison operators
 
@@ -131,7 +167,7 @@ All of these produce `BinOp` / `UnaryOp` expression nodes:
 
 | Method | IR expression | Returns |
 |--------|---------------|---------|
-| `series.isin(values)` | `OR(eq, eq, ...)` | `TracedSeries[BOOL]` |
+| `series.isin(values)` | `SingularOrList` | `TracedSeries[BOOL]` |
 | `series.isna()` | `is_null(col)` | `TracedSeries[BOOL]` |
 | `series.notna()` | `NOT(is_null(col))` | `TracedSeries[BOOL]` |
 | `series.fillna(val)` | `coalesce(col, val)` | `TracedSeries` |
@@ -140,7 +176,7 @@ All of these produce `BinOp` / `UnaryOp` expression nodes:
 
 ### Datetime accessor (`.dt`)
 
-Traced via `FunctionCall("extract", ...)`. Supported on both backends.
+Traced via `FunctionCall("extract", ...)`. Supported on all backends.
 
 ```python
 @pd.compile
@@ -210,7 +246,6 @@ transparently — the user doesn't need to do anything special.
 | `df.melt(...)` | Materialize, melt, re-register |
 | `df.stack()`, `df.unstack()` | Materialize, reshape, re-register |
 | `df.astype(dtype)` | Materialize, cast, re-register |
-| `df.where(cond)`, `df.mask(cond)` | Materialize, apply, re-register |
 | `series.apply(func)` | Materialize, apply |
 | `series.map(func)` | Materialize, map |
 | `series.unique()`, `series.nunique()` | Materialize, return |
@@ -238,7 +273,7 @@ def f(df):
 
 print(f.explain(sales_df))
 # ExecutionPlan for f():
-#   Backend: acero
+#   Backend: datafusion
 #   Segments: 1
 #
 #   [0] COMPILED -> __mat_1
@@ -261,6 +296,47 @@ plan_bytes = plans[0].SerializeToString()
 json_str = f.to_substrait_json(sales_df)
 ```
 
+### ConnectedPlan — rich DAG export
+
+When a function has graph breaks, `to_substrait()` returns disconnected plans.
+`to_connected_plan()` provides a richer export with full metadata: schemas,
+table connections, and graph-break reasons, forming a linked DAG.
+
+```python
+@pd.compile
+def f(df):
+    df["revenue"] = df["price"] * df["quantity"]
+    total = len(df)                                    # graph break
+    return df[df["revenue"] > 500].head(10)
+
+cp = f.to_connected_plan(sales_df)
+
+# Iterate stages in order
+for stage in cp.stages:
+    if isinstance(stage, CompiledStage):
+        print(f"Compiled stage {stage.index}: {stage.description}")
+        print(f"  Inputs: {stage.input_tables}")
+        print(f"  Output: {stage.output_table}")
+        print(f"  Schema: {stage.output_schema.columns}")
+    elif isinstance(stage, GraphBreakStage):
+        print(f"Graph break {stage.index}: {stage.reason}")
+
+# Backward-compatible: list of Substrait Plan protos
+plans = cp.plans
+
+# JSON-serializable dict with full metadata
+metadata = cp.to_dict()
+```
+
+Key classes:
+
+| Class | Purpose |
+|-------|---------|
+| `ConnectedPlan` | Top-level container. Properties: `stages`, `compiled_stages`, `graph_breaks`, `plans`, `final_output` |
+| `CompiledStage` | A Substrait plan with `plan`, `plan_bytes`, `input_tables`, `output_table`, `output_schema` |
+| `GraphBreakStage` | A materialization point with `reason`, `input_tables`, `output_tables` |
+| `StageSchema` | Schema metadata: `table_name`, `columns: dict[str, str]` |
+
 ## Context manager API
 
 For more control, use `Tracer` directly:
@@ -280,6 +356,9 @@ print(t.explain())
 # Substrait export
 plans = t.to_substrait()
 json_str = t.to_substrait_json()
+
+# Connected plan export
+cp = t.to_connected_plan()
 ```
 
 ## Caching
@@ -317,10 +396,36 @@ the eager functions may depend on runtime values.
 | `Literal` | `value: Any`, `dtype: DType` |
 | `BinOp` | `op: str`, `left: Expr`, `right: Expr` |
 | `UnaryOp` | `op: str`, `operand: Expr` |
+| `IfThenExpr` | `condition: Expr`, `then_expr: Expr`, `else_expr: Expr` |
+| `CastExpr` | `expr: Expr`, `target_dtype: DType` |
+| `SingularOrList` | `value: Expr`, `options: list[Expr]` |
 | `FunctionCall` | `func_name: str`, `args: list[Expr]`, `options: dict[str, str]`, `return_dtype: DType` |
+| `ScalarSubquery` | `agg_node: IRNode`, `dtype: DType` |
 
 ### DType enum
 
 `INT8`, `INT16`, `INT32`, `INT64`, `UINT8`, `UINT16`, `UINT32`, `UINT64`,
 `FLOAT32`, `FLOAT64`, `STRING`, `BINARY`, `BOOL`, `DATE`, `TIME`,
 `TIMESTAMP`, `TIMESTAMP_TZ`, `TIMEDELTA`, `DECIMAL`
+
+## Public API
+
+All public names are importable from `pandas.compile`:
+
+```python
+from pandas.compile import (
+    AceroBackend,
+    Backend,
+    CompiledFunction,
+    CompiledStage,
+    ConnectedPlan,
+    DataFusionBackend,
+    DeferredScalar,
+    GraphBreakStage,
+    PandasBackend,
+    StageSchema,
+    Tracer,
+    compile,
+    infer_schema,
+)
+```
