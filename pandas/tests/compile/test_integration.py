@@ -1,9 +1,9 @@
 """
-Integration tests: pandas code → JIT tracing → Substrait IR → Acero execution.
+Integration tests: pandas code → JIT tracing → Substrait IR → backend execution.
 
 Each test compiles a pandas workflow to a Substrait plan, executes it on
-PyArrow's Acero engine, and compares the result against the equivalent
-pandas computation.
+PyArrow's Acero engine or DataFusion, and compares the result against the
+equivalent pandas computation.
 """
 
 from __future__ import annotations
@@ -1736,3 +1736,242 @@ class TestWhereMask:
         result = f(df)
         expected = df.where(cond, other=-1)
         tm.assert_frame_equal(result, expected)
+
+    def test_where_traced_condition(self, sales_df):
+        """where with a traced boolean series builds IR (no graph break)."""
+
+        @compile(backend=PandasBackend())
+        def f(df):
+            return df[["id", "price"]].where(df["price"] > 100, other=-1)
+
+        result = f(sales_df)
+        expected = sales_df[["id", "price"]].where(sales_df["price"] > 100, other=-1)
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_dtype=False,
+        )
+
+    def test_mask_traced_condition(self, sales_df):
+        """mask with a traced boolean series builds IR (no graph break)."""
+
+        @compile(backend=PandasBackend())
+        def f(df):
+            return df[["id", "price"]].mask(df["price"] > 200, other=0)
+
+        result = f(sales_df)
+        expected = sales_df[["id", "price"]].mask(sales_df["price"] > 200, other=0)
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_dtype=False,
+        )
+
+
+# ---------------------------------------------------------------------------
+# DataFusion backend integration tests
+# ---------------------------------------------------------------------------
+
+datafusion_mod = pytest.importorskip("datafusion")
+pytest.importorskip("datafusion.substrait")
+
+
+def _run_on_datafusion(
+    ir_node,
+    tables: dict[str, DataFrame],
+) -> DataFrame:
+    """Compile IR to Substrait, run on DataFusion, return pandas DataFrame."""
+    from datafusion import SessionContext
+    from datafusion.substrait import (
+        Consumer,
+        Serde,
+    )
+
+    compiler = SubstraitCompiler()
+    plan = compiler.compile(ir_node)
+    plan_bytes = plan.SerializeToString()
+
+    ctx = SessionContext()
+    for name, df in tables.items():
+        arrow_table = pa.Table.from_pandas(df)
+        # Cast large_string/large_binary to utf8/binary for Substrait compat
+        new_fields = []
+        needs_cast = False
+        for field in arrow_table.schema:
+            if field.type == pa.large_string():
+                new_fields.append(pa.field(field.name, pa.utf8()))
+                needs_cast = True
+            elif field.type == pa.large_binary():
+                new_fields.append(pa.field(field.name, pa.binary()))
+                needs_cast = True
+            else:
+                new_fields.append(field)
+        if needs_cast:
+            arrow_table = arrow_table.cast(pa.schema(new_fields))
+        ctx.register_record_batches(name, [arrow_table.to_batches()])
+
+    substrait_plan = Serde.deserialize_bytes(plan_bytes)
+    logical_plan = Consumer.from_substrait_plan(ctx, substrait_plan)
+    result_df = ctx.create_dataframe_from_logical_plan(logical_plan)
+    return result_df.to_pandas()
+
+
+class TestPandasVsDataFusion:
+    def test_filter_matches(self, sales_df):
+        schema = infer_schema(sales_df)
+        node = Filter(
+            ReadTable("sales", schema),
+            BinOp("gte", ColRef("price"), Literal(150.0, DType.FLOAT64)),
+        )
+        pandas_result = PandasBackend().execute(node, {"sales": sales_df})
+        df_result = _run_on_datafusion(node, {"sales": sales_df})
+
+        tm.assert_frame_equal(
+            pandas_result.sort_values("id").reset_index(drop=True),
+            df_result.sort_values("id").reset_index(drop=True),
+        )
+
+    def test_add_column_matches(self, sales_df):
+        schema = infer_schema(sales_df)
+        base = ReadTable("sales", schema)
+        node = AddColumn(
+            base,
+            "revenue",
+            BinOp("mul", ColRef("price"), ColRef("quantity")),
+            DType.FLOAT64,
+        )
+        pandas_result = PandasBackend().execute(node, {"sales": sales_df})
+        df_result = _run_on_datafusion(node, {"sales": sales_df})
+
+        tm.assert_frame_equal(
+            pandas_result.sort_values("id").reset_index(drop=True),
+            df_result.sort_values("id").reset_index(drop=True),
+        )
+
+    def test_aggregate_matches(self, sales_df):
+        schema = infer_schema(sales_df)
+        node = Aggregate(
+            ReadTable("sales", schema),
+            group_keys=["region"],
+            agg_specs=[("total", "price", "sum"), ("cnt", "id", "count")],
+        )
+        pandas_result = PandasBackend().execute(node, {"sales": sales_df})
+        df_result = _run_on_datafusion(node, {"sales": sales_df})
+
+        tm.assert_frame_equal(
+            pandas_result.sort_values("region").reset_index(drop=True),
+            df_result.sort_values("region").reset_index(drop=True),
+        )
+
+    def test_sort_limit_matches(self, sales_df):
+        schema = infer_schema(sales_df)
+        node = Limit(
+            Sort(ReadTable("sales", schema), [("price", False)]),
+            3,
+        )
+        pandas_result = PandasBackend().execute(node, {"sales": sales_df})
+        df_result = _run_on_datafusion(node, {"sales": sales_df})
+
+        tm.assert_frame_equal(
+            pandas_result.reset_index(drop=True),
+            df_result.reset_index(drop=True),
+        )
+
+    def test_join_matches(self, sales_df, regions_df):
+        left_schema = infer_schema(sales_df)
+        right_schema = infer_schema(regions_df)
+        node = Join(
+            ReadTable("sales", left_schema),
+            ReadTable("regions", right_schema),
+            "region",
+            "region",
+        )
+        pandas_result = PandasBackend().execute(
+            node, {"sales": sales_df, "regions": regions_df}
+        )
+        df_result = _run_on_datafusion(node, {"sales": sales_df, "regions": regions_df})
+
+        tm.assert_frame_equal(
+            pandas_result.sort_values("id").reset_index(drop=True),
+            df_result.sort_values("id").reset_index(drop=True),
+        )
+
+    def test_full_pipeline_matches(self, sales_df):
+        """Complex pipeline: filter -> add col -> sort -> limit."""
+        schema = infer_schema(sales_df)
+        base = ReadTable("sales", schema)
+
+        pipeline = Limit(
+            Sort(
+                AddColumn(
+                    Filter(
+                        base,
+                        BinOp("gt", ColRef("price"), Literal(50.0, DType.FLOAT64)),
+                    ),
+                    "revenue",
+                    BinOp("mul", ColRef("price"), ColRef("quantity")),
+                    DType.FLOAT64,
+                ),
+                [("revenue", False)],
+            ),
+            3,
+        )
+
+        pandas_result = PandasBackend().execute(pipeline, {"sales": sales_df})
+        df_result = _run_on_datafusion(pipeline, {"sales": sales_df})
+
+        tm.assert_frame_equal(
+            pandas_result.reset_index(drop=True),
+            df_result.reset_index(drop=True),
+        )
+
+
+class TestCompileDecoratorDataFusion:
+    """End-to-end: @compile(backend=DataFusionBackend()) decorator tests."""
+
+    def test_filter_rows(self, sales_df):
+        from pandas.compile.compiler import DataFusionBackend
+
+        @compile(backend=DataFusionBackend())
+        def f(df):
+            return df[df["price"] > 100]
+
+        result = f(sales_df)
+        expected = sales_df[sales_df["price"] > 100]
+        tm.assert_frame_equal(
+            result.sort_values("id").reset_index(drop=True),
+            expected.sort_values("id").reset_index(drop=True),
+        )
+
+    def test_groupby_sum(self, sales_df):
+        from pandas.compile.compiler import DataFusionBackend
+
+        @compile(backend=DataFusionBackend())
+        def f(df):
+            return df.groupby("region")["price"].sum().reset_index()
+
+        result = f(sales_df)
+        expected = sales_df.groupby("region")["price"].sum().reset_index()
+        tm.assert_frame_equal(
+            result.sort_values("region").reset_index(drop=True),
+            expected.sort_values("region").reset_index(drop=True),
+            check_dtype=False,
+        )
+
+    def test_multi_step_pipeline(self, sales_df):
+        from pandas.compile.compiler import DataFusionBackend
+
+        @compile(backend=DataFusionBackend())
+        def f(df):
+            df = df[df["price"] > 50]
+            df["revenue"] = df["price"] * df["quantity"]
+            return df.sort_values("revenue", ascending=False).head(3)
+
+        result = f(sales_df)
+        expected = sales_df[sales_df["price"] > 50].copy()
+        expected["revenue"] = expected["price"] * expected["quantity"]
+        expected = expected.sort_values("revenue", ascending=False).head(3)
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+        )

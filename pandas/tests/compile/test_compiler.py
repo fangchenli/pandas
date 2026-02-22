@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import substrait.algebra_pb2 as stalg
 import substrait.type_pb2 as stt
 
 import pandas as pd
 from pandas import DataFrame
+import pandas._testing as tm
 from pandas.compile.compiler import (
     _DTYPE_TO_SUBSTRAIT,
     AceroBackend,
     Backend,
+    DataFusionBackend,
     PandasBackend,
     SchemaGuard,
     SubstraitCompiler,
@@ -23,18 +26,25 @@ from pandas.compile.ir import (
     AddColumn,
     Aggregate,
     BinOp,
+    CastExpr,
     ColRef,
     DType,
     Filter,
+    FunctionCall,
+    IfThenExpr,
     Join,
     Limit,
     Literal,
     Project,
     ReadTable,
     RenameColumns,
+    ScalarSubquery,
     Schema,
+    SingularOrList,
     Sort,
     UnaryOp,
+    Window,
+    WindowSpec,
 )
 
 # ---------------------------------------------------------------------------
@@ -287,6 +297,111 @@ class TestSubstraitCompiler:
             assert result.HasField("literal")
             assert result.literal.HasField(field), f"Expected {field} for {lit.dtype}"
 
+    def test_compile_window_rolling(self):
+        base = self._make_base()
+        spec = WindowSpec(kind="rows", lower_offset=2, upper_offset=0)
+        node = Window(base, [("price", "price", "sum")], spec)
+        compiler = SubstraitCompiler()
+        plan = compiler.compile(node)
+        rel = plan.relations[0].root.input
+        assert rel.HasField("window")
+        assert len(rel.window.window_functions) == 1
+
+    def test_compile_window_expanding(self):
+        base = self._make_base()
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=0)
+        node = Window(base, [("price", "price", "avg")], spec)
+        compiler = SubstraitCompiler()
+        plan = compiler.compile(node)
+        rel = plan.relations[0].root.input
+        assert rel.HasField("window")
+        wf = rel.window.window_functions[0]
+        assert wf.lower_bound.HasField("unbounded")
+
+    def test_compile_if_then(self):
+        expr = IfThenExpr(
+            BinOp("gt", ColRef("price"), Literal(200.0)),
+            ColRef("price"),
+            Literal(0.0),
+        )
+        node = AddColumn(self._make_base(), "clamped", expr, DType.FLOAT64)
+        compiler = SubstraitCompiler()
+        plan = compiler.compile(node)
+        rel = plan.relations[0].root.input
+        assert rel.HasField("project")
+        proj_expr = rel.project.expressions[0]
+        assert proj_expr.HasField("if_then")
+        assert len(proj_expr.if_then.ifs) == 1
+
+    def test_compile_cast(self):
+        expr = CastExpr(ColRef("price"), DType.INT64)
+        node = AddColumn(self._make_base(), "price_int", expr, DType.INT64)
+        compiler = SubstraitCompiler()
+        plan = compiler.compile(node)
+        rel = plan.relations[0].root.input
+        assert rel.HasField("project")
+        # The expression in the project should be a cast
+        proj_expr = rel.project.expressions[0]
+        assert proj_expr.HasField("cast")
+        assert proj_expr.cast.type.HasField("i64")
+
+    def test_compile_singular_or_list(self):
+        expr = SingularOrList(ColRef("name"), [Literal("Alice"), Literal("Bob")])
+        node = Filter(self._make_base(), expr)
+        compiler = SubstraitCompiler()
+        plan = compiler.compile(node)
+        rel = plan.relations[0].root.input
+        assert rel.HasField("filter")
+        # The condition should be a singular_or_list expression
+        condition = rel.filter.condition
+        assert condition.HasField("singular_or_list")
+        assert len(condition.singular_or_list.options) == 2
+
+    def test_compile_unaryop_abs_output_type(self):
+        """abs should produce fp64, not bool."""
+        expr = UnaryOp("abs", BinOp("sub", ColRef("price"), Literal(200.0)))
+        node = AddColumn(self._make_base(), "dist", expr, DType.FLOAT64)
+        compiler = SubstraitCompiler()
+        plan = compiler.compile(node)
+        rel = plan.relations[0].root.input
+        proj_expr = rel.project.expressions[0]
+        assert proj_expr.HasField("scalar_function")
+        assert proj_expr.scalar_function.output_type.HasField("fp64")
+
+    def test_compile_unaryop_negate_output_type(self):
+        """negate should produce fp64, not bool."""
+        expr = UnaryOp("negate", ColRef("price"))
+        node = AddColumn(self._make_base(), "neg", expr, DType.FLOAT64)
+        compiler = SubstraitCompiler()
+        plan = compiler.compile(node)
+        rel = plan.relations[0].root.input
+        proj_expr = rel.project.expressions[0]
+        assert proj_expr.HasField("scalar_function")
+        assert proj_expr.scalar_function.output_type.HasField("fp64")
+
+    def test_compile_unaryop_not_output_type(self):
+        """not should produce bool."""
+        expr = UnaryOp("not", BinOp("gt", ColRef("price"), Literal(100.0)))
+        node = Filter(self._make_base(), expr)
+        compiler = SubstraitCompiler()
+        plan = compiler.compile(node)
+        rel = plan.relations[0].root.input
+        condition = rel.filter.condition
+        assert condition.HasField("scalar_function")
+        assert condition.scalar_function.output_type.HasField("bool")
+
+    def test_compile_window_has_invocation(self):
+        """WindowRelFunction should have AGGREGATION_INVOCATION_ALL."""
+        base = self._make_base()
+        spec = WindowSpec(kind="rows", lower_offset=2, upper_offset=0)
+        node = Window(base, [("price", "price", "sum")], spec)
+        compiler = SubstraitCompiler()
+        plan = compiler.compile(node)
+        rel = plan.relations[0].root.input
+        assert rel.HasField("window")
+        wf = rel.window.window_functions[0]
+        assert wf.invocation == stalg.AggregateFunction.AGGREGATION_INVOCATION_ALL
+
     def test_unknown_ir_node_raises(self):
         class BadNode:
             pass
@@ -294,6 +409,57 @@ class TestSubstraitCompiler:
         compiler = SubstraitCompiler()
         with pytest.raises(TypeError, match="Unknown IR node"):
             compiler._compile_rel(BadNode())
+
+
+# ---------------------------------------------------------------------------
+# String function Substrait names
+# ---------------------------------------------------------------------------
+
+
+class TestStringSubstraitNames:
+    """Verify string functions compile to proper Substrait function names."""
+
+    def _make_base(self):
+        return ReadTable("t", Schema({"name": DType.STRING, "val": DType.INT64}))
+
+    @pytest.mark.parametrize(
+        "ir_name, substrait_name",
+        [
+            ("str_upper", "upper:str"),
+            ("str_lower", "lower:str"),
+            ("str_strip", "trim:str"),
+            ("str_lstrip", "ltrim:str"),
+            ("str_rstrip", "rtrim:str"),
+            ("str_len", "char_length:str"),
+            ("str_contains", "contains:str_str"),
+            ("str_startswith", "starts_with:str_str"),
+            ("str_endswith", "ends_with:str_str"),
+            ("str_replace", "replace:str_str_str"),
+            ("str_slice", "substring:str_i32_i32"),
+        ],
+    )
+    def test_string_func_substrait_name(self, ir_name, substrait_name):
+        from pandas.compile.compiler import (
+            FUNC_REGISTRY,
+            STRING_URI,
+        )
+
+        assert ir_name in FUNC_REGISTRY
+        name, uri = FUNC_REGISTRY[ir_name]
+        assert name == substrait_name
+        assert uri == STRING_URI
+
+    def test_string_func_compiles_to_substrait(self):
+        """A string function call compiles to a Substrait scalar function."""
+        expr = FunctionCall("str_upper", [ColRef("name")], return_dtype=DType.STRING)
+        node = AddColumn(self._make_base(), "upper_name", expr, DType.STRING)
+        compiler = SubstraitCompiler()
+        plan = compiler.compile(node)
+        # Should have STRING_URI in extension URIs
+        from pandas.compile.compiler import STRING_URI
+
+        uri_strs = [u.uri for u in plan.extension_uris]
+        assert STRING_URI in uri_strs
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +544,49 @@ class TestPandasBackend:
         result = backend.execute(node, tables)
         assert "row_id" in result.columns
         assert "id" not in result.columns
+
+    def test_singular_or_list(self, backend, tables, base_ir):
+        expr = SingularOrList(ColRef("region"), [Literal("E")])
+        node = Filter(base_ir, expr)
+        result = backend.execute(node, tables)
+        assert all(result["region"] == "E")
+
+    def test_cast_expr(self, backend, tables, base_ir):
+        expr = CastExpr(ColRef("price"), DType.FLOAT64)
+        node = AddColumn(base_ir, "price_f64", expr, DType.FLOAT64)
+        result = backend.execute(node, tables)
+        assert "price_f64" in result.columns
+        assert result["price_f64"].dtype == np.float64
+
+    def test_if_then_expr(self, backend, tables, base_ir):
+        expr = IfThenExpr(
+            BinOp("gt", ColRef("price"), Literal(200)),
+            ColRef("price"),
+            Literal(0),
+        )
+        node = AddColumn(base_ir, "clamped", expr, DType.INT64)
+        result = backend.execute(node, tables)
+        assert "clamped" in result.columns
+        # price > 200: keep price, else 0
+        for _, row in result.iterrows():
+            if row["price"] > 200:
+                assert row["clamped"] == row["price"]
+            else:
+                assert row["clamped"] == 0
+
+    def test_window_rolling(self, backend, tables, base_ir):
+        spec = WindowSpec(kind="rows", lower_offset=1, upper_offset=0)
+        node = Window(base_ir, [("price", "price", "sum")], spec)
+        result = backend.execute(node, tables)
+        assert "price" in result.columns
+        assert len(result) == 4
+
+    def test_window_expanding(self, backend, tables, base_ir):
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=0)
+        node = Window(base_ir, [("price", "price", "avg")], spec)
+        result = backend.execute(node, tables)
+        assert "price" in result.columns
+        assert len(result) == 4
 
     def test_missing_table_raises(self, backend, base_ir):
         with pytest.raises(KeyError, match="Table 't' not registered"):
@@ -585,6 +794,12 @@ class TestAceroBackend:
         result = backend.execute(node, tables)
         assert len(result) == 4
 
+    def test_singular_or_list(self, backend, tables, base_ir):
+        expr = SingularOrList(ColRef("region"), [Literal("E"), Literal("W")])
+        node = Filter(base_ir, expr)
+        result = backend.execute(node, tables)
+        assert len(result) == 4
+
     def test_sort_multiple_keys(self, backend, tables, base_ir):
         node = Sort(base_ir, [("region", True), ("price", False)])
         result = backend.execute(node, tables)
@@ -639,17 +854,369 @@ class TestAceroBackend:
 
 
 # ---------------------------------------------------------------------------
+# DataFusionBackend
+# ---------------------------------------------------------------------------
+
+datafusion = pytest.importorskip("datafusion")
+pytest.importorskip("datafusion.substrait")
+
+
+class TestDataFusionBackend:
+    @pytest.fixture
+    def backend(self):
+        return DataFusionBackend()
+
+    @pytest.fixture
+    def sample_df(self):
+        return DataFrame(
+            {
+                "id": [1, 2, 3, 4],
+                "region": ["E", "W", "E", "W"],
+                "price": [100.0, 250.0, 150.0, 300.0],
+            }
+        )
+
+    @pytest.fixture
+    def tables(self, sample_df):
+        return {"t": sample_df}
+
+    @pytest.fixture
+    def base_ir(self, sample_df):
+        return ReadTable("t", infer_schema(sample_df))
+
+    def test_name(self, backend):
+        assert backend.name == "datafusion"
+
+    def test_read(self, backend, tables, base_ir):
+        result = backend.execute(base_ir, tables)
+        assert len(result) == 4
+
+    def test_filter(self, backend, tables, base_ir):
+        node = Filter(base_ir, BinOp("gt", ColRef("price"), Literal(100.0)))
+        result = backend.execute(node, tables)
+        assert all(result["price"] > 100)
+
+    def test_project(self, backend, tables, base_ir):
+        node = Project(base_ir, ["id", "price"])
+        result = backend.execute(node, tables)
+        assert list(result.columns) == ["id", "price"]
+
+    def test_add_column(self, backend, tables, base_ir):
+        expr = BinOp("mul", ColRef("price"), Literal(2.0))
+        node = AddColumn(base_ir, "double", expr, DType.FLOAT64)
+        result = backend.execute(node, tables)
+        assert "double" in result.columns
+
+    def test_sort(self, backend, tables, base_ir):
+        node = Sort(base_ir, [("price", False)])
+        result = backend.execute(node, tables)
+        assert list(result["price"]) == [300.0, 250.0, 150.0, 100.0]
+
+    def test_limit(self, backend, tables, base_ir):
+        node = Limit(base_ir, 2)
+        result = backend.execute(node, tables)
+        assert len(result) == 2
+
+    def test_aggregate(self, backend, tables, base_ir):
+        node = Aggregate(
+            base_ir,
+            ["region"],
+            [("total", "price", "sum"), ("cnt", "id", "count")],
+        )
+        result = backend.execute(node, tables)
+        assert set(result.columns) == {"region", "total", "cnt"}
+        assert len(result) == 2
+
+    def test_join(self, backend, sample_df):
+        regions = DataFrame({"region": ["E", "W"], "mgr": ["Alice", "Bob"]})
+        tables = {"l": sample_df, "r": regions}
+        left_ir = ReadTable("l", infer_schema(sample_df))
+        right_ir = ReadTable("r", infer_schema(regions))
+        node = Join(left_ir, right_ir, "region", "region")
+        result = backend.execute(node, tables)
+        assert "mgr" in result.columns
+
+    def test_rename(self, backend, tables, base_ir):
+        node = RenameColumns(base_ir, {"price": "cost"})
+        result = backend.execute(node, tables)
+        assert "cost" in result.columns
+        assert "price" not in result.columns
+
+    def test_filter_is_null(self, backend):
+        df = DataFrame(
+            {
+                "x": [1.0, None, 3.0, None],
+                "y": ["a", "b", "c", "d"],
+            }
+        )
+        schema = infer_schema(df)
+        tables = {"t": df}
+        base = ReadTable("t", schema)
+        pred = UnaryOp("not", UnaryOp("is_null", ColRef("x")))
+        node = Filter(base, pred)
+        result = backend.execute(node, tables)
+        assert len(result) == 2
+        assert result["x"].notna().all()
+
+    def test_add_column_coalesce(self, backend):
+        df = DataFrame({"x": [1.0, None, 3.0, None]})
+        schema = infer_schema(df)
+        tables = {"t": df}
+        base = ReadTable("t", schema)
+        expr = BinOp("coalesce", ColRef("x"), Literal(0.0))
+        node = AddColumn(base, "x_filled", expr, DType.FLOAT64)
+        result = backend.execute(node, tables)
+        assert result["x_filled"].notna().all()
+        assert list(result["x_filled"]) == [1.0, 0.0, 3.0, 0.0]
+
+    def test_add_column_abs(self, backend, tables, base_ir):
+        expr = UnaryOp("abs", BinOp("sub", ColRef("price"), Literal(200.0)))
+        node = AddColumn(base_ir, "dist", expr, DType.FLOAT64)
+        result = backend.execute(node, tables)
+        assert "dist" in result.columns
+        assert all(result["dist"] >= 0)
+
+    def test_add_column_negate(self, backend, tables, base_ir):
+        expr = UnaryOp("negate", ColRef("price"))
+        node = AddColumn(base_ir, "neg_price", expr, DType.FLOAT64)
+        result = backend.execute(node, tables)
+        assert all(result["neg_price"] < 0)
+
+    def test_compound_filter(self, backend, tables, base_ir):
+        pred = BinOp(
+            "and",
+            BinOp("gt", ColRef("price"), Literal(100.0)),
+            BinOp("eq", ColRef("region"), Literal("E")),
+        )
+        node = Filter(base_ir, pred)
+        result = backend.execute(node, tables)
+        assert all(result["price"] > 100)
+        assert all(result["region"] == "E")
+
+    def test_filter_or(self, backend, tables, base_ir):
+        pred = BinOp(
+            "or",
+            BinOp("lt", ColRef("price"), Literal(150.0)),
+            BinOp("gt", ColRef("price"), Literal(250.0)),
+        )
+        node = Filter(base_ir, pred)
+        result = backend.execute(node, tables)
+        assert all((result["price"] < 150) | (result["price"] > 250))
+
+    def test_singular_or_list(self, backend, tables, base_ir):
+        expr = SingularOrList(ColRef("region"), [Literal("E"), Literal("W")])
+        node = Filter(base_ir, expr)
+        result = backend.execute(node, tables)
+        assert len(result) == 4
+
+    def test_sort_multiple_keys(self, backend, tables, base_ir):
+        node = Sort(base_ir, [("region", True), ("price", False)])
+        result = backend.execute(node, tables)
+        assert list(result["region"]) == ["E", "E", "W", "W"]
+        e_prices = list(result[result["region"] == "E"]["price"])
+        assert e_prices == sorted(e_prices, reverse=True)
+
+    def test_aggregate_mean(self, backend, tables, base_ir):
+        node = Aggregate(
+            base_ir,
+            ["region"],
+            [("avg_price", "price", "avg")],
+        )
+        result = backend.execute(node, tables)
+        assert "avg_price" in result.columns
+        assert len(result) == 2
+
+    def test_aggregate_min_max(self, backend, tables, base_ir):
+        node = Aggregate(
+            base_ir,
+            ["region"],
+            [("lo", "price", "min"), ("hi", "price", "max")],
+        )
+        result = backend.execute(node, tables)
+        assert set(result.columns) == {"region", "lo", "hi"}
+        for _, row in result.iterrows():
+            assert row["lo"] <= row["hi"]
+
+    def test_aggregate_std(self, backend, tables, base_ir):
+        node = Aggregate(
+            base_ir,
+            ["region"],
+            [("std_price", "price", "std")],
+        )
+        result = backend.execute(node, tables)
+        assert "std_price" in result.columns
+        assert len(result) == 2
+        assert all(result["std_price"] >= 0)
+
+    def test_aggregate_var(self, backend, tables, base_ir):
+        node = Aggregate(
+            base_ir,
+            ["region"],
+            [("var_price", "price", "var")],
+        )
+        result = backend.execute(node, tables)
+        assert "var_price" in result.columns
+        assert len(result) == 2
+        assert all(result["var_price"] >= 0)
+
+    def test_if_then_expr(self, backend, tables, base_ir):
+        expr = IfThenExpr(
+            BinOp("gt", ColRef("price"), Literal(200.0)),
+            ColRef("price"),
+            Literal(0.0),
+        )
+        node = AddColumn(base_ir, "clamped", expr, DType.FLOAT64)
+        result = backend.execute(node, tables)
+        assert "clamped" in result.columns
+        for _, row in result.iterrows():
+            if row["price"] > 200:
+                assert row["clamped"] == row["price"]
+            else:
+                assert row["clamped"] == 0.0
+
+    def test_cast_expr(self, backend, tables, base_ir):
+        expr = CastExpr(ColRef("price"), DType.INT64)
+        node = AddColumn(base_ir, "price_int", expr, DType.INT64)
+        result = backend.execute(node, tables)
+        assert "price_int" in result.columns
+
+    def test_window_rolling(self, backend, tables, base_ir):
+        spec = WindowSpec(kind="rows", lower_offset=1, upper_offset=0)
+        node = Window(base_ir, [("price", "price", "sum")], spec)
+        result = backend.execute(node, tables)
+        assert "price" in result.columns
+        assert len(result) == 4
+
+    def test_window_expanding(self, backend, tables, base_ir):
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=0)
+        node = Window(base_ir, [("price", "price", "avg")], spec)
+        result = backend.execute(node, tables)
+        assert "price" in result.columns
+        assert len(result) == 4
+
+
+# ---------------------------------------------------------------------------
 # default_backend
 # ---------------------------------------------------------------------------
 
 
-class TestDefaultBackend:
+class TestDefaultBackendSelection:
     def test_returns_backend_instance(self):
         backend = default_backend()
         assert isinstance(backend, Backend)
 
-    def test_returns_acero_when_pyarrow_available(self):
-        pytest.importorskip("pyarrow")
-        pytest.importorskip("pyarrow.substrait")
+    def test_default_backend_is_datafusion(self):
+        pytest.importorskip("datafusion")
+        pytest.importorskip("datafusion.substrait")
         backend = default_backend()
-        assert isinstance(backend, AceroBackend)
+        assert isinstance(backend, DataFusionBackend)
+
+
+# ---------------------------------------------------------------------------
+# ScalarSubquery — Substrait compilation + backend evaluation
+# ---------------------------------------------------------------------------
+
+
+class TestScalarSubquery:
+    @pytest.fixture
+    def schema(self):
+        return Schema(
+            {
+                "price": DType.INT64,
+                "region": DType.STRING,
+            }
+        )
+
+    @pytest.fixture
+    def base_ir(self, schema):
+        return ReadTable("t", schema)
+
+    @pytest.fixture
+    def tables(self, schema):
+        return {
+            "t": DataFrame(
+                {
+                    "price": [100, 250, 150, 300],
+                    "region": ["E", "W", "E", "W"],
+                }
+            )
+        }
+
+    def test_compile_scalar_subquery_in_expression(self, schema, base_ir):
+        """Verify ScalarSubquery compiles to Substrait Expression.Subquery.Scalar."""
+        agg_node = Aggregate(base_ir, [], [("price", "price", "sum")])
+        subquery = ScalarSubquery(agg_node, DType.INT64)
+        expr = BinOp("div", ColRef("price"), subquery)
+        node = AddColumn(base_ir, "pct", expr, DType.FLOAT64)
+
+        compiler = SubstraitCompiler()
+        plan = compiler.compile(node)
+
+        # The plan should have been built successfully
+        assert plan.SerializeToString()
+        # Check that we have extension functions registered (div, sum)
+        assert len(plan.extensions) >= 2
+
+    def test_pandas_backend_scalar_subquery(self, schema, base_ir, tables):
+        """PandasBackend correctly evaluates ScalarSubquery."""
+        agg_node = Aggregate(base_ir, [], [("price", "price", "sum")])
+        subquery = ScalarSubquery(agg_node, DType.INT64)
+        expr = BinOp("div", ColRef("price"), subquery)
+        node = AddColumn(base_ir, "pct", expr, DType.FLOAT64)
+
+        backend = PandasBackend()
+        result = backend.execute(node, tables)
+        expected = tables["t"]["price"] / tables["t"]["price"].sum()
+        tm.assert_series_equal(result["pct"], expected, check_names=False)
+
+    def test_datafusion_scalar_subquery(self):
+        """DataFusion executes scalar subquery plan correctly."""
+        pytest.importorskip("datafusion")
+        pytest.importorskip("datafusion.substrait")
+
+        # Use float data to avoid integer division
+        float_schema = Schema({"price": DType.FLOAT64, "region": DType.STRING})
+        float_ir = ReadTable("t", float_schema)
+        float_tables = {
+            "t": DataFrame(
+                {
+                    "price": [100.0, 250.0, 150.0, 300.0],
+                    "region": ["E", "W", "E", "W"],
+                }
+            )
+        }
+
+        agg_node = Aggregate(float_ir, [], [("price", "price", "sum")])
+        subquery = ScalarSubquery(agg_node, DType.FLOAT64)
+        expr = BinOp("div", ColRef("price"), subquery)
+        node = AddColumn(float_ir, "pct", expr, DType.FLOAT64)
+
+        backend = DataFusionBackend()
+        result = backend.execute(node, float_tables)
+        expected = float_tables["t"]["price"] / float_tables["t"]["price"].sum()
+        tm.assert_series_equal(result["pct"], expected, check_names=False)
+
+    def test_scalar_subquery_with_avg(self, schema, base_ir, tables):
+        """ScalarSubquery with avg aggregation."""
+        agg_node = Aggregate(base_ir, [], [("price", "price", "avg")])
+        subquery = ScalarSubquery(agg_node, DType.FLOAT64)
+        expr = BinOp("sub", ColRef("price"), subquery)
+        node = AddColumn(base_ir, "diff", expr, DType.FLOAT64)
+
+        backend = PandasBackend()
+        result = backend.execute(node, tables)
+        expected = tables["t"]["price"] - tables["t"]["price"].mean()
+        tm.assert_series_equal(result["diff"], expected, check_names=False)
+
+    def test_scalar_subquery_in_filter(self, schema, base_ir, tables):
+        """ScalarSubquery used in a filter predicate."""
+        agg_node = Aggregate(base_ir, [], [("price", "price", "avg")])
+        subquery = ScalarSubquery(agg_node, DType.FLOAT64)
+        pred = BinOp("gt", ColRef("price"), subquery)
+        node = Filter(base_ir, pred)
+
+        backend = PandasBackend()
+        result = backend.execute(node, tables)
+        avg = tables["t"]["price"].mean()
+        expected = tables["t"][tables["t"]["price"] > avg].reset_index(drop=True)
+        tm.assert_frame_equal(result, expected)

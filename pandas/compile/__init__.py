@@ -4,9 +4,10 @@ pandas.compile — JIT compilation for pandas operations.
 Public API:
     compile       Decorator for JIT-compiling pandas functions.
     Tracer        Context manager for tracing pandas operations.
-    Backend       Abstract backend base class.
-    AceroBackend  Execute IR via PyArrow's Acero engine (default when available).
-    PandasBackend Pure-pandas IR interpreter backend (fallback).
+    Backend            Abstract backend base class.
+    DataFusionBackend  Execute IR via Apache DataFusion (preferred when available).
+    AceroBackend       Execute IR via PyArrow's Acero engine.
+    PandasBackend      Pure-pandas IR interpreter backend (fallback).
     infer_schema  Infer IR Schema from a DataFrame.
 
 Power-user modules:
@@ -17,11 +18,17 @@ Power-user modules:
 from pandas.compile.compiler import (
     AceroBackend,
     Backend,
+    CompiledStage,
+    ConnectedPlan,
+    DataFusionBackend,
+    GraphBreakStage,
     PandasBackend,
+    StageSchema,
     infer_schema,
 )
 from pandas.compile.jit import (
     CompiledFunction,
+    DeferredScalar,
     Tracer,
     compile,
 )
@@ -30,7 +37,13 @@ __all__ = [
     "AceroBackend",
     "Backend",
     "CompiledFunction",
+    "CompiledStage",
+    "ConnectedPlan",
+    "DataFusionBackend",
+    "DeferredScalar",
+    "GraphBreakStage",
     "PandasBackend",
+    "StageSchema",
     "Tracer",
     "compile",
     "infer_schema",

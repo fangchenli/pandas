@@ -298,6 +298,60 @@ class Join(IRNode):
         return Schema(cols)
 
 
+@dataclass
+class WindowSpec:
+    """Window frame specification."""
+
+    kind: str = "rows"  # "rows" or "range"
+    lower_offset: int | None = None  # None = unbounded
+    upper_offset: int = 0  # 0 = current row
+
+
+class Window(IRNode):
+    """Window function computation (rolling / expanding)."""
+
+    def __init__(
+        self,
+        input: IRNode,
+        window_funcs: list[tuple[str, str, str]],
+        window_spec: WindowSpec,
+        partition_by: list[str] | None = None,
+        order_by: list[tuple[str, bool]] | None = None,
+    ):
+        # window_funcs: list of (out_name, src_col, func)
+        self.input = input
+        self.window_funcs = window_funcs
+        self.window_spec = window_spec
+        self.partition_by = partition_by or []
+        self.order_by = order_by or []
+
+    def output_schema(self) -> Schema:
+        parent = self.input.output_schema()
+        cols: dict[str, DType] = {}
+        func_output_cols = {out: (src, func) for out, src, func in self.window_funcs}
+        for col_name, dtype in parent.columns.items():
+            if col_name in func_output_cols:
+                _, func = func_output_cols[col_name]
+                if func in ("avg", "mean", "std", "var"):
+                    cols[col_name] = DType.FLOAT64
+                elif func == "count":
+                    cols[col_name] = DType.INT64
+                else:
+                    cols[col_name] = dtype
+            else:
+                cols[col_name] = dtype
+        # Add any new output columns not already in parent
+        for out_name, src_col, func in self.window_funcs:
+            if out_name not in cols:
+                if func in ("avg", "mean", "std", "var"):
+                    cols[out_name] = DType.FLOAT64
+                elif func == "count":
+                    cols[out_name] = DType.INT64
+                else:
+                    cols[out_name] = parent.columns.get(src_col, DType.FLOAT64)
+        return Schema(cols)
+
+
 class RenameColumns(IRNode):
     """Rename columns (maps to Project with renamed outputs in Substrait)."""
 
@@ -401,6 +455,35 @@ class UnaryOp(Expr):
         self.operand = operand
 
 
+class IfThenExpr(Expr):
+    """Conditional expression: IF condition THEN then_expr ELSE else_expr."""
+
+    def __init__(self, condition: Expr, then_expr: Expr, else_expr: Expr):
+        self.condition = condition
+        self.then_expr = then_expr
+        self.else_expr = else_expr
+
+
+class CastExpr(Expr):
+    """Cast an expression to a target DType."""
+
+    def __init__(self, input: Expr, target_dtype: DType):
+        self.input = input
+        self.target_dtype = target_dtype
+
+
+class SingularOrList(Expr):
+    """IN-list expression: value IN (option1, option2, ...).
+
+    More efficient than OR(eq, eq, ...) chains — maps directly to
+    Substrait's SingularOrList expression.
+    """
+
+    def __init__(self, value: Expr, options: list[Expr]):
+        self.value = value
+        self.options = options
+
+
 class FunctionCall(Expr):
     """Named function call with arguments and options.
 
@@ -419,6 +502,21 @@ class FunctionCall(Expr):
         self.args = args
         self.options = options or {}
         self.return_dtype = return_dtype
+
+
+@dataclass
+class ScalarSubquery(Expr):
+    """A single-row, single-column subquery used as a scalar expression.
+
+    Wraps an Aggregate IR node (with no group_keys) so that the
+    aggregation result can be used inline in arithmetic expressions
+    without triggering a graph break.
+
+    Maps to Substrait's ``Expression.Subquery.Scalar``.
+    """
+
+    agg_node: IRNode  # Aggregate with no group_keys
+    dtype: DType
 
 
 def _wrap_literal(v):
@@ -478,6 +576,23 @@ def explain_ir(ir: IRNode, indent: int = 0) -> str:
             left_str = explain_ir(left, indent + 1)
             right_str = explain_ir(right, indent + 1)
             return f"{prefix}Join({how}, {lo}={ro})\n{left_str}\n{right_str}"
+        case Window(
+            input=inp,
+            window_funcs=funcs,
+            window_spec=spec,
+            partition_by=part,
+            order_by=order,
+        ):
+            child = explain_ir(inp, indent + 1)
+            funcs_str = ", ".join(f"{o}={f}({s})" for o, s, f in funcs)
+            frame = "UNBOUNDED" if spec.lower_offset is None else str(spec.lower_offset)
+            parts = [f"funcs=[{funcs_str}]", f"frame={frame}..{spec.upper_offset}"]
+            if part:
+                parts.append(f"partition=[{', '.join(part)}]")
+            if order:
+                order_str = ", ".join(f"{k} {'ASC' if a else 'DESC'}" for k, a in order)
+                parts.append(f"order=[{order_str}]")
+            return f"{prefix}Window({', '.join(parts)})\n{child}"
         case RenameColumns(input=inp, mapping=mapping):
             child = explain_ir(inp, indent + 1)
             map_str = ", ".join(f"{k}->{v}" for k, v in mapping.items())
@@ -497,11 +612,23 @@ def explain_expr(expr: Expr) -> str:
             return f"({explain_expr(left)} {sym} {explain_expr(right)})"
         case UnaryOp(op=op, operand=operand):
             return f"{op}({explain_expr(operand)})"
+        case IfThenExpr(condition=cond, then_expr=then, else_expr=els):
+            return (
+                f"IF({explain_expr(cond)}, {explain_expr(then)}, {explain_expr(els)})"
+            )
+        case CastExpr(input=inp, target_dtype=dtype):
+            return f"CAST({explain_expr(inp)} AS {dtype.name})"
+        case SingularOrList(value=value, options=opts):
+            val_str = explain_expr(value)
+            opts_str = ", ".join(explain_expr(o) for o in opts)
+            return f"{val_str} IN ({opts_str})"
         case FunctionCall(func_name=name, args=args, options=opts):
             args_str = ", ".join(explain_expr(a) for a in args)
             if opts:
                 opts_str = ", ".join(f"{k}={v}" for k, v in opts.items())
                 return f"{name}({args_str}, {opts_str})"
             return f"{name}({args_str})"
+        case ScalarSubquery(agg_node=agg, dtype=dtype):
+            return f"SCALAR_SUBQUERY({explain_ir(agg)}, {dtype.name})"
         case _:
             return "?"

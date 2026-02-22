@@ -11,9 +11,11 @@ from pandas.compile.ir import (
     AddColumn,
     Aggregate,
     BinOp,
+    CastExpr,
     ColRef,
     DType,
     Filter,
+    IfThenExpr,
     IRNode,
     Join,
     Limit,
@@ -22,8 +24,11 @@ from pandas.compile.ir import (
     ReadTable,
     RenameColumns,
     Schema,
+    SingularOrList,
     Sort,
     UnaryOp,
+    Window,
+    WindowSpec,
     _wrap_literal,
     explain_expr,
     explain_ir,
@@ -289,6 +294,45 @@ class TestJoin:
         assert set(schema.columns.keys()) == {"id", "val", "label"}
 
 
+class TestWindow:
+    def test_rolling_output_schema(self):
+        base = ReadTable("t", _sample_schema())
+        spec = WindowSpec(kind="rows", lower_offset=2, upper_offset=0)
+        node = Window(base, [("price", "price", "sum")], spec)
+        schema = node.output_schema()
+        # sum preserves source dtype (FLOAT64)
+        assert schema.columns["price"] is DType.FLOAT64
+
+    def test_expanding_output_schema(self):
+        base = ReadTable("t", _sample_schema())
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=0)
+        node = Window(base, [("price", "price", "avg")], spec)
+        schema = node.output_schema()
+        assert schema.columns["price"] is DType.FLOAT64
+
+    def test_count_output_schema(self):
+        base = ReadTable("t", _sample_schema())
+        spec = WindowSpec(kind="rows", lower_offset=1, upper_offset=0)
+        node = Window(base, [("price", "price", "count")], spec)
+        schema = node.output_schema()
+        assert schema.columns["price"] is DType.INT64
+
+    def test_explain_rolling(self):
+        base = ReadTable("t", Schema({"x": DType.INT64}))
+        spec = WindowSpec(kind="rows", lower_offset=2, upper_offset=0)
+        node = Window(base, [("x", "x", "sum")], spec)
+        result = explain_ir(node)
+        assert "Window" in result
+        assert "frame=2..0" in result
+
+    def test_explain_expanding(self):
+        base = ReadTable("t", Schema({"x": DType.INT64}))
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=0)
+        node = Window(base, [("x", "x", "sum")], spec)
+        result = explain_ir(node)
+        assert "UNBOUNDED" in result
+
+
 class TestRenameColumns:
     def test_renames(self):
         base = ReadTable("t", Schema({"a": DType.INT64, "b": DType.STRING}))
@@ -361,6 +405,51 @@ class TestBinOp:
         assert combined.op == "and"
         combined_or = left | right
         assert combined_or.op == "or"
+
+
+class TestIfThenExpr:
+    def test_creation(self):
+        expr = IfThenExpr(
+            BinOp("gt", ColRef("x"), Literal(0)),
+            ColRef("x"),
+            Literal(-1),
+        )
+        assert isinstance(expr, IfThenExpr)
+        assert isinstance(expr.condition, BinOp)
+
+    def test_explain(self):
+        expr = IfThenExpr(
+            BinOp("gt", ColRef("x"), Literal(0)),
+            ColRef("x"),
+            Literal(-1),
+        )
+        result = explain_expr(expr)
+        assert result == "IF(($x > 0), $x, -1)"
+
+
+class TestCastExpr:
+    def test_creation(self):
+        expr = CastExpr(ColRef("x"), DType.FLOAT64)
+        assert isinstance(expr, CastExpr)
+        assert expr.target_dtype is DType.FLOAT64
+
+    def test_explain(self):
+        expr = CastExpr(ColRef("x"), DType.INT32)
+        result = explain_expr(expr)
+        assert result == "CAST($x AS INT32)"
+
+
+class TestSingularOrList:
+    def test_creation(self):
+        expr = SingularOrList(ColRef("x"), [Literal(1), Literal(2), Literal(3)])
+        assert isinstance(expr, SingularOrList)
+        assert isinstance(expr.value, ColRef)
+        assert len(expr.options) == 3
+
+    def test_explain(self):
+        expr = SingularOrList(ColRef("x"), [Literal(1), Literal(2)])
+        result = explain_expr(expr)
+        assert result == "$x IN (1, 2)"
 
 
 class TestWrapLiteral:

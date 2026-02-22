@@ -41,10 +41,14 @@ import pandas as pd
 from pandas.compile.compiler import (
     Backend,
     CompiledSegment,
+    CompiledStage,
+    ConnectedPlan,
     EagerSegment,
     ExecutionPlan,
+    GraphBreakStage,
     PandasBackend,
     SchemaGuard,
+    StageSchema,
     SubstraitCompiler,
     default_backend,
     infer_schema,
@@ -54,11 +58,13 @@ from pandas.compile.ir import (
     AddColumn,
     Aggregate,
     BinOp,
+    CastExpr,
     ColRef,
     DType,
     Expr,
     Filter,
     FunctionCall,
+    IfThenExpr,
     IRNode,
     Join,
     Limit,
@@ -66,11 +72,16 @@ from pandas.compile.ir import (
     Project,
     ReadTable,
     RenameColumns,
+    ScalarSubquery,
     Schema,
+    SingularOrList,
     Sort,
     UnaryOp,
+    Window,
+    WindowSpec,
     explain_expr,
     explain_ir,
+    pandas_dtype_to_ir,
 )
 
 log = logging.getLogger("pandas.compile")
@@ -83,13 +94,107 @@ log = logging.getLogger("pandas.compile")
 
 def _to_expr(value) -> Expr:
     """Convert a Python value or TracedSeries to an Expr."""
-    if isinstance(value, TracedSeries):
+    if isinstance(value, DeferredScalar):
+        return value._expr
+    elif isinstance(value, TracedSeries):
         return value._expr
     elif isinstance(value, Expr):
         return value
     elif isinstance(value, (int, float, str, bool)):
         return Literal(value)
     raise TypeError(f"Cannot convert {type(value)} to expression")
+
+
+_SENTINEL = object()
+
+
+class DeferredScalar:
+    """
+    A lazy scalar that wraps a deferred aggregation.
+
+    When used in arithmetic with TracedSeries (e.g. ``series / total``),
+    it produces a ``ScalarSubquery`` expression in the IR, avoiding a
+    graph break. When Python needs the actual value (bool, comparison,
+    control flow), it materializes.
+    """
+
+    def __init__(
+        self,
+        ctx: TraceContext,
+        source_ir: IRNode,
+        column_name: str,
+        agg_func: str,
+        dtype: DType,
+    ):
+        self._ctx = ctx
+        self._source_ir = source_ir
+        self._column_name = column_name
+        self._agg_func = agg_func
+        self._dtype = dtype
+        self._materialized = _SENTINEL
+
+    @property
+    def _expr(self) -> ScalarSubquery:
+        agg_node = Aggregate(
+            self._source_ir,
+            [],
+            [(self._column_name, self._column_name, self._agg_func)],
+        )
+        return ScalarSubquery(agg_node, self._dtype)
+
+    def _materialize(self):
+        if self._materialized is not _SENTINEL:
+            return self._materialized
+        _, df = self._ctx.materialize(self._source_ir)
+        agg_map = {
+            "sum": "sum",
+            "avg": "mean",
+            "mean": "mean",
+            "min": "min",
+            "max": "max",
+            "count": "count",
+            "std": "std",
+            "var": "var",
+        }
+        self._materialized = getattr(df[self._column_name], agg_map[self._agg_func])()
+        return self._materialized
+
+    # Python protocol: force materialization
+    def __bool__(self):
+        return bool(self._materialize())
+
+    def __int__(self):
+        return int(self._materialize())
+
+    def __float__(self):
+        return float(self._materialize())
+
+    def __gt__(self, other):
+        return self._materialize() > other
+
+    def __ge__(self, other):
+        return self._materialize() >= other
+
+    def __lt__(self, other):
+        return self._materialize() < other
+
+    def __le__(self, other):
+        return self._materialize() <= other
+
+    def __eq__(self, other):
+        return self._materialize() == other
+
+    def __ne__(self, other):
+        return self._materialize() != other
+
+    def item(self):
+        return self._materialize()
+
+    def __repr__(self):
+        return (
+            f"DeferredScalar({self._agg_func}({self._column_name}), "
+            f"dtype={self._dtype.name})"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +288,9 @@ class TraceContext:
         self._segment_counter += 1
         return self._segment_counter
 
-    def materialize(self, ir_node: IRNode) -> tuple[str, pd.DataFrame]:
+    def materialize(
+        self, ir_node: IRNode, reason: str = ""
+    ) -> tuple[str, pd.DataFrame]:
         """
         Compile and execute the IR up to this point.
         This is the GRAPH BREAK mechanism.
@@ -216,12 +323,14 @@ class TraceContext:
         fn: Callable,
         input_tables: list[str],
         output_names: list[str],
+        reason: str = "",
     ):
         seg = EagerSegment(
             operation=operation,
             fn=fn,
             input_tables=input_tables,
             output_names=output_names,
+            reason=reason,
         )
         self.segments.append(seg)
 
@@ -244,6 +353,28 @@ class TraceContext:
         elif hasattr(node, "left") and hasattr(node, "right"):
             self._walk_reads(node.left, acc)
             self._walk_reads(node.right, acc)
+        # Walk expressions for embedded ScalarSubquery references
+        if isinstance(node, (Filter, AddColumn)):
+            expr = node.predicate if isinstance(node, Filter) else node.expr
+            self._walk_expr_reads(expr, acc)
+
+    def _walk_expr_reads(self, expr, acc: list[str]):
+        if isinstance(expr, ScalarSubquery):
+            self._walk_reads(expr.agg_node, acc)
+        elif isinstance(expr, BinOp):
+            self._walk_expr_reads(expr.left, acc)
+            self._walk_expr_reads(expr.right, acc)
+        elif isinstance(expr, UnaryOp):
+            self._walk_expr_reads(expr.operand, acc)
+        elif isinstance(expr, IfThenExpr):
+            self._walk_expr_reads(expr.condition, acc)
+            self._walk_expr_reads(expr.then_expr, acc)
+            self._walk_expr_reads(expr.else_expr, acc)
+        elif isinstance(expr, CastExpr):
+            self._walk_expr_reads(expr.input, acc)
+        elif isinstance(expr, FunctionCall):
+            for arg in expr.args:
+                self._walk_expr_reads(arg, acc)
 
 
 # ---------------------------------------------------------------------------
@@ -337,25 +468,25 @@ class TracedSeries:
         return self._materialize_scalar()
 
     def sum(self):
-        return self._materialize_agg("sum")
+        return self._deferred_agg("sum", self._dtype)
 
     def mean(self):
-        return self._materialize_agg("avg")
+        return self._deferred_agg("avg", DType.FLOAT64)
 
     def min(self):
-        return self._materialize_agg("min")
+        return self._deferred_agg("min", self._dtype)
 
     def max(self):
-        return self._materialize_agg("max")
+        return self._deferred_agg("max", self._dtype)
 
     def count(self):
-        return self._materialize_agg("count")
+        return self._deferred_agg("count", DType.INT64)
 
     def std(self):
-        return self._materialize_agg("std")
+        return self._deferred_agg("std", DType.FLOAT64)
 
     def var(self):
-        return self._materialize_agg("var")
+        return self._deferred_agg("var", DType.FLOAT64)
 
     # -- Non-materializing pandas methods --
 
@@ -367,11 +498,8 @@ class TracedSeries:
                 expr=Literal(False, DType.BOOL),
                 dtype=DType.BOOL,
             )
-        exprs = [BinOp("eq", self._expr, Literal(v)) for v in values]
-        combined = exprs[0]
-        for e in exprs[1:]:
-            combined = BinOp("or", combined, e)
-        return TracedSeries(self._ctx, self._source_ir, expr=combined, dtype=DType.BOOL)
+        expr = SingularOrList(self._expr, [Literal(v) for v in values])
+        return TracedSeries(self._ctx, self._source_ir, expr=expr, dtype=DType.BOOL)
 
     def isna(self) -> TracedSeries:
         return TracedSeries(
@@ -488,6 +616,10 @@ class TracedSeries:
             expr=BinOp(op, self._expr, _to_expr(other)),
             dtype=result_dtype,
         )
+
+    def _deferred_agg(self, func, result_dtype):
+        col = self._column_name or next(iter(self._source_ir.output_schema().columns))
+        return DeferredScalar(self._ctx, self._source_ir, col, func, result_dtype)
 
     def _materialize_scalar(self):
         _, df = self._ctx.materialize(self._source_ir)
@@ -660,7 +792,7 @@ class TracedStringAccessor:
 
 
 class TracedRolling:
-    """Proxy for DataFrame.rolling() — graph-breaks on aggregation."""
+    """Proxy for DataFrame.rolling() — builds Window IR node."""
 
     def __init__(self, ctx, source_ir, window, **kwargs):
         self._ctx = ctx
@@ -669,15 +801,27 @@ class TracedRolling:
         self._kwargs = kwargs
 
     def _apply(self, method, **method_kwargs):
-        _, df = self._ctx.materialize(self._source_ir)
-        result = getattr(df.rolling(self._window, **self._kwargs), method)(
-            **method_kwargs
-        )
-        if isinstance(result, pd.DataFrame):
-            name = self._ctx.next_materialized_name()
-            self._ctx.register_table(name, result)
-            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
-        return result
+        schema = self._source_ir.output_schema()
+        numeric_cols = [
+            col for col, dtype in schema.columns.items() if dtype in NUMERIC_DTYPES
+        ]
+        if not numeric_cols:
+            # No numeric columns — fall back to graph break
+            _, df = self._ctx.materialize(self._source_ir)
+            result = getattr(df.rolling(self._window, **self._kwargs), method)(
+                **method_kwargs
+            )
+            if isinstance(result, pd.DataFrame):
+                name = self._ctx.next_materialized_name()
+                self._ctx.register_table(name, result)
+                return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+            return result
+
+        func = {"mean": "avg"}.get(method, method)
+        window_funcs = [(col, col, func) for col in numeric_cols]
+        spec = WindowSpec(kind="rows", lower_offset=self._window - 1, upper_offset=0)
+        node = Window(self._source_ir, window_funcs, spec)
+        return TracedDataFrame(self._ctx, node)
 
     def mean(self, **kwargs):
         return self._apply("mean", **kwargs)
@@ -702,7 +846,7 @@ class TracedRolling:
 
 
 class TracedExpanding:
-    """Proxy for DataFrame.expanding() — graph-breaks on aggregation."""
+    """Proxy for DataFrame.expanding() — builds Window IR node."""
 
     def __init__(self, ctx, source_ir, **kwargs):
         self._ctx = ctx
@@ -710,13 +854,24 @@ class TracedExpanding:
         self._kwargs = kwargs
 
     def _apply(self, method, **method_kwargs):
-        _, df = self._ctx.materialize(self._source_ir)
-        result = getattr(df.expanding(**self._kwargs), method)(**method_kwargs)
-        if isinstance(result, pd.DataFrame):
-            name = self._ctx.next_materialized_name()
-            self._ctx.register_table(name, result)
-            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
-        return result
+        schema = self._source_ir.output_schema()
+        numeric_cols = [
+            col for col, dtype in schema.columns.items() if dtype in NUMERIC_DTYPES
+        ]
+        if not numeric_cols:
+            _, df = self._ctx.materialize(self._source_ir)
+            result = getattr(df.expanding(**self._kwargs), method)(**method_kwargs)
+            if isinstance(result, pd.DataFrame):
+                name = self._ctx.next_materialized_name()
+                self._ctx.register_table(name, result)
+                return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+            return result
+
+        func = {"mean": "avg"}.get(method, method)
+        window_funcs = [(col, col, func) for col in numeric_cols]
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=0)
+        node = Window(self._source_ir, window_funcs, spec)
+        return TracedDataFrame(self._ctx, node)
 
     def mean(self, **kwargs):
         return self._apply("mean", **kwargs)
@@ -1217,13 +1372,58 @@ class TracedDataFrame:
         return result
 
     def astype(self, dtype) -> TracedDataFrame:
-        df = self._materialize()
-        result = df.astype(dtype)
-        name = self._ctx.next_materialized_name()
-        self._ctx.register_table(name, result)
-        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        schema = self._ir.output_schema()
+        if isinstance(dtype, dict):
+            cast_map = dtype
+        elif isinstance(dtype, str):
+            cast_map = dict.fromkeys(schema.column_names(), dtype)
+        else:
+            # Unsupported dtype form — fall back to graph break
+            df = self._materialize()
+            result = df.astype(dtype)
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+        ir = self._ir
+        for col_name, target_str in cast_map.items():
+            if col_name not in schema.columns:
+                continue
+            target_dtype = pandas_dtype_to_ir(str(target_str))
+            # If the dtype maps to STRING (unknown), fall back to graph break
+            if target_dtype == DType.STRING and str(target_str) not in (
+                "object",
+                "string",
+                "str",
+                "string[python]",
+                "string[pyarrow]",
+            ):
+                df = self._materialize()
+                result = df.astype(dtype)
+                name = self._ctx.next_materialized_name()
+                self._ctx.register_table(name, result)
+                return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+            ir = AddColumn(
+                ir, col_name, CastExpr(ColRef(col_name), target_dtype), target_dtype
+            )
+        return TracedDataFrame(self._ctx, ir)
 
     def where(self, cond, other=None, **kwargs) -> TracedDataFrame:
+        if isinstance(cond, TracedSeries) and isinstance(
+            other, (int, float, str, bool, type(None))
+        ):
+            other_val = other if other is not None else float("nan")
+            schema = self._ir.output_schema()
+            ir = self._ir
+            for col_name, dtype in schema.columns.items():
+                ir = AddColumn(
+                    ir,
+                    col_name,
+                    IfThenExpr(cond._expr, ColRef(col_name), Literal(other_val)),
+                    dtype,
+                )
+            return TracedDataFrame(self._ctx, ir)
+        # Fall back to graph break for complex conditions
         df = self._materialize()
         if isinstance(cond, TracedDataFrame):
             cond = cond._materialize()
@@ -1233,6 +1433,22 @@ class TracedDataFrame:
         return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
 
     def mask(self, cond, other=None, **kwargs) -> TracedDataFrame:
+        if isinstance(cond, TracedSeries) and isinstance(
+            other, (int, float, str, bool, type(None))
+        ):
+            other_val = other if other is not None else float("nan")
+            inverted = UnaryOp("not", cond._expr)
+            schema = self._ir.output_schema()
+            ir = self._ir
+            for col_name, dtype in schema.columns.items():
+                ir = AddColumn(
+                    ir,
+                    col_name,
+                    IfThenExpr(inverted, ColRef(col_name), Literal(other_val)),
+                    dtype,
+                )
+            return TracedDataFrame(self._ctx, ir)
+        # Fall back to graph break for complex conditions
         df = self._materialize()
         if isinstance(cond, TracedDataFrame):
             cond = cond._materialize()
@@ -1420,6 +1636,43 @@ def _extract_substrait_plans(ctx: TraceContext) -> list[Any]:
     return plans
 
 
+def _build_connected_plan(ctx: TraceContext) -> ConnectedPlan:
+    """Build a ConnectedPlan from a TraceContext with full metadata."""
+    stages: list[CompiledStage | GraphBreakStage] = []
+    for i, seg in enumerate(ctx.segments):
+        if isinstance(seg, CompiledSegment):
+            compiler = SubstraitCompiler()
+            plan = compiler.compile(seg.ir_node)
+            plan_bytes = plan.SerializeToString()
+            out_schema = seg.ir_node.output_schema()
+            stage_schema = StageSchema(
+                table_name=seg.output_table,
+                columns={c: d.name for c, d in out_schema.columns.items()},
+            )
+            stages.append(
+                CompiledStage(
+                    index=i,
+                    plan=plan,
+                    plan_bytes=plan_bytes,
+                    input_tables=seg.input_tables,
+                    output_table=seg.output_table,
+                    output_schema=stage_schema,
+                    description=seg.description,
+                )
+            )
+        elif isinstance(seg, EagerSegment):
+            stages.append(
+                GraphBreakStage(
+                    index=i,
+                    reason=seg.reason or seg.operation,
+                    input_tables=seg.input_tables,
+                    output_tables=seg.output_names,
+                )
+            )
+    final = f"__mat_{ctx._mat_counter}" if ctx._mat_counter > 0 else ""
+    return ConnectedPlan(stages=stages, final_output=final)
+
+
 def _plans_to_json(plans: list[Any]) -> str:
     """Serialize a list of Substrait Plan protobufs to a JSON string."""
     from google.protobuf.json_format import MessageToJson
@@ -1499,6 +1752,8 @@ class CompiledFunction:
         if isinstance(result, TracedDataFrame):
             final_name, result_df = ctx.materialize(result._ir)
             plan = ctx.build_plan(final_output=final_name)
+        elif isinstance(result, DeferredScalar):
+            return result._materialize()
         elif isinstance(result, pd.DataFrame):
             result_df = result
             final_name = ctx.next_materialized_name()
@@ -1616,6 +1871,27 @@ class CompiledFunction:
         """
         plans = self.to_substrait(*sample_args, **kwargs)
         return _plans_to_json(plans)
+
+    def to_connected_plan(self, *sample_args: Any, **kwargs: Any) -> ConnectedPlan:
+        """
+        Export a ConnectedPlan with full metadata.
+
+        Returns a linked DAG of compiled stages and graph break stages
+        with schemas, connections, and break reasons.
+
+        Parameters
+        ----------
+        *sample_args : positional arguments
+            Sample inputs (DataFrames and scalars) for tracing.
+        **kwargs : keyword arguments
+            Additional keyword arguments passed to the function.
+
+        Returns
+        -------
+        ConnectedPlan
+        """
+        ctx = self.trace(*sample_args, **kwargs)
+        return _build_connected_plan(ctx)
 
 
 @overload
@@ -1749,3 +2025,13 @@ class Tracer:
             JSON representation of all Substrait plans.
         """
         return _plans_to_json(self.to_substrait())
+
+    def to_connected_plan(self) -> ConnectedPlan:
+        """
+        Export a ConnectedPlan with full metadata.
+
+        Returns
+        -------
+        ConnectedPlan
+        """
+        return _build_connected_plan(self._ctx)

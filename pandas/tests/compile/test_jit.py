@@ -2,25 +2,34 @@
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
 import pandas as pd
 from pandas import DataFrame
+import pandas._testing as tm
 from pandas.compile.compiler import (
+    CompiledSegment,
+    CompiledStage,
+    ConnectedPlan,
     PandasBackend,
     infer_schema,
 )
 from pandas.compile.ir import (
     AddColumn,
     BinOp,
+    ColRef,
     DType,
     Filter,
     Project,
     ReadTable,
+    ScalarSubquery,
     Sort,
 )
 from pandas.compile.jit import (
+    DeferredScalar,
     TraceContext,
     TracedDataFrame,
     TracedSeries,
@@ -364,7 +373,10 @@ class TestDefaultBackendSelection:
     def test_default_backend_is_acero(self):
         pytest.importorskip("pyarrow")
         pytest.importorskip("pyarrow.substrait")
-        from pandas.compile.compiler import AceroBackend
+        from pandas.compile.compiler import (
+            AceroBackend,
+            DataFusionBackend,
+        )
 
         @compile
         def f(df):
@@ -373,4 +385,263 @@ class TestDefaultBackendSelection:
         df = DataFrame({"price": [100, 250, 150, 300]})
         result = f(df)
         assert isinstance(result, DataFrame)
-        assert isinstance(f._backend, AceroBackend)
+        assert isinstance(f._backend, (AceroBackend, DataFusionBackend))
+
+
+# ---------------------------------------------------------------------------
+# DeferredScalar — lazy aggregation proxies
+# ---------------------------------------------------------------------------
+
+
+class TestDeferredScalar:
+    @pytest.fixture
+    def ctx(self):
+        return TraceContext(PandasBackend())
+
+    @pytest.fixture
+    def sample_df(self):
+        return DataFrame(
+            {"price": [100, 250, 150, 300], "region": ["E", "W", "E", "W"]}
+        )
+
+    def test_sum_returns_deferred(self, ctx, sample_df):
+        schema = infer_schema(sample_df)
+        ctx.register_table("t", sample_df)
+        traced = TracedDataFrame(ctx, ReadTable("t", schema))
+        result = traced["price"].sum()
+        assert isinstance(result, DeferredScalar)
+
+    def test_mean_returns_deferred(self, ctx, sample_df):
+        schema = infer_schema(sample_df)
+        ctx.register_table("t", sample_df)
+        traced = TracedDataFrame(ctx, ReadTable("t", schema))
+        result = traced["price"].mean()
+        assert isinstance(result, DeferredScalar)
+
+    def test_deferred_bool_materializes(self, ctx, sample_df):
+        schema = infer_schema(sample_df)
+        ctx.register_table("t", sample_df)
+        traced = TracedDataFrame(ctx, ReadTable("t", schema))
+        total = traced["price"].sum()
+        assert bool(total)
+        assert total._materialized is not object  # sentinel cleared
+
+    def test_deferred_comparison_materializes(self, ctx, sample_df):
+        schema = infer_schema(sample_df)
+        ctx.register_table("t", sample_df)
+        traced = TracedDataFrame(ctx, ReadTable("t", schema))
+        total = traced["price"].sum()
+        assert total > 500
+
+    def test_deferred_item(self, ctx, sample_df):
+        schema = infer_schema(sample_df)
+        ctx.register_table("t", sample_df)
+        traced = TracedDataFrame(ctx, ReadTable("t", schema))
+        total = traced["price"].sum()
+        assert total.item() == 800
+
+    def test_deferred_int_float(self, ctx, sample_df):
+        schema = infer_schema(sample_df)
+        ctx.register_table("t", sample_df)
+        traced = TracedDataFrame(ctx, ReadTable("t", schema))
+        total = traced["price"].sum()
+        assert int(total) == 800
+        assert float(total) == 800.0
+
+    def test_deferred_in_arithmetic_no_graph_break(self, ctx, sample_df):
+        schema = infer_schema(sample_df)
+        ctx.register_table("t", sample_df)
+        traced = TracedDataFrame(ctx, ReadTable("t", schema))
+        total = traced["price"].sum()
+        # Using deferred in arithmetic should NOT trigger materialization
+        pct = traced["price"] / total
+        assert isinstance(pct, TracedSeries)
+        assert isinstance(pct._expr, BinOp)
+        # No segments should have been created
+        assert len(ctx.segments) == 0
+
+    def test_deferred_assign_no_break(self, ctx, sample_df):
+        schema = infer_schema(sample_df)
+        ctx.register_table("t", sample_df)
+        traced = TracedDataFrame(ctx, ReadTable("t", schema))
+        traced["pct"] = traced["price"] / traced["price"].sum()
+        # Should be pure IR with no graph breaks
+        assert len(ctx.segments) == 0
+
+    def test_deferred_correctness_end_to_end(self, sample_df):
+        @compile(backend=PandasBackend())
+        def f(df):
+            df["pct"] = df["price"] / df["price"].sum()
+            return df
+
+        result = f(sample_df)
+        expected = sample_df.copy()
+        expected["pct"] = expected["price"] / expected["price"].sum()
+        tm.assert_frame_equal(result, expected)
+
+    def test_deferred_reduces_segments(self, sample_df):
+        """Without DeferredScalar this would need 2+ segments."""
+
+        @compile(backend=PandasBackend())
+        def f(df):
+            df["pct"] = df["price"] / df["price"].sum()
+            return df
+
+        ctx = f.trace(sample_df)
+        # The final materialize at return creates 1 segment
+        compiled = [s for s in ctx.segments if isinstance(s, CompiledSegment)]
+        assert len(compiled) == 1
+
+    def test_deferred_expr_is_scalar_subquery(self, ctx, sample_df):
+        schema = infer_schema(sample_df)
+        ctx.register_table("t", sample_df)
+        traced = TracedDataFrame(ctx, ReadTable("t", schema))
+        total = traced["price"].sum()
+        assert isinstance(total._expr, ScalarSubquery)
+
+    def test_deferred_scalar_repr(self, ctx, sample_df):
+        schema = infer_schema(sample_df)
+        ctx.register_table("t", sample_df)
+        traced = TracedDataFrame(ctx, ReadTable("t", schema))
+        total = traced["price"].sum()
+        assert "DeferredScalar" in repr(total)
+        assert "sum" in repr(total)
+
+    def test_compiled_function_returns_deferred_scalar(self, sample_df):
+        """If the function returns a DeferredScalar, it materializes."""
+
+        @compile(backend=PandasBackend())
+        def f(df):
+            return df["price"].sum()
+
+        result = f(sample_df)
+        assert result == 800
+
+    def test_all_agg_types(self, ctx, sample_df):
+        schema = infer_schema(sample_df)
+        ctx.register_table("t", sample_df)
+        traced = TracedDataFrame(ctx, ReadTable("t", schema))
+        for method in ("sum", "mean", "min", "max", "count", "std", "var"):
+            result = getattr(traced["price"], method)()
+            assert isinstance(result, DeferredScalar), (
+                f"{method} didn't return deferred"
+            )
+
+    def test_pandas_backend_scalar_subquery(self):
+        """PandasBackend correctly evaluates ScalarSubquery in expressions."""
+        from pandas.compile.ir import Aggregate
+
+        df = DataFrame(
+            {"price": [100.0, 250.0, 150.0, 300.0], "region": ["E", "W", "E", "W"]}
+        )
+        schema = infer_schema(df)
+        agg_node = Aggregate(
+            ReadTable("t", schema),
+            [],
+            [("price", "price", "sum")],
+        )
+        subquery = ScalarSubquery(agg_node, DType.FLOAT64)
+        expr = BinOp("div", ColRef("price"), subquery)
+
+        node = AddColumn(ReadTable("t", schema), "pct", expr, DType.FLOAT64)
+        backend = PandasBackend()
+        result = backend.execute(node, {"t": df})
+        expected = df["price"] / df["price"].sum()
+        tm.assert_series_equal(result["pct"], expected, check_names=False)
+
+
+# ---------------------------------------------------------------------------
+# ConnectedPlan — rich export with metadata
+# ---------------------------------------------------------------------------
+
+
+class TestConnectedPlan:
+    @pytest.fixture
+    def sample_df(self):
+        return DataFrame(
+            {"price": [100, 250, 150, 300], "region": ["E", "W", "E", "W"]}
+        )
+
+    def test_single_segment_plan(self, sample_df):
+        @compile(backend=PandasBackend())
+        def f(df):
+            return df[df["price"] > 100]
+
+        cp = f.to_connected_plan(sample_df)
+        assert isinstance(cp, ConnectedPlan)
+        assert len(cp.compiled_stages) == 1
+        assert len(cp.graph_breaks) == 0
+
+    def test_graph_break_produces_break_stage(self, sample_df):
+        @compile(backend=PandasBackend())
+        def f(df):
+            n = len(df)
+            return df.head(n - 1)
+
+        cp = f.to_connected_plan(sample_df)
+        # Should have at least 1 compiled stage (the head after len)
+        assert len(cp.compiled_stages) >= 1
+
+    def test_backward_compat_plans(self, sample_df):
+        @compile(backend=PandasBackend())
+        def f(df):
+            return df[df["price"] > 100]
+
+        cp = f.to_connected_plan(sample_df)
+        plans = f.to_substrait(sample_df)
+        # .plans should give same number of plan objects
+        assert len(cp.plans) == len(plans)
+
+    def test_to_dict_serializable(self, sample_df):
+        @compile(backend=PandasBackend())
+        def f(df):
+            return df[df["price"] > 100]
+
+        cp = f.to_connected_plan(sample_df)
+        d = cp.to_dict()
+        # Must be JSON-serializable
+        json_str = json.dumps(d)
+        assert isinstance(json_str, str)
+        parsed = json.loads(json_str)
+        assert "stages" in parsed
+        assert "final_output" in parsed
+
+    def test_schema_in_connected_plan(self, sample_df):
+        @compile(backend=PandasBackend())
+        def f(df):
+            return df[df["price"] > 100]
+
+        cp = f.to_connected_plan(sample_df)
+        stage = cp.compiled_stages[0]
+        assert isinstance(stage, CompiledStage)
+        assert "price" in stage.output_schema.columns
+        assert "region" in stage.output_schema.columns
+
+    def test_tracer_connected_plan(self, sample_df):
+        with Tracer(backend=PandasBackend()) as t:
+            df = t.input(sample_df, "input")
+            filtered = df[df["price"] > 100]
+            t.output(filtered)
+
+        cp = t.to_connected_plan()
+        assert isinstance(cp, ConnectedPlan)
+        assert len(cp.compiled_stages) >= 1
+
+    def test_connected_plan_stage_indices(self, sample_df):
+        @compile(backend=PandasBackend())
+        def f(df):
+            return df[df["price"] > 100]
+
+        cp = f.to_connected_plan(sample_df)
+        for stage in cp.stages:
+            assert isinstance(stage.index, int)
+
+    def test_to_dict_has_counts(self, sample_df):
+        @compile(backend=PandasBackend())
+        def f(df):
+            return df[df["price"] > 100]
+
+        cp = f.to_connected_plan(sample_df)
+        d = cp.to_dict()
+        assert d["num_compiled"] == len(cp.compiled_stages)
+        assert d["num_graph_breaks"] == len(cp.graph_breaks)
