@@ -1749,6 +1749,37 @@ class TestCumulative:
             check_dtype=False,
         )
 
+    def test_series_cumsum_assign(self, sales_df):
+        @compilable
+        def f(df):
+            df = df.sort_values("id")
+            df["price_cumsum"] = df["price"].cumsum()
+            return df
+
+        result = f(sales_df)
+        expected = sales_df.sort_values("id").copy()
+        expected["price_cumsum"] = expected["price"].cumsum()
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+        )
+
+    def test_series_cumsum_then_filter(self, sales_df):
+        @compilable
+        def f(df):
+            df = df.sort_values("id")
+            df["running_total"] = df["price"].cumsum()
+            return df[df["running_total"] <= 500]
+
+        result = f(sales_df)
+        expected = sales_df.sort_values("id").copy()
+        expected["running_total"] = expected["price"].cumsum()
+        expected = expected[expected["running_total"] <= 500]
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+        )
+
 
 class TestPivotTable:
     def test_pivot_table(self, sales_df):
@@ -2311,4 +2342,129 @@ class TestCompileDecoratorDataFusion:
         tm.assert_frame_equal(
             result.reset_index(drop=True),
             expected.reset_index(drop=True),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Clip and abs — end-to-end
+# ---------------------------------------------------------------------------
+
+
+class TestClipAbs:
+    @pytest.fixture
+    def df(self):
+        return DataFrame({"a": [-5, -2, 0, 3, 7], "b": [10, 20, 30, 40, 50]})
+
+    def test_clip_in_pipeline(self, df):
+        @compilable
+        def f(df):
+            return df.clip(lower=0, upper=40)
+
+        result = f(df)
+        expected = df.clip(lower=0, upper=40)
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+        )
+
+    def test_abs_in_pipeline(self, df):
+        @compilable
+        def f(df):
+            df["diff"] = df["a"] - df["b"]
+            return df.abs()
+
+        result = f(df)
+        expected = df.copy()
+        expected["diff"] = expected["a"] - expected["b"]
+        expected = expected.abs()
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+        )
+
+    def test_series_clip_assign(self, df):
+        @compilable
+        def f(df):
+            df["a_clipped"] = df["a"].clip(lower=-1, upper=4)
+            return df
+
+        result = f(df)
+        expected = df.copy()
+        expected["a_clipped"] = expected["a"].clip(lower=-1, upper=4)
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+        )
+
+    def test_clip_then_filter(self, df):
+        @compilable
+        def f(df):
+            df = df.clip(lower=0, upper=40)
+            return df[df["a"] > 0]
+
+        result = f(df)
+        expected = df.clip(lower=0, upper=40)
+        expected = expected[expected["a"] > 0]
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Diff — end-to-end
+# ---------------------------------------------------------------------------
+
+
+class TestDiff:
+    def test_series_diff_pipeline(self, sales_df):
+        @compilable
+        def f(df):
+            df = df.sort_values("id")
+            df["price_diff"] = df["price"].diff(1)
+            return df
+
+        result = f(sales_df)
+        expected = sales_df.sort_values("id").copy()
+        expected["price_diff"] = expected["price"].diff(1)
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_dtype=False,
+        )
+
+    def test_dataframe_diff_pipeline(self, sales_df):
+        @compilable
+        def f(df):
+            nums = df[["id", "price", "quantity"]].sort_values("id")
+            return nums.diff(1)
+
+        result = f(sales_df)
+        expected = sales_df[["id", "price", "quantity"]].sort_values("id").diff(1)
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_dtype=False,
+        )
+
+
+# ---------------------------------------------------------------------------
+# GroupBy cumulative — end-to-end
+# ---------------------------------------------------------------------------
+
+
+class TestGroupByCumulative:
+    def test_groupby_cumsum_pipeline(self, sales_df):
+        @compilable
+        def f(df):
+            df["running_price"] = df.groupby("region")["price"].cumsum()
+            return df
+
+        result = f(sales_df)
+        expected = sales_df.copy()
+        expected["running_price"] = expected.groupby("region")["price"].cumsum()
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_dtype=False,
         )

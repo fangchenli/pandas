@@ -599,8 +599,8 @@ class TestCumulative:
         expected = df.cumprod()
         tm.assert_frame_equal(result, expected, check_dtype=False)
 
-    def test_series_cumsum_graph_break(self):
-        """df["col"].cumsum() graph breaks (Window IR is relational)."""
+    def test_series_cumsum_traced(self):
+        """df["col"].cumsum() stays traced via Window IR."""
         df = DataFrame({"a": [1, 2, 3], "b": [10, 20, 30]})
 
         @compilable
@@ -609,7 +609,55 @@ class TestCumulative:
 
         result = f(df)
         expected = df.assign(a_cumsum=df["a"].cumsum())
-        tm.assert_frame_equal(result, expected)
+        tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_series_cummax_traced(self):
+        df = DataFrame({"a": [3, 1, 2], "b": [1, 5, 3]})
+
+        @compilable
+        def f(df):
+            return df.assign(b_max=df["b"].cummax())
+
+        result = f(df)
+        expected = df.assign(b_max=df["b"].cummax())
+        tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_series_cummin_traced(self):
+        df = DataFrame({"a": [3, 1, 2], "b": [5, 1, 3]})
+
+        @compilable
+        def f(df):
+            return df.assign(a_min=df["a"].cummin())
+
+        result = f(df)
+        expected = df.assign(a_min=df["a"].cummin())
+        tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_series_cumprod_traced(self):
+        df = DataFrame({"a": [1, 2, 3], "b": [2, 3, 4]})
+
+        @compilable
+        def f(df):
+            return df.assign(a_prod=df["a"].cumprod())
+
+        result = f(df)
+        expected = df.assign(a_prod=df["a"].cumprod())
+        tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_series_cumsum_filter(self):
+        """Cross-IR: cumsum → compare → filter via __getitem__."""
+        df = DataFrame({"a": [1, 2, 3, 4], "b": [10, 20, 30, 40]})
+
+        @compilable
+        def f(df):
+            return df[df["a"].cumsum() <= 6]
+
+        result = f(df)
+        expected = df[df["a"].cumsum() <= 6]
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+        )
 
 
 # reset_index / set_index
@@ -745,8 +793,8 @@ class TestShiftDiff:
         expected = df.shift(0)
         tm.assert_frame_equal(result, expected)
 
-    def test_diff_traced(self):
-        """df.diff(1) graph-breaks, produces correct result."""
+    def test_dataframe_diff_traced(self):
+        """df.diff(1) stays traced via Window(lag) + sub."""
         df = DataFrame({"a": [1, 3, 6, 10], "b": [10.0, 20.0, 30.0, 40.0]})
 
         @compilable
@@ -755,10 +803,10 @@ class TestShiftDiff:
 
         result = f(df)
         expected = df.diff(1)
-        tm.assert_frame_equal(result, expected)
+        tm.assert_frame_equal(result, expected, check_dtype=False)
 
-    def test_series_shift_graph_break(self):
-        """Series.shift() graph-breaks and returns correct values."""
+    def test_series_shift_traced(self):
+        """Series.shift() stays traced via Window IR."""
         df = DataFrame({"a": [1, 2, 3, 4], "b": [10, 20, 30, 40]})
 
         @compilable
@@ -769,8 +817,8 @@ class TestShiftDiff:
         expected = df.assign(a_shifted=df["a"].shift(1))
         tm.assert_frame_equal(result, expected)
 
-    def test_series_diff_graph_break(self):
-        """Series.diff() graph-breaks and returns correct values."""
+    def test_series_diff_traced(self):
+        """Series.diff() stays traced via Window(lag) + sub."""
         df = DataFrame({"a": [1, 3, 6, 10], "b": [10, 20, 30, 40]})
 
         @compilable
@@ -779,7 +827,26 @@ class TestShiftDiff:
 
         result = f(df)
         expected = df.assign(a_diff=df["a"].diff(1))
-        tm.assert_frame_equal(result, expected)
+        tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_series_diff_assign_filter(self):
+        """diff → assign → filter pipeline stays traced."""
+        df = DataFrame({"a": [1, 3, 6, 10]})
+
+        @compilable
+        def f(df):
+            df["d"] = df["a"].diff(1)
+            return df[df["d"] > 2]
+
+        result = f(df)
+        expected = df.copy()
+        expected["d"] = expected["a"].diff(1)
+        expected = expected[expected["d"] > 2]
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_dtype=False,
+        )
 
 
 class TestRank:
@@ -1241,3 +1308,295 @@ class TestConnectedPlan:
         d = cp.to_dict()
         assert d["num_compiled"] == len(cp.compiled_stages)
         assert d["num_graph_breaks"] == len(cp.graph_breaks)
+
+
+# ---------------------------------------------------------------------------
+# Clip and abs
+# ---------------------------------------------------------------------------
+
+
+class TestClipAbs:
+    @pytest.fixture
+    def ctx(self):
+        return TraceContext(PandasBackend())
+
+    @pytest.fixture
+    def sample_df(self):
+        return DataFrame({"a": [-3, -1, 0, 2, 5], "b": [10, 20, 30, 40, 50]})
+
+    def test_series_clip_both(self, ctx, sample_df):
+        ctx.register_table("t", sample_df)
+        tdf = TracedDataFrame(ctx, ReadTable("t", infer_schema(sample_df)))
+        series = tdf["a"]
+        clipped = series.clip(lower=-1, upper=3)
+        assert isinstance(clipped, TracedSeries)
+        tdf2 = tdf.assign(a_clipped=clipped)
+        _, result = ctx.materialize(tdf2._ir)
+        expected = sample_df["a"].clip(lower=-1, upper=3)
+        tm.assert_series_equal(
+            result["a_clipped"].reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_names=False,
+        )
+
+    def test_series_clip_lower_only(self, ctx, sample_df):
+        ctx.register_table("t", sample_df)
+        tdf = TracedDataFrame(ctx, ReadTable("t", infer_schema(sample_df)))
+        clipped = tdf["a"].clip(lower=0)
+        assert isinstance(clipped, TracedSeries)
+        tdf2 = tdf.assign(a_clipped=clipped)
+        _, result = ctx.materialize(tdf2._ir)
+        expected = sample_df["a"].clip(lower=0)
+        tm.assert_series_equal(
+            result["a_clipped"].reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_names=False,
+        )
+
+    def test_series_clip_upper_only(self, ctx, sample_df):
+        ctx.register_table("t", sample_df)
+        tdf = TracedDataFrame(ctx, ReadTable("t", infer_schema(sample_df)))
+        clipped = tdf["a"].clip(upper=2)
+        assert isinstance(clipped, TracedSeries)
+        tdf2 = tdf.assign(a_clipped=clipped)
+        _, result = ctx.materialize(tdf2._ir)
+        expected = sample_df["a"].clip(upper=2)
+        tm.assert_series_equal(
+            result["a_clipped"].reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_names=False,
+        )
+
+    def test_series_clip_none_noop(self, ctx, sample_df):
+        ctx.register_table("t", sample_df)
+        tdf = TracedDataFrame(ctx, ReadTable("t", infer_schema(sample_df)))
+        series = tdf["a"]
+        clipped = series.clip()
+        assert clipped is series
+
+    def test_dataframe_clip(self, ctx, sample_df):
+        ctx.register_table("t", sample_df)
+        tdf = TracedDataFrame(ctx, ReadTable("t", infer_schema(sample_df)))
+        clipped = tdf.clip(lower=0, upper=25)
+        assert isinstance(clipped, TracedDataFrame)
+        _, result = ctx.materialize(clipped._ir)
+        expected = sample_df.clip(lower=0, upper=25)
+        tm.assert_frame_equal(result, expected)
+
+    def test_dataframe_clip_none_noop(self, ctx, sample_df):
+        ctx.register_table("t", sample_df)
+        tdf = TracedDataFrame(ctx, ReadTable("t", infer_schema(sample_df)))
+        clipped = tdf.clip()
+        assert clipped is tdf
+
+    def test_dataframe_abs(self, ctx, sample_df):
+        ctx.register_table("t", sample_df)
+        tdf = TracedDataFrame(ctx, ReadTable("t", infer_schema(sample_df)))
+        result_tdf = tdf.abs()
+        assert isinstance(result_tdf, TracedDataFrame)
+        _, result = ctx.materialize(result_tdf._ir)
+        expected = sample_df.abs()
+        tm.assert_frame_equal(result, expected)
+
+    def test_dataframe_abs_preserves_non_numeric(self, ctx):
+        df = DataFrame({"name": ["a", "b"], "val": [-1, -2]})
+        ctx.register_table("t", df)
+        tdf = TracedDataFrame(ctx, ReadTable("t", infer_schema(df)))
+        result_tdf = tdf.abs()
+        _, result = ctx.materialize(result_tdf._ir)
+        assert list(result["name"]) == ["a", "b"]
+        assert list(result["val"]) == [1, 2]
+
+
+# ---------------------------------------------------------------------------
+# Arithmetic operators
+# ---------------------------------------------------------------------------
+
+
+class TestArithmeticOperators:
+    def test_floordiv(self):
+        df = DataFrame({"a": [7, 10, 15]})
+
+        @compilable
+        def f(df):
+            df["b"] = df["a"] // 4
+            return df
+
+        result = f(df)
+        expected = df.copy()
+        expected["b"] = expected["a"] // 4
+        tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_mod(self):
+        df = DataFrame({"a": [7, 10, 15]})
+
+        @compilable
+        def f(df):
+            df["b"] = df["a"] % 4
+            return df
+
+        result = f(df)
+        expected = df.copy()
+        expected["b"] = expected["a"] % 4
+        tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_pow(self):
+        df = DataFrame({"a": [2, 3, 4]})
+
+        @compilable
+        def f(df):
+            df["b"] = df["a"] ** 2
+            return df
+
+        result = f(df)
+        expected = df.copy()
+        expected["b"] = expected["a"] ** 2
+        tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_rtruediv(self):
+        df = DataFrame({"a": [2.0, 4.0, 5.0]})
+
+        @compilable
+        def f(df):
+            df["b"] = 100.0 / df["a"]
+            return df
+
+        result = f(df)
+        expected = df.copy()
+        expected["b"] = 100.0 / expected["a"]
+        tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_rfloordiv(self):
+        df = DataFrame({"a": [2, 3, 4]})
+
+        @compilable
+        def f(df):
+            df["b"] = 10 // df["a"]
+            return df
+
+        result = f(df)
+        expected = df.copy()
+        expected["b"] = 10 // expected["a"]
+        tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_rmod(self):
+        df = DataFrame({"a": [3, 4, 7]})
+
+        @compilable
+        def f(df):
+            df["b"] = 10 % df["a"]
+            return df
+
+        result = f(df)
+        expected = df.copy()
+        expected["b"] = 10 % expected["a"]
+        tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_rpow(self):
+        df = DataFrame({"a": [1, 2, 3]})
+
+        @compilable
+        def f(df):
+            df["b"] = 2 ** df["a"]
+            return df
+
+        result = f(df)
+        expected = df.copy()
+        expected["b"] = 2 ** expected["a"]
+        tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_query_floordiv(self):
+        df = DataFrame({"a": [7, 10, 15, 20]})
+
+        @compilable
+        def f(df):
+            return df.query("a // 10 == 1")
+
+        result = f(df)
+        expected = df[df["a"] // 10 == 1]
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_dtype=False,
+        )
+
+    def test_query_mod(self):
+        df = DataFrame({"a": [7, 10, 15, 20]})
+
+        @compilable
+        def f(df):
+            return df.query("a % 5 == 0")
+
+        result = f(df)
+        expected = df[df["a"] % 5 == 0]
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+        )
+
+
+# ---------------------------------------------------------------------------
+# GroupBy cumulative
+# ---------------------------------------------------------------------------
+
+
+class TestGroupByCumulative:
+    def test_groupby_series_cumsum(self):
+        df = DataFrame({"g": ["a", "a", "b", "b"], "v": [1, 2, 3, 4]})
+
+        @compilable
+        def f(df):
+            return df.assign(cs=df.groupby("g")["v"].cumsum())
+
+        result = f(df)
+        expected = df.assign(cs=df.groupby("g")["v"].cumsum())
+        tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_groupby_series_cummax(self):
+        df = DataFrame({"g": ["a", "a", "b", "b"], "v": [3, 1, 2, 4]})
+
+        @compilable
+        def f(df):
+            return df.assign(cm=df.groupby("g")["v"].cummax())
+
+        result = f(df)
+        expected = df.assign(cm=df.groupby("g")["v"].cummax())
+        tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_groupby_df_cumsum(self):
+        df = DataFrame(
+            {"g": ["a", "a", "b", "b"], "x": [1, 2, 3, 4], "y": [10, 20, 30, 40]}
+        )
+
+        @compilable
+        def f(df):
+            return df.groupby("g").cumsum()
+
+        result = f(df)
+        # pandas groupby().cumsum() drops group keys; JIT keeps all columns
+        expected_vals = df.groupby("g").cumsum()
+        for col in expected_vals.columns:
+            tm.assert_series_equal(
+                result[col].reset_index(drop=True),
+                expected_vals[col].reset_index(drop=True),
+                check_names=False,
+                check_dtype=False,
+            )
+
+    def test_groupby_cumsum_assign(self):
+        df = DataFrame({"g": ["a", "a", "b", "b"], "v": [1, 2, 3, 4]})
+
+        @compilable
+        def f(df):
+            df["running"] = df.groupby("g")["v"].cumsum()
+            return df[df["running"] > 2]
+
+        result = f(df)
+        expected = df.copy()
+        expected["running"] = expected.groupby("g")["v"].cumsum()
+        expected = expected[expected["running"] > 2]
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_dtype=False,
+        )

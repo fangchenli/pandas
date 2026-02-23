@@ -97,6 +97,8 @@ any backend without materialization.
 | `df.merge(right, on=...)` | `Join` | inner/left/right/outer; single or composite keys |
 | `df.where(cond, other)` | `AddColumn(IfThenExpr)` | Conditional replacement per column |
 | `df.mask(cond, other)` | `AddColumn(IfThenExpr)` | Inverse of where |
+| `df.abs()` | `AddColumn(UnaryOp("abs"))` | Numeric columns only; non-numeric pass through |
+| `df.clip(lower, upper)` | `AddColumn(IfThenExpr)` | Scalar bounds; dict/Series bounds graph-break |
 | `df.drop_duplicates()` | `Distinct` | When `keep="first"` and subset covers all columns |
 | `df.cumsum()` | `Window` | Expanding window with sum |
 | `df.cummax()` | `Window` | Expanding window with max |
@@ -107,6 +109,7 @@ any backend without materialization.
 | `pd.concat([df1, df2])` | `Union` | UNION ALL; N-ary; mixed traced + raw DataFrames |
 | `df.groupby(by).sum()` | `Aggregate` | See aggregations below |
 | `df.shift(n)` | `Window(lag/lead)` | Positive n → lag, negative → lead; all columns shifted |
+| `df.diff(n)` | `Window(lag) + AddColumn(sub)` | Per-column lag then subtract; numeric only |
 | `df.reset_index(drop=True)` | no-op | Relational algebra has no row index |
 | `df.copy()` | no-op | Returns same proxy |
 | `df.pipe(func)` | pass-through | Calls `func(self)`, stays traced if func uses traced API |
@@ -116,7 +119,7 @@ any backend without materialization.
 | Method | IR expression | Returns |
 |--------|---------------|---------|
 | `series > x` (and `>=`, `<`, `<=`, `==`, `!=`) | `BinOp` | `TracedSeries[BOOL]` |
-| `series + x` (and `-`, `*`, `/`) | `BinOp` | `TracedSeries` |
+| `series + x` (and `-`, `*`, `/`, `//`, `%`, `**`) | `BinOp` | `TracedSeries`; reverse ops supported |
 | `series & other`, `series \| other` | `BinOp("and"/"or")` | `TracedSeries[BOOL]` |
 | `~series` | `UnaryOp("not")` | `TracedSeries[BOOL]` |
 | `-series` | `UnaryOp("negate")` | `TracedSeries` |
@@ -126,6 +129,14 @@ any backend without materialization.
 | `series.notna()` | `NOT(IS_NULL)` | `TracedSeries[BOOL]` |
 | `series.fillna(val)` | `BinOp("coalesce")` | `TracedSeries` |
 | `series.between(lo, hi)` | `AND(GTE, LTE)` | `TracedSeries[BOOL]` |
+| `series.clip(lower, upper)` | `IfThenExpr` | Scalar bounds only; Series bounds graph-break |
+| `series.rank(method=...)` | `Window(rank/dense_rank/row_number)` | `TracedSeries[FLOAT64]`; methods `min`/`dense`/`first` |
+| `series.cumsum()` | `Window(sum, expanding)` | `TracedSeries`; composable via cross-IR |
+| `series.cummax()` | `Window(max, expanding)` | `TracedSeries` |
+| `series.cummin()` | `Window(min, expanding)` | `TracedSeries` |
+| `series.cumprod()` | `Window(product, expanding)` | `TracedSeries` |
+| `series.diff(n)` | `Window(lag) + BinOp(sub)` | `TracedSeries`; col minus lagged col |
+| `series.shift(n)` | `Window(lag/lead)` | `TracedSeries`; positive n → lag, negative → lead |
 
 ### Aggregation functions
 
@@ -144,7 +155,11 @@ Available on `groupby()`, `groupby()[col]`, and `groupby()[[cols]]`:
 | `agg({col: func})` | varies | Dict mapping columns to function names |
 | `first()` | — | **Graph break** (no Substrait equivalent) |
 | `last()` | — | **Graph break** (no Substrait equivalent) |
-| `rank()` | — | **Graph break** on `groupby()[col]`; returns pandas Series |
+| `rank(method=...)` | `Window(rank/dense_rank/row_number)` | Traced for `min`/`dense`/`first`; others graph-break |
+| `cumsum()` | `Window(sum, expanding)` | Partitioned by group keys |
+| `cummax()` | `Window(max, expanding)` | Partitioned by group keys |
+| `cummin()` | `Window(min, expanding)` | Partitioned by group keys |
+| `cumprod()` | `Window(product, expanding)` | Partitioned by group keys |
 
 ### DeferredScalar — series-level aggregations
 
@@ -211,15 +226,35 @@ Both support `partition_by` and `order_by` via the `Window` IR node.
 
 The IR and compiler support `RANK()`, `DENSE_RANK()`, and `ROW_NUMBER()` as
 parameterless window functions with `ORDER BY` and optional `PARTITION BY`.
-At the tracer level, `series.rank()` and `groupby().rank()` currently
-graph-break because window function results can't compose as scalar
-expressions in `assign()` / `filter()`.
+`series.rank()` and `groupby().rank()` stay traced for supported methods
+(`min`, `dense`, `first`) via cross-IR composition — the Window node is
+transplanted into the target IR when used in `assign()`, `__setitem__()`,
+or `__getitem__()`. Unsupported methods (`average`, `pct=True`) graph-break.
 
 | Substrait function | pandas equivalent | Notes |
 |-------------------|-------------------|-------|
 | `rank:` | `rank(method="min")` | Ties get lowest rank, gaps after ties |
 | `dense_rank:` | `rank(method="dense")` | Ties get lowest rank, no gaps |
 | `row_number:` | `rank(method="first")` | No ties, order of appearance |
+
+### Cross-IR composition
+
+When a `TracedSeries` is backed by a different IR tree (e.g., a `Window` node
+from `rank()` or `shift()`), it can't be directly composed with the parent
+DataFrame's IR via simple expression splicing. The tracer detects this case
+and transplants the Window function into a new `Window` node attached to the
+target IR:
+
+- **`assign()` / `__setitem__()`**: The Window's output column is renamed to
+  the target key. The new Window uses the DataFrame's current IR as input.
+- **`__getitem__()` (boolean mask)**: Temporary column names are generated to
+  avoid overwriting existing columns. The mask expression is rewritten to
+  reference the temp names, then `Filter` + `Project` drops the temps.
+- **Fallback**: If the Window's input isn't an ancestor of the target IR,
+  both sides are materialized.
+
+This enables patterns like `df.assign(r=df["a"].rank(method="min"))` and
+`df[df["a"].rank(method="min") <= 3]` to stay fully traced.
 
 ### Cumulative functions
 
@@ -232,8 +267,8 @@ DataFrame-level cumulative functions are traced as expanding windows:
 | `df.cummin()` | `min` over `rows(unbounded, 0)` | |
 | `df.cumprod()` | `product` over `rows(unbounded, 0)` | |
 
-Series-level cumulative (`series.cumsum()`) graph-breaks because Window IR
-is a relational operator that can't be composed as an expression in `assign()`.
+Series-level cumulative (`series.cumsum()`, etc.) is also traced using expanding
+windows and supports cross-IR composition — see the Series operations table above.
 
 ### Datetime accessor (`.dt`)
 
@@ -289,7 +324,6 @@ transparently — the user doesn't need to do anything special.
 | `df.to_csv()`, `df.to_parquet()` | Materialize, write |
 | `df.describe()`, `df.info()`, `df.value_counts()` | Materialize, return |
 | `df.drop_duplicates(subset=[...])` | Materialize when partial subset or `keep != "first"` |
-| `df.diff(n)` | Materialize, compute differences, re-wrap |
 | `df.rank(...)` | Materialize, rank all columns, re-wrap |
 | `df.reset_index(drop=False)` | Materialize when index is meaningful (non-default RangeIndex) |
 | `df.set_index(keys)` | Materialize, set index, re-wrap |
@@ -306,10 +340,7 @@ transparently — the user doesn't need to do anything special.
 | `series.unique()` | Materialize, return array |
 | `series.nunique()` | Materialize, return int |
 | `series.value_counts()` | Materialize, return Series |
-| `series.cumsum()` etc. | Materialize (Window IR is relational) |
-| `series.shift(n)` | Materialize, shift values |
-| `series.diff(n)` | Materialize, compute differences |
-| `series.rank(...)` | Materialize, rank values |
+| `series.rank(method="average")` | Materialize; `min`/`dense`/`first` stay traced |
 | `series.reset_index(drop=False)` | Materialize, returns DataFrame |
 | `bool(series)`, `series.item()` | Materialize scalar value |
 | `len(series)` | Materialize, return int |
@@ -548,12 +579,12 @@ the eager functions may depend on runtime values.
 `FLOAT32`, `FLOAT64`, `STRING`, `BINARY`, `BOOL`, `DATE`, `TIME`,
 `TIMESTAMP`, `TIMESTAMP_TZ`, `TIMEDELTA`, `DECIMAL`
 
-### Substrait function registry — 43 entries
+### Substrait function registry — 46 entries
 
 | Category | Functions |
 |----------|----------|
 | Comparison | `gt`, `gte`, `lt`, `lte`, `eq`, `ne`, `is_null`, `coalesce` |
-| Arithmetic | `add`, `sub`, `mul`, `div`, `abs`, `negate` |
+| Arithmetic | `add`, `sub`, `mul`, `div`, `floordiv`, `mod`, `pow`, `abs`, `negate` |
 | Boolean | `and`, `or`, `not` |
 | Aggregate | `sum`, `avg`/`mean`, `min`, `max`, `count`, `std`, `var`, `product` |
 | Positional window | `lag`, `lead` |

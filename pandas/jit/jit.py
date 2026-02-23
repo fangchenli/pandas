@@ -334,6 +334,9 @@ def _ast_to_expr(node, schema: Schema) -> Expr:
             ast.Sub: "sub",
             ast.Mult: "mul",
             ast.Div: "div",
+            ast.FloorDiv: "floordiv",
+            ast.Mod: "mod",
+            ast.Pow: "pow",
             ast.BitAnd: "and",
             ast.BitOr: "or",
         }
@@ -544,6 +547,31 @@ class TracedSeries:
     def __truediv__(self, other):
         return self._binop("div", other, DType.FLOAT64)
 
+    def __rtruediv__(self, other):
+        expr = BinOp("div", _to_expr(other), self._expr)
+        return TracedSeries(self._ctx, self._source_ir, expr=expr, dtype=DType.FLOAT64)
+
+    def __floordiv__(self, other):
+        return self._binop("floordiv", other, self._dtype)
+
+    def __rfloordiv__(self, other):
+        expr = BinOp("floordiv", _to_expr(other), self._expr)
+        return TracedSeries(self._ctx, self._source_ir, expr=expr, dtype=self._dtype)
+
+    def __mod__(self, other):
+        return self._binop("mod", other, self._dtype)
+
+    def __rmod__(self, other):
+        expr = BinOp("mod", _to_expr(other), self._expr)
+        return TracedSeries(self._ctx, self._source_ir, expr=expr, dtype=self._dtype)
+
+    def __pow__(self, other):
+        return self._binop("pow", other, DType.FLOAT64)
+
+    def __rpow__(self, other):
+        expr = BinOp("pow", _to_expr(other), self._expr)
+        return TracedSeries(self._ctx, self._source_ir, expr=expr, dtype=DType.FLOAT64)
+
     # -- Boolean --
     def __and__(self, other):
         return self._binop("and", other, DType.BOOL)
@@ -645,6 +673,36 @@ class TracedSeries:
     def __abs__(self) -> TracedSeries:
         return self.abs()
 
+    def clip(self, lower=None, upper=None, **kwargs) -> TracedSeries:
+        if isinstance(lower, (TracedSeries, pd.Series)) or isinstance(
+            upper, (TracedSeries, pd.Series)
+        ):
+            _, df = self._ctx.materialize(self._source_ir)
+            col = self._column_name or next(iter(df.columns))
+            return df[col].clip(lower=lower, upper=upper)
+        if lower is None and upper is None:
+            return self
+        expr = self._expr
+        if lower is not None:
+            expr = IfThenExpr(
+                BinOp("lt", self._expr, Literal(lower)),
+                Literal(lower),
+                expr,
+            )
+        if upper is not None:
+            inner = expr
+            expr = IfThenExpr(
+                BinOp("gt", self._expr, Literal(upper)),
+                Literal(upper),
+                inner,
+            )
+        return TracedSeries(
+            self._ctx,
+            self._source_ir,
+            expr=expr,
+            dtype=self._dtype,
+        )
+
     def between(self, left, right, inclusive="both") -> TracedSeries:
         if inclusive == "both":
             lo = BinOp("gte", self._expr, _to_expr(left))
@@ -702,25 +760,26 @@ class TracedSeries:
         col = self._column_name or next(iter(df.columns))
         return df[col].value_counts(**kwargs)
 
-    # --- cumulative (graph break — Window IR is relational, not expression-level) ---
+    # --- cumulative (traced via Window IR with expanding frame) ---
 
-    def _cumulative_graph_break(self, method):
-        _, df = self._ctx.materialize(self._source_ir)
-        col = self._column_name or next(iter(df.columns))
-        result = getattr(df[col], method)()
-        return result
+    def _apply_series_cumulative(self, func):
+        col = self._column_name
+        window_funcs = [(col, col, func, 0)]
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=0)
+        node = Window(self._source_ir, window_funcs, spec)
+        return TracedSeries(self._ctx, node, col)
 
     def cumsum(self, **kwargs):
-        return self._cumulative_graph_break("cumsum")
+        return self._apply_series_cumulative("sum")
 
     def cummax(self, **kwargs):
-        return self._cumulative_graph_break("cummax")
+        return self._apply_series_cumulative("max")
 
     def cummin(self, **kwargs):
-        return self._cumulative_graph_break("cummin")
+        return self._apply_series_cumulative("min")
 
     def cumprod(self, **kwargs):
-        return self._cumulative_graph_break("cumprod")
+        return self._apply_series_cumulative("product")
 
     def shift(self, periods=1, **kwargs):
         col = self._column_name
@@ -732,9 +791,18 @@ class TracedSeries:
         return TracedSeries(self._ctx, node, col)
 
     def diff(self, periods=1, **kwargs):
-        _, df = self._ctx.materialize(self._source_ir)
-        col = self._column_name or next(iter(df.columns))
-        return df[col].diff(periods)
+        col = self._column_name
+        lag_col = f"__jit_lag_{col}"
+        if periods >= 0:
+            wfuncs = [(lag_col, col, "lag", periods)]
+        else:
+            wfuncs = [(lag_col, col, "lead", -periods)]
+        window_node = Window(self._source_ir, wfuncs, WindowSpec())
+        diff_expr = BinOp("sub", ColRef(col), ColRef(lag_col))
+        add_node = AddColumn(window_node, col, diff_expr, self._dtype)
+        parent_cols = list(self._source_ir.output_schema().columns.keys())
+        proj_node = Project(add_node, parent_cols)
+        return TracedSeries(self._ctx, proj_node, col)
 
     def rank(
         self, method="average", ascending=True, na_option="keep", pct=False, **kwargs
@@ -1167,6 +1235,41 @@ class TracedGroupBy:
             ),
         )
 
+    def _apply_groupby_cumulative(self, func):
+        numeric_cols = [
+            col
+            for col, dtype in self._source_schema.columns.items()
+            if col not in self._keys and dtype in NUMERIC_DTYPES
+        ]
+        if not numeric_cols:
+            _, df = self._ctx.materialize(self._source_ir)
+            pandas_func = {"product": "prod"}.get(func, func)
+            result = getattr(df.groupby(self._keys), f"cum{pandas_func}")()
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        window_funcs = [(col, col, func, 0) for col in numeric_cols]
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=0)
+        node = Window(
+            self._source_ir,
+            window_funcs,
+            spec,
+            partition_by=self._keys,
+        )
+        return TracedDataFrame(self._ctx, node)
+
+    def cumsum(self):
+        return self._apply_groupby_cumulative("sum")
+
+    def cummax(self):
+        return self._apply_groupby_cumulative("max")
+
+    def cummin(self):
+        return self._apply_groupby_cumulative("min")
+
+    def cumprod(self):
+        return self._apply_groupby_cumulative("product")
+
 
 class TracedGroupBySeries:
     def __init__(self, ctx, source_ir, keys, column, source_schema):
@@ -1230,6 +1333,30 @@ class TracedGroupBySeries:
                 [(self._column, self._column, func)],
             ),
         )
+
+    def _apply_groupby_cumulative(self, func):
+        col = self._column
+        window_funcs = [(col, col, func, 0)]
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=0)
+        node = Window(
+            self._source_ir,
+            window_funcs,
+            spec,
+            partition_by=self._keys,
+        )
+        return TracedSeries(self._ctx, node, col)
+
+    def cumsum(self, **kwargs):
+        return self._apply_groupby_cumulative("sum")
+
+    def cummax(self, **kwargs):
+        return self._apply_groupby_cumulative("max")
+
+    def cummin(self, **kwargs):
+        return self._apply_groupby_cumulative("min")
+
+    def cumprod(self, **kwargs):
+        return self._apply_groupby_cumulative("product")
 
 
 class TracedGroupByMulti:
@@ -1583,6 +1710,52 @@ class TracedDataFrame:
                 )
         return result
 
+    def abs(self) -> TracedDataFrame:
+        schema = self._ir.output_schema()
+        result_ir = self._ir
+        for col_name, dtype in schema.columns.items():
+            if dtype in NUMERIC_DTYPES:
+                result_ir = AddColumn(
+                    result_ir,
+                    col_name,
+                    UnaryOp("abs", ColRef(col_name)),
+                    dtype,
+                )
+        return TracedDataFrame(self._ctx, result_ir)
+
+    def clip(self, lower=None, upper=None, **kwargs) -> TracedDataFrame:
+        if isinstance(lower, (TracedSeries, pd.Series, dict)) or isinstance(
+            upper, (TracedSeries, pd.Series, dict)
+        ):
+            df = self._materialize()
+            result = df.clip(lower=lower, upper=upper)
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        if lower is None and upper is None:
+            return self
+        schema = self._ir.output_schema()
+        result_ir = self._ir
+        for col_name, dtype in schema.columns.items():
+            if dtype not in NUMERIC_DTYPES:
+                continue
+            expr: Expr = ColRef(col_name)
+            if lower is not None:
+                expr = IfThenExpr(
+                    BinOp("lt", ColRef(col_name), Literal(lower)),
+                    Literal(lower),
+                    expr,
+                )
+            if upper is not None:
+                inner = expr
+                expr = IfThenExpr(
+                    BinOp("gt", ColRef(col_name), Literal(upper)),
+                    Literal(upper),
+                    inner,
+                )
+            result_ir = AddColumn(result_ir, col_name, expr, dtype)
+        return TracedDataFrame(self._ctx, result_ir)
+
     def drop_duplicates(self, subset=None, keep="first", **kwargs) -> TracedDataFrame:
         schema = self._ir.output_schema()
         all_cols = list(schema.columns.keys())
@@ -1652,11 +1825,34 @@ class TracedDataFrame:
         return TracedDataFrame(self._ctx, node)
 
     def diff(self, periods=1, **kwargs):
-        df = self._materialize()
-        result = df.diff(periods=periods)
-        name = self._ctx.next_materialized_name()
-        self._ctx.register_table(name, result)
-        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        schema = self._ir.output_schema()
+        numeric_cols = [
+            col for col, dtype in schema.columns.items() if dtype in NUMERIC_DTYPES
+        ]
+        if not numeric_cols:
+            df = self._materialize()
+            result = df.diff(periods=periods)
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        lag_funcs = [
+            (
+                f"__jit_lag_{col}",
+                col,
+                "lag" if periods >= 0 else "lead",
+                abs(periods),
+            )
+            for col in numeric_cols
+        ]
+        window_node = Window(self._ir, lag_funcs, WindowSpec())
+        result_ir = window_node
+        for col in numeric_cols:
+            lag_col = f"__jit_lag_{col}"
+            diff_expr = BinOp("sub", ColRef(col), ColRef(lag_col))
+            dtype = schema.columns[col]
+            result_ir = AddColumn(result_ir, col, diff_expr, dtype)
+        proj_node = Project(result_ir, list(schema.columns.keys()))
+        return TracedDataFrame(self._ctx, proj_node)
 
     def rank(
         self, method="average", ascending=True, na_option="keep", pct=False, **kwargs

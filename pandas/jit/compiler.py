@@ -189,6 +189,9 @@ FUNC_REGISTRY: dict[str, tuple[str, str]] = {
     "sub": ("subtract:i64_i64", ARITHMETIC_URI),
     "mul": ("multiply:i64_i64", ARITHMETIC_URI),
     "div": ("divide:i64_i64", ARITHMETIC_URI),
+    "floordiv": ("divide:i64_i64", ARITHMETIC_URI),
+    "mod": ("modulo:i64_i64", ARITHMETIC_URI),
+    "pow": ("power:fp64_fp64", ARITHMETIC_URI),
     "abs": ("abs:fp64", ARITHMETIC_URI),
     "negate": ("negate:i64", ARITHMETIC_URI),
     # Boolean
@@ -1067,13 +1070,22 @@ class PandasBackend(Backend):
         elif isinstance(node, Window):
             df = self._exec(node.input, tables)
             spec = node.window_spec
+            has_partition = bool(node.partition_by)
+            if has_partition:
+                grp = df.groupby(node.partition_by, sort=False)
             if spec.lower_offset is None:
                 # Expanding window
-                window_obj = df.expanding()
+                if has_partition:
+                    window_obj = grp.expanding()
+                else:
+                    window_obj = df.expanding()
             else:
-                # Rolling window: lower_offset is N-1 preceding rows
+                # Rolling window
                 window_size = spec.lower_offset + 1
-                window_obj = df.rolling(window_size)
+                if has_partition:
+                    window_obj = grp.rolling(window_size)
+                else:
+                    window_obj = df.rolling(window_size)
             result = df.copy()
             _RANK_FUNCS = {"rank", "dense_rank", "row_number"}
             _RANK_METHOD_MAP = {
@@ -1085,24 +1097,36 @@ class PandasBackend(Backend):
                 if func in _RANK_FUNCS:
                     method = _RANK_METHOD_MAP[func]
                     asc = node.order_by[0][1] if node.order_by else True
-                    if node.partition_by:
-                        result[out_name] = df.groupby(node.partition_by, sort=False)[
-                            src_col
-                        ].rank(method=method, ascending=asc)
+                    if has_partition:
+                        result[out_name] = grp[src_col].rank(
+                            method=method, ascending=asc
+                        )
                     else:
                         result[out_name] = df[src_col].rank(
                             method=method, ascending=asc
                         )
                 elif func == "lag":
-                    result[out_name] = df[src_col].shift(offset)
+                    if has_partition:
+                        result[out_name] = grp[src_col].shift(offset)
+                    else:
+                        result[out_name] = df[src_col].shift(offset)
                 elif func == "lead":
-                    result[out_name] = df[src_col].shift(-offset)
+                    if has_partition:
+                        result[out_name] = grp[src_col].shift(-offset)
+                    else:
+                        result[out_name] = df[src_col].shift(-offset)
                 elif func == "product" and spec.lower_offset is None:
-                    # expanding().prod() doesn't exist; use cumprod directly
-                    result[out_name] = df[src_col].cumprod()
+                    if has_partition:
+                        result[out_name] = grp[src_col].cumprod()
+                    else:
+                        result[out_name] = df[src_col].cumprod()
                 else:
                     pandas_func = {"avg": "mean", "product": "prod"}.get(func, func)
-                    result[out_name] = getattr(window_obj[src_col], pandas_func)()
+                    col_window = window_obj[src_col]
+                    vals = getattr(col_window, pandas_func)()
+                    if has_partition:
+                        vals = vals.droplevel(0)
+                    result[out_name] = vals
             return result
 
         elif isinstance(node, RenameColumns):
@@ -1131,6 +1155,9 @@ class PandasBackend(Backend):
                 "sub": lambda a, b: a - b,
                 "mul": lambda a, b: a * b,
                 "div": lambda a, b: a / b,
+                "floordiv": lambda a, b: a // b,
+                "mod": lambda a, b: a % b,
+                "pow": lambda a, b: a**b,
                 "and": lambda a, b: a & b,
                 "or": lambda a, b: a | b,
                 "coalesce": lambda a, b: (
