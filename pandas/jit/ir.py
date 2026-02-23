@@ -331,17 +331,18 @@ class WindowSpec:
 
 
 class Window(IRNode):
-    """Window function computation (rolling / expanding)."""
+    """Window function computation (rolling / expanding / lag / lead)."""
 
     def __init__(
         self,
         input: IRNode,
-        window_funcs: list[tuple[str, str, str]],
+        window_funcs: list[tuple[str, str, str, int]],
         window_spec: WindowSpec,
         partition_by: list[str] | None = None,
         order_by: list[tuple[str, bool]] | None = None,
     ):
-        # window_funcs: list of (out_name, src_col, func)
+        # window_funcs: list of (out_name, src_col, func, offset)
+        # offset is 0 for aggregate window funcs, >0 for lag/lead
         self.input = input
         self.window_funcs = window_funcs
         self.window_spec = window_spec
@@ -351,11 +352,21 @@ class Window(IRNode):
     def output_schema(self) -> Schema:
         parent = self.input.output_schema()
         cols: dict[str, DType] = {}
-        func_output_cols = {out: (src, func) for out, src, func in self.window_funcs}
+        func_output_cols = {
+            out: (src, func) for out, src, func, _offset in self.window_funcs
+        }
         for col_name, dtype in parent.columns.items():
             if col_name in func_output_cols:
                 _, func = func_output_cols[col_name]
-                if func in ("avg", "mean", "std", "var"):
+                if func in (
+                    "avg",
+                    "mean",
+                    "std",
+                    "var",
+                    "rank",
+                    "dense_rank",
+                    "row_number",
+                ):
                     cols[col_name] = DType.FLOAT64
                 elif func == "count":
                     cols[col_name] = DType.INT64
@@ -364,9 +375,17 @@ class Window(IRNode):
             else:
                 cols[col_name] = dtype
         # Add any new output columns not already in parent
-        for out_name, src_col, func in self.window_funcs:
+        for out_name, src_col, func, _offset in self.window_funcs:
             if out_name not in cols:
-                if func in ("avg", "mean", "std", "var"):
+                if func in (
+                    "avg",
+                    "mean",
+                    "std",
+                    "var",
+                    "rank",
+                    "dense_rank",
+                    "row_number",
+                ):
                     cols[out_name] = DType.FLOAT64
                 elif func == "count":
                     cols[out_name] = DType.INT64
@@ -616,7 +635,10 @@ def explain_ir(ir: IRNode, indent: int = 0) -> str:
             order_by=order,
         ):
             child = explain_ir(inp, indent + 1)
-            funcs_str = ", ".join(f"{o}={f}({s})" for o, s, f in funcs)
+            funcs_str = ", ".join(
+                f"{o}={f}({s}, {off})" if off else f"{o}={f}({s})"
+                for o, s, f, off in funcs
+            )
             frame = "UNBOUNDED" if spec.lower_offset is None else str(spec.lower_offset)
             parts = [f"funcs=[{funcs_str}]", f"frame={frame}..{spec.upper_offset}"]
             if part:

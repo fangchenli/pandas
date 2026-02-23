@@ -1,11 +1,11 @@
-"""Tests for pandas.compile.ir — DType enum, type mappings, Schema,
+"""Tests for pandas.jit.ir — DType enum, type mappings, Schema,
 IR nodes, expressions."""
 
 from __future__ import annotations
 
 import pytest
 
-from pandas.compile.ir import (
+from pandas.jit.ir import (
     _PANDAS_DTYPE_MAP,
     NUMERIC_DTYPES,
     AddColumn,
@@ -298,7 +298,7 @@ class TestWindow:
     def test_rolling_output_schema(self):
         base = ReadTable("t", _sample_schema())
         spec = WindowSpec(kind="rows", lower_offset=2, upper_offset=0)
-        node = Window(base, [("price", "price", "sum")], spec)
+        node = Window(base, [("price", "price", "sum", 0)], spec)
         schema = node.output_schema()
         # sum preserves source dtype (FLOAT64)
         assert schema.columns["price"] is DType.FLOAT64
@@ -306,21 +306,29 @@ class TestWindow:
     def test_expanding_output_schema(self):
         base = ReadTable("t", _sample_schema())
         spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=0)
-        node = Window(base, [("price", "price", "avg")], spec)
+        node = Window(base, [("price", "price", "avg", 0)], spec)
         schema = node.output_schema()
         assert schema.columns["price"] is DType.FLOAT64
 
     def test_count_output_schema(self):
         base = ReadTable("t", _sample_schema())
         spec = WindowSpec(kind="rows", lower_offset=1, upper_offset=0)
-        node = Window(base, [("price", "price", "count")], spec)
+        node = Window(base, [("price", "price", "count", 0)], spec)
         schema = node.output_schema()
         assert schema.columns["price"] is DType.INT64
+
+    def test_lag_output_schema(self):
+        base = ReadTable("t", _sample_schema())
+        spec = WindowSpec()
+        node = Window(base, [("price", "price", "lag", 1)], spec)
+        schema = node.output_schema()
+        # lag preserves source dtype
+        assert schema.columns["price"] is DType.FLOAT64
 
     def test_explain_rolling(self):
         base = ReadTable("t", Schema({"x": DType.INT64}))
         spec = WindowSpec(kind="rows", lower_offset=2, upper_offset=0)
-        node = Window(base, [("x", "x", "sum")], spec)
+        node = Window(base, [("x", "x", "sum", 0)], spec)
         result = explain_ir(node)
         assert "Window" in result
         assert "frame=2..0" in result
@@ -328,7 +336,7 @@ class TestWindow:
     def test_explain_expanding(self):
         base = ReadTable("t", Schema({"x": DType.INT64}))
         spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=0)
-        node = Window(base, [("x", "x", "sum")], spec)
+        node = Window(base, [("x", "x", "sum", 0)], spec)
         result = explain_ir(node)
         assert "UNBOUNDED" in result
 

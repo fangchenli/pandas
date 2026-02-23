@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 import numpy as np
 
 import pandas as pd
-from pandas.compile.compiler import (
+from pandas.jit.compiler import (
     Backend,
     CompiledSegment,
     CompiledStage,
@@ -53,7 +53,7 @@ from pandas.compile.compiler import (
     default_backend,
     infer_schema,
 )
-from pandas.compile.ir import (
+from pandas.jit.ir import (
     NUMERIC_DTYPES,
     AddColumn,
     Aggregate,
@@ -86,7 +86,7 @@ from pandas.compile.ir import (
     pandas_dtype_to_ir,
 )
 
-log = logging.getLogger("pandas.compile")
+log = logging.getLogger("pandas.jit")
 
 # Save the real pd.concat so we can restore it after tracing.
 _original_concat = pd.concat
@@ -134,6 +134,66 @@ def _to_expr(value) -> Expr:
     elif isinstance(value, (int, float, str, bool)):
         return Literal(value)
     raise TypeError(f"Cannot convert {type(value)} to expression")
+
+
+def _ir_contains(ir_node, target) -> bool:
+    """Return True if *target* is *ir_node* itself or reachable via its input chain."""
+    if ir_node is target:
+        return True
+    if hasattr(ir_node, "input") and isinstance(ir_node.input, IRNode):
+        if _ir_contains(ir_node.input, target):
+            return True
+    if isinstance(ir_node, Join):
+        if _ir_contains(ir_node.left, target) or _ir_contains(ir_node.right, target):
+            return True
+    if isinstance(ir_node, Union):
+        for inp in ir_node.inputs:
+            if _ir_contains(inp, target):
+                return True
+    return False
+
+
+def _rewrite_col_refs(expr: Expr, mapping: dict[str, str]) -> Expr:
+    """Recursively rewrite ColRef names in an expression tree."""
+    if isinstance(expr, ColRef):
+        return ColRef(mapping.get(expr.name, expr.name))
+    elif isinstance(expr, BinOp):
+        return BinOp(
+            expr.op,
+            _rewrite_col_refs(expr.left, mapping),
+            _rewrite_col_refs(expr.right, mapping),
+        )
+    elif isinstance(expr, UnaryOp):
+        return UnaryOp(expr.op, _rewrite_col_refs(expr.operand, mapping))
+    elif isinstance(expr, IfThenExpr):
+        return IfThenExpr(
+            _rewrite_col_refs(expr.condition, mapping),
+            _rewrite_col_refs(expr.then_expr, mapping),
+            _rewrite_col_refs(expr.else_expr, mapping),
+        )
+    elif isinstance(expr, CastExpr):
+        return CastExpr(_rewrite_col_refs(expr.input, mapping), expr.target_dtype)
+    elif isinstance(expr, SingularOrList):
+        return SingularOrList(
+            _rewrite_col_refs(expr.value, mapping),
+            [_rewrite_col_refs(o, mapping) for o in expr.options],
+        )
+    elif isinstance(expr, FunctionCall):
+        return FunctionCall(
+            expr.func_name,
+            [_rewrite_col_refs(a, mapping) for a in expr.args],
+            expr.options,
+            expr.return_dtype,
+        )
+    # Literal, ScalarSubquery — no column refs to rewrite
+    return expr
+
+
+def _composable_window(series_ir, target_ir):
+    """Return the Window node if series_ir is a composable Window on target_ir."""
+    if isinstance(series_ir, Window) and _ir_contains(target_ir, series_ir.input):
+        return series_ir
+    return None
 
 
 _SENTINEL = object()
@@ -326,6 +386,12 @@ class TraceContext:
         Compile and execute the IR up to this point.
         This is the GRAPH BREAK mechanism.
         """
+        # Short-circuit: ReadTable for an already-registered table.
+        # Avoids re-executing through the backend, which would lose
+        # pandas index info in Arrow roundtrip (Acero/DataFusion).
+        if isinstance(ir_node, ReadTable) and ir_node.name in self.tables:
+            return ir_node.name, self.tables[ir_node.name]
+
         input_tables = self._collect_read_tables(ir_node)
         out_name = self.next_materialized_name()
 
@@ -636,6 +702,75 @@ class TracedSeries:
         col = self._column_name or next(iter(df.columns))
         return df[col].value_counts(**kwargs)
 
+    # --- cumulative (graph break — Window IR is relational, not expression-level) ---
+
+    def _cumulative_graph_break(self, method):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        result = getattr(df[col], method)()
+        return result
+
+    def cumsum(self, **kwargs):
+        return self._cumulative_graph_break("cumsum")
+
+    def cummax(self, **kwargs):
+        return self._cumulative_graph_break("cummax")
+
+    def cummin(self, **kwargs):
+        return self._cumulative_graph_break("cummin")
+
+    def cumprod(self, **kwargs):
+        return self._cumulative_graph_break("cumprod")
+
+    def shift(self, periods=1, **kwargs):
+        col = self._column_name
+        if periods >= 0:
+            window_funcs = [(col, col, "lag", periods)]
+        else:
+            window_funcs = [(col, col, "lead", -periods)]
+        node = Window(self._source_ir, window_funcs, WindowSpec())
+        return TracedSeries(self._ctx, node, col)
+
+    def diff(self, periods=1, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].diff(periods)
+
+    def rank(
+        self, method="average", ascending=True, na_option="keep", pct=False, **kwargs
+    ):
+        _RANK_FUNC_MAP = {"min": "rank", "dense": "dense_rank", "first": "row_number"}
+        if method not in _RANK_FUNC_MAP or pct or na_option != "keep":
+            _, df = self._ctx.materialize(self._source_ir)
+            col = self._column_name or next(iter(df.columns))
+            return df[col].rank(
+                method=method,
+                ascending=ascending,
+                na_option=na_option,
+                pct=pct,
+            )
+        col = self._column_name
+        func = _RANK_FUNC_MAP[method]
+        window_funcs = [(col, col, func, 0)]
+        node = Window(
+            self._source_ir,
+            window_funcs,
+            WindowSpec(),
+            order_by=[(col, ascending)],
+        )
+        return TracedSeries(self._ctx, node, col, dtype=DType.FLOAT64)
+
+    def reset_index(self, drop=True, **kwargs):
+        if drop:
+            return self
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        result = df[col].reset_index(drop=False, **kwargs)
+        # Series.reset_index(drop=False) returns a DataFrame
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
     def __len__(self):
         _, df = self._ctx.materialize(self._source_ir)
         col = self._column_name or next(iter(df.columns))
@@ -852,7 +987,7 @@ class TracedRolling:
             return result
 
         func = {"mean": "avg"}.get(method, method)
-        window_funcs = [(col, col, func) for col in numeric_cols]
+        window_funcs = [(col, col, func, 0) for col in numeric_cols]
         spec = WindowSpec(kind="rows", lower_offset=self._window - 1, upper_offset=0)
         node = Window(self._source_ir, window_funcs, spec)
         return TracedDataFrame(self._ctx, node)
@@ -902,7 +1037,7 @@ class TracedExpanding:
             return result
 
         func = {"mean": "avg"}.get(method, method)
-        window_funcs = [(col, col, func) for col in numeric_cols]
+        window_funcs = [(col, col, func, 0) for col in numeric_cols]
         spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=0)
         node = Window(self._source_ir, window_funcs, spec)
         return TracedDataFrame(self._ctx, node)
@@ -1062,6 +1197,30 @@ class TracedGroupBySeries:
     def var(self):
         return self._agg("var")
 
+    def rank(
+        self, method="average", ascending=True, na_option="keep", pct=False, **kwargs
+    ):
+        _RANK_FUNC_MAP = {"min": "rank", "dense": "dense_rank", "first": "row_number"}
+        if method not in _RANK_FUNC_MAP or pct or na_option != "keep":
+            _, df = self._ctx.materialize(self._source_ir)
+            return df.groupby(self._keys)[self._column].rank(
+                method=method,
+                ascending=ascending,
+                na_option=na_option,
+                pct=pct,
+            )
+        col = self._column
+        func = _RANK_FUNC_MAP[method]
+        window_funcs = [(col, col, func, 0)]
+        node = Window(
+            self._source_ir,
+            window_funcs,
+            WindowSpec(),
+            partition_by=self._keys,
+            order_by=[(col, ascending)],
+        )
+        return TracedSeries(self._ctx, node, col, dtype=DType.FLOAT64)
+
     def _agg(self, func):
         return TracedDataFrame(
             self._ctx,
@@ -1145,7 +1304,43 @@ class TracedDataFrame:
         elif isinstance(key, TracedSeries):
             if key._dtype != DType.BOOL:
                 raise TypeError("Boolean indexing requires boolean series")
-            return TracedDataFrame(self._ctx, Filter(self._ir, key._expr))
+            if key._source_ir is self._ir:
+                return TracedDataFrame(self._ctx, Filter(self._ir, key._expr))
+            w = _composable_window(key._source_ir, self._ir)
+            if w is not None:
+                # Build Window with temp names, filter, then project away temps
+                parent_cols = list(self._ir.output_schema().columns.keys())
+                parent_set = set(parent_cols)
+                mapping: dict[str, str] = {}
+                new_wfuncs = []
+                for out, src, func, off in w.window_funcs:
+                    if out in parent_set:
+                        temp = f"__jit_tmp_{out}"
+                        mapping[out] = temp
+                        new_wfuncs.append((temp, src, func, off))
+                    else:
+                        new_wfuncs.append((out, src, func, off))
+                window_node = Window(
+                    self._ir,
+                    new_wfuncs,
+                    w.window_spec,
+                    w.partition_by,
+                    w.order_by,
+                )
+                rewritten = _rewrite_col_refs(key._expr, mapping)
+                filter_node = Filter(window_node, rewritten)
+                project_node = Project(filter_node, parent_cols)
+                return TracedDataFrame(self._ctx, project_node)
+            # Incompatible IR — materialize mask
+            _, mat = self._ctx.materialize(key._source_ir)
+            col = key._column_name or next(iter(mat.columns))
+            df = self._materialize()
+            result = df[mat[col].astype(bool)]
+            result_name = self._ctx.next_materialized_name()
+            self._ctx.register_table(result_name, result)
+            return TracedDataFrame(
+                self._ctx, ReadTable(result_name, infer_schema(result))
+            )
         elif isinstance(key, pd.Series):
             df = self._materialize()
             result = df[key]
@@ -1169,8 +1364,7 @@ class TracedDataFrame:
     def __setitem__(self, key, value):
         if isinstance(key, str):
             if isinstance(value, TracedSeries):
-                expr, dtype = value._expr, value._dtype
-                node = AddColumn(self._ir, key, expr, dtype)
+                node = self._assign_series(self, key, value)
                 object.__setattr__(self, "_ir", node)
             elif isinstance(value, (int, float, str, bool)):
                 lit = Literal(value)
@@ -1214,16 +1408,11 @@ class TracedDataFrame:
         result = self
         for name, value in kwargs.items():
             if isinstance(value, TracedSeries):
-                node = AddColumn(result._ir, name, value._expr, value._dtype)
+                node = self._assign_series(result, name, value)
             elif callable(value):
                 traced_result = value(result)
                 if isinstance(traced_result, TracedSeries):
-                    node = AddColumn(
-                        result._ir,
-                        name,
-                        traced_result._expr,
-                        traced_result._dtype,
-                    )
+                    node = self._assign_series(result, name, traced_result)
                 else:
                     df = result._materialize()
                     df[name] = value(df)
@@ -1241,6 +1430,36 @@ class TracedDataFrame:
                 node = ReadTable(result_name, infer_schema(df))
             result = TracedDataFrame(result._ctx, node)
         return result
+
+    @staticmethod
+    def _assign_series(target, col_name, series):
+        """Build IR node for assigning a TracedSeries to a column.
+
+        Handles same-IR (AddColumn), composable Window (transplant),
+        and incompatible IR (materialize fallback).
+        """
+        if series._source_ir is target._ir:
+            return AddColumn(target._ir, col_name, series._expr, series._dtype)
+        w = _composable_window(series._source_ir, target._ir)
+        if w is not None:
+            new_wfuncs = [
+                (col_name, src, func, off) for (_, src, func, off) in w.window_funcs
+            ]
+            return Window(
+                target._ir,
+                new_wfuncs,
+                w.window_spec,
+                w.partition_by,
+                w.order_by,
+            )
+        # Incompatible IR — materialize both sides
+        _, mat = target._ctx.materialize(series._source_ir)
+        col = series._column_name or next(iter(mat.columns))
+        df = target._materialize().copy()
+        df[col_name] = mat[col].values
+        nm = target._ctx.next_materialized_name()
+        target._ctx.register_table(nm, df)
+        return ReadTable(nm, infer_schema(df))
 
     def drop(self, columns=None, axis=None, **kwargs) -> TracedDataFrame:
         if columns is None and axis == 1:
@@ -1390,6 +1609,69 @@ class TracedDataFrame:
     def expanding(self, **kwargs) -> TracedExpanding:
         return TracedExpanding(self._ctx, self._ir, **kwargs)
 
+    # --- cumulative window helpers ---
+
+    def _apply_cumulative(self, func):
+        schema = self._ir.output_schema()
+        numeric_cols = [
+            col for col, dtype in schema.columns.items() if dtype in NUMERIC_DTYPES
+        ]
+        if not numeric_cols:
+            df = self._materialize()
+            pandas_func = {"product": "prod"}.get(func, func)
+            result = getattr(df, f"cum{pandas_func}")()
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        window_funcs = [(col, col, func, 0) for col in numeric_cols]
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=0)
+        node = Window(self._ir, window_funcs, spec)
+        return TracedDataFrame(self._ctx, node)
+
+    def cumsum(self, **kwargs):
+        return self._apply_cumulative("sum")
+
+    def cummax(self, **kwargs):
+        return self._apply_cumulative("max")
+
+    def cummin(self, **kwargs):
+        return self._apply_cumulative("min")
+
+    def cumprod(self, **kwargs):
+        return self._apply_cumulative("product")
+
+    def shift(self, periods=1, **kwargs):
+        schema = self._ir.output_schema()
+        all_cols = list(schema.columns.keys())
+        if periods >= 0:
+            window_funcs = [(col, col, "lag", periods) for col in all_cols]
+        else:
+            window_funcs = [(col, col, "lead", -periods) for col in all_cols]
+        spec = WindowSpec()
+        node = Window(self._ir, window_funcs, spec)
+        return TracedDataFrame(self._ctx, node)
+
+    def diff(self, periods=1, **kwargs):
+        df = self._materialize()
+        result = df.diff(periods=periods)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def rank(
+        self, method="average", ascending=True, na_option="keep", pct=False, **kwargs
+    ):
+        df = self._materialize()
+        result = df.rank(
+            method=method,
+            ascending=ascending,
+            na_option=na_option,
+            pct=pct,
+        )
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
     def pivot_table(self, **kwargs) -> TracedDataFrame:
         df = self._materialize()
         result = df.pivot_table(**kwargs).reset_index()
@@ -1508,8 +1790,25 @@ class TracedDataFrame:
         self._ctx.register_table(name, result)
         return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
 
-    def reset_index(self, drop=True, **kwargs):
-        return self  # No-op in relational algebra
+    def reset_index(self, drop=False, level=None, **kwargs):
+        if drop:
+            return self  # No-op in relational algebra
+        # drop=False: index → column, graph-break only if meaningful index
+        df = self._materialize()
+        if isinstance(df.index, pd.RangeIndex) and df.index.name is None:
+            # Default RangeIndex — nothing to reset
+            return self
+        result = df.reset_index(drop=False, level=level, **kwargs)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def set_index(self, keys, drop=True, append=False, **kwargs):
+        df = self._materialize()
+        result = df.set_index(keys, drop=drop, append=append, **kwargs)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
 
     def copy(self):
         return self
@@ -1973,16 +2272,16 @@ class CompiledFunction:
 
 
 @overload
-def compile(fn: Callable) -> CompiledFunction: ...
+def compilable(fn: Callable) -> CompiledFunction: ...
 
 
 @overload
-def compile(
+def compilable(
     fn: None = ..., *, backend: Backend | None = ...
 ) -> Callable[[Callable], CompiledFunction]: ...
 
 
-def compile(
+def compilable(
     fn: Callable | None = None, *, backend: Backend | None = None
 ) -> CompiledFunction | Callable[[Callable], CompiledFunction]:
     """
@@ -1993,7 +2292,7 @@ def compile(
     Parameters
     ----------
     fn : callable, optional
-        The function to compile. When used as ``@compile`` (without
+        The function to compile. When used as ``@compilable`` (without
         parentheses), this is the decorated function.
     backend : Backend or None, default None
         Execution backend. ``None`` selects ``AceroBackend`` when pyarrow
@@ -2002,17 +2301,17 @@ def compile(
     Returns
     -------
     CompiledFunction or callable
-        When called as ``@compile``, returns a ``CompiledFunction``.
-        When called as ``@compile(backend=...)``, returns a decorator
+        When called as ``@compilable``, returns a ``CompiledFunction``.
+        When called as ``@compilable(backend=...)``, returns a decorator
         that produces a ``CompiledFunction``.
 
     Examples
     --------
-    >>> @compile
+    >>> @compilable
     ... def process(df):
     ...     return df[df["price"] > 100]
 
-    >>> @compile(backend=PandasBackend())
+    >>> @compilable(backend=PandasBackend())
     ... def process(df):
     ...     return df[df["price"] > 100]
     """

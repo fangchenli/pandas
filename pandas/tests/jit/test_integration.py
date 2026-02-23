@@ -18,12 +18,12 @@ import pandas._testing as tm
 pa = pytest.importorskip("pyarrow")
 pas = pytest.importorskip("pyarrow.substrait")
 
-from pandas.compile.compiler import (
+from pandas.jit.compiler import (
     PandasBackend,
     SubstraitCompiler,
     infer_schema,
 )
-from pandas.compile.ir import (
+from pandas.jit.ir import (
     AddColumn,
     Aggregate,
     BinOp,
@@ -37,9 +37,9 @@ from pandas.compile.ir import (
     ReadTable,
     Sort,
 )
-from pandas.compile.jit import (
+from pandas.jit.jit import (
     Tracer,
-    compile,
+    compilable,
 )
 
 # ---------------------------------------------------------------------------
@@ -467,15 +467,15 @@ class TestPandasVsAcero:
 
 
 # ---------------------------------------------------------------------------
-# JIT decorator → Acero: end-to-end from @compile to Substrait execution
+# JIT decorator → Acero: end-to-end from @compilable to Substrait execution
 # ---------------------------------------------------------------------------
 
 
 class TestJitToAcero:
     def test_jit_plan_runs_on_acero(self, sales_df):
-        """Trace with @compile, extract Substrait plan, run on Acero."""
+        """Trace with @compilable, extract Substrait plan, run on Acero."""
 
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def pipeline(df):
             filtered = df[df["price"] > 100]
             filtered["revenue"] = filtered["price"] * filtered["quantity"]
@@ -490,7 +490,7 @@ class TestJitToAcero:
         ctx = pipeline.trace(sales_df)
         plans = []
         for seg in ctx.segments:
-            from pandas.compile.compiler import CompiledSegment
+            from pandas.jit.compiler import CompiledSegment
 
             if isinstance(seg, CompiledSegment):
                 compiler = SubstraitCompiler()
@@ -551,15 +551,15 @@ class TestJitToAcero:
 
 
 # ---------------------------------------------------------------------------
-# User scenarios: @compile decorator — how users actually use the API
+# User scenarios: @compilable decorator — how users actually use the API
 # ---------------------------------------------------------------------------
 
 
 class TestCompileDecorator:
-    """End-to-end tests using @compile with the default AceroBackend."""
+    """End-to-end tests using @compilable with the default AceroBackend."""
 
     def test_filter_rows(self, sales_df):
-        @compile
+        @compilable
         def get_expensive(df):
             return df[df["price"] > 100]
 
@@ -571,7 +571,7 @@ class TestCompileDecorator:
         )
 
     def test_select_columns(self, sales_df):
-        @compile
+        @compilable
         def select_cols(df):
             return df[["id", "region", "price"]]
 
@@ -580,7 +580,7 @@ class TestCompileDecorator:
         assert len(result) == len(sales_df)
 
     def test_add_computed_column(self, sales_df):
-        @compile
+        @compilable
         def add_revenue(df):
             df["revenue"] = df["price"] * df["quantity"]
             return df
@@ -595,7 +595,7 @@ class TestCompileDecorator:
         )
 
     def test_filter_and_sort(self, sales_df):
-        @compile
+        @compilable
         def top_expensive(df):
             expensive = df[df["price"] > 100]
             return expensive.sort_values("price", ascending=False)
@@ -605,7 +605,7 @@ class TestCompileDecorator:
         assert list(result["price"]) == sorted(result["price"], reverse=True)
 
     def test_sort_and_head(self, sales_df):
-        @compile
+        @compilable
         def top_3(df):
             return df.sort_values("price", ascending=False).head(3)
 
@@ -614,7 +614,7 @@ class TestCompileDecorator:
         assert list(result["price"]) == sorted(result["price"], reverse=True)
 
     def test_groupby_sum(self, sales_df):
-        @compile
+        @compilable
         def regional_totals(df):
             return df.groupby("region").sum()
 
@@ -631,7 +631,7 @@ class TestCompileDecorator:
         tm.assert_frame_equal(result_sorted, expected, check_dtype=False)
 
     def test_groupby_count(self, sales_df):
-        @compile
+        @compilable
         def product_counts(df):
             return df.groupby("product").count()
 
@@ -640,7 +640,7 @@ class TestCompileDecorator:
         assert len(result) == 2  # products A and B
 
     def test_groupby_std(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             return df.groupby("region").std()
 
@@ -652,7 +652,7 @@ class TestCompileDecorator:
         assert result_sorted["price"].dtype == np.float64
 
     def test_groupby_var(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             return df.groupby("region").var()
 
@@ -664,7 +664,7 @@ class TestCompileDecorator:
         assert result_sorted["price"].dtype == np.float64
 
     def test_groupby_series_std(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             return df.groupby("region")["price"].std()
 
@@ -673,7 +673,7 @@ class TestCompileDecorator:
         assert "region" in result.columns
 
     def test_groupby_first(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             return df.sort_values("price").groupby("region").first()
 
@@ -682,7 +682,7 @@ class TestCompileDecorator:
         assert len(result) == 2
 
     def test_groupby_last(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             return df.sort_values("price").groupby("region").last()
 
@@ -691,7 +691,7 @@ class TestCompileDecorator:
         assert len(result) == 2
 
     def test_series_std(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             s = df["price"].std()
             return df[df["price"] > s]
@@ -700,7 +700,7 @@ class TestCompileDecorator:
         assert all(result["price"] > sales_df["price"].std())
 
     def test_series_var(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             v = df["price"].var()
             return df[df["price"] > v]
@@ -709,7 +709,7 @@ class TestCompileDecorator:
         assert all(result["price"] > sales_df["price"].var())
 
     def test_filter_then_groupby(self, sales_df):
-        @compile
+        @compilable
         def expensive_by_region(df):
             expensive = df[df["price"] > 100]
             return expensive.groupby("region").sum()
@@ -719,7 +719,7 @@ class TestCompileDecorator:
         # All prices in the input should be > 100
 
     def test_multi_step_pipeline(self, sales_df):
-        @compile
+        @compilable
         def pipeline(df):
             df["revenue"] = df["price"] * df["quantity"]
             high_rev = df[df["revenue"] > 500]
@@ -732,7 +732,7 @@ class TestCompileDecorator:
         assert list(result["revenue"]) == sorted(result["revenue"], reverse=True)
 
     def test_nlargest(self, sales_df):
-        @compile
+        @compilable
         def top_by_price(df):
             return df.nlargest(3, "price")
 
@@ -741,7 +741,7 @@ class TestCompileDecorator:
         assert list(result["price"]) == sorted(result["price"], reverse=True)
 
     def test_drop_columns(self, sales_df):
-        @compile
+        @compilable
         def drop_qty(df):
             return df.drop(columns=["quantity"])
 
@@ -750,7 +750,7 @@ class TestCompileDecorator:
         assert "price" in result.columns
 
     def test_query_string(self, sales_df):
-        @compile
+        @compilable
         def query_filter(df):
             return df.query("price > 100")
 
@@ -758,7 +758,7 @@ class TestCompileDecorator:
         assert all(result["price"] > 100)
 
     def test_rename_columns(self, sales_df):
-        @compile
+        @compilable
         def rename_cols(df):
             return df.rename(columns={"price": "cost", "quantity": "qty"})
 
@@ -769,7 +769,7 @@ class TestCompileDecorator:
         assert "quantity" not in result.columns
 
     def test_assign(self, sales_df):
-        @compile
+        @compilable
         def with_discount(df):
             return df.assign(discount=df["price"] * 0.1)
 
@@ -780,7 +780,7 @@ class TestCompileDecorator:
         tm.assert_numpy_array_equal(r["discount"].values, expected.values)
 
     def test_nsmallest(self, sales_df):
-        @compile
+        @compilable
         def bottom_by_price(df):
             return df.nsmallest(3, "price")
 
@@ -789,7 +789,7 @@ class TestCompileDecorator:
         assert list(result["price"]) == sorted(result["price"])
 
     def test_merge(self, sales_df, regions_df):
-        @compile
+        @compilable
         def with_manager(df, regions):
             return df.merge(regions, on="region")
 
@@ -798,7 +798,7 @@ class TestCompileDecorator:
         assert len(result) == len(sales_df)
 
     def test_isin_filter(self, sales_df):
-        @compile
+        @compilable
         def east_west(df):
             return df[df["product"].isin(["A"])]
 
@@ -806,7 +806,7 @@ class TestCompileDecorator:
         assert all(result["product"] == "A")
 
     def test_dropna(self, nullable_df):
-        @compile
+        @compilable
         def drop_nulls(df):
             return df.dropna(subset=["score"])
 
@@ -815,7 +815,7 @@ class TestCompileDecorator:
         assert len(result) == 3
 
     def test_isna_filter(self, nullable_df):
-        @compile
+        @compilable
         def get_missing(df):
             return df[df["score"].isna()]
 
@@ -824,7 +824,7 @@ class TestCompileDecorator:
         assert result["score"].isna().all()
 
     def test_notna_filter(self, nullable_df):
-        @compile
+        @compilable
         def get_present(df):
             return df[df["score"].notna()]
 
@@ -833,7 +833,7 @@ class TestCompileDecorator:
         assert result["score"].notna().all()
 
     def test_fillna_scalar(self, nullable_df):
-        @compile
+        @compilable
         def fill_zeros(df):
             df["score"] = df["score"].fillna(0.0)
             return df
@@ -845,7 +845,7 @@ class TestCompileDecorator:
         assert filled.loc[3, "score"] == 0.0
 
     def test_fillna_dataframe(self, nullable_df):
-        @compile
+        @compilable
         def fill_df(df):
             return df.fillna({"score": -1.0})
 
@@ -855,7 +855,7 @@ class TestCompileDecorator:
         assert filled.loc[1, "score"] == -1.0
 
     def test_series_abs(self, sales_df):
-        @compile
+        @compilable
         def price_dist(df):
             df["dist"] = (df["price"] - 200.0).abs()
             return df
@@ -865,7 +865,7 @@ class TestCompileDecorator:
         assert all(result["dist"] >= 0)
 
     def test_series_negation(self, sales_df):
-        @compile
+        @compilable
         def neg_price(df):
             df["neg"] = -df["price"]
             return df
@@ -879,7 +879,7 @@ class TestCompileDecorator:
         )
 
     def test_between_filter(self, sales_df):
-        @compile
+        @compilable
         def mid_range(df):
             return df[df["price"].between(100.0, 200.0)]
 
@@ -888,7 +888,7 @@ class TestCompileDecorator:
         assert all(result["price"] <= 200)
 
     def test_compound_boolean_filter(self, sales_df):
-        @compile
+        @compilable
         def compound(df):
             return df[(df["price"] > 100) & (df["region"] == "East")]
 
@@ -897,7 +897,7 @@ class TestCompileDecorator:
         assert all(result["region"] == "East")
 
     def test_cache_reuse(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             return df[df["price"] > 100]
 
@@ -910,7 +910,7 @@ class TestCompileDecorator:
         )
 
     def test_explain_output(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             return df[df["price"] > 100]
 
@@ -921,7 +921,7 @@ class TestCompileDecorator:
     def test_cache_invalidation_on_scalar_change(self, sales_df):
         """Changing a scalar parameter must re-trace, not reuse stale plan."""
 
-        @compile
+        @compilable
         def f(df, threshold):
             return df[df["price"] > threshold]
 
@@ -937,7 +937,7 @@ class TestCompileDecorator:
     def test_cache_hit_same_scalar(self, sales_df):
         """Same scalar parameter should reuse the cached plan."""
 
-        @compile
+        @compilable
         def f(df, threshold):
             return df[df["price"] > threshold]
 
@@ -948,7 +948,7 @@ class TestCompileDecorator:
     def test_cache_invalidation_on_kwarg_change(self, sales_df):
         """Changing a keyword argument must re-trace."""
 
-        @compile
+        @compilable
         def f(df, ascending=True):
             return df.sort_values("price", ascending=ascending)
 
@@ -964,7 +964,7 @@ class TestCompileDecorator:
     def test_cache_invalidation_on_multiple_scalars(self, sales_df):
         """Multiple scalar args must all match for cache hit."""
 
-        @compile
+        @compilable
         def f(df, lo, hi):
             return df[df["price"].between(lo, hi)]
 
@@ -994,7 +994,7 @@ class TestCompileDecorator:
             }
         )
 
-        @compile
+        @compilable
         def join_two(df_orders, df_products):
             return df_orders.merge(df_products, on="product_id")
 
@@ -1027,7 +1027,7 @@ class TestCompileDecorator:
             }
         )
 
-        @compile
+        @compilable
         def expensive_orders(df_orders, df_products):
             merged = df_orders.merge(df_products, on="product_id")
             return merged[merged["price"] > 15]
@@ -1054,7 +1054,7 @@ class TestCompileDecorator:
             }
         )
 
-        @compile
+        @compilable
         def with_target(df_orders, df_targets):
             return df_orders.merge(df_targets, on=["year", "region"])
 
@@ -1067,7 +1067,7 @@ class TestCompileDecorator:
         a = DataFrame({"id": [1, 2], "val": [10, 20]})
         b = DataFrame({"id": [3, 4], "val": [30, 40]})
 
-        @compile
+        @compilable
         def stacked_and_filtered(df1, df2):
             combined = pd.concat([df1, df2])
             return combined[combined["val"] > 15]
@@ -1079,7 +1079,7 @@ class TestCompileDecorator:
     def test_filter_then_iloc_slice(self):
         df = DataFrame({"id": range(20), "val": range(20)})
 
-        @compile
+        @compilable
         def top_filtered(df):
             big = df[df["val"] >= 5]
             return big.iloc[:3]
@@ -1091,7 +1091,7 @@ class TestCompileDecorator:
     def test_sort_then_iloc_offset(self):
         df = DataFrame({"id": [3, 1, 4, 1, 5, 9], "val": [30, 10, 40, 10, 50, 90]})
 
-        @compile
+        @compilable
         def middle_sorted(df):
             sorted_df = df.sort_values("val")
             return sorted_df.iloc[2:4]
@@ -1101,15 +1101,15 @@ class TestCompileDecorator:
 
 
 # ---------------------------------------------------------------------------
-# User scenarios: @compile with graph breaks
+# User scenarios: @compilable with graph breaks
 # ---------------------------------------------------------------------------
 
 
 class TestCompileGraphBreaks:
-    """Tests for @compile with operations that force materialization."""
+    """Tests for @compilable with operations that force materialization."""
 
     def test_len_graph_break(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             filtered = df[df["price"] > 100]
             if len(filtered) > 0:
@@ -1120,7 +1120,7 @@ class TestCompileGraphBreaks:
         assert all(result["price"] > 100)
 
     def test_shape_graph_break(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             filtered = df[df["price"] > 100]
             n_rows, _ = filtered.shape
@@ -1130,7 +1130,7 @@ class TestCompileGraphBreaks:
         assert len(result) == 2
 
     def test_iterrows_graph_break(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             sorted_df = df.sort_values("price", ascending=False)
             top = sorted_df.head(2)
@@ -1143,7 +1143,7 @@ class TestCompileGraphBreaks:
         assert len(result) == 2
 
     def test_drop_duplicates_traced(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             return df[["region", "product"]].drop_duplicates()
 
@@ -1153,7 +1153,7 @@ class TestCompileGraphBreaks:
         assert not result.duplicated().any()
 
     def test_filter_then_drop_duplicates(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             big = df[df["price"] > 100]
             return big[["region"]].drop_duplicates()
@@ -1254,23 +1254,23 @@ class TestTracerScenarios:
 
 
 # ---------------------------------------------------------------------------
-# User scenarios: top-level compile access
+# User scenarios: top-level jit access
 # ---------------------------------------------------------------------------
 
 
-class TestPdCompileScenarios:
-    """End-to-end tests using compile as users would."""
+class TestPdJitScenarios:
+    """End-to-end tests using compilable as users would."""
 
-    def test_pd_compile_filter(self, sales_df):
-        @compile
+    def test_pd_jit_filter(self, sales_df):
+        @compilable
         def f(df):
             return df[df["price"] > 100]
 
         result = f(sales_df)
         assert all(result["price"] > 100)
 
-    def test_pd_compile_pipeline(self, sales_df):
-        @compile
+    def test_pd_jit_pipeline(self, sales_df):
+        @compilable
         def pipeline(df):
             df["revenue"] = df["price"] * df["quantity"]
             return df.sort_values("revenue", ascending=False).head(3)
@@ -1279,8 +1279,8 @@ class TestPdCompileScenarios:
         assert len(result) == 3
         assert "revenue" in result.columns
 
-    def test_pd_compile_groupby(self, sales_df):
-        @compile
+    def test_pd_jit_groupby(self, sales_df):
+        @compilable
         def agg(df):
             return df.groupby("region").sum()
 
@@ -1297,7 +1297,7 @@ class TestSubstraitExport:
     """Tests for Substrait plan export on CompiledFunction and Tracer."""
 
     def test_compiled_function_to_substrait(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             return df[df["price"] > 100]
 
@@ -1309,7 +1309,7 @@ class TestSubstraitExport:
         assert len(plan.relations) >= 1
 
     def test_compiled_function_to_substrait_serializes(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             return df[df["price"] > 100]
 
@@ -1319,7 +1319,7 @@ class TestSubstraitExport:
         assert len(plan_bytes) > 0
 
     def test_compiled_function_to_substrait_json(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             return df[df["price"] > 100]
 
@@ -1366,7 +1366,7 @@ class TestSubstraitExport:
     def test_multi_segment_export(self, sales_df):
         """Graph break produces multiple segments; only compiled ones export."""
 
-        @compile
+        @compilable
         def f(df):
             filtered = df[df["price"] > 100]
             n = len(filtered)  # graph break
@@ -1379,7 +1379,7 @@ class TestSubstraitExport:
     def test_substrait_plan_runs_on_acero(self, sales_df):
         """Exported Substrait plan can be executed on Acero."""
 
-        @compile
+        @compilable
         def f(df):
             return df[df["price"] > 100]
 
@@ -1437,7 +1437,7 @@ class TestAceroDtypeRoundTrip:
 
 class TestDatetimeAccessor:
     def test_dt_year_filter(self, datetime_df):
-        @compile
+        @compilable
         def f(df):
             return df[df["ts"].dt.year == 2024]
 
@@ -1446,7 +1446,7 @@ class TestDatetimeAccessor:
         assert len(result) == len(expected)
 
     def test_dt_month_add_column(self, datetime_df):
-        @compile
+        @compilable
         def f(df):
             df["month"] = df["ts"].dt.month
             return df
@@ -1461,7 +1461,7 @@ class TestDatetimeAccessor:
         )
 
     def test_dt_day_of_week(self, datetime_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             df["dow"] = df["ts"].dt.dayofweek
             return df
@@ -1472,7 +1472,7 @@ class TestDatetimeAccessor:
         assert all(result["dow"] <= 6)
 
     def test_dt_quarter(self, datetime_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             df["q"] = df["ts"].dt.quarter
             return df
@@ -1483,7 +1483,7 @@ class TestDatetimeAccessor:
         assert all(result["q"] <= 4)
 
     def test_dt_hour(self, datetime_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             df["h"] = df["ts"].dt.hour
             return df
@@ -1497,7 +1497,7 @@ class TestDatetimeAccessor:
         )
 
     def test_dt_multiple_components(self, datetime_df):
-        @compile
+        @compilable
         def f(df):
             df["year"] = df["ts"].dt.year
             df["month"] = df["ts"].dt.month
@@ -1515,7 +1515,7 @@ class TestDatetimeAccessor:
 
 class TestStringAccessor:
     def test_str_upper(self, string_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             df["upper_name"] = df["name"].str.upper()
             return df
@@ -1524,7 +1524,7 @@ class TestStringAccessor:
         assert all(result["upper_name"] == string_df["name"].str.upper())
 
     def test_str_lower(self, string_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             df["lower_name"] = df["name"].str.lower()
             return df
@@ -1533,7 +1533,7 @@ class TestStringAccessor:
         assert all(result["lower_name"] == string_df["name"].str.lower())
 
     def test_str_contains_filter(self, string_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             return df[df["name"].str.contains("li", regex=False)]
 
@@ -1541,7 +1541,7 @@ class TestStringAccessor:
         assert len(result) == 2  # Alice, Charlie
 
     def test_str_startswith(self, string_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             return df[df["name"].str.startswith("A")]
 
@@ -1550,7 +1550,7 @@ class TestStringAccessor:
         assert result.iloc[0]["name"] == "Alice"
 
     def test_str_endswith(self, string_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             return df[df["name"].str.endswith("e")]
 
@@ -1558,7 +1558,7 @@ class TestStringAccessor:
         assert all(r.endswith("e") for r in result["name"])
 
     def test_str_strip(self, string_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             df["clean_city"] = df["city"].str.strip()
             return df
@@ -1567,7 +1567,7 @@ class TestStringAccessor:
         assert result.iloc[0]["clean_city"] == "New York"
 
     def test_str_len(self, string_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             df["name_len"] = df["name"].str.len()
             return df
@@ -1583,7 +1583,7 @@ class TestStringAccessor:
         )
 
     def test_str_replace(self, string_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             df["replaced"] = df["name"].str.replace("e", "X", regex=False)
             return df
@@ -1599,7 +1599,7 @@ class TestStringAccessor:
 
 class TestRolling:
     def test_rolling_mean(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             nums = df[["id", "price", "quantity"]].sort_values("price")
             return nums.rolling(2).mean()
@@ -1616,7 +1616,7 @@ class TestRolling:
         )
 
     def test_rolling_sum(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             nums = df[["id", "price", "quantity"]].sort_values("id")
             return nums.rolling(3).sum()
@@ -1633,7 +1633,7 @@ class TestRolling:
         )
 
     def test_rolling_std(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             nums = df[["id", "price", "quantity"]].sort_values("id")
             return nums.rolling(3).std()
@@ -1652,7 +1652,7 @@ class TestRolling:
     def test_rolling_then_filter(self, sales_df):
         """Graph break from rolling, then continue tracing with filter."""
 
-        @compile
+        @compilable
         def f(df):
             nums = df[["id", "price", "quantity"]].sort_values("id")
             rolled = nums.rolling(2).mean()
@@ -1669,7 +1669,7 @@ class TestRolling:
 
 class TestExpanding:
     def test_expanding_sum(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             nums = df[["id", "price", "quantity"]].sort_values("id")
             return nums.expanding().sum()
@@ -1686,7 +1686,7 @@ class TestExpanding:
         )
 
     def test_expanding_mean(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             nums = df[["id", "price", "quantity"]].sort_values("id")
             return nums.expanding().mean()
@@ -1703,9 +1703,56 @@ class TestExpanding:
         )
 
 
+class TestCumulative:
+    def test_cumsum_end_to_end(self, sales_df):
+        @compilable
+        def f(df):
+            nums = df[["id", "price", "quantity"]].sort_values("id")
+            return nums.cumsum()
+
+        result = f(sales_df)
+        expected = sales_df[["id", "price", "quantity"]].sort_values("id").cumsum()
+        assert len(result) == len(expected)
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_dtype=False,
+        )
+
+    def test_cummax_end_to_end(self, sales_df):
+        @compilable
+        def f(df):
+            nums = df[["id", "price", "quantity"]].sort_values("id")
+            return nums.cummax()
+
+        result = f(sales_df)
+        expected = sales_df[["id", "price", "quantity"]].sort_values("id").cummax()
+        assert len(result) == len(expected)
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_dtype=False,
+        )
+
+    def test_cumprod_end_to_end(self, sales_df):
+        @compilable
+        def f(df):
+            nums = df[["id", "price", "quantity"]].sort_values("id")
+            return nums.cumprod()
+
+        result = f(sales_df)
+        expected = sales_df[["id", "price", "quantity"]].sort_values("id").cumprod()
+        assert len(result) == len(expected)
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_dtype=False,
+        )
+
+
 class TestPivotTable:
     def test_pivot_table(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             return df.pivot_table(values="price", index="region", aggfunc="mean")
 
@@ -1724,7 +1771,7 @@ class TestPivotTable:
     def test_pivot_then_filter(self, sales_df):
         """Graph break from pivot_table, then continue tracing."""
 
-        @compile
+        @compilable
         def f(df):
             pivoted = df.pivot_table(values="price", index="region", aggfunc="mean")
             return pivoted[pivoted["price"] > 150]
@@ -1739,7 +1786,7 @@ class TestPivotTable:
 
 class TestMelt:
     def test_melt(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             return df[["id", "price", "quantity"]].melt(
                 id_vars=["id"], value_vars=["price", "quantity"]
@@ -1755,7 +1802,7 @@ class TestMelt:
 
 class TestAstype:
     def test_astype_dataframe(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             return df[["id", "price"]].astype({"price": "int64"})
 
@@ -1765,7 +1812,7 @@ class TestAstype:
     def test_astype_then_filter(self, sales_df):
         """astype graph break, then continue tracing."""
 
-        @compile
+        @compilable
         def f(df):
             casted = df[["id", "price"]].astype({"price": "int64"})
             return casted[casted["price"] > 100]
@@ -1777,7 +1824,7 @@ class TestAstype:
 
 class TestWhereMask:
     def test_where_dataframe(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             return df[["id", "price"]].where(sales_df[["id", "price"]] > 100, other=-1)
 
@@ -1789,7 +1836,7 @@ class TestWhereMask:
         # price: 100 → -1, 250 → 250, ...
 
     def test_mask_dataframe(self, sales_df):
-        @compile
+        @compilable
         def f(df):
             return df[["id", "price"]].mask(sales_df[["id", "price"]] > 100, other=0)
 
@@ -1801,7 +1848,7 @@ class TestWhereMask:
         df = DataFrame({"a": [1, 2, 3, 4, 5], "b": [10, 20, 30, 40, 50]})
         cond = df > 2
 
-        @compile
+        @compilable
         def f(d):
             return d.where(cond, other=-1)
 
@@ -1812,7 +1859,7 @@ class TestWhereMask:
     def test_where_traced_condition(self, sales_df):
         """where with a traced boolean series builds IR (no graph break)."""
 
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             return df[["id", "price"]].where(df["price"] > 100, other=-1)
 
@@ -1827,7 +1874,7 @@ class TestWhereMask:
     def test_mask_traced_condition(self, sales_df):
         """mask with a traced boolean series builds IR (no graph break)."""
 
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             return df[["id", "price"]].mask(df["price"] > 200, other=0)
 
@@ -1837,6 +1884,224 @@ class TestWhereMask:
             result.reset_index(drop=True),
             expected.reset_index(drop=True),
             check_dtype=False,
+        )
+
+
+# ---------------------------------------------------------------------------
+# reset_index / set_index integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestResetSetIndex:
+    def test_groupby_reset_index_end_to_end(self):
+        """groupby().sum().reset_index(drop=True) — common pattern.
+
+        JIT Aggregate keeps group keys as columns (SQL semantics),
+        so reset_index(drop=True) is a no-op. Both JIT and pandas
+        produce the same columns when accounting for this.
+        """
+        df = DataFrame({"group": ["a", "a", "b", "b"], "value": [10, 20, 30, 40]})
+
+        @compilable
+        def f(df):
+            return df.groupby("group").sum().reset_index(drop=True)
+
+        result = f(df)
+        # JIT keeps group keys as columns; pandas puts them in index.
+        # reset_index(drop=False) on pandas gives same shape as JIT.
+        expected = df.groupby("group").sum().reset_index(drop=False)
+        # Backend may not preserve sort order.
+        tm.assert_frame_equal(
+            result.sort_values("group").reset_index(drop=True),
+            expected.sort_values("group").reset_index(drop=True),
+        )
+
+    def test_set_index_end_to_end(self):
+        """set_index() sets a column as the index."""
+        df = DataFrame({"id": [1, 2, 3], "val": [10, 20, 30]})
+
+        @compilable
+        def f(df):
+            return df.set_index("id")
+
+        result = f(df)
+        expected = df.set_index("id")
+        tm.assert_frame_equal(result, expected)
+
+    def test_set_index_then_reset(self):
+        """set_index() → reset_index() round-trip."""
+        df = DataFrame({"id": [1, 2, 3], "val": [10, 20, 30]})
+
+        @compilable
+        def f(df):
+            return df.set_index("id").reset_index()
+
+        result = f(df)
+        expected = df.set_index("id").reset_index()
+        tm.assert_frame_equal(result, expected)
+
+    def test_series_reset_index_drop_false(self):
+        """Series.reset_index(drop=False) returns a DataFrame."""
+        df = DataFrame({"a": [1, 2, 3]}, index=pd.Index([10, 20, 30], name="idx"))
+
+        @compilable
+        def f(df):
+            return df["a"].reset_index(drop=False)
+
+        result = f(df)
+        expected = df["a"].reset_index(drop=False)
+        tm.assert_frame_equal(result, expected)
+
+
+# ---------------------------------------------------------------------------
+# shift / diff integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestShiftDiff:
+    def test_shift_end_to_end(self):
+        """shift(1) produces correct lagged values."""
+        df = DataFrame({"a": [1, 2, 3, 4], "b": [10.0, 20.0, 30.0, 40.0]})
+
+        @compilable
+        def f(df):
+            return df.shift(1)
+
+        result = f(df)
+        expected = df.shift(1)
+        tm.assert_frame_equal(result, expected)
+
+    def test_diff_end_to_end(self):
+        """diff(1) produces correct first differences."""
+        df = DataFrame({"a": [1, 3, 6, 10], "b": [10.0, 20.0, 30.0, 40.0]})
+
+        @compilable
+        def f(df):
+            return df.diff(1)
+
+        result = f(df)
+        expected = df.diff(1)
+        tm.assert_frame_equal(result, expected)
+
+    def test_shift_then_filter(self):
+        """shift + downstream filter operation."""
+        df = DataFrame({"a": [1, 2, 3, 4, 5], "b": [10, 20, 30, 40, 50]})
+
+        @compilable
+        def f(df):
+            shifted = df.shift(1)
+            return shifted[shifted["a"] > 2]
+
+        result = f(df)
+        expected = df.shift(1)
+        expected = expected[expected["a"] > 2]
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+        )
+
+
+class TestRank:
+    def test_rank_end_to_end(self):
+        """Series rank with method='min' end-to-end."""
+        df = DataFrame({"a": [3, 1, 4, 1, 5]})
+
+        @compilable
+        def f(df):
+            return df.assign(r=df["a"].rank(method="min"))
+
+        result = f(df)
+        expected = df.assign(r=df["a"].rank(method="min"))
+        tm.assert_frame_equal(result, expected)
+
+    def test_groupby_rank_end_to_end(self):
+        """GroupBy series rank end-to-end."""
+        df = DataFrame(
+            {
+                "g": ["a", "a", "b", "b", "a"],
+                "v": [3, 1, 4, 2, 5],
+            }
+        )
+
+        @compilable
+        def f(df):
+            return df.assign(r=df.groupby("g")["v"].rank(method="dense"))
+
+        result = f(df)
+        expected = df.assign(r=df.groupby("g")["v"].rank(method="dense"))
+        tm.assert_frame_equal(result, expected)
+
+    def test_rank_then_filter(self):
+        """Rank followed by downstream filter operation."""
+        df = DataFrame({"a": [3, 1, 4, 1, 5], "b": [10, 20, 30, 40, 50]})
+
+        @compilable
+        def f(df):
+            ranked = df.assign(r=df["a"].rank(method="min"))
+            return ranked[ranked["r"] <= 2]
+
+        result = f(df)
+        expected = df.assign(r=df["a"].rank(method="min"))
+        expected = expected[expected["r"] <= 2]
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+        )
+
+
+class TestCrossIRComposition:
+    def test_rank_assign_pipeline(self):
+        """Full pipeline: rank → assign → filter."""
+        df = DataFrame({"a": [3, 1, 4, 1, 5], "b": [10, 20, 30, 40, 50]})
+
+        @compilable
+        def f(df):
+            ranked = df.assign(r=df["a"].rank(method="min"))
+            return ranked[ranked["r"] <= 2]
+
+        result = f(df)
+        expected = df.assign(r=df["a"].rank(method="min"))
+        expected = expected[expected["r"] <= 2]
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+        )
+
+    def test_groupby_rank_filter(self):
+        """Groupby rank → assign → filter pipeline."""
+        df = DataFrame(
+            {
+                "g": ["a", "a", "b", "b", "a"],
+                "v": [3, 1, 4, 2, 5],
+            }
+        )
+
+        @compilable
+        def f(df):
+            ranked = df.assign(r=df.groupby("g")["v"].rank(method="dense"))
+            return ranked[ranked["r"] == 1]
+
+        result = f(df)
+        expected = df.assign(r=df.groupby("g")["v"].rank(method="dense"))
+        expected = expected[expected["r"] == 1]
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+        )
+
+    def test_shift_assign_pipeline(self):
+        """Series shift → assign → sort pipeline."""
+        df = DataFrame({"a": [1, 2, 3, 4, 5], "b": [10, 20, 30, 40, 50]})
+
+        @compilable
+        def f(df):
+            return df.assign(a_prev=df["a"].shift(1)).sort_values("b")
+
+        result = f(df)
+        expected = df.assign(a_prev=df["a"].shift(1)).sort_values("b")
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
         )
 
 
@@ -1999,12 +2264,12 @@ class TestPandasVsDataFusion:
 
 
 class TestCompileDecoratorDataFusion:
-    """End-to-end: @compile(backend=DataFusionBackend()) decorator tests."""
+    """End-to-end: @compilable(backend=DataFusionBackend()) decorator tests."""
 
     def test_filter_rows(self, sales_df):
-        from pandas.compile.compiler import DataFusionBackend
+        from pandas.jit.compiler import DataFusionBackend
 
-        @compile(backend=DataFusionBackend())
+        @compilable(backend=DataFusionBackend())
         def f(df):
             return df[df["price"] > 100]
 
@@ -2016,9 +2281,9 @@ class TestCompileDecoratorDataFusion:
         )
 
     def test_groupby_sum(self, sales_df):
-        from pandas.compile.compiler import DataFusionBackend
+        from pandas.jit.compiler import DataFusionBackend
 
-        @compile(backend=DataFusionBackend())
+        @compilable(backend=DataFusionBackend())
         def f(df):
             return df.groupby("region")["price"].sum().reset_index()
 
@@ -2031,9 +2296,9 @@ class TestCompileDecoratorDataFusion:
         )
 
     def test_multi_step_pipeline(self, sales_df):
-        from pandas.compile.compiler import DataFusionBackend
+        from pandas.jit.compiler import DataFusionBackend
 
-        @compile(backend=DataFusionBackend())
+        @compilable(backend=DataFusionBackend())
         def f(df):
             df = df[df["price"] > 50]
             df["revenue"] = df["price"] * df["quantity"]

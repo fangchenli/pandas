@@ -1,4 +1,4 @@
-"""Tests for pandas.compile.jit — tracing proxies, @compile decorator, Tracer."""
+"""Tests for pandas.jit.jit — tracing proxies, @compilable decorator, Tracer."""
 
 from __future__ import annotations
 
@@ -10,14 +10,14 @@ import pytest
 import pandas as pd
 from pandas import DataFrame
 import pandas._testing as tm
-from pandas.compile.compiler import (
+from pandas.jit.compiler import (
     CompiledSegment,
     CompiledStage,
     ConnectedPlan,
     PandasBackend,
     infer_schema,
 )
-from pandas.compile.ir import (
+from pandas.jit.ir import (
     AddColumn,
     BinOp,
     ColRef,
@@ -28,13 +28,13 @@ from pandas.compile.ir import (
     ScalarSubquery,
     Sort,
 )
-from pandas.compile.jit import (
+from pandas.jit.jit import (
     DeferredScalar,
     TraceContext,
     TracedDataFrame,
     TracedSeries,
     Tracer,
-    compile,
+    compilable,
 )
 
 # ---------------------------------------------------------------------------
@@ -210,7 +210,7 @@ class TestTracedSeries:
 
 
 # ---------------------------------------------------------------------------
-# @compile decorator
+# @compilable decorator
 # ---------------------------------------------------------------------------
 
 
@@ -226,7 +226,7 @@ class TestCompile:
         )
 
     def test_basic_filter(self, sample_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             return df[df["price"] > 100]
 
@@ -236,7 +236,7 @@ class TestCompile:
         assert all(result["price"] > 100)
 
     def test_graph_break_with_len(self, sample_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             filtered = df[df["price"] > 100]
             if len(filtered) > 0:
@@ -247,7 +247,7 @@ class TestCompile:
         assert len(result) == 3
 
     def test_add_column(self, sample_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             df["double"] = df["price"] * 2
             return df
@@ -257,7 +257,7 @@ class TestCompile:
         assert list(result["double"]) == [200, 500, 300, 600]
 
     def test_explain(self, sample_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             return df[df["price"] > 100]
 
@@ -266,7 +266,7 @@ class TestCompile:
         assert "COMPILED" in plan_str
 
     def test_cache_hit(self, sample_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             return df[df["price"] > 100].groupby("region").sum()
 
@@ -277,7 +277,7 @@ class TestCompile:
         assert r1.equals(r2)
 
     def test_no_args_decorator(self, sample_df):
-        @compile
+        @compilable
         def f(df):
             return df.head(2)
 
@@ -294,7 +294,7 @@ class TestCompile:
             }
         )
 
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             return df[["i8", "f32"]]
 
@@ -341,13 +341,13 @@ class TestTracer:
 
 
 # ---------------------------------------------------------------------------
-# Top-level compile access
+# Top-level jit access
 # ---------------------------------------------------------------------------
 
 
-class TestPdCompile:
-    def test_pd_compile_decorator(self):
-        @compile
+class TestPdJit:
+    def test_pd_jit_decorator(self):
+        @compilable
         def f(df):
             return df.head(2)
 
@@ -355,8 +355,8 @@ class TestPdCompile:
         assert isinstance(result, DataFrame)
         assert len(result) == 2
 
-    def test_pd_compile_with_backend(self):
-        @compile(backend=PandasBackend())
+    def test_pd_jit_with_backend(self):
+        @compilable(backend=PandasBackend())
         def f(df):
             return df[df["x"] > 1]
 
@@ -373,12 +373,12 @@ class TestDefaultBackendSelection:
     def test_default_backend_is_acero(self):
         pytest.importorskip("pyarrow")
         pytest.importorskip("pyarrow.substrait")
-        from pandas.compile.compiler import (
+        from pandas.jit.compiler import (
             AceroBackend,
             DataFusionBackend,
         )
 
-        @compile
+        @compilable
         def f(df):
             return df[df["price"] > 100]
 
@@ -398,7 +398,7 @@ class TestCompositeJoin:
         left = DataFrame({"a": [1, 1, 2], "b": ["x", "y", "x"], "v": [10, 20, 30]})
         right = DataFrame({"a": [1, 2], "b": ["x", "x"], "score": [100, 200]})
 
-        @compile
+        @compilable
         def joined(df, ref):
             return df.merge(ref, on=["a", "b"])
 
@@ -411,7 +411,7 @@ class TestCompositeJoin:
         left = DataFrame({"la": [1, 1, 2], "lb": ["x", "y", "x"], "v": [10, 20, 30]})
         right = DataFrame({"ra": [1, 2], "rb": ["x", "x"], "score": [100, 200]})
 
-        @compile
+        @compilable
         def joined(df, ref):
             return df.merge(ref, left_on=["la", "lb"], right_on=["ra", "rb"])
 
@@ -430,7 +430,7 @@ class TestConcat:
         a = DataFrame({"x": [1, 2], "y": ["a", "b"]})
         b = DataFrame({"x": [3, 4], "y": ["c", "d"]})
 
-        @compile
+        @compilable
         def stacked(df1, df2):
             return pd.concat([df1, df2])
 
@@ -443,7 +443,7 @@ class TestConcat:
         a = DataFrame({"v": [10, 20]})
         extra = DataFrame({"v": [30]})
 
-        @compile
+        @compilable
         def with_extra(df):
             return pd.concat([df, extra])
 
@@ -452,7 +452,7 @@ class TestConcat:
         assert set(result["v"]) == {10, 20, 30}
 
     def test_pd_concat_untraced_fallback(self):
-        """Outside @compile, pd.concat still works normally."""
+        """Outside @compilable, pd.concat still works normally."""
         a = DataFrame({"x": [1]})
         b = DataFrame({"x": [2]})
         result = pd.concat([a, b], ignore_index=True)
@@ -469,7 +469,7 @@ class TestIloc:
         """df.iloc[:5] should stay traced (no graph break)."""
         df = DataFrame({"x": range(10)})
 
-        @compile
+        @compilable
         def first_five(df):
             return df.iloc[:5]
 
@@ -481,7 +481,7 @@ class TestIloc:
         """df.iloc[2:5] should stay traced with offset."""
         df = DataFrame({"x": range(10)})
 
-        @compile
+        @compilable
         def middle(df):
             return df.iloc[2:5]
 
@@ -493,7 +493,7 @@ class TestIloc:
         """df.iloc[0] returns a scalar/Series — graph breaks as expected."""
         df = DataFrame({"x": [10, 20, 30]})
 
-        @compile
+        @compilable
         def first_row(df):
             return df.iloc[:1]
 
@@ -504,7 +504,7 @@ class TestIloc:
         """df.iloc[[0,2]] uses fancy indexing — graph breaks."""
         df = DataFrame({"x": [10, 20, 30]})
 
-        @compile
+        @compilable
         def fancy(df):
             r = df.iloc[[0, 2]]
             return r
@@ -523,7 +523,7 @@ class TestDropDuplicates:
         """drop_duplicates() with no subset stays traced."""
         df = DataFrame({"x": [1, 2, 1, 2], "y": ["a", "b", "a", "b"]})
 
-        @compile
+        @compilable
         def dedup(df):
             return df.drop_duplicates()
 
@@ -534,7 +534,7 @@ class TestDropDuplicates:
         """drop_duplicates(subset=["x"]) graph breaks for partial subset."""
         df = DataFrame({"x": [1, 1, 2], "y": ["a", "b", "c"]})
 
-        @compile
+        @compilable
         def dedup(df):
             return df.drop_duplicates(subset=["x"])
 
@@ -545,12 +545,444 @@ class TestDropDuplicates:
         """keep='last' graph breaks."""
         df = DataFrame({"x": [1, 2, 1], "y": ["a", "b", "a"]})
 
-        @compile
+        @compilable
         def dedup(df):
             return df.drop_duplicates(keep="last")
 
         result = dedup(df)
         assert len(result) == 2
+
+
+class TestCumulative:
+    def test_cumsum_traced(self):
+        """df.cumsum() stays traced — produces Window IR."""
+        df = DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+
+        @compilable
+        def f(df):
+            return df.cumsum()
+
+        result = f(df)
+        expected = df.cumsum()
+        tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_cummax_traced(self):
+        df = DataFrame({"a": [3, 1, 2], "b": [1, 5, 3]})
+
+        @compilable
+        def f(df):
+            return df.cummax()
+
+        result = f(df)
+        expected = df.cummax()
+        tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_cummin_traced(self):
+        df = DataFrame({"a": [3, 1, 2], "b": [5, 1, 3]})
+
+        @compilable
+        def f(df):
+            return df.cummin()
+
+        result = f(df)
+        expected = df.cummin()
+        tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_cumprod_traced(self):
+        df = DataFrame({"a": [1, 2, 3], "b": [2, 3, 4]})
+
+        @compilable
+        def f(df):
+            return df.cumprod()
+
+        result = f(df)
+        expected = df.cumprod()
+        tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_series_cumsum_graph_break(self):
+        """df["col"].cumsum() graph breaks (Window IR is relational)."""
+        df = DataFrame({"a": [1, 2, 3], "b": [10, 20, 30]})
+
+        @compilable
+        def f(df):
+            return df.assign(a_cumsum=df["a"].cumsum())
+
+        result = f(df)
+        expected = df.assign(a_cumsum=df["a"].cumsum())
+        tm.assert_frame_equal(result, expected)
+
+
+# reset_index / set_index
+# ---------------------------------------------------------------------------
+
+
+class TestResetSetIndex:
+    def test_reset_index_drop_true(self):
+        """reset_index(drop=True) is a no-op in relational algebra."""
+        df = DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+
+        @compilable
+        def f(df):
+            return df.reset_index(drop=True)
+
+        result = f(df)
+        expected = df.reset_index(drop=True)
+        tm.assert_frame_equal(result, expected)
+
+    def test_reset_index_drop_false(self):
+        """set_index then reset_index(drop=False) round-trips correctly."""
+        df = DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
+
+        @compilable
+        def f(df):
+            return df.set_index("b").reset_index(drop=False)
+
+        result = f(df)
+        expected = df.set_index("b").reset_index(drop=False)
+        tm.assert_frame_equal(result, expected)
+
+    def test_set_index(self):
+        """set_index() graph-breaks to set a column as index."""
+        df = DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
+
+        @compilable
+        def f(df):
+            return df.set_index("b")
+
+        result = f(df)
+        expected = df.set_index("b")
+        tm.assert_frame_equal(result, expected)
+
+    def test_set_index_drop_false(self):
+        """set_index(drop=False) keeps the column and sets it as index."""
+        df = DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
+
+        @compilable
+        def f(df):
+            return df.set_index("b", drop=False)
+
+        result = f(df)
+        expected = df.set_index("b", drop=False)
+        tm.assert_frame_equal(result, expected)
+
+    def test_reset_index_after_groupby(self):
+        """groupby().sum().reset_index(drop=True) — common pattern.
+
+        JIT Aggregate keeps group keys as columns (SQL semantics),
+        so reset_index(drop=True) is a no-op. The expected result
+        should include group keys as regular columns.
+        """
+        df = DataFrame({"g": ["a", "a", "b"], "v": [1, 2, 3]})
+
+        @compilable
+        def f(df):
+            return df.groupby("g").sum().reset_index(drop=True)
+
+        result = f(df)
+        # In pandas: groupby puts keys in index,
+        # reset_index(drop=False) moves them back.
+        # In JIT: keys are already columns, reset_index(drop=True) is a no-op.
+        # Both yield the same result: columns [g, v].
+        expected = df.groupby("g").sum().reset_index(drop=False)
+        # Backend may not preserve sort order.
+        tm.assert_frame_equal(
+            result.sort_values("g").reset_index(drop=True),
+            expected.sort_values("g").reset_index(drop=True),
+        )
+
+    def test_series_reset_index_drop_true(self):
+        """Series.reset_index(drop=True) is a no-op."""
+        df = DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+
+        @compilable
+        def f(df):
+            s = df["a"].reset_index(drop=True)
+            return df.assign(a2=s)
+
+        result = f(df)
+        expected = df.assign(a2=df["a"].reset_index(drop=True))
+        tm.assert_frame_equal(result, expected)
+
+
+# shift / diff
+# ---------------------------------------------------------------------------
+
+
+class TestShiftDiff:
+    def test_shift_traced(self):
+        """df.shift(1) creates Window IR with lag."""
+        df = DataFrame({"a": [1, 2, 3, 4], "b": [10, 20, 30, 40]})
+
+        @compilable
+        def f(df):
+            return df.shift(1)
+
+        result = f(df)
+        expected = df.shift(1)
+        tm.assert_frame_equal(result, expected)
+
+    def test_shift_negative(self):
+        """df.shift(-1) creates Window IR with lead."""
+        df = DataFrame({"a": [1, 2, 3, 4], "b": [10, 20, 30, 40]})
+
+        @compilable
+        def f(df):
+            return df.shift(-1)
+
+        result = f(df)
+        expected = df.shift(-1)
+        tm.assert_frame_equal(result, expected)
+
+    def test_shift_zero(self):
+        """df.shift(0) is identity."""
+        df = DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+
+        @compilable
+        def f(df):
+            return df.shift(0)
+
+        result = f(df)
+        expected = df.shift(0)
+        tm.assert_frame_equal(result, expected)
+
+    def test_diff_traced(self):
+        """df.diff(1) graph-breaks, produces correct result."""
+        df = DataFrame({"a": [1, 3, 6, 10], "b": [10.0, 20.0, 30.0, 40.0]})
+
+        @compilable
+        def f(df):
+            return df.diff(1)
+
+        result = f(df)
+        expected = df.diff(1)
+        tm.assert_frame_equal(result, expected)
+
+    def test_series_shift_graph_break(self):
+        """Series.shift() graph-breaks and returns correct values."""
+        df = DataFrame({"a": [1, 2, 3, 4], "b": [10, 20, 30, 40]})
+
+        @compilable
+        def f(df):
+            return df.assign(a_shifted=df["a"].shift(1))
+
+        result = f(df)
+        expected = df.assign(a_shifted=df["a"].shift(1))
+        tm.assert_frame_equal(result, expected)
+
+    def test_series_diff_graph_break(self):
+        """Series.diff() graph-breaks and returns correct values."""
+        df = DataFrame({"a": [1, 3, 6, 10], "b": [10, 20, 30, 40]})
+
+        @compilable
+        def f(df):
+            return df.assign(a_diff=df["a"].diff(1))
+
+        result = f(df)
+        expected = df.assign(a_diff=df["a"].diff(1))
+        tm.assert_frame_equal(result, expected)
+
+
+class TestRank:
+    def test_series_rank_min(self):
+        """Series.rank(method='min') traced via Window IR."""
+        df = DataFrame({"a": [3, 1, 4, 1, 5]})
+
+        @compilable
+        def f(df):
+            return df.assign(r=df["a"].rank(method="min"))
+
+        result = f(df)
+        expected = df.assign(r=df["a"].rank(method="min"))
+        tm.assert_frame_equal(result, expected)
+
+    def test_series_rank_dense(self):
+        """Series.rank(method='dense') traced via Window IR."""
+        df = DataFrame({"a": [3, 1, 4, 1, 5]})
+
+        @compilable
+        def f(df):
+            return df.assign(r=df["a"].rank(method="dense"))
+
+        result = f(df)
+        expected = df.assign(r=df["a"].rank(method="dense"))
+        tm.assert_frame_equal(result, expected)
+
+    def test_series_rank_first(self):
+        """Series.rank(method='first') traced via Window IR."""
+        df = DataFrame({"a": [3, 1, 4, 1, 5]})
+
+        @compilable
+        def f(df):
+            return df.assign(r=df["a"].rank(method="first"))
+
+        result = f(df)
+        expected = df.assign(r=df["a"].rank(method="first"))
+        tm.assert_frame_equal(result, expected)
+
+    def test_series_rank_descending(self):
+        """Series.rank(ascending=False) reverses order."""
+        df = DataFrame({"a": [3, 1, 4, 1, 5]})
+
+        @compilable
+        def f(df):
+            return df.assign(r=df["a"].rank(method="min", ascending=False))
+
+        result = f(df)
+        expected = df.assign(r=df["a"].rank(method="min", ascending=False))
+        tm.assert_frame_equal(result, expected)
+
+    def test_series_rank_average_graph_break(self):
+        """Series.rank(method='average') graph-breaks (no SQL equivalent)."""
+        df = DataFrame({"a": [3, 1, 4, 1, 5]})
+
+        @compilable
+        def f(df):
+            return df.assign(r=df["a"].rank(method="average"))
+
+        result = f(df)
+        expected = df.assign(r=df["a"].rank(method="average"))
+        tm.assert_frame_equal(result, expected)
+
+    def test_dataframe_rank_graph_break(self):
+        """DataFrame.rank() graph-breaks."""
+        df = DataFrame({"a": [3.0, 1.0, 4.0], "b": [10.0, 30.0, 20.0]})
+
+        @compilable
+        def f(df):
+            return df.rank()
+
+        result = f(df)
+        expected = df.rank()
+        tm.assert_frame_equal(result, expected)
+
+    def test_groupby_series_rank(self):
+        """GroupBy series rank traced via Window IR with partition_by."""
+        df = DataFrame({"g": ["a", "a", "b", "b"], "v": [2, 1, 4, 3]})
+
+        @compilable
+        def f(df):
+            return df.assign(r=df.groupby("g")["v"].rank(method="min"))
+
+        result = f(df)
+        expected = df.assign(r=df.groupby("g")["v"].rank(method="min"))
+        tm.assert_frame_equal(result, expected)
+
+
+class TestCrossIRComposition:
+    """Cross-IR composition: Window-backed TracedSeries in assign/setitem/getitem."""
+
+    def test_assign_rank_composable(self):
+        """df.assign(r=df['a'].rank()) composes via Window transplant."""
+        df = DataFrame({"a": [3, 1, 4, 1, 5]})
+
+        @compilable
+        def f(df):
+            return df.assign(r=df["a"].rank(method="min"))
+
+        result = f(df)
+        expected = df.assign(r=df["a"].rank(method="min"))
+        tm.assert_frame_equal(result, expected)
+
+    def test_assign_multiple_ranks(self):
+        """Chained assign with multiple rank columns."""
+        df = DataFrame({"a": [3, 1, 4], "b": [10, 30, 20]})
+
+        @compilable
+        def f(df):
+            return df.assign(
+                ra=df["a"].rank(method="min"),
+                rb=df["b"].rank(method="dense"),
+            )
+
+        result = f(df)
+        expected = df.assign(
+            ra=df["a"].rank(method="min"),
+            rb=df["b"].rank(method="dense"),
+        )
+        tm.assert_frame_equal(result, expected)
+
+    def test_setitem_rank(self):
+        """df['r'] = df['a'].rank() composes via Window transplant."""
+        df = DataFrame({"a": [3, 1, 4, 1, 5]})
+
+        @compilable
+        def f(df):
+            df["r"] = df["a"].rank(method="min")
+            return df
+
+        result = f(df)
+        expected = df.copy()
+        expected["r"] = expected["a"].rank(method="min")
+        tm.assert_frame_equal(result, expected)
+
+    def test_filter_by_rank(self):
+        """df[df['a'].rank() <= 2] composes via Window + Filter + Project."""
+        df = DataFrame({"a": [3, 1, 4, 1, 5], "b": [10, 20, 30, 40, 50]})
+
+        @compilable
+        def f(df):
+            return df[df["a"].rank(method="min") <= 2]
+
+        result = f(df)
+        expected = df[df["a"].rank(method="min") <= 2]
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+        )
+
+    def test_groupby_rank_assign(self):
+        """Groupby rank composes in assign."""
+        df = DataFrame({"g": ["a", "a", "b", "b"], "v": [2, 1, 4, 3]})
+
+        @compilable
+        def f(df):
+            return df.assign(r=df.groupby("g")["v"].rank(method="dense"))
+
+        result = f(df)
+        expected = df.assign(r=df.groupby("g")["v"].rank(method="dense"))
+        tm.assert_frame_equal(result, expected)
+
+    def test_series_shift_assign(self):
+        """Series shift composes in assign."""
+        df = DataFrame({"a": [1, 2, 3, 4], "b": [10, 20, 30, 40]})
+
+        @compilable
+        def f(df):
+            return df.assign(a_shifted=df["a"].shift(1))
+
+        result = f(df)
+        expected = df.assign(a_shifted=df["a"].shift(1))
+        tm.assert_frame_equal(result, expected)
+
+    def test_rank_average_still_graph_breaks(self):
+        """method='average' still graph-breaks (no SQL equivalent)."""
+        df = DataFrame({"a": [3, 1, 4, 1, 5]})
+
+        @compilable
+        def f(df):
+            return df.assign(r=df["a"].rank(method="average"))
+
+        result = f(df)
+        expected = df.assign(r=df["a"].rank(method="average"))
+        tm.assert_frame_equal(result, expected)
+
+    def test_filter_by_rank_preserves_original_columns(self):
+        """Filtering by rank should preserve original column values (not rank)."""
+        df = DataFrame({"a": [30, 10, 40], "b": ["x", "y", "z"]})
+
+        @compilable
+        def f(df):
+            return df[df["a"].rank(method="min") <= 2]
+
+        result = f(df)
+        # Only rows where rank(a) <= 2: a=10 (rank 1) and a=30 (rank 2)
+        expected = df[df["a"].rank(method="min") <= 2]
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+        )
+        # Verify original "a" values are preserved, not replaced by ranks
+        assert set(result["a"].tolist()) == {10, 30}
 
 
 # DeferredScalar — lazy aggregation proxies
@@ -633,7 +1065,7 @@ class TestDeferredScalar:
         assert len(ctx.segments) == 0
 
     def test_deferred_correctness_end_to_end(self, sample_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             df["pct"] = df["price"] / df["price"].sum()
             return df
@@ -646,7 +1078,7 @@ class TestDeferredScalar:
     def test_deferred_reduces_segments(self, sample_df):
         """Without DeferredScalar this would need 2+ segments."""
 
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             df["pct"] = df["price"] / df["price"].sum()
             return df
@@ -674,7 +1106,7 @@ class TestDeferredScalar:
     def test_compiled_function_returns_deferred_scalar(self, sample_df):
         """If the function returns a DeferredScalar, it materializes."""
 
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             return df["price"].sum()
 
@@ -693,7 +1125,7 @@ class TestDeferredScalar:
 
     def test_pandas_backend_scalar_subquery(self):
         """PandasBackend correctly evaluates ScalarSubquery in expressions."""
-        from pandas.compile.ir import Aggregate
+        from pandas.jit.ir import Aggregate
 
         df = DataFrame(
             {"price": [100.0, 250.0, 150.0, 300.0], "region": ["E", "W", "E", "W"]}
@@ -727,7 +1159,7 @@ class TestConnectedPlan:
         )
 
     def test_single_segment_plan(self, sample_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             return df[df["price"] > 100]
 
@@ -737,7 +1169,7 @@ class TestConnectedPlan:
         assert len(cp.graph_breaks) == 0
 
     def test_graph_break_produces_break_stage(self, sample_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             n = len(df)
             return df.head(n - 1)
@@ -747,7 +1179,7 @@ class TestConnectedPlan:
         assert len(cp.compiled_stages) >= 1
 
     def test_backward_compat_plans(self, sample_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             return df[df["price"] > 100]
 
@@ -757,7 +1189,7 @@ class TestConnectedPlan:
         assert len(cp.plans) == len(plans)
 
     def test_to_dict_serializable(self, sample_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             return df[df["price"] > 100]
 
@@ -771,7 +1203,7 @@ class TestConnectedPlan:
         assert "final_output" in parsed
 
     def test_schema_in_connected_plan(self, sample_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             return df[df["price"] > 100]
 
@@ -792,7 +1224,7 @@ class TestConnectedPlan:
         assert len(cp.compiled_stages) >= 1
 
     def test_connected_plan_stage_indices(self, sample_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             return df[df["price"] > 100]
 
@@ -801,7 +1233,7 @@ class TestConnectedPlan:
             assert isinstance(stage.index, int)
 
     def test_to_dict_has_counts(self, sample_df):
-        @compile(backend=PandasBackend())
+        @compilable(backend=PandasBackend())
         def f(df):
             return df[df["price"] > 100]
 

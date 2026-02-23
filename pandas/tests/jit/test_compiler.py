@@ -1,4 +1,4 @@
-"""Tests for pandas.compile.compiler — SubstraitCompiler, backends, infer_schema."""
+"""Tests for pandas.jit.compiler — SubstraitCompiler, backends, infer_schema."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import substrait.type_pb2 as stt
 import pandas as pd
 from pandas import DataFrame
 import pandas._testing as tm
-from pandas.compile.compiler import (
+from pandas.jit.compiler import (
     _DTYPE_TO_SUBSTRAIT,
     AceroBackend,
     Backend,
@@ -22,7 +22,7 @@ from pandas.compile.compiler import (
     default_backend,
     infer_schema,
 )
-from pandas.compile.ir import (
+from pandas.jit.ir import (
     AddColumn,
     Aggregate,
     BinOp,
@@ -353,7 +353,7 @@ class TestSubstraitCompiler:
     def test_compile_window_rolling(self):
         base = self._make_base()
         spec = WindowSpec(kind="rows", lower_offset=2, upper_offset=0)
-        node = Window(base, [("price", "price", "sum")], spec)
+        node = Window(base, [("price", "price", "sum", 0)], spec)
         compiler = SubstraitCompiler()
         plan = compiler.compile(node)
         rel = plan.relations[0].root.input
@@ -363,13 +363,56 @@ class TestSubstraitCompiler:
     def test_compile_window_expanding(self):
         base = self._make_base()
         spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=0)
-        node = Window(base, [("price", "price", "avg")], spec)
+        node = Window(base, [("price", "price", "avg", 0)], spec)
         compiler = SubstraitCompiler()
         plan = compiler.compile(node)
         rel = plan.relations[0].root.input
         assert rel.HasField("window")
         wf = rel.window.window_functions[0]
         assert wf.lower_bound.HasField("unbounded")
+
+    def test_compile_cumulative_product(self):
+        base = self._make_base()
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=0)
+        node = Window(base, [("price", "price", "product", 0)], spec)
+        compiler = SubstraitCompiler()
+        plan = compiler.compile(node)
+        rel = plan.relations[0].root.input
+        assert rel.HasField("window")
+        wf = rel.window.window_functions[0]
+        assert wf.lower_bound.HasField("unbounded")
+
+    def test_compile_shift_lag(self):
+        base = self._make_base()
+        spec = WindowSpec()
+        node = Window(base, [("price", "price", "lag", 2)], spec)
+        compiler = SubstraitCompiler()
+        plan = compiler.compile(node)
+        rel = plan.relations[0].root.input
+        assert rel.HasField("window")
+        wf = rel.window.window_functions[0]
+        # lag should have 2 arguments: column ref + offset literal
+        assert len(wf.arguments) == 2
+        assert wf.arguments[1].value.literal.i64 == 2
+
+    def test_compile_rank(self):
+        base = self._make_base()
+        spec = WindowSpec()
+        node = Window(
+            base,
+            [("price", "price", "rank", 0)],
+            spec,
+            order_by=[("price", True)],
+        )
+        compiler = SubstraitCompiler()
+        plan = compiler.compile(node)
+        rel = plan.relations[0].root.input
+        assert rel.HasField("window")
+        wf = rel.window.window_functions[0]
+        # rank is parameterless — no arguments
+        assert len(wf.arguments) == 0
+        # Should have sorts for ORDER BY
+        assert len(rel.window.sorts) == 1
 
     def test_compile_if_then(self):
         expr = IfThenExpr(
@@ -447,7 +490,7 @@ class TestSubstraitCompiler:
         """WindowRelFunction should have AGGREGATION_INVOCATION_ALL."""
         base = self._make_base()
         spec = WindowSpec(kind="rows", lower_offset=2, upper_offset=0)
-        node = Window(base, [("price", "price", "sum")], spec)
+        node = Window(base, [("price", "price", "sum", 0)], spec)
         compiler = SubstraitCompiler()
         plan = compiler.compile(node)
         rel = plan.relations[0].root.input
@@ -492,7 +535,7 @@ class TestStringSubstraitNames:
         ],
     )
     def test_string_func_substrait_name(self, ir_name, substrait_name):
-        from pandas.compile.compiler import (
+        from pandas.jit.compiler import (
             FUNC_REGISTRY,
             STRING_URI,
         )
@@ -509,7 +552,7 @@ class TestStringSubstraitNames:
         compiler = SubstraitCompiler()
         plan = compiler.compile(node)
         # Should have STRING_URI in extension URIs
-        from pandas.compile.compiler import STRING_URI
+        from pandas.jit.compiler import STRING_URI
 
         uri_strs = [u.uri for u in plan.extension_uris]
         assert STRING_URI in uri_strs
@@ -683,17 +726,94 @@ class TestPandasBackend:
 
     def test_window_rolling(self, backend, tables, base_ir):
         spec = WindowSpec(kind="rows", lower_offset=1, upper_offset=0)
-        node = Window(base_ir, [("price", "price", "sum")], spec)
+        node = Window(base_ir, [("price", "price", "sum", 0)], spec)
         result = backend.execute(node, tables)
         assert "price" in result.columns
         assert len(result) == 4
 
     def test_window_expanding(self, backend, tables, base_ir):
         spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=0)
-        node = Window(base_ir, [("price", "price", "avg")], spec)
+        node = Window(base_ir, [("price", "price", "avg", 0)], spec)
         result = backend.execute(node, tables)
         assert "price" in result.columns
         assert len(result) == 4
+
+    def test_cumsum(self, backend, tables, base_ir):
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=0)
+        node = Window(base_ir, [("price", "price", "sum", 0)], spec)
+        result = backend.execute(node, tables)
+        assert "price" in result.columns
+        assert len(result) == 4
+        # First row's cumsum should equal the original value
+        assert result["price"].iloc[0] == tables["t"]["price"].iloc[0]
+
+    def test_cumprod(self, backend, tables, base_ir):
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=0)
+        node = Window(base_ir, [("price", "price", "product", 0)], spec)
+        result = backend.execute(node, tables)
+        assert "price" in result.columns
+        assert len(result) == 4
+
+    def test_shift_lag(self, backend, tables, base_ir):
+        spec = WindowSpec()
+        node = Window(base_ir, [("price", "price", "lag", 1)], spec)
+        result = backend.execute(node, tables)
+        assert "price" in result.columns
+        assert len(result) == 4
+        # First row should be NaN (shifted)
+        assert pd.isna(result["price"].iloc[0])
+        # Second row should equal original first row
+        assert result["price"].iloc[1] == tables["t"]["price"].iloc[0]
+
+    def test_shift_lead(self, backend, tables, base_ir):
+        spec = WindowSpec()
+        node = Window(base_ir, [("price", "price", "lead", 1)], spec)
+        result = backend.execute(node, tables)
+        assert "price" in result.columns
+        # Last row should be NaN (lead past end)
+        assert pd.isna(result["price"].iloc[-1])
+        # First row should equal original second row
+        assert result["price"].iloc[0] == tables["t"]["price"].iloc[1]
+
+    def test_rank(self, backend, tables, base_ir):
+        spec = WindowSpec()
+        node = Window(
+            base_ir,
+            [("price", "price", "rank", 0)],
+            spec,
+            order_by=[("price", True)],
+        )
+        result = backend.execute(node, tables)
+        assert "price" in result.columns
+        assert len(result) == 4
+        expected = tables["t"]["price"].rank(method="min")
+        tm.assert_series_equal(result["price"], expected, check_names=False)
+
+    def test_rank_partitioned(self, backend, tables, base_ir):
+        spec = WindowSpec()
+        node = Window(
+            base_ir,
+            [("price", "price", "rank", 0)],
+            spec,
+            partition_by=["region"],
+            order_by=[("price", True)],
+        )
+        result = backend.execute(node, tables)
+        assert "price" in result.columns
+        expected = tables["t"].groupby("region")["price"].rank(method="min")
+        tm.assert_series_equal(result["price"], expected, check_names=False)
+
+    def test_dense_rank(self, backend, tables, base_ir):
+        spec = WindowSpec()
+        node = Window(
+            base_ir,
+            [("price", "price", "dense_rank", 0)],
+            spec,
+            order_by=[("price", True)],
+        )
+        result = backend.execute(node, tables)
+        expected = tables["t"]["price"].rank(method="dense")
+        tm.assert_series_equal(result["price"], expected, check_names=False)
 
     def test_missing_table_raises(self, backend, base_ir):
         with pytest.raises(KeyError, match="Table 't' not registered"):
@@ -1267,17 +1387,25 @@ class TestDataFusionBackend:
 
     def test_window_rolling(self, backend, tables, base_ir):
         spec = WindowSpec(kind="rows", lower_offset=1, upper_offset=0)
-        node = Window(base_ir, [("price", "price", "sum")], spec)
+        node = Window(base_ir, [("price", "price", "sum", 0)], spec)
         result = backend.execute(node, tables)
         assert "price" in result.columns
         assert len(result) == 4
 
     def test_window_expanding(self, backend, tables, base_ir):
         spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=0)
-        node = Window(base_ir, [("price", "price", "avg")], spec)
+        node = Window(base_ir, [("price", "price", "avg", 0)], spec)
         result = backend.execute(node, tables)
         assert "price" in result.columns
         assert len(result) == 4
+
+    def test_cumsum(self, backend, tables, base_ir):
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=0)
+        node = Window(base_ir, [("price", "price", "sum", 0)], spec)
+        result = backend.execute(node, tables)
+        assert "price" in result.columns
+        assert len(result) == 4
+        assert result["price"].iloc[0] == tables["t"]["price"].iloc[0]
 
 
 # ---------------------------------------------------------------------------

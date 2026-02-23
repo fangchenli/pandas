@@ -1,6 +1,6 @@
-# pandas.compile — JIT Compilation for pandas
+# pandas.jit — JIT Compilation for pandas
 
-`pandas.compile` traces pandas operations at runtime, builds a relational
+`pandas.jit` traces pandas operations at runtime, builds a relational
 intermediate representation (IR), and compiles the plan to
 [Substrait](https://substrait.io/) for execution on an optimized backend
 (DataFusion, PyArrow Acero, or a pure-pandas interpreter). Operations that
@@ -12,7 +12,7 @@ is materialized and tracing resumes automatically.
 ```python
 import pandas as pd
 
-@pd.compile
+@pd.jit.compilable
 def process(df):
     df["revenue"] = df["price"] * df["quantity"]
     big = df[df["revenue"] > 500]
@@ -21,19 +21,15 @@ def process(df):
 result = process(sales_df)
 ```
 
-`@pd.compile` can also be called with a specific backend:
+`@pd.jit.compilable` can also be called with a specific backend:
 
 ```python
-from pandas.compile import PandasBackend
+from pandas.jit import PandasBackend
 
-@pd.compile(backend=PandasBackend())
+@pd.jit.compilable(backend=PandasBackend())
 def process(df):
     return df[df["price"] > 100]
 ```
-
-> **Note:** `compile` is a Python built-in, so always use `pd.compile` to
-> avoid shadowing it. The `pandas.compile` subpackage is made callable via
-> a `_CallableModule` wrapper so `pd.compile(fn)` works as a decorator.
 
 ## Architecture
 
@@ -59,7 +55,7 @@ IR graph  (ReadTable → Filter → AddColumn → Sort → Limit → ...)
 |--------|---------|
 | `ir.py` | IR types: `DType`, `Schema`, `IRNode` subclasses, `Expr` subclasses, `explain_ir`/`explain_expr` |
 | `compiler.py` | `SubstraitCompiler`, backends, `ExecutionPlan`, `ConnectedPlan`, `SchemaGuard` |
-| `jit.py` | `@pd.compile` decorator, `Tracer`, `DeferredScalar`, all `Traced*` proxy classes |
+| `jit.py` | `@compilable` decorator, `Tracer`, `DeferredScalar`, all `Traced*` proxy classes |
 
 ### Backends
 
@@ -101,10 +97,16 @@ any backend without materialization.
 | `df.merge(right, on=...)` | `Join` | inner/left/right/outer; single or composite keys |
 | `df.where(cond, other)` | `AddColumn(IfThenExpr)` | Conditional replacement per column |
 | `df.mask(cond, other)` | `AddColumn(IfThenExpr)` | Inverse of where |
+| `df.drop_duplicates()` | `Distinct` | When `keep="first"` and subset covers all columns |
+| `df.cumsum()` | `Window` | Expanding window with sum |
+| `df.cummax()` | `Window` | Expanding window with max |
+| `df.cummin()` | `Window` | Expanding window with min |
+| `df.cumprod()` | `Window` | Expanding window with product |
 | `df.rolling(w).mean()` | `Window` | See window functions below |
 | `df.expanding().sum()` | `Window` | Unbounded window |
 | `pd.concat([df1, df2])` | `Union` | UNION ALL; N-ary; mixed traced + raw DataFrames |
 | `df.groupby(by).sum()` | `Aggregate` | See aggregations below |
+| `df.shift(n)` | `Window(lag/lead)` | Positive n → lag, negative → lead; all columns shifted |
 | `df.reset_index(drop=True)` | no-op | Relational algebra has no row index |
 | `df.copy()` | no-op | Returns same proxy |
 | `df.pipe(func)` | pass-through | Calls `func(self)`, stays traced if func uses traced API |
@@ -142,6 +144,7 @@ Available on `groupby()`, `groupby()[col]`, and `groupby()[[cols]]`:
 | `agg({col: func})` | varies | Dict mapping columns to function names |
 | `first()` | — | **Graph break** (no Substrait equivalent) |
 | `last()` | — | **Graph break** (no Substrait equivalent) |
+| `rank()` | — | **Graph break** on `groupby()[col]`; returns pandas Series |
 
 ### DeferredScalar — series-level aggregations
 
@@ -151,7 +154,7 @@ arithmetic with traced objects. This avoids graph breaks for common patterns
 like normalization:
 
 ```python
-@pd.compile
+@pd.jit.compilable
 def normalize(df):
     df["pct"] = df["price"] / df["price"].sum()   # no graph break!
     return df
@@ -195,6 +198,42 @@ Available on `df.rolling(window)` and `df.expanding()` for numeric columns:
 | `expanding().max()` | `rows(unbounded, 0)` | |
 
 Both support `partition_by` and `order_by` via the `Window` IR node.
+
+### Positional window functions
+
+| Method | Window function | Notes |
+|--------|----------------|-------|
+| `df.shift(n)` (n > 0) | `lag(col, n)` | NaN-fills first n rows |
+| `df.shift(n)` (n < 0) | `lead(col, abs(n))` | NaN-fills last n rows |
+| `df.shift(0)` | `lag(col, 0)` | Identity |
+
+### Rank window functions
+
+The IR and compiler support `RANK()`, `DENSE_RANK()`, and `ROW_NUMBER()` as
+parameterless window functions with `ORDER BY` and optional `PARTITION BY`.
+At the tracer level, `series.rank()` and `groupby().rank()` currently
+graph-break because window function results can't compose as scalar
+expressions in `assign()` / `filter()`.
+
+| Substrait function | pandas equivalent | Notes |
+|-------------------|-------------------|-------|
+| `rank:` | `rank(method="min")` | Ties get lowest rank, gaps after ties |
+| `dense_rank:` | `rank(method="dense")` | Ties get lowest rank, no gaps |
+| `row_number:` | `rank(method="first")` | No ties, order of appearance |
+
+### Cumulative functions
+
+DataFrame-level cumulative functions are traced as expanding windows:
+
+| Method | Window function | Notes |
+|--------|----------------|-------|
+| `df.cumsum()` | `sum` over `rows(unbounded, 0)` | Numeric columns only |
+| `df.cummax()` | `max` over `rows(unbounded, 0)` | |
+| `df.cummin()` | `min` over `rows(unbounded, 0)` | |
+| `df.cumprod()` | `product` over `rows(unbounded, 0)` | |
+
+Series-level cumulative (`series.cumsum()`) graph-breaks because Window IR
+is a relational operator that can't be composed as an expression in `assign()`.
 
 ### Datetime accessor (`.dt`)
 
@@ -249,7 +288,11 @@ transparently — the user doesn't need to do anything special.
 | `df.pipe(func)` | Tries traced first; materializes on failure |
 | `df.to_csv()`, `df.to_parquet()` | Materialize, write |
 | `df.describe()`, `df.info()`, `df.value_counts()` | Materialize, return |
-| `df.drop_duplicates()` | Materialize, deduplicate, re-wrap |
+| `df.drop_duplicates(subset=[...])` | Materialize when partial subset or `keep != "first"` |
+| `df.diff(n)` | Materialize, compute differences, re-wrap |
+| `df.rank(...)` | Materialize, rank all columns, re-wrap |
+| `df.reset_index(drop=False)` | Materialize when index is meaningful (non-default RangeIndex) |
+| `df.set_index(keys)` | Materialize, set index, re-wrap |
 | `df.pivot_table(...)` | Materialize, pivot, re-wrap |
 | `df.melt(...)` | Materialize, melt, re-wrap |
 | `df.stack()`, `df.unstack()` | Materialize, reshape |
@@ -263,13 +306,18 @@ transparently — the user doesn't need to do anything special.
 | `series.unique()` | Materialize, return array |
 | `series.nunique()` | Materialize, return int |
 | `series.value_counts()` | Materialize, return Series |
+| `series.cumsum()` etc. | Materialize (Window IR is relational) |
+| `series.shift(n)` | Materialize, shift values |
+| `series.diff(n)` | Materialize, compute differences |
+| `series.rank(...)` | Materialize, rank values |
+| `series.reset_index(drop=False)` | Materialize, returns DataFrame |
 | `bool(series)`, `series.item()` | Materialize scalar value |
 | `len(series)` | Materialize, return int |
 
 After a graph break, tracing continues automatically:
 
 ```python
-@pd.compile
+@pd.jit.compilable
 def f(df):
     deduped = df.drop_duplicates(subset=["id"])    # graph break
     return deduped[deduped["price"] > 100]          # tracing resumes with filter
@@ -306,8 +354,8 @@ lack of an UNPIVOT operator.
 
 The IR uses flat column names with no concept of row index. Operations
 that depend on row labels — `.loc`, label-based alignment, index joins,
-`set_index()`, `reset_index(drop=False)`, and MultiIndex — will always
-require materialization.
+and MultiIndex — will always require materialization. `set_index()` and
+`reset_index(drop=False)` are supported but graph-break transparently.
 
 ### Operations requiring row count
 
@@ -326,10 +374,7 @@ instead.
 
 | Operation | Why it can't be compiled |
 |-----------|------------------------|
-| `drop_duplicates()` | No DISTINCT ON in Substrait; would need ROW_NUMBER window + filter |
 | `groupby().first()` / `last()` | No first/last aggregation function in Substrait |
-| `rank()`, `cumsum()`, `cumprod()` | Window function infrastructure exists but these aren't wired up yet |
-| `shift()`, `diff()` | Lag/lead window ops; infrastructure exists but not exposed |
 | `resample()` | Temporal bucketing has no Substrait equivalent |
 
 ### Missing accessor methods
@@ -359,7 +404,7 @@ fully-compiled plans (zero graph breaks) benefit from caching.
 ### `explain()` — view the execution plan
 
 ```python
-@pd.compile
+@pd.jit.compilable
 def f(df):
     return df[df["price"] > 100].sort_values("price").head(5)
 
@@ -395,7 +440,7 @@ When a function has graph breaks, `to_substrait()` returns disconnected plans.
 table connections, and graph-break reasons, forming a linked DAG.
 
 ```python
-@pd.compile
+@pd.jit.compilable
 def f(df):
     df["revenue"] = df["price"] * df["quantity"]
     total = len(df)                                    # graph break
@@ -434,7 +479,7 @@ Key classes:
 For more control, use `Tracer` directly:
 
 ```python
-from pandas.compile import Tracer, PandasBackend
+from pandas.jit import Tracer, PandasBackend
 
 with Tracer(backend=PandasBackend()) as t:
     df = t.input(sales_df, "sales")
@@ -466,7 +511,7 @@ the eager functions may depend on runtime values.
 
 ## IR types reference
 
-### Nodes (`ir.IRNode` subclasses) — 11 total
+### Nodes (`ir.IRNode` subclasses) — 12 total
 
 | Node | Fields |
 |------|--------|
@@ -479,6 +524,7 @@ the eager functions may depend on runtime values.
 | `Aggregate` | `input: IRNode`, `group_keys: list[str]`, `agg_specs: list[tuple[str, str, str]]` |
 | `Join` | `left: IRNode`, `right: IRNode`, `left_on: list[str]`, `right_on: list[str]`, `how: str` |
 | `Union` | `inputs: list[IRNode]` |
+| `Distinct` | `input: IRNode`, `columns: list[str]` |
 | `Window` | `input: IRNode`, `window_funcs: list[tuple]`, `window_spec: WindowSpec`, `partition_by`, `order_by` |
 | `RenameColumns` | `input: IRNode`, `mapping: dict[str, str]` |
 
@@ -502,23 +548,25 @@ the eager functions may depend on runtime values.
 `FLOAT32`, `FLOAT64`, `STRING`, `BINARY`, `BOOL`, `DATE`, `TIME`,
 `TIMESTAMP`, `TIMESTAMP_TZ`, `TIMEDELTA`, `DECIMAL`
 
-### Substrait function registry — 30 entries
+### Substrait function registry — 43 entries
 
 | Category | Functions |
 |----------|----------|
 | Comparison | `gt`, `gte`, `lt`, `lte`, `eq`, `ne`, `is_null`, `coalesce` |
 | Arithmetic | `add`, `sub`, `mul`, `div`, `abs`, `negate` |
 | Boolean | `and`, `or`, `not` |
-| Aggregate | `sum`, `avg`/`mean`, `min`, `max`, `count`, `std`, `var` |
+| Aggregate | `sum`, `avg`/`mean`, `min`, `max`, `count`, `std`, `var`, `product` |
+| Positional window | `lag`, `lead` |
+| Rank window | `rank`, `dense_rank`, `row_number` |
 | Datetime | `extract` |
 | String | `str_upper`, `str_lower`, `str_strip`, `str_lstrip`, `str_rstrip`, `str_len`, `str_contains`, `str_startswith`, `str_endswith`, `str_replace`, `str_slice` |
 
 ## Public API
 
-All public names are importable from `pandas.compile`:
+All public names are importable from `pandas.jit`:
 
 ```python
-from pandas.compile import (
+from pandas.jit import (
     AceroBackend,
     Backend,
     CompiledFunction,
@@ -530,11 +578,11 @@ from pandas.compile import (
     PandasBackend,
     StageSchema,
     Tracer,
-    compile,
+    compilable,
     infer_schema,
 )
 ```
 
 Power-user modules (not re-exported but importable):
-- `pandas.compile.ir` — `DType`, `Schema`, `IRNode`, `Expr` subclasses
-- `pandas.compile.compiler` — `SubstraitCompiler`, `ExecutionPlan`
+- `pandas.jit.ir` — `DType`, `Schema`, `IRNode`, `Expr` subclasses
+- `pandas.jit.compiler` — `SubstraitCompiler`, `ExecutionPlan`

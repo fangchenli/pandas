@@ -31,7 +31,7 @@ subdirs_list = [
     'api',
     'arrays',
     'compat',
-    'compile',
+    'jit',
     'core',
     'errors',
     'io',

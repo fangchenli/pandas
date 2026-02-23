@@ -275,7 +275,6 @@ __all__ = [
     "arrays",
     "bdate_range",
     "col",
-    "compile",
     "concat",
     "crosstab",
     "cut",
@@ -292,6 +291,7 @@ __all__ = [
     "io",
     "isna",
     "isnull",
+    "jit",
     "json_normalize",
     "lreshape",
     "melt",
@@ -346,8 +346,8 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    if name == "compile":
-        import pandas.compile as _compile
+    if name == "jit":
+        import pandas.jit as _jit
 
-        return _compile
+        return _jit
     raise AttributeError(f"module 'pandas' has no attribute '{name}'")

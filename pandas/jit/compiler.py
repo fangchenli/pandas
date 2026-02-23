@@ -32,7 +32,7 @@ import substrait.type_pb2 as stt
 from substrait.version import substrait_version
 
 import pandas as pd
-from pandas.compile.ir import (
+from pandas.jit.ir import (
     AddColumn,
     Aggregate,
     BinOp,
@@ -62,7 +62,7 @@ from pandas.compile.ir import (
     pandas_dtype_to_ir,
 )
 
-log = logging.getLogger("pandas.compile")
+log = logging.getLogger("pandas.jit")
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +204,14 @@ FUNC_REGISTRY: dict[str, tuple[str, str]] = {
     "count": ("count:any", AGGREGATE_URI),
     "std": ("std_dev:fp64", ARITHMETIC_URI),
     "var": ("variance:fp64", ARITHMETIC_URI),
+    "product": ("multiply:i64", ARITHMETIC_URI),
+    # Positional window
+    "lag": ("lag:any_i64", AGGREGATE_URI),
+    "lead": ("lead:any_i64", AGGREGATE_URI),
+    # Rank window
+    "rank": ("rank:", AGGREGATE_URI),
+    "dense_rank": ("dense_rank:", AGGREGATE_URI),
+    "row_number": ("row_number:", AGGREGATE_URI),
     # Datetime
     "extract": ("extract:req_ts", DATETIME_URI),
     # String
@@ -638,7 +646,7 @@ class SubstraitCompiler:
 
         # Build window functions
         window_functions = []
-        for out_name, src_col, func in ir.window_funcs:
+        for out_name, src_col, func, offset in ir.window_funcs:
             func_anchor = self._get_func_anchor(func)
             idx = input_schema.column_index(src_col)
 
@@ -659,7 +667,8 @@ class SubstraitCompiler:
             )
 
             # Determine output type
-            if func in ("avg", "mean", "std", "var"):
+            _RANK_FUNCS = {"rank", "dense_rank", "row_number"}
+            if func in ("avg", "mean", "std", "var") or func in _RANK_FUNCS:
                 output_type = _DTYPE_TO_SUBSTRAIT[DType.FLOAT64]()
             elif func == "count":
                 output_type = _DTYPE_TO_SUBSTRAIT[DType.INT64]()
@@ -667,23 +676,38 @@ class SubstraitCompiler:
                 col_dtype = input_schema.columns.get(src_col, DType.FLOAT64)
                 output_type = _DTYPE_TO_SUBSTRAIT[col_dtype]()
 
+            # Build arguments: column reference + optional offset for lag/lead
+            # Rank functions (rank, dense_rank, row_number) are parameterless
+            if func in _RANK_FUNCS:
+                arguments = []
+            else:
+                arguments = [
+                    stalg.FunctionArgument(
+                        value=stalg.Expression(
+                            selection=stalg.Expression.FieldReference(
+                                direct_reference=stalg.Expression.ReferenceSegment(
+                                    struct_field=stalg.Expression.ReferenceSegment.StructField(
+                                        field=idx
+                                    )
+                                ),
+                                root_reference=stalg.Expression.FieldReference.RootReference(),
+                            )
+                        )
+                    )
+                ]
+            if func in ("lag", "lead") and offset > 0:
+                arguments.append(
+                    stalg.FunctionArgument(
+                        value=stalg.Expression(
+                            literal=stalg.Expression.Literal(i64=offset)
+                        )
+                    )
+                )
+
             window_functions.append(
                 stalg.ConsistentPartitionWindowRel.WindowRelFunction(
                     function_reference=func_anchor,
-                    arguments=[
-                        stalg.FunctionArgument(
-                            value=stalg.Expression(
-                                selection=stalg.Expression.FieldReference(
-                                    direct_reference=stalg.Expression.ReferenceSegment(
-                                        struct_field=stalg.Expression.ReferenceSegment.StructField(
-                                            field=idx
-                                        )
-                                    ),
-                                    root_reference=stalg.Expression.FieldReference.RootReference(),
-                                )
-                            )
-                        )
-                    ],
+                    arguments=arguments,
                     phase=stalg.AggregationPhase.AGGREGATION_PHASE_INITIAL_TO_RESULT,
                     invocation=stalg.AggregateFunction.AGGREGATION_INVOCATION_ALL,
                     output_type=output_type,
@@ -1051,9 +1075,34 @@ class PandasBackend(Backend):
                 window_size = spec.lower_offset + 1
                 window_obj = df.rolling(window_size)
             result = df.copy()
-            for out_name, src_col, func in node.window_funcs:
-                pandas_func = {"avg": "mean"}.get(func, func)
-                result[out_name] = getattr(window_obj[src_col], pandas_func)()
+            _RANK_FUNCS = {"rank", "dense_rank", "row_number"}
+            _RANK_METHOD_MAP = {
+                "rank": "min",
+                "dense_rank": "dense",
+                "row_number": "first",
+            }
+            for out_name, src_col, func, offset in node.window_funcs:
+                if func in _RANK_FUNCS:
+                    method = _RANK_METHOD_MAP[func]
+                    asc = node.order_by[0][1] if node.order_by else True
+                    if node.partition_by:
+                        result[out_name] = df.groupby(node.partition_by, sort=False)[
+                            src_col
+                        ].rank(method=method, ascending=asc)
+                    else:
+                        result[out_name] = df[src_col].rank(
+                            method=method, ascending=asc
+                        )
+                elif func == "lag":
+                    result[out_name] = df[src_col].shift(offset)
+                elif func == "lead":
+                    result[out_name] = df[src_col].shift(-offset)
+                elif func == "product" and spec.lower_offset is None:
+                    # expanding().prod() doesn't exist; use cumprod directly
+                    result[out_name] = df[src_col].cumprod()
+                else:
+                    pandas_func = {"avg": "mean", "product": "prod"}.get(func, func)
+                    result[out_name] = getattr(window_obj[src_col], pandas_func)()
             return result
 
         elif isinstance(node, RenameColumns):
