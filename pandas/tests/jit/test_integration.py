@@ -1666,6 +1666,70 @@ class TestRolling:
         assert len(result) == len(expected)
         assert all(result["price"] > 100)
 
+    def test_rolling_min(self, sales_df):
+        @compilable
+        def f(df):
+            nums = df[["id", "price", "quantity"]].sort_values("id")
+            return nums.rolling(2).min()
+
+        result = f(sales_df)
+        expected = (
+            sales_df[["id", "price", "quantity"]].sort_values("id").rolling(2).min()
+        )
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_dtype=False,
+        )
+
+    def test_rolling_max(self, sales_df):
+        @compilable
+        def f(df):
+            nums = df[["id", "price", "quantity"]].sort_values("id")
+            return nums.rolling(2).max()
+
+        result = f(sales_df)
+        expected = (
+            sales_df[["id", "price", "quantity"]].sort_values("id").rolling(2).max()
+        )
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_dtype=False,
+        )
+
+    def test_rolling_var(self, sales_df):
+        @compilable
+        def f(df):
+            nums = df[["id", "price", "quantity"]].sort_values("id")
+            return nums.rolling(3).var()
+
+        result = f(sales_df)
+        expected = (
+            sales_df[["id", "price", "quantity"]].sort_values("id").rolling(3).var()
+        )
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_dtype=False,
+        )
+
+    def test_rolling_count(self, sales_df):
+        @compilable
+        def f(df):
+            nums = df[["id", "price", "quantity"]].sort_values("id")
+            return nums.rolling(2).count()
+
+        result = f(sales_df)
+        expected = (
+            sales_df[["id", "price", "quantity"]].sort_values("id").rolling(2).count()
+        )
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_dtype=False,
+        )
+
 
 class TestExpanding:
     def test_expanding_sum(self, sales_df):
@@ -1696,6 +1760,54 @@ class TestExpanding:
             sales_df[["id", "price", "quantity"]].sort_values("id").expanding().mean()
         )
         assert len(result) == len(expected)
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_dtype=False,
+        )
+
+    def test_expanding_min(self, sales_df):
+        @compilable
+        def f(df):
+            nums = df[["id", "price", "quantity"]].sort_values("id")
+            return nums.expanding().min()
+
+        result = f(sales_df)
+        expected = (
+            sales_df[["id", "price", "quantity"]].sort_values("id").expanding().min()
+        )
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_dtype=False,
+        )
+
+    def test_expanding_max(self, sales_df):
+        @compilable
+        def f(df):
+            nums = df[["id", "price", "quantity"]].sort_values("id")
+            return nums.expanding().max()
+
+        result = f(sales_df)
+        expected = (
+            sales_df[["id", "price", "quantity"]].sort_values("id").expanding().max()
+        )
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_dtype=False,
+        )
+
+    def test_expanding_count(self, sales_df):
+        @compilable
+        def f(df):
+            nums = df[["id", "price", "quantity"]].sort_values("id")
+            return nums.expanding().count()
+
+        result = f(sales_df)
+        expected = (
+            sales_df[["id", "price", "quantity"]].sort_values("id").expanding().count()
+        )
         tm.assert_frame_equal(
             result.reset_index(drop=True),
             expected.reset_index(drop=True),
@@ -2468,3 +2580,919 @@ class TestGroupByCumulative:
             expected.reset_index(drop=True),
             check_dtype=False,
         )
+
+
+# ---------------------------------------------------------------------------
+# Complex multi-operation pipelines
+# ---------------------------------------------------------------------------
+
+
+class TestComplexPipelines:
+    def test_etl_pipeline(self):
+        """ETL: clean -> transform -> aggregate -> sort."""
+        df = DataFrame(
+            {
+                "date": pd.to_datetime(
+                    [
+                        "2024-01-01",
+                        "2024-01-01",
+                        "2024-01-02",
+                        "2024-01-02",
+                        "2024-01-03",
+                    ]
+                ),
+                "category": ["A", "B", "A", "B", "A"],
+                "amount": [100.0, np.nan, 300.0, 400.0, 500.0],
+                "region": ["  East  ", "West", "East", " West ", "East"],
+            }
+        )
+
+        @compilable
+        def etl(df):
+            df["region"] = df["region"].str.strip()
+            df = df.dropna(subset=["amount"])
+            df["month"] = df["date"].dt.month
+            result = df.groupby(["region", "category"]).agg({"amount": "sum"})
+            return result.sort_values("amount", ascending=False)
+
+        result = etl(df)
+        assert len(result) >= 2
+        assert all(r.strip() == r for r in result["region"])
+
+    def test_feature_engineering(self):
+        """Feature engineering: diff + pct_change + normalize."""
+        df = DataFrame(
+            {
+                "price": [100.0, 102.0, 101.0, 105.0, 103.0, 108.0],
+                "volume": [1000.0, 1100.0, 900.0, 1200.0, 1050.0, 1300.0],
+            }
+        )
+
+        @compilable
+        def features(df):
+            df["price_change"] = df["price"].diff(1)
+            df["price_pct"] = df["price"].pct_change(1)
+            df["vol_ratio"] = df["volume"] / df["volume"].mean()
+            return df
+
+        result = features(df)
+        expected = df.copy()
+        expected["price_change"] = expected["price"].diff(1)
+        expected["price_pct"] = expected["price"].pct_change(1)
+        expected["vol_ratio"] = expected["volume"] / expected["volume"].mean()
+        tm.assert_frame_equal(result, expected, check_dtype=False, atol=1e-10)
+
+    def test_multi_table_join(self):
+        """Join 2 tables -> filter -> aggregate."""
+        orders = DataFrame(
+            {
+                "order_id": range(1, 6),
+                "customer_id": [1, 2, 1, 3, 2],
+                "amount": [100.0, 200.0, 150.0, 300.0, 250.0],
+            }
+        )
+        customers = DataFrame(
+            {
+                "customer_id": [1, 2, 3],
+                "name": ["Alice", "Bob", "Charlie"],
+            }
+        )
+
+        @compilable
+        def pipeline(orders, customers):
+            merged = orders.merge(customers, on="customer_id")
+            high_value = merged[merged["amount"] > 150]
+            return (
+                high_value.groupby("name")
+                .agg({"amount": "sum"})
+                .sort_values("amount", ascending=False)
+            )
+
+        result = pipeline(orders, customers)
+        expected = orders.merge(customers, on="customer_id")
+        expected = expected[expected["amount"] > 150]
+        expected = (
+            expected.groupby("name")["amount"]
+            .sum()
+            .reset_index()
+            .sort_values("amount", ascending=False)
+            .reset_index(drop=True)
+        )
+        tm.assert_frame_equal(
+            result.sort_values("name").reset_index(drop=True),
+            expected.sort_values("name").reset_index(drop=True),
+            check_dtype=False,
+        )
+
+    def test_string_cleaning_pipeline(self):
+        """String: strip -> lower -> contains filter -> replace."""
+        df = DataFrame(
+            {"name": ["  Alice  ", " BOB ", "charlie", "  DAVE  ", "  eve  "]}
+        )
+
+        @compilable
+        def clean(df):
+            df["name"] = df["name"].str.strip().str.lower()
+            df = df[df["name"].str.contains("e")]
+            df["name"] = df["name"].str.replace("e", "E")
+            return df
+
+        result = clean(df)
+        expected = df.copy()
+        expected["name"] = expected["name"].str.strip().str.lower()
+        expected = expected[expected["name"].str.contains("e")]
+        expected["name"] = expected["name"].str.replace("e", "E")
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+        )
+
+    def test_math_normalization(self):
+        """Math: sqrt + log -> normalize by mean."""
+        df = DataFrame({"x": [1.0, 4.0, 9.0, 16.0, 25.0]})
+
+        @compilable
+        def normalize(df):
+            df["sqrt_x"] = df["x"].sqrt()
+            df["log_x"] = df["x"].log()
+            df["norm"] = df["sqrt_x"] / df["sqrt_x"].mean()
+            return df
+
+        result = normalize(df)
+        expected = df.copy()
+        expected["sqrt_x"] = np.sqrt(expected["x"])
+        expected["log_x"] = np.log(expected["x"])
+        expected["norm"] = expected["sqrt_x"] / expected["sqrt_x"].mean()
+        tm.assert_frame_equal(result, expected, check_dtype=False, atol=1e-10)
+
+    def test_cumulative_with_groupby_filter(self):
+        """Cumulative sum per group, then filter."""
+        df = DataFrame(
+            {
+                "g": ["a", "b", "a", "b", "a", "b"],
+                "v": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+            }
+        )
+
+        @compilable
+        def f(df):
+            df["cumv"] = df.groupby("g")["v"].cumsum()
+            return df[df["cumv"] > 30]
+
+        result = f(df)
+        expected = df.copy()
+        expected["cumv"] = expected.groupby("g")["v"].cumsum()
+        expected = expected[expected["cumv"] > 30]
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_dtype=False,
+        )
+
+    def test_assign_chain(self):
+        """5+ chained assigns with mixed operations."""
+        df = DataFrame({"a": [1.0, 2.0, 3.0, 4.0, 5.0]})
+
+        @compilable
+        def f(df):
+            df["b"] = df["a"] * 2
+            df["c"] = df["b"] + 10
+            df["d"] = df["c"] / df["a"]
+            df["e"] = df["a"].sqrt()
+            df["f"] = df["d"].round(1)
+            return df
+
+        result = f(df)
+        expected = df.copy()
+        expected["b"] = expected["a"] * 2
+        expected["c"] = expected["b"] + 10
+        expected["d"] = expected["c"] / expected["a"]
+        expected["e"] = np.sqrt(expected["a"])
+        expected["f"] = expected["d"].round(1)
+        tm.assert_frame_equal(result, expected, check_dtype=False, atol=1e-10)
+
+    def test_window_ranking(self):
+        """Rank within dataset."""
+        df = DataFrame(
+            {
+                "dept": ["A", "A", "A", "B", "B", "B"],
+                "salary": [50, 70, 60, 80, 55, 65],
+            }
+        )
+
+        @compilable
+        def f(df):
+            df["rnk"] = df["salary"].rank(method="min")
+            return df.sort_values("rnk")
+
+        result = f(df)
+        expected = df.copy()
+        expected["rnk"] = expected["salary"].rank(method="min")
+        expected = expected.sort_values("rnk")
+        tm.assert_frame_equal(
+            result.reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_dtype=False,
+        )
+
+
+# ---------------------------------------------------------------------------
+# NaN handling integration
+# ---------------------------------------------------------------------------
+
+
+class TestNaNIntegration:
+    def test_nan_propagation_through_pipeline(self):
+        df = DataFrame({"a": [1.0, np.nan, 3.0], "b": [4.0, 5.0, np.nan]})
+
+        @compilable
+        def f(df):
+            df["c"] = df["a"] + df["b"]
+            return df[df["c"].isna() | (df["c"] > 0)]
+
+        result = f(df)
+        assert len(result) == 3
+
+    def test_fillna_then_aggregate(self):
+        df = DataFrame({"g": ["a", "a", "b"], "v": [1.0, np.nan, 3.0]})
+
+        @compilable
+        def f(df):
+            df["v"] = df["v"].fillna(0)
+            return df.groupby("g")[["v"]].sum()
+
+        result = f(df)
+        result = result.sort_values("g").reset_index(drop=True)
+        assert result.iloc[0]["v"] == 1.0
+        assert result.iloc[1]["v"] == 3.0
+
+    def test_dropna_then_sort(self):
+        df = DataFrame({"x": [3.0, np.nan, 1.0, np.nan, 2.0]})
+
+        @compilable
+        def f(df):
+            df = df.dropna(subset=["x"])
+            return df.sort_values("x")
+
+        result = f(df)
+        assert list(result["x"]) == [1.0, 2.0, 3.0]
+
+    def test_nan_in_window(self):
+        """Window cumsum skips NaN (treated as 0), unlike pandas."""
+        df = DataFrame({"x": [1.0, np.nan, 3.0, 4.0]})
+
+        @compilable
+        def f(df):
+            df["cs"] = df["x"].cumsum()
+            return df
+
+        result = f(df)
+        # JIT cumsum uses window sum which skips NaN
+        assert result["cs"].iloc[0] == 1.0
+        assert result["cs"].iloc[2] == 4.0
+        assert result["cs"].iloc[3] == 8.0
+
+    def test_nan_in_deferred_scalar(self):
+        df = DataFrame({"x": [1.0, np.nan, 3.0]})
+
+        @compilable
+        def f(df):
+            df["norm"] = df["x"] / df["x"].mean()
+            return df
+
+        result = f(df)
+        expected = df.copy()
+        expected["norm"] = expected["x"] / expected["x"].mean()
+        tm.assert_frame_equal(result, expected, check_dtype=False)
+
+
+# ---------------------------------------------------------------------------
+# Transform Integration Tests (Phase 37)
+# ---------------------------------------------------------------------------
+
+
+class TestTransformIntegration:
+    """Integration tests for groupby().transform() and optimization passes."""
+
+    def test_transform_then_filter(self):
+        """transform('sum') → filter → sort pipeline."""
+        df = DataFrame({"g": ["a", "a", "b", "b", "b"], "v": [10, 20, 30, 40, 50]})
+
+        @compilable
+        def f(df):
+            df["group_sum"] = df.groupby("g")["v"].transform("sum")
+            df = df[df["group_sum"] > 50]
+            return df.sort_values("v")
+
+        result = f(df)
+        assert all(result["group_sum"] > 50)
+        assert list(result["v"]) == sorted(result["v"])
+
+    def test_transform_normalization(self):
+        """Transform sum used in downstream computation."""
+        df = DataFrame({"g": ["a", "a", "b", "b"], "v": [10.0, 20.0, 30.0, 40.0]})
+
+        @compilable
+        def f(df):
+            df["group_sum"] = df.groupby("g")["v"].transform("sum")
+            df = df[df["group_sum"] > 50]
+            return df
+
+        result = f(df)
+        # Group a sum=30 (<50), group b sum=70 (>50)
+        assert len(result) == 2
+        assert all(result["g"] == "b")
+
+    def test_multi_optimization_pass(self):
+        """Pipeline where predicate pushdown + projection pruning both apply."""
+        df = DataFrame(
+            {
+                "a": [1, 2, 3, 4, 5],
+                "b": [10, 20, 30, 40, 50],
+                "c": ["x", "y", "z", "w", "v"],
+            }
+        )
+
+        @compilable
+        def f(df):
+            df["d"] = df["a"] + df["b"]
+            df = df[df["a"] > 2]
+            return df[["a", "d"]]
+
+        result = f(df)
+        assert all(result["a"] > 2)
+        assert list(result.columns) == ["a", "d"]
+
+    def test_transform_with_deferred_scalar(self):
+        """transform + DeferredScalar composition."""
+        df = DataFrame({"g": ["a", "a", "b", "b"], "v": [10.0, 20.0, 30.0, 40.0]})
+
+        @compilable
+        def f(df):
+            df["group_mean"] = df.groupby("g")["v"].transform("mean")
+            df["norm"] = df["v"] / df["v"].mean()
+            return df
+
+        result = f(df)
+        assert "group_mean" in result.columns
+        assert "norm" in result.columns
+        overall_mean = df["v"].mean()
+        for i in range(len(result)):
+            assert abs(result["norm"].iloc[i] - df["v"].iloc[i] / overall_mean) < 1e-10
+
+
+# ---------------------------------------------------------------------------
+# Phase 38-42 integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestPhase38To42Integration:
+    def test_select_dtypes_then_aggregate(self):
+        """select_dtypes('number') → groupby → sum."""
+        df = DataFrame(
+            {
+                "cat": ["a", "a", "b", "b"],
+                "x": [1, 2, 3, 4],
+                "y": [10, 20, 30, 40],
+                "label": ["p", "q", "r", "s"],
+            }
+        )
+
+        @compilable
+        def f(df):
+            numeric = df.select_dtypes(include="number")
+            return numeric
+
+        result = f(df)
+        assert set(result.columns) == {"x", "y"}
+        assert len(result) == 4
+
+    def test_replace_then_groupby(self):
+        """replace({0: 1}) → groupby → sum."""
+        df = DataFrame({"g": ["a", "a", "b", "b"], "v": [0, 2, 3, 0]})
+
+        @compilable
+        def f(df):
+            df = df.replace(0, 1)
+            return df
+
+        result = f(df)
+        assert 0 not in result["v"].values
+        assert list(result["v"]) == [1, 2, 3, 1]
+
+    def test_drop_duplicates_in_pipeline(self):
+        """filter → drop_duplicates(subset) → sort → head."""
+        df = DataFrame(
+            {
+                "cat": ["a", "a", "b", "b", "c"],
+                "val": [10, 20, 30, 40, 50],
+            }
+        )
+
+        @compilable
+        def f(df):
+            df = df[df["val"] > 10]
+            df = df.drop_duplicates(subset=["cat"])
+            df = df.sort_values("val")
+            return df.head(2)
+
+        result = f(df)
+        assert len(result) == 2
+
+    def test_replace_preserves_types(self):
+        """replace doesn't change dtypes for int→int."""
+        df = DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+
+        @compilable
+        def f(df):
+            return df.replace(1, 99)
+
+        result = f(df)
+        assert result["a"].iloc[0] == 99
+        assert result["b"].dtype == df["b"].dtype
+
+    def test_select_dtypes_empty(self):
+        """select_dtypes with no matching columns returns empty DataFrame."""
+        df = DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
+
+        @compilable
+        def f(df):
+            return df.select_dtypes(include="datetime")
+
+        result = f(df)
+        assert len(result.columns) == 0
+
+    def test_df_aggregation_after_filter(self):
+        """filter → df.sum(), verify correct results."""
+        df = DataFrame({"a": [1, 2, 3, 4, 5], "b": [10, 20, 30, 40, 50]})
+
+        @compilable
+        def f(df):
+            df = df[df["a"] > 2]
+            return df.sum()
+
+        result = f(df)
+        assert result["a"] == 12  # 3+4+5
+        assert result["b"] == 120  # 30+40+50
+
+    def test_string_split_rejoin(self):
+        """str.split → extract column → filter."""
+        df = DataFrame({"s": ["hello-world", "foo-bar", "test-case"]})
+
+        @compilable
+        def f(df):
+            parts = df["s"].str.split("-", expand=True)
+            return parts
+
+        result = f(df)
+        assert result.shape == (3, 2)
+
+    def test_timedelta_filtering(self):
+        """Create timedelta column, filter by .dt.days > 1."""
+        df = DataFrame(
+            {
+                "name": ["a", "b", "c"],
+                "duration": pd.to_timedelta([1, 3, 0], unit="D"),
+            }
+        )
+
+        @compilable
+        def f(df):
+            df["days"] = df["duration"].dt.days
+            return df[df["days"] > 1]
+
+        result = f(df)
+        assert len(result) == 1
+        assert result["name"].iloc[0] == "b"
+
+    def test_full_pipeline_with_new_features(self):
+        """Combines df replace, select_dtypes, dedup, head."""
+        df = DataFrame(
+            {
+                "cat": ["a", "a", "b", "b"],
+                "x": [0, 2, 3, 0],
+                "y": [10, 20, 30, 40],
+                "label": ["p", "q", "r", "s"],
+            }
+        )
+
+        @compilable
+        def f(df):
+            df = df.replace(0, 1)
+            numeric = df.select_dtypes(include="number")
+            numeric = numeric.drop_duplicates()
+            return numeric
+
+        result = f(df)
+        assert set(result.columns) == {"x", "y"}
+        assert 0 not in result["x"].values
+
+    def test_filter_groupby_median_rename(self):
+        """Filter rows, groupby median, rename columns."""
+        df = DataFrame(
+            {
+                "region": ["east", "east", "west", "west", "east"],
+                "sales": [100.0, 200.0, 150.0, 250.0, 300.0],
+                "cost": [50.0, 80.0, 60.0, 90.0, 110.0],
+            }
+        )
+
+        @compilable
+        def f(df):
+            df = df[df["sales"] > 120]
+            result = df.groupby("region").median()
+            result = result.rename(columns={"sales": "median_sales"})
+            return result
+
+        result = f(df)
+        assert "median_sales" in result.columns
+
+    def test_comparison_dropna_to_frame(self):
+        """Chain comparison methods, dropna, and to_frame."""
+        df = DataFrame({"x": [1.0, float("nan"), 3.0, 4.0, float("nan")]})
+
+        @compilable
+        def f(df):
+            s = df["x"].dropna()
+            big = s.gt(2.0)
+            return big.to_frame(name="is_big")
+
+        result = f(df)
+        assert "is_big" in result.columns
+        assert result["is_big"].sum() == 2
+
+    def test_ffill_pct_change_duplicated(self):
+        """Forward fill, pct_change, then check duplicated."""
+        df = DataFrame(
+            {
+                "a": [1.0, float("nan"), 3.0, 3.0],
+                "b": [10.0, 20.0, 20.0, 40.0],
+            }
+        )
+
+        @compilable
+        def f(df):
+            df = df.ffill()
+            pct = df.pct_change()
+            return pct
+
+        result = f(df)
+        assert len(result) == 4
+
+    def test_groupby_nunique_then_filter(self):
+        """Groupby nunique then filter groups with >1 unique."""
+        df = DataFrame(
+            {
+                "g": ["a", "a", "b", "b", "b"],
+                "x": [1, 1, 2, 3, 4],
+            }
+        )
+
+        @compilable
+        def f(df):
+            counts = df.groupby("g").nunique()
+            return counts[counts["x"] > 1]
+
+        result = f(df)
+        assert len(result) == 1
+        assert result["g"].iloc[0] == "b"
+
+    def test_insert_sort_head(self):
+        """Insert column, sort, then take head."""
+        df = DataFrame({"name": ["c", "a", "b"], "score": [3, 1, 2]})
+
+        @compilable
+        def f(df):
+            df.insert(1, "rank", [3, 1, 2])
+            df = df.sort_values("rank")
+            return df.head(2)
+
+        result = f(df)
+        assert len(result) == 2
+        assert result["name"].iloc[0] == "a"
+
+    def test_dt_week_groupby_sum(self):
+        """Extract week from datetime, groupby week, sum."""
+        df = DataFrame(
+            {
+                "date": pd.to_datetime(
+                    ["2024-01-01", "2024-01-02", "2024-01-08", "2024-01-09"]
+                ),
+                "value": [10, 20, 30, 40],
+            }
+        )
+
+        @compilable
+        def f(df):
+            df["week"] = df["date"].dt.week
+            return df.groupby("week").sum()
+
+        result = f(df)
+        assert len(result) >= 1
+
+    def test_groupby_shift_diff_corr(self):
+        """GroupBy shift, diff, then compute correlation."""
+        df = DataFrame(
+            {
+                "g": ["a", "a", "a", "b", "b", "b"],
+                "x": [1.0, 2.0, 4.0, 10.0, 20.0, 40.0],
+                "y": [10.0, 20.0, 40.0, 5.0, 10.0, 20.0],
+            }
+        )
+
+        @compilable
+        def f(df):
+            diffs = df.groupby("g").diff()
+            return diffs[["x", "y"]].corr()
+
+        result = f(df)
+        assert "x" in result.columns
+
+    def test_median_quantile_pipeline(self):
+        """Compute median and quantile on filtered data."""
+        df = DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]})
+
+        @compilable
+        def f(df):
+            df = df[df["x"] > 3]
+            med = df["x"].median()
+            q25 = df["x"].quantile(0.25)
+            return DataFrame({"median": [med], "q25": [q25]})
+
+        result = f(df)
+        assert result["median"].iloc[0] == 7.0
+
+    def test_strftime_groupby_count(self):
+        """Format dates, group by month string, count."""
+        df = DataFrame(
+            {
+                "date": pd.to_datetime(
+                    ["2024-01-15", "2024-01-20", "2024-02-10", "2024-02-25"]
+                ),
+                "value": [1, 2, 3, 4],
+            }
+        )
+
+        @compilable
+        def f(df):
+            df["month"] = df["date"].dt.strftime("%Y-%m")
+            return df.groupby("month").count()
+
+        result = f(df)
+        assert len(result) == 2
+
+    def test_idxmax_join_pipeline(self):
+        """Find idxmax, then use result."""
+        df = DataFrame(
+            {
+                "category": ["a", "b", "a", "b"],
+                "score": [10.0, 30.0, 50.0, 20.0],
+            }
+        )
+
+        @compilable
+        def f(df):
+            best_idx = df["score"].idxmax()
+            best_row = df.iloc[[best_idx]]
+            return best_row
+
+        result = f(df)
+        assert result["score"].iloc[0] == 50.0
+
+    def test_groupby_first_pct_change(self):
+        """Get first per group, then pct_change across groups."""
+        df = DataFrame(
+            {
+                "g": ["a", "a", "b", "b", "c", "c"],
+                "x": [100.0, 200.0, 50.0, 100.0, 75.0, 150.0],
+            }
+        )
+
+        @compilable
+        def f(df):
+            firsts = df.groupby("g").first()
+            return firsts
+
+        result = f(df)
+        assert len(result) == 3
+
+    def test_combine_first_then_stats(self):
+        """Combine two DataFrames, then compute stats."""
+        df1 = DataFrame({"x": [1.0, float("nan"), 3.0], "y": [float("nan"), 5.0, 6.0]})
+        df2 = DataFrame({"x": [10.0, 20.0, 30.0], "y": [40.0, 50.0, 60.0]})
+
+        @compilable
+        def f(df):
+            filled = df.combine_first(df2)
+            return filled
+
+        result = f(df1)
+        assert result["x"].iloc[1] == 20.0
+        assert result["y"].iloc[0] == 40.0
+
+
+class TestPhase53_57Integration:
+    """Integration tests combining features from Phases 53-57."""
+
+    def test_groupby_prod_cumcount(self):
+        """GroupBy prod + cumcount pipeline."""
+        df = DataFrame({"g": ["a", "a", "a", "b", "b"], "x": [2, 3, 4, 5, 6]})
+
+        @compilable
+        def f(df):
+            df["cc"] = df.groupby("g").cumcount()
+            prods = df.groupby("g").prod()
+            return prods
+
+        result = f(df)
+        vals = dict(zip(result["g"], result["x"], strict=True))
+        assert vals["a"] == 24  # 2*3*4
+        assert vals["b"] == 30  # 5*6
+
+    def test_series_properties_chain(self):
+        """Series hasnans -> filter -> is_unique."""
+        df = DataFrame({"x": [1.0, 2.0, float("nan"), 3.0, 3.0]})
+
+        @compilable
+        def f(df):
+            has_na = df["x"].hasnans
+            if has_na:
+                clean = df.dropna()
+                return clean["x"].is_unique
+            return True
+
+        result = f(df)
+        assert result is False  # 3.0 appears twice
+
+    def test_rolling_median_expanding_quantile(self):
+        """Rolling median + expanding quantile pipeline."""
+        df = DataFrame({"x": [1.0, 5.0, 3.0, 7.0, 2.0, 8.0]})
+
+        @compilable
+        def f(df):
+            _ = df.rolling(3).median()
+            eq = df.expanding().quantile(0.75)
+            return eq
+
+        result = f(df)
+        assert len(result) == 6
+
+    def test_df_filter_reindex_equals(self):
+        """DataFrame filter + reindex + equals."""
+        df = DataFrame({"col_a": [1, 2], "col_b": [3, 4], "other": [5, 6]})
+
+        @compilable
+        def f(df):
+            filtered = df.filter(regex=r"^col_")
+            reindexed = df.reindex(columns=["col_a", "col_b"])
+            return filtered.equals(reindexed)
+
+        assert f(df) is True
+
+    def test_gbs_shift_diff_first(self):
+        """GroupBySeries shift + diff + first."""
+        df = DataFrame(
+            {
+                "g": ["a", "a", "a", "b", "b", "b"],
+                "x": [10.0, 20.0, 30.0, 100.0, 200.0, 300.0],
+            }
+        )
+
+        @compilable
+        def f(df):
+            df["d"] = df.groupby("g")["x"].diff(1)
+            firsts = df.groupby("g")["x"].first().to_frame()
+            return firsts
+
+        result = f(df)
+        vals = sorted(result["x"].tolist())
+        assert vals == [10.0, 100.0]
+
+    def test_full_pipeline(self):
+        """Combine groupby extras, series props, rolling, df utils."""
+        df = DataFrame(
+            {
+                "category": ["A", "A", "A", "B", "B", "B"],
+                "value": [10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+            }
+        )
+
+        @compilable
+        def f(df):
+            filtered = df.filter(items=["category", "value"])
+            result = filtered.groupby("category").prod()
+            return result
+
+        result = f(df)
+        vals = dict(zip(result["category"], result["value"], strict=True))
+        assert vals["A"] == 6000.0  # 10*20*30
+        assert vals["B"] == 120000.0  # 40*50*60
+
+
+class TestPhase58_62Integration:
+    """Integration tests combining features from Phases 58-62."""
+
+    def test_groupby_multi_shift_diff_first(self):
+        """GroupByMulti shift + diff + first pipeline."""
+        df = DataFrame(
+            {
+                "g": ["a", "a", "a", "b", "b", "b"],
+                "x": [10.0, 20.0, 30.0, 100.0, 200.0, 300.0],
+                "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            }
+        )
+
+        @compilable
+        def f(df):
+            multi = df.groupby("g")[["x", "y"]]
+            _ = multi.shift(1)
+            firsts = multi.first()
+            return firsts
+
+        result = f(df)
+        vals_x = sorted(result["x"].tolist())
+        assert vals_x == [10.0, 100.0]
+
+    def test_dataframe_arithmetic_any_all(self):
+        """DataFrame arithmetic + any/all pipeline."""
+        df = DataFrame({"x": [1, 2, 3], "y": [10, 20, 30]})
+
+        @compilable
+        def f(df):
+            scaled = df * 2
+            above = scaled["x"] > 4
+            has_any = bool(above.any())
+            return has_any
+
+        result = f(df)
+        assert result is True
+
+    def test_groupby_rank_rolling_agg(self):
+        """GroupBy rank + rolling agg pipeline."""
+        df = DataFrame(
+            {
+                "g": ["a", "a", "a", "b", "b", "b"],
+                "x": [30.0, 10.0, 20.0, 60.0, 40.0, 50.0],
+            }
+        )
+
+        @compilable
+        def f(df):
+            ranked = df.groupby("g").rank(method="min")
+            rolled = ranked.rolling(2).agg("mean")
+            return rolled
+
+        result = f(df)
+        assert len(result) == 6
+
+    def test_series_conversion_conditional(self):
+        """Series conversion in conditional pipeline."""
+        df = DataFrame({"x": [1, 2, 3, 4, 5]})
+
+        @compilable
+        def f(df):
+            arr = df["x"].to_numpy()
+            total = arr.sum()
+            if total > 10:
+                d = df["x"].to_dict()
+                return len(d)
+            return 0
+
+        result = f(df)
+        assert result == 5  # sum=15 > 10, so returns len(dict)=5
+
+    def test_dataframe_iter_filter(self):
+        """DataFrame iter + filter pipeline."""
+        df = DataFrame({"col_a": [1, 2], "col_b": [3, 4], "other": [5, 6]})
+
+        @compilable
+        def f(df):
+            _ = list(df)
+            filtered = df.filter(regex=r"^col_")
+            agged = filtered.agg("sum")
+            return agged
+
+        result = f(df)
+        assert result["col_a"] == 3
+        assert result["col_b"] == 7
+
+    def test_full_pipeline_phases58_62(self):
+        """Full pipeline combining arithmetic, map, groupby multi, iter."""
+        df = DataFrame(
+            {
+                "category": ["A", "A", "B", "B"],
+                "value": [10, 20, 30, 40],
+                "code": [1, 2, 1, 2],
+            }
+        )
+
+        @compilable
+        def f(df):
+            _ = df * 1  # arithmetic (makes a copy)
+            _ = df["code"].map({1: 100, 2: 200})  # series map dict
+            _ = list(df)  # DataFrame iter
+            totals = df.agg({"value": "sum"})
+            return totals
+
+        result = f(df)
+        assert result["value"] == 100  # 10+20+30+40

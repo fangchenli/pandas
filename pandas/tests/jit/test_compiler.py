@@ -1533,3 +1533,179 @@ class TestScalarSubquery:
         avg = tables["t"]["price"].mean()
         expected = tables["t"][tables["t"]["price"] > avg].reset_index(drop=True)
         tm.assert_frame_equal(result, expected)
+
+
+# ---------------------------------------------------------------------------
+# Aggregate with duplicate src_col (Bug fix)
+# ---------------------------------------------------------------------------
+
+
+class TestPandasBackendAggDuplicate:
+    """Verify Aggregate handles the same src_col with different functions."""
+
+    @pytest.fixture
+    def setup(self):
+        schema = Schema({"g": DType.STRING, "price": DType.INT64, "qty": DType.INT64})
+        ir = ReadTable("t", schema)
+        df = DataFrame(
+            {"g": ["a", "a", "b", "b"], "price": [10, 20, 30, 40], "qty": [1, 2, 3, 4]}
+        )
+        tables = {"t": df}
+        return ir, tables
+
+    def test_agg_same_col_two_funcs(self, setup):
+        ir, tables = setup
+        agg = Aggregate(
+            ir, ["g"], [("sum_price", "price", "sum"), ("avg_price", "price", "avg")]
+        )
+        result = PandasBackend().execute(agg, tables)
+        assert "sum_price" in result.columns
+        assert "avg_price" in result.columns
+        row_a = result[result["g"] == "a"].iloc[0]
+        assert row_a["sum_price"] == 30
+        assert row_a["avg_price"] == 15.0
+
+    def test_agg_same_col_three_funcs(self, setup):
+        ir, tables = setup
+        agg = Aggregate(
+            ir,
+            ["g"],
+            [
+                ("s", "price", "sum"),
+                ("mn", "price", "min"),
+                ("mx", "price", "max"),
+            ],
+        )
+        result = PandasBackend().execute(agg, tables)
+        assert list(result.columns) == ["g", "s", "mn", "mx"]
+        row_b = result[result["g"] == "b"].iloc[0]
+        assert row_b["s"] == 70
+        assert row_b["mn"] == 30
+        assert row_b["mx"] == 40
+
+    def test_agg_no_group_keys_duplicate_col(self, setup):
+        ir, tables = setup
+        agg = Aggregate(
+            ir, [], [("total", "price", "sum"), ("average", "price", "avg")]
+        )
+        result = PandasBackend().execute(agg, tables)
+        assert result["total"].iloc[0] == 100
+        assert result["average"].iloc[0] == 25.0
+
+
+# ---------------------------------------------------------------------------
+# CastExpr with temporal dtypes (Bug fix)
+# ---------------------------------------------------------------------------
+
+
+class TestCastExprDTypes:
+    """Verify CastExpr works for temporal and decimal dtypes."""
+
+    def test_cast_to_timestamp(self):
+        schema = Schema({"v": DType.INT64})
+        ir = ReadTable("t", schema)
+        expr = CastExpr(ColRef("v"), DType.TIMESTAMP)
+        node = AddColumn(ir, "v_ts", expr, DType.TIMESTAMP)
+        df = DataFrame({"v": pd.to_datetime(["2024-01-01", "2024-06-15"]).astype(int)})
+        result = PandasBackend().execute(node, {"t": df})
+        assert "datetime64" in str(result["v_ts"].dtype)
+
+    def test_cast_to_timedelta(self):
+        schema = Schema({"v": DType.INT64})
+        ir = ReadTable("t", schema)
+        expr = CastExpr(ColRef("v"), DType.TIMEDELTA)
+        node = AddColumn(ir, "v_td", expr, DType.TIMEDELTA)
+        df = DataFrame({"v": pd.to_timedelta(["1 day", "2 days"]).astype(int)})
+        result = PandasBackend().execute(node, {"t": df})
+        assert "timedelta64" in str(result["v_td"].dtype)
+
+    def test_cast_to_decimal_becomes_float64(self):
+        schema = Schema({"v": DType.INT64})
+        ir = ReadTable("t", schema)
+        expr = CastExpr(ColRef("v"), DType.DECIMAL)
+        node = AddColumn(ir, "v_dec", expr, DType.DECIMAL)
+        df = DataFrame({"v": [1, 2, 3]})
+        result = PandasBackend().execute(node, {"t": df})
+        assert result["v_dec"].dtype == np.float64
+
+
+# ---------------------------------------------------------------------------
+# _compile_literal for temporal types (Bug fix)
+# ---------------------------------------------------------------------------
+
+
+class TestLiteralCompilation:
+    """Verify temporal Literal values compile to proper Substrait protos."""
+
+    def test_literal_date(self):
+        compiler = SubstraitCompiler()
+        lit = Literal(pd.Timestamp("2024-01-15"), DType.DATE)
+        result = compiler._compile_literal(lit)
+        assert result.literal.HasField("date")
+
+    def test_literal_timestamp(self):
+        compiler = SubstraitCompiler()
+        lit = Literal(pd.Timestamp("2024-01-15 10:30:00"), DType.TIMESTAMP)
+        result = compiler._compile_literal(lit)
+        assert result.literal.HasField("timestamp")
+
+    def test_literal_timedelta(self):
+        compiler = SubstraitCompiler()
+        lit = Literal(pd.Timedelta("3 days 4 hours"), DType.TIMEDELTA)
+        result = compiler._compile_literal(lit)
+        assert result.literal.HasField("interval_day_to_second")
+        assert result.literal.interval_day_to_second.days == 3
+
+
+# ---------------------------------------------------------------------------
+# Math function registry + PandasBackend execution
+# ---------------------------------------------------------------------------
+
+
+class TestMathFuncRegistry:
+    @pytest.mark.parametrize(
+        "func_name,substrait_name",
+        [
+            ("sqrt", "sqrt:fp64"),
+            ("log", "ln:fp64"),
+            ("log10", "log10:fp64"),
+            ("exp", "exp:fp64"),
+            ("ceil", "ceil:fp64"),
+            ("floor", "floor:fp64"),
+            ("sign", "sign:fp64"),
+        ],
+    )
+    def test_math_func_in_registry(self, func_name, substrait_name):
+        from pandas.jit.compiler import (
+            ARITHMETIC_URI,
+            FUNC_REGISTRY,
+        )
+
+        assert func_name in FUNC_REGISTRY
+        name, uri = FUNC_REGISTRY[func_name]
+        assert name == substrait_name
+        assert uri == ARITHMETIC_URI
+
+    def test_math_func_compiles_to_substrait(self):
+        expr = FunctionCall("sqrt", [ColRef("x")], return_dtype=DType.FLOAT64)
+        node = AddColumn(
+            ReadTable("t", Schema({"x": DType.FLOAT64})),
+            "root",
+            expr,
+            DType.FLOAT64,
+        )
+        compiler = SubstraitCompiler()
+        plan = compiler.compile(node)
+        assert len(plan.extensions) > 0
+
+    def test_math_func_pandas_backend(self):
+        import numpy as np
+
+        backend = PandasBackend()
+        df = DataFrame({"x": [1.0, 4.0, 9.0]})
+        schema = Schema({"x": DType.FLOAT64})
+        base = ReadTable("t", schema)
+        expr = FunctionCall("sqrt", [ColRef("x")], return_dtype=DType.FLOAT64)
+        node = AddColumn(base, "root", expr, DType.FLOAT64)
+        result = backend.execute(node, {"t": df})
+        tm.assert_numpy_array_equal(result["root"].values, np.sqrt(df["x"]).values)

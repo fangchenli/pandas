@@ -147,6 +147,13 @@ _IR_DTYPE_TO_PANDAS: dict[DType, str] = {
     DType.FLOAT64: "float64",
     DType.STRING: "object",
     DType.BOOL: "bool",
+    DType.TIMESTAMP: "datetime64[ns]",
+    DType.TIMESTAMP_TZ: "datetime64[ns]",
+    DType.DATE: "datetime64[ns]",
+    DType.TIMEDELTA: "timedelta64[ns]",
+    DType.DECIMAL: "float64",
+    DType.TIME: "object",
+    DType.BINARY: "object",
 }
 
 
@@ -192,8 +199,16 @@ FUNC_REGISTRY: dict[str, tuple[str, str]] = {
     "floordiv": ("divide:i64_i64", ARITHMETIC_URI),
     "mod": ("modulo:i64_i64", ARITHMETIC_URI),
     "pow": ("power:fp64_fp64", ARITHMETIC_URI),
+    "round": ("round:fp64_i32", ARITHMETIC_URI),
     "abs": ("abs:fp64", ARITHMETIC_URI),
     "negate": ("negate:i64", ARITHMETIC_URI),
+    "sqrt": ("sqrt:fp64", ARITHMETIC_URI),
+    "log": ("ln:fp64", ARITHMETIC_URI),
+    "log10": ("log10:fp64", ARITHMETIC_URI),
+    "exp": ("exp:fp64", ARITHMETIC_URI),
+    "ceil": ("ceil:fp64", ARITHMETIC_URI),
+    "floor": ("floor:fp64", ARITHMETIC_URI),
+    "sign": ("sign:fp64", ARITHMETIC_URI),
     # Boolean
     "and": ("and:bool", BOOLEAN_URI),
     "or": ("or:bool", BOOLEAN_URI),
@@ -215,6 +230,7 @@ FUNC_REGISTRY: dict[str, tuple[str, str]] = {
     "rank": ("rank:", AGGREGATE_URI),
     "dense_rank": ("dense_rank:", AGGREGATE_URI),
     "row_number": ("row_number:", AGGREGATE_URI),
+    "count_distinct": ("count:any", AGGREGATE_URI),
     # Datetime
     "extract": ("extract:req_ts", DATETIME_URI),
     # String
@@ -229,6 +245,22 @@ FUNC_REGISTRY: dict[str, tuple[str, str]] = {
     "str_endswith": ("ends_with:str_str", STRING_URI),
     "str_replace": ("replace:str_str_str", STRING_URI),
     "str_slice": ("substring:str_i32_i32", STRING_URI),
+    "str_capitalize": ("capitalize:str", STRING_URI),
+    "str_title": ("title:str", STRING_URI),
+    "str_swapcase": ("swapcase:str", STRING_URI),
+    "str_isdigit": ("is_digit:str", STRING_URI),
+    "str_isalpha": ("is_alpha:str", STRING_URI),
+    "str_isnumeric": ("is_numeric:str", STRING_URI),
+    "str_isspace": ("is_space:str", STRING_URI),
+    "str_islower": ("is_lower:str", STRING_URI),
+    "str_isupper": ("is_upper:str", STRING_URI),
+    "str_count": ("count_substring:str_str", STRING_URI),
+    "str_find": ("strpos:str_str", STRING_URI),
+    "str_cat": ("concat:str_str", STRING_URI),
+    "str_pad": ("lpad:str_i32_str", STRING_URI),
+    "str_zfill": ("lpad:str_i32_str", STRING_URI),
+    "str_center": ("center:str_i32_str", STRING_URI),
+    "str_repeat": ("repeat:str_i64", STRING_URI),
 }
 
 
@@ -276,7 +308,17 @@ class SubstraitCompiler:
             )
         return self._func_anchors[func_key]
 
-    def compile(self, ir: IRNode) -> stp.Plan:
+    def compile(self, ir: IRNode, optimize: bool = True) -> stp.Plan:
+        if optimize:
+            from pandas.jit.ir import (
+                optimize_expressions,
+                optimize_projections,
+                push_predicates,
+            )
+
+            ir = push_predicates(ir)
+            ir = optimize_expressions(ir)
+            ir = optimize_projections(ir)
         rel = self._compile_rel(ir)
         output_schema = ir.output_schema()
 
@@ -463,6 +505,11 @@ class SubstraitCompiler:
             func_anchor = self._get_func_anchor(func)
             idx = input_schema.column_index(src_col)
 
+            invocation = (
+                stalg.AggregateFunction.AGGREGATION_INVOCATION_DISTINCT
+                if func == "count_distinct"
+                else stalg.AggregateFunction.AGGREGATION_INVOCATION_ALL
+            )
             agg_func = stalg.AggregateFunction(
                 function_reference=func_anchor,
                 arguments=[
@@ -480,9 +527,10 @@ class SubstraitCompiler:
                     )
                 ],
                 phase=stalg.AggregationPhase.AGGREGATION_PHASE_INITIAL_TO_RESULT,
+                invocation=invocation,
                 output_type=_DTYPE_TO_SUBSTRAIT.get(
                     DType.INT64
-                    if func == "count"
+                    if func in ("count", "count_distinct")
                     else input_schema.columns.get(src_col, DType.FLOAT64),
                     _DTYPE_TO_SUBSTRAIT[DType.FLOAT64],
                 )(),
@@ -843,6 +891,27 @@ class SubstraitCompiler:
                 return stalg.Expression(
                     literal=stalg.Expression.Literal(boolean=bool(lit.value))
                 )
+            case DType.DATE:
+                days = int(pd.Timestamp(lit.value).timestamp() / 86400)
+                return stalg.Expression(literal=stalg.Expression.Literal(date=days))
+            case DType.TIMESTAMP | DType.TIMESTAMP_TZ:
+                micros = int(pd.Timestamp(lit.value).timestamp() * 1_000_000)
+                return stalg.Expression(
+                    literal=stalg.Expression.Literal(timestamp=micros)
+                )
+            case DType.TIMEDELTA:
+                td = pd.Timedelta(lit.value)
+                return stalg.Expression(
+                    literal=stalg.Expression.Literal(
+                        interval_day_to_second=(
+                            stalg.Expression.Literal.IntervalDayToSecond(
+                                days=td.days,
+                                seconds=td.seconds,
+                                microseconds=td.microseconds,
+                            )
+                        )
+                    )
+                )
             case _:
                 return stalg.Expression(
                     literal=stalg.Expression.Literal(string=str(lit.value))
@@ -988,7 +1057,22 @@ class PandasBackend(Backend):
     def name(self) -> str:
         return "pandas"
 
-    def execute(self, ir_node: IRNode, tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    def execute(
+        self,
+        ir_node: IRNode,
+        tables: dict[str, pd.DataFrame],
+        optimize: bool = True,
+    ) -> pd.DataFrame:
+        if optimize:
+            from pandas.jit.ir import (
+                optimize_expressions,
+                optimize_projections,
+                push_predicates,
+            )
+
+            ir_node = push_predicates(ir_node)
+            ir_node = optimize_expressions(ir_node)
+            ir_node = optimize_projections(ir_node)
         return self._exec(ir_node, tables)
 
     def _exec(self, node: IRNode, tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -1036,18 +1120,13 @@ class PandasBackend(Backend):
                 for out_name, src_col, func in node.agg_specs:
                     result[out_name] = [self._agg_fn(func)(df[src_col])]
                 return pd.DataFrame(result)
-            agg_dict = {}
-            rename_map = {}
+            named_aggs = {}
             for out_name, src_col, func in node.agg_specs:
-                pandas_func = {"avg": "mean"}.get(func, func)
-                agg_dict[src_col] = pandas_func
-                rename_map[src_col] = out_name
-            result = df.groupby(node.group_keys, as_index=False).agg(agg_dict)
-            non_key_cols = [c for c in result.columns if c not in node.group_keys]
-            for col in non_key_cols:
-                if col in rename_map and rename_map[col] != col:
-                    result = result.rename(columns={col: rename_map[col]})
-            return result
+                pandas_func = {"avg": "mean", "count_distinct": "nunique"}.get(
+                    func, func
+                )
+                named_aggs[out_name] = pd.NamedAgg(column=src_col, aggfunc=pandas_func)
+            return df.groupby(node.group_keys, as_index=False).agg(**named_aggs)
 
         elif isinstance(node, Join):
             left = self._exec(node.left, tables)
@@ -1073,7 +1152,11 @@ class PandasBackend(Backend):
             has_partition = bool(node.partition_by)
             if has_partition:
                 grp = df.groupby(node.partition_by, sort=False)
-            if spec.lower_offset is None:
+            # Whole-partition window (transform): both bounds unbounded
+            is_whole_partition = spec.lower_offset is None and spec.upper_offset is None
+            if is_whole_partition:
+                window_obj = None  # use groupby().transform() instead
+            elif spec.lower_offset is None:
                 # Expanding window
                 if has_partition:
                     window_obj = grp.expanding()
@@ -1120,6 +1203,10 @@ class PandasBackend(Backend):
                         result[out_name] = grp[src_col].cumprod()
                     else:
                         result[out_name] = df[src_col].cumprod()
+                elif is_whole_partition and has_partition:
+                    # Whole-partition window = groupby().transform()
+                    pandas_func = {"avg": "mean", "product": "prod"}.get(func, func)
+                    result[out_name] = grp[src_col].transform(pandas_func)
                 else:
                     pandas_func = {"avg": "mean", "product": "prod"}.get(func, func)
                     col_window = window_obj[src_col]
@@ -1223,8 +1310,46 @@ class PandasBackend(Backend):
                 "QUARTER": "quarter",
                 "MONDAY_DAY_OF_WEEK": "dayofweek",
                 "DAY_OF_YEAR": "dayofyear",
+                "MICROSECOND": "microsecond",
+                "NANOSECOND": "nanosecond",
             }
+            if component == "WEEK":
+                return series.dt.isocalendar().week.astype("int64")
+            if component == "DATE":
+                return series.dt.date
             return getattr(series.dt, _COMPONENT_MAP[component])
+        elif expr.func_name == "round":
+            series = self._eval_expr(expr.args[0], df, tables)
+            decimals = expr.args[1].value if len(expr.args) > 1 else 0
+            return series.round(decimals=int(decimals))
+        elif expr.func_name in (
+            "sqrt",
+            "log",
+            "log10",
+            "exp",
+            "ceil",
+            "floor",
+            "sign",
+        ):
+            import numpy as np
+
+            series = self._eval_expr(expr.args[0], df, tables)
+            _MATH = {
+                "sqrt": np.sqrt,
+                "log": np.log,
+                "log10": np.log10,
+                "exp": np.exp,
+                "ceil": np.ceil,
+                "floor": np.floor,
+                "sign": np.sign,
+            }
+            return _MATH[expr.func_name](series)
+        elif expr.func_name == "extract_td":
+            series = self._eval_expr(expr.args[0], df, tables)
+            component = expr.options.get("component", "days")
+            if component == "total_seconds":
+                return series.dt.total_seconds()
+            return getattr(series.dt, component)
         elif expr.func_name.startswith("str_"):
             return self._eval_str_func(expr, df, tables)
         raise TypeError(f"Unknown function: {expr.func_name}")
@@ -1247,8 +1372,11 @@ class PandasBackend(Backend):
             "min": pd.Series.min,
             "max": pd.Series.max,
             "count": pd.Series.count,
+            "count_distinct": pd.Series.nunique,
             "std": pd.Series.std,
             "var": pd.Series.var,
+            "prod": pd.Series.prod,
+            "product": pd.Series.prod,
         }[name]
 
 

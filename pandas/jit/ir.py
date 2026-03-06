@@ -263,9 +263,9 @@ class Aggregate(IRNode):
         for k in self.group_keys:
             cols[k] = parent.columns[k]
         for out_name, src_col, func in self.agg_specs:
-            if func == "count":
+            if func in ("count", "count_distinct"):
                 cols[out_name] = DType.INT64
-            elif func in ("avg", "std", "var"):
+            elif func in ("avg", "mean", "std", "var"):
                 cols[out_name] = DType.FLOAT64
             else:
                 cols[out_name] = parent.columns[src_col]
@@ -326,8 +326,8 @@ class WindowSpec:
     """Window frame specification."""
 
     kind: str = "rows"  # "rows" or "range"
-    lower_offset: int | None = None  # None = unbounded
-    upper_offset: int = 0  # 0 = current row
+    lower_offset: int | None = None  # None = unbounded preceding
+    upper_offset: int | None = 0  # 0 = current row, None = unbounded following
 
 
 class Window(IRNode):
@@ -686,3 +686,504 @@ def explain_expr(expr: Expr) -> str:
             return f"SCALAR_SUBQUERY({explain_ir(agg)}, {dtype.name})"
         case _:
             return "?"
+
+
+# ---------------------------------------------------------------------------
+# 6. IR optimization — projection pruning
+# ---------------------------------------------------------------------------
+
+
+def _collect_used_columns(expr: Expr) -> set[str]:
+    """Collect all column names referenced by an expression."""
+    if isinstance(expr, ColRef):
+        return {expr.name}
+    elif isinstance(expr, BinOp):
+        return _collect_used_columns(expr.left) | _collect_used_columns(expr.right)
+    elif isinstance(expr, UnaryOp):
+        return _collect_used_columns(expr.operand)
+    elif isinstance(expr, IfThenExpr):
+        return (
+            _collect_used_columns(expr.condition)
+            | _collect_used_columns(expr.then_expr)
+            | _collect_used_columns(expr.else_expr)
+        )
+    elif isinstance(expr, CastExpr):
+        return _collect_used_columns(expr.input)
+    elif isinstance(expr, FunctionCall):
+        result: set[str] = set()
+        for arg in expr.args:
+            result |= _collect_used_columns(arg)
+        return result
+    elif isinstance(expr, SingularOrList):
+        result = _collect_used_columns(expr.value)
+        for opt in expr.options:
+            result |= _collect_used_columns(opt)
+        return result
+    elif isinstance(expr, ScalarSubquery):
+        return set()  # subquery is self-contained
+    return set()  # Literal, etc.
+
+
+def optimize_projections(ir: IRNode, needed: set[str] | None = None) -> IRNode:
+    """
+    Projection pruning optimization pass.
+
+    Walks the IR tree top-down and prunes unused columns at each level
+    by recursing with a narrowed "needed" set.
+    """
+    if needed is None:
+        needed = set(ir.output_schema().column_names())
+
+    if isinstance(ir, ReadTable):
+        available = set(ir.schema.columns.keys())
+        keep = needed & available
+        if keep < available:
+            ordered = [c for c in ir.schema.columns if c in keep]
+            return Project(ir, ordered)
+        return ir
+
+    elif isinstance(ir, Filter):
+        expr_cols = _collect_used_columns(ir.predicate)
+        child_needed = needed | expr_cols
+        new_input = optimize_projections(ir.input, child_needed)
+        result = Filter(new_input, ir.predicate)
+        available = set(result.output_schema().column_names())
+        if needed < available:
+            ordered = [c for c in result.output_schema().column_names() if c in needed]
+            return Project(result, ordered)
+        return result
+
+    elif isinstance(ir, Project):
+        child_needed = set(ir.columns)
+        new_input = optimize_projections(ir.input, child_needed)
+        return Project(new_input, ir.columns)
+
+    elif isinstance(ir, AddColumn):
+        expr_cols = _collect_used_columns(ir.expr)
+        child_needed = (needed - {ir.name}) | expr_cols
+        new_input = optimize_projections(ir.input, child_needed)
+        return AddColumn(new_input, ir.name, ir.expr, ir.dtype)
+
+    elif isinstance(ir, Sort):
+        sort_cols = {k for k, _ in ir.keys}
+        child_needed = needed | sort_cols
+        new_input = optimize_projections(ir.input, child_needed)
+        return Sort(new_input, ir.keys)
+
+    elif isinstance(ir, Limit):
+        new_input = optimize_projections(ir.input, needed)
+        return Limit(new_input, ir.n, ir.offset)
+
+    elif isinstance(ir, Aggregate):
+        group_cols = set(ir.group_keys)
+        src_cols = {src for _, src, _ in ir.agg_specs}
+        child_needed = group_cols | src_cols
+        new_input = optimize_projections(ir.input, child_needed)
+        return Aggregate(new_input, ir.group_keys, ir.agg_specs)
+
+    elif isinstance(ir, Join):
+        left_cols = set(ir.left.output_schema().column_names())
+        right_cols = set(ir.right.output_schema().column_names())
+        left_needed: set[str] = set()
+        right_needed: set[str] = set()
+        for col in needed:
+            if col in left_cols:
+                left_needed.add(col)
+            elif col in right_cols:
+                right_needed.add(col)
+        for k in ir.left_on:
+            left_needed.add(k)
+        for k in ir.right_on:
+            right_needed.add(k)
+        new_left = optimize_projections(ir.left, left_needed)
+        new_right = optimize_projections(ir.right, right_needed)
+        return Join(new_left, new_right, ir.left_on, ir.right_on, ir.how)
+
+    elif isinstance(ir, Window):
+        child_needed = set(needed)
+        for _, src, _, _ in ir.window_funcs:
+            child_needed.add(src)
+        for col in ir.partition_by:
+            child_needed.add(col)
+        for col, _ in ir.order_by:
+            child_needed.add(col)
+        new_input = optimize_projections(ir.input, child_needed)
+        return Window(
+            new_input,
+            ir.window_funcs,
+            ir.window_spec,
+            ir.partition_by,
+            ir.order_by,
+        )
+
+    elif isinstance(ir, Union):
+        return Union([optimize_projections(inp, needed) for inp in ir.inputs])
+
+    elif isinstance(ir, Distinct):
+        child_needed = needed | set(ir.columns)
+        new_input = optimize_projections(ir.input, child_needed)
+        return Distinct(new_input, ir.columns)
+
+    elif isinstance(ir, RenameColumns):
+        inv_map = {v: k for k, v in ir.mapping.items()}
+        child_needed = {inv_map.get(c, c) for c in needed}
+        new_input = optimize_projections(ir.input, child_needed)
+        return RenameColumns(new_input, ir.mapping)
+
+    return ir
+
+
+# ---------------------------------------------------------------------------
+# IR optimization — predicate pushdown
+# ---------------------------------------------------------------------------
+
+
+def _expr_uses_only(expr: Expr, available: set[str]) -> bool:
+    """Check if all ColRefs in expr are within the available set."""
+    return _collect_used_columns(expr).issubset(available)
+
+
+def push_predicates(ir: IRNode) -> IRNode:
+    """
+    Push Filter nodes closer to data sources.
+
+    Recursively transforms the IR tree so that filters are applied as early
+    as possible, reducing the amount of data flowing through the plan.
+    """
+    if isinstance(ir, ReadTable):
+        return ir
+
+    elif isinstance(ir, Filter):
+        # First, recursively push predicates in the child
+        child = push_predicates(ir.input)
+        pred = ir.predicate
+
+        # Merge adjacent filters: Filter(Filter(x, p1), p2) → Filter(x, AND(p1, p2))
+        if isinstance(child, Filter):
+            merged = BinOp("and", child.predicate, pred)
+            return Filter(child.input, merged)
+
+        # Push below AddColumn if pred doesn't use the added/overwritten column
+        if isinstance(child, AddColumn):
+            pred_cols = _collect_used_columns(pred)
+            if child.name not in pred_cols:
+                return AddColumn(
+                    Filter(child.input, pred),
+                    child.name,
+                    child.expr,
+                    child.dtype,
+                )
+            return Filter(child, pred)
+
+        # Push below Sort (doesn't change semantics)
+        if isinstance(child, Sort):
+            return Sort(Filter(child.input, pred), child.keys)
+
+        # Do NOT push below Limit (changes semantics)
+        if isinstance(child, Limit):
+            return Filter(child, pred)
+
+        # Push into Union branches
+        if isinstance(child, Union):
+            return Union([Filter(inp, pred) for inp in child.inputs])
+
+        # Push below Project if pred columns exist in child
+        if isinstance(child, Project):
+            child_cols = set(child.input.output_schema().column_names())
+            if _expr_uses_only(pred, child_cols):
+                return Project(Filter(child.input, pred), child.columns)
+            return Filter(child, pred)
+
+        # Push below Window if pred doesn't reference window output columns
+        if isinstance(child, Window):
+            window_out_cols = {out for out, _, _, _ in child.window_funcs}
+            if not _collect_used_columns(pred) & window_out_cols:
+                return Window(
+                    Filter(child.input, pred),
+                    child.window_funcs,
+                    child.window_spec,
+                    partition_by=child.partition_by,
+                    order_by=child.order_by,
+                )
+            return Filter(child, pred)
+
+        # Push into Join sides
+        if isinstance(child, Join):
+            left_cols = set(child.left.output_schema().column_names())
+            right_cols = set(child.right.output_schema().column_names())
+            pred_cols = _collect_used_columns(pred)
+            if pred_cols.issubset(left_cols) and not pred_cols.intersection(right_cols):
+                return Join(
+                    Filter(child.left, pred),
+                    child.right,
+                    child.left_on,
+                    child.right_on,
+                    child.how,
+                )
+            elif pred_cols.issubset(right_cols) and not pred_cols.intersection(
+                left_cols
+            ):
+                return Join(
+                    child.left,
+                    Filter(child.right, pred),
+                    child.left_on,
+                    child.right_on,
+                    child.how,
+                )
+            return Filter(child, pred)
+
+        # Push below RenameColumns if we can map pred columns back
+        if isinstance(child, RenameColumns):
+            inv_map = {v: k for k, v in child.mapping.items()}
+            child_cols = set(child.input.output_schema().column_names())
+            pred_cols = _collect_used_columns(pred)
+            mapped_cols = {inv_map.get(c, c) for c in pred_cols}
+            if mapped_cols.issubset(child_cols):
+                mapped_pred = _remap_expr(pred, inv_map)
+                return RenameColumns(Filter(child.input, mapped_pred), child.mapping)
+            return Filter(child, pred)
+
+        return Filter(child, pred)
+
+    elif isinstance(ir, Project):
+        return Project(push_predicates(ir.input), ir.columns)
+
+    elif isinstance(ir, AddColumn):
+        return AddColumn(push_predicates(ir.input), ir.name, ir.expr, ir.dtype)
+
+    elif isinstance(ir, Sort):
+        return Sort(push_predicates(ir.input), ir.keys)
+
+    elif isinstance(ir, Limit):
+        return Limit(push_predicates(ir.input), ir.n, ir.offset)
+
+    elif isinstance(ir, Aggregate):
+        return Aggregate(push_predicates(ir.input), ir.group_keys, ir.agg_specs)
+
+    elif isinstance(ir, Join):
+        return Join(
+            push_predicates(ir.left),
+            push_predicates(ir.right),
+            ir.left_on,
+            ir.right_on,
+            ir.how,
+        )
+
+    elif isinstance(ir, Window):
+        return Window(
+            push_predicates(ir.input),
+            ir.window_funcs,
+            ir.window_spec,
+            partition_by=ir.partition_by,
+            order_by=ir.order_by,
+        )
+
+    elif isinstance(ir, Union):
+        return Union([push_predicates(inp) for inp in ir.inputs])
+
+    elif isinstance(ir, Distinct):
+        return Distinct(push_predicates(ir.input), ir.columns)
+
+    elif isinstance(ir, RenameColumns):
+        return RenameColumns(push_predicates(ir.input), ir.mapping)
+
+    return ir
+
+
+def _remap_expr(expr: Expr, mapping: dict[str, str]) -> Expr:
+    """Remap ColRef names through a column rename mapping."""
+    if isinstance(expr, ColRef):
+        return ColRef(mapping.get(expr.name, expr.name))
+    elif isinstance(expr, BinOp):
+        return BinOp(
+            expr.op,
+            _remap_expr(expr.left, mapping),
+            _remap_expr(expr.right, mapping),
+        )
+    elif isinstance(expr, UnaryOp):
+        return UnaryOp(expr.op, _remap_expr(expr.operand, mapping))
+    elif isinstance(expr, FunctionCall):
+        return FunctionCall(
+            expr.func_name,
+            [_remap_expr(a, mapping) for a in expr.args],
+            options=expr.options,
+            return_dtype=expr.return_dtype,
+        )
+    elif isinstance(expr, Literal):
+        return expr
+    return expr
+
+
+# ---------------------------------------------------------------------------
+# IR optimization — constant folding
+# ---------------------------------------------------------------------------
+
+_BINOP_EVAL: dict[str, object] = {
+    "add": lambda a, b: a + b,
+    "sub": lambda a, b: a - b,
+    "mul": lambda a, b: a * b,
+    "div": lambda a, b: a / b if b != 0 else None,
+    "floordiv": lambda a, b: a // b if b != 0 else None,
+    "mod": lambda a, b: a % b if b != 0 else None,
+    "pow": lambda a, b: a**b,
+    "gt": lambda a, b: a > b,
+    "gte": lambda a, b: a >= b,
+    "lt": lambda a, b: a < b,
+    "lte": lambda a, b: a <= b,
+    "eq": lambda a, b: a == b,
+    "ne": lambda a, b: a != b,
+    "and": lambda a, b: a and b,
+    "or": lambda a, b: a or b,
+}
+
+_UNARYOP_EVAL: dict[str, object] = {
+    "not": lambda a: not a,
+    "negate": lambda a: -a,
+    "abs": lambda a: abs(a),
+}
+
+
+def fold_constants(expr: Expr) -> Expr:
+    """
+    Simplify expressions with constant operands.
+
+    Folds literal-only operations and applies identity simplifications.
+    """
+    if isinstance(expr, BinOp):
+        left = fold_constants(expr.left)
+        right = fold_constants(expr.right)
+
+        # Full constant fold: Literal op Literal → Literal
+        if isinstance(left, Literal) and isinstance(right, Literal):
+            fn = _BINOP_EVAL.get(expr.op)
+            if fn is not None:
+                try:
+                    result = fn(left.value, right.value)
+                    if result is not None:
+                        return Literal(result)
+                except (TypeError, ArithmeticError):
+                    pass
+
+        # Identity simplifications
+        if isinstance(right, Literal):
+            if expr.op == "add" and right.value == 0:
+                return left
+            if expr.op == "sub" and right.value == 0:
+                return left
+            if expr.op == "mul" and right.value == 1:
+                return left
+            if expr.op == "mul" and right.value == 0:
+                return Literal(0)
+            if expr.op == "and" and right.value is True:
+                return left
+            if expr.op == "or" and right.value is False:
+                return left
+
+        if isinstance(left, Literal):
+            if expr.op == "add" and left.value == 0:
+                return right
+            if expr.op == "mul" and left.value == 1:
+                return right
+            if expr.op == "mul" and left.value == 0:
+                return Literal(0)
+            if expr.op == "and" and left.value is True:
+                return right
+            if expr.op == "or" and left.value is False:
+                return right
+
+        return BinOp(expr.op, left, right)
+
+    elif isinstance(expr, UnaryOp):
+        operand = fold_constants(expr.operand)
+
+        # Full constant fold
+        if isinstance(operand, Literal):
+            fn = _UNARYOP_EVAL.get(expr.op)
+            if fn is not None:
+                try:
+                    return Literal(fn(operand.value))
+                except (TypeError, ArithmeticError):
+                    pass
+
+        # NOT(NOT(x)) = x
+        if expr.op == "not" and isinstance(operand, UnaryOp) and operand.op == "not":
+            return operand.operand
+
+        return UnaryOp(expr.op, operand)
+
+    elif isinstance(expr, FunctionCall):
+        return FunctionCall(
+            expr.func_name,
+            [fold_constants(a) for a in expr.args],
+            options=expr.options,
+            return_dtype=expr.return_dtype,
+        )
+
+    elif isinstance(expr, IfThenExpr):
+        return IfThenExpr(
+            fold_constants(expr.condition),
+            fold_constants(expr.then_expr),
+            fold_constants(expr.else_expr),
+        )
+
+    elif isinstance(expr, CastExpr):
+        return CastExpr(fold_constants(expr.input), expr.target_dtype)
+
+    return expr
+
+
+def optimize_expressions(ir: IRNode) -> IRNode:
+    """Walk IR tree, apply fold_constants to all expressions."""
+    if isinstance(ir, ReadTable):
+        return ir
+
+    elif isinstance(ir, Filter):
+        new_input = optimize_expressions(ir.input)
+        new_pred = fold_constants(ir.predicate)
+        return Filter(new_input, new_pred)
+
+    elif isinstance(ir, AddColumn):
+        new_input = optimize_expressions(ir.input)
+        new_expr = fold_constants(ir.expr)
+        return AddColumn(new_input, ir.name, new_expr, ir.dtype)
+
+    elif isinstance(ir, Project):
+        return Project(optimize_expressions(ir.input), ir.columns)
+
+    elif isinstance(ir, Sort):
+        return Sort(optimize_expressions(ir.input), ir.keys)
+
+    elif isinstance(ir, Limit):
+        return Limit(optimize_expressions(ir.input), ir.n, ir.offset)
+
+    elif isinstance(ir, Aggregate):
+        return Aggregate(optimize_expressions(ir.input), ir.group_keys, ir.agg_specs)
+
+    elif isinstance(ir, Join):
+        return Join(
+            optimize_expressions(ir.left),
+            optimize_expressions(ir.right),
+            ir.left_on,
+            ir.right_on,
+            ir.how,
+        )
+
+    elif isinstance(ir, Window):
+        return Window(
+            optimize_expressions(ir.input),
+            ir.window_funcs,
+            ir.window_spec,
+            partition_by=ir.partition_by,
+            order_by=ir.order_by,
+        )
+
+    elif isinstance(ir, Union):
+        return Union([optimize_expressions(inp) for inp in ir.inputs])
+
+    elif isinstance(ir, Distinct):
+        return Distinct(optimize_expressions(ir.input), ir.columns)
+
+    elif isinstance(ir, RenameColumns):
+        return RenameColumns(optimize_expressions(ir.input), ir.mapping)
+
+    return ir

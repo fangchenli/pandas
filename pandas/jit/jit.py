@@ -524,6 +524,25 @@ class TracedSeries:
     def __ne__(self, other):
         return self._binop("ne", other, DType.BOOL)
 
+    # -- Comparison method forms --
+    def eq(self, other) -> TracedSeries:
+        return self._binop("eq", other, DType.BOOL)
+
+    def ne(self, other) -> TracedSeries:
+        return self._binop("ne", other, DType.BOOL)
+
+    def lt(self, other) -> TracedSeries:
+        return self._binop("lt", other, DType.BOOL)
+
+    def le(self, other) -> TracedSeries:
+        return self._binop("lte", other, DType.BOOL)
+
+    def gt(self, other) -> TracedSeries:
+        return self._binop("gt", other, DType.BOOL)
+
+    def ge(self, other) -> TracedSeries:
+        return self._binop("gte", other, DType.BOOL)
+
     # -- Arithmetic --
     def __add__(self, other):
         return self._binop("add", other, self._dtype)
@@ -616,6 +635,214 @@ class TracedSeries:
     def var(self):
         return self._deferred_agg("var", DType.FLOAT64)
 
+    def any(self, **kwargs):
+        return self._deferred_agg("max", DType.BOOL)
+
+    def all(self, **kwargs):
+        return self._deferred_agg("min", DType.BOOL)
+
+    def median(self, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].median(**kwargs)
+
+    def quantile(self, q=0.5, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].quantile(q=q, **kwargs)
+
+    def prod(self, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].prod(**kwargs)
+
+    product = prod
+
+    def sem(self, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].sem(**kwargs)
+
+    def skew(self, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].skew(**kwargs)
+
+    def kurt(self, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].kurt(**kwargs)
+
+    kurtosis = kurt
+
+    @property
+    def name(self):
+        return self._column_name
+
+    @property
+    def dtype(self):
+        _DTYPE_MAP = {
+            DType.INT8: "int8",
+            DType.INT16: "int16",
+            DType.INT32: "int32",
+            DType.INT64: "int64",
+            DType.UINT8: "uint8",
+            DType.UINT16: "uint16",
+            DType.UINT32: "uint32",
+            DType.UINT64: "uint64",
+            DType.FLOAT32: "float32",
+            DType.FLOAT64: "float64",
+            DType.STRING: "object",
+            DType.BOOL: "bool",
+            DType.TIMESTAMP: "datetime64[ns]",
+            DType.TIMESTAMP_TZ: "datetime64[ns]",
+            DType.DATE: "datetime64[ns]",
+            DType.TIMEDELTA: "timedelta64[ns]",
+            DType.DECIMAL: "float64",
+            DType.TIME: "object",
+            DType.BINARY: "object",
+        }
+        pd_dtype = _DTYPE_MAP.get(self._dtype, "object")
+        return pd.api.types.pandas_dtype(pd_dtype)
+
+    @property
+    def ndim(self):
+        return 1
+
+    @property
+    def hasnans(self):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].hasnans
+
+    @property
+    def is_unique(self):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].is_unique
+
+    @property
+    def is_monotonic_increasing(self):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].is_monotonic_increasing
+
+    @property
+    def is_monotonic_decreasing(self):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].is_monotonic_decreasing
+
+    @property
+    def empty(self):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].empty
+
+    def duplicated(self, keep="first") -> TracedSeries:
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        result = df[col].duplicated(keep=keep)
+        result_df = pd.DataFrame({col: result})
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result_df)
+        return TracedSeries(
+            self._ctx, ReadTable(name, infer_schema(result_df)), col, dtype=DType.BOOL
+        )
+
+    def factorize(self, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].factorize(**kwargs)
+
+    def explode(self, **kwargs) -> TracedSeries:
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        result = df[col].explode(**kwargs)
+        result_df = pd.DataFrame({col: result})
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result_df)
+        return TracedSeries(self._ctx, ReadTable(name, infer_schema(result_df)), col)
+
+    def searchsorted(self, value, side="left", sorter=None):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].searchsorted(value, side=side, sorter=sorter)
+
+    def copy(self, deep=True):
+        return TracedSeries(
+            self._ctx,
+            self._source_ir,
+            column_name=self._column_name,
+            expr=self._expr,
+            dtype=self._dtype,
+        )
+
+    def tolist(self):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].tolist()
+
+    to_list = tolist
+
+    def __array__(self, dtype=None, copy=None):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return np.array(df[col], dtype=dtype)
+
+    def to_numpy(self, dtype=None, copy=False, na_value=None, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].to_numpy(dtype=dtype, copy=copy, na_value=na_value, **kwargs)
+
+    def to_dict(self, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].to_dict(**kwargs)
+
+    def to_csv(self, *args, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].to_csv(*args, **kwargs)
+
+    def to_json(self, *args, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].to_json(*args, **kwargs)
+
+    def items(self):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].items()
+
+    def __iter__(self):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return iter(df[col])
+
+    def __contains__(self, value):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return value in df[col].values
+
+    @property
+    def values(self):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].values
+
+    @property
+    def shape(self):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].shape
+
+    @property
+    def index(self):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].index
+
     # -- Non-materializing pandas methods --
 
     def isin(self, values) -> TracedSeries:
@@ -645,7 +872,7 @@ class TracedSeries:
             dtype=DType.BOOL,
         )
 
-    def fillna(self, value) -> TracedSeries:
+    def fillna(self, value=None, **kwargs) -> TracedSeries:
         return TracedSeries(
             self._ctx,
             self._source_ir,
@@ -653,6 +880,39 @@ class TracedSeries:
             expr=BinOp("coalesce", self._expr, _to_expr(value)),
             dtype=self._dtype,
         )
+
+    def ffill(self, **kwargs) -> TracedSeries:
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        result = df[col].ffill(**kwargs)
+        result_df = pd.DataFrame({col: result})
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result_df)
+        return TracedSeries(self._ctx, ReadTable(name, infer_schema(result_df)), col)
+
+    def bfill(self, **kwargs) -> TracedSeries:
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        result = df[col].bfill(**kwargs)
+        result_df = pd.DataFrame({col: result})
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result_df)
+        return TracedSeries(self._ctx, ReadTable(name, infer_schema(result_df)), col)
+
+    def dropna(self) -> TracedSeries:
+        col = self._column_name
+        if col is None:
+            _, df = self._ctx.materialize(self._source_ir)
+            col = next(iter(df.columns))
+            result = df[[col]].dropna()
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedSeries(self._ctx, ReadTable(name, infer_schema(result)), col)
+        filter_node = Filter(
+            self._source_ir,
+            UnaryOp("not", UnaryOp("is_null", ColRef(col))),
+        )
+        return TracedSeries(self._ctx, filter_node, col, dtype=self._dtype)
 
     def abs(self) -> TracedSeries:
         return TracedSeries(
@@ -723,15 +983,134 @@ class TracedSeries:
             dtype=DType.BOOL,
         )
 
+    def to_frame(self, name=None) -> TracedDataFrame:
+        col = self._column_name
+        if col is None:
+            # Computed expression — add as column, then project
+            out_name = name or "__to_frame__"
+            add_node = AddColumn(self._source_ir, out_name, self._expr, self._dtype)
+            return TracedDataFrame(self._ctx, Project(add_node, [out_name]))
+        proj = Project(self._source_ir, [col])
+        if name is not None and name != col:
+            proj = RenameColumns(proj, {col: name})
+        return TracedDataFrame(self._ctx, proj)
+
     # -- Accessor properties --
 
     @property
-    def dt(self) -> TracedDatetimeAccessor:
+    def dt(self):
+        if self._dtype == DType.TIMEDELTA:
+            return TracedTimedeltaAccessor(self)
         return TracedDatetimeAccessor(self)
 
     @property
     def str(self) -> TracedStringAccessor:
         return TracedStringAccessor(self)
+
+    def where(self, cond, other=None, **kwargs) -> TracedSeries:
+        if isinstance(cond, TracedSeries) and isinstance(
+            other, (int, float, str, bool, type(None))
+        ):
+            other_val = other if other is not None else float("nan")
+            expr = IfThenExpr(cond._expr, self._expr, Literal(other_val))
+            return TracedSeries(
+                self._ctx, self._source_ir, expr=expr, dtype=self._dtype
+            )
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        if isinstance(cond, TracedSeries):
+            cond = self._ctx.materialize(cond._source_ir)[1][cond._column_name]
+        return df[col].where(cond, other)
+
+    def mask(self, cond, other=None, **kwargs) -> TracedSeries:
+        if isinstance(cond, TracedSeries) and isinstance(
+            other, (int, float, str, bool, type(None))
+        ):
+            other_val = other if other is not None else float("nan")
+            inverted = UnaryOp("not", cond._expr)
+            expr = IfThenExpr(inverted, self._expr, Literal(other_val))
+            return TracedSeries(
+                self._ctx, self._source_ir, expr=expr, dtype=self._dtype
+            )
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        if isinstance(cond, TracedSeries):
+            cond = self._ctx.materialize(cond._source_ir)[1][cond._column_name]
+        return df[col].mask(cond, other)
+
+    def astype(self, dtype) -> TracedSeries:
+        target_dtype = pandas_dtype_to_ir(str(dtype))
+        known_strings = {"object", "string", "str", "string[python]", "string[pyarrow]"}
+        if target_dtype == DType.STRING and str(dtype) not in known_strings:
+            _, df = self._ctx.materialize(self._source_ir)
+            col = self._column_name or next(iter(df.columns))
+            return df[col].astype(dtype)
+        expr = CastExpr(self._expr, target_dtype)
+        return TracedSeries(self._ctx, self._source_ir, expr=expr, dtype=target_dtype)
+
+    def round(self, decimals=0) -> TracedSeries:
+        expr = FunctionCall(
+            "round",
+            args=[self._expr, Literal(int(decimals))],
+            return_dtype=self._dtype,
+        )
+        return TracedSeries(self._ctx, self._source_ir, expr=expr, dtype=self._dtype)
+
+    def sqrt(self) -> TracedSeries:
+        expr = FunctionCall("sqrt", args=[self._expr], return_dtype=DType.FLOAT64)
+        return TracedSeries(self._ctx, self._source_ir, expr=expr, dtype=DType.FLOAT64)
+
+    def log(self) -> TracedSeries:
+        expr = FunctionCall("log", args=[self._expr], return_dtype=DType.FLOAT64)
+        return TracedSeries(self._ctx, self._source_ir, expr=expr, dtype=DType.FLOAT64)
+
+    def log10(self) -> TracedSeries:
+        expr = FunctionCall("log10", args=[self._expr], return_dtype=DType.FLOAT64)
+        return TracedSeries(self._ctx, self._source_ir, expr=expr, dtype=DType.FLOAT64)
+
+    def exp(self) -> TracedSeries:
+        expr = FunctionCall("exp", args=[self._expr], return_dtype=DType.FLOAT64)
+        return TracedSeries(self._ctx, self._source_ir, expr=expr, dtype=DType.FLOAT64)
+
+    def ceil(self) -> TracedSeries:
+        expr = FunctionCall("ceil", args=[self._expr], return_dtype=self._dtype)
+        return TracedSeries(self._ctx, self._source_ir, expr=expr, dtype=self._dtype)
+
+    def floor(self) -> TracedSeries:
+        expr = FunctionCall("floor", args=[self._expr], return_dtype=self._dtype)
+        return TracedSeries(self._ctx, self._source_ir, expr=expr, dtype=self._dtype)
+
+    def sign(self) -> TracedSeries:
+        expr = FunctionCall("sign", args=[self._expr], return_dtype=self._dtype)
+        return TracedSeries(self._ctx, self._source_ir, expr=expr, dtype=self._dtype)
+
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        import numpy as np
+
+        if method != "__call__":
+            return NotImplemented
+        _UFUNC_MAP = {
+            np.sqrt: "sqrt",
+            np.log: "log",
+            np.log10: "log10",
+            np.exp: "exp",
+            np.ceil: "ceil",
+            np.floor: "floor",
+            np.sign: "sign",
+            np.abs: "abs",
+            np.negative: "negate",
+        }
+        if ufunc in _UFUNC_MAP:
+            name = _UFUNC_MAP[ufunc]
+            if name == "abs":
+                return self.abs()
+            if name == "negate":
+                return -self
+            expr = FunctionCall(name, args=[self._expr], return_dtype=DType.FLOAT64)
+            return TracedSeries(
+                self._ctx, self._source_ir, expr=expr, dtype=DType.FLOAT64
+            )
+        return NotImplemented
 
     # -- Graph-breaking Series methods --
 
@@ -740,10 +1119,28 @@ class TracedSeries:
         col = self._column_name or next(iter(df.columns))
         return df[col].apply(func, **kwargs)
 
-    def map(self, func, **kwargs):
+    def map(self, func, na_action=None, **kwargs):
+        # Dict mapping: traced via chained IfThenExpr (unmapped -> NaN)
+        if isinstance(func, dict) and na_action is None:
+            col = self._column_name
+            expr: Expr = Literal(float("nan"))
+            for old_val, new_val in reversed(func.items()):
+                expr = IfThenExpr(
+                    BinOp("eq", self._expr, Literal(old_val)),
+                    Literal(new_val),
+                    expr,
+                )
+            # Materialize the expression as a named column so downstream
+            # operations (to_frame, etc.) preserve the column name.
+            add_node = AddColumn(
+                self._source_ir, col or "__mapped__", expr, self._dtype
+            )
+            return TracedSeries(
+                self._ctx, add_node, col or "__mapped__", dtype=self._dtype
+            )
         _, df = self._ctx.materialize(self._source_ir)
         col = self._column_name or next(iter(df.columns))
-        return df[col].map(func, **kwargs)
+        return df[col].map(func, na_action=na_action, **kwargs)
 
     def unique(self):
         _, df = self._ctx.materialize(self._source_ir)
@@ -759,6 +1156,98 @@ class TracedSeries:
         _, df = self._ctx.materialize(self._source_ir)
         col = self._column_name or next(iter(df.columns))
         return df[col].value_counts(**kwargs)
+
+    def describe(self, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].describe(**kwargs)
+
+    def mode(self, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].mode(**kwargs)
+
+    def corr(self, other, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        if isinstance(other, TracedSeries):
+            _, other_df = self._ctx.materialize(other._source_ir)
+            other_col = other._column_name or next(iter(other_df.columns))
+            return df[col].corr(other_df[other_col], **kwargs)
+        return df[col].corr(other, **kwargs)
+
+    def cov(self, other, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        if isinstance(other, TracedSeries):
+            _, other_df = self._ctx.materialize(other._source_ir)
+            other_col = other._column_name or next(iter(other_df.columns))
+            return df[col].cov(other_df[other_col], **kwargs)
+        return df[col].cov(other, **kwargs)
+
+    def idxmin(self, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].idxmin(**kwargs)
+
+    def idxmax(self, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        return df[col].idxmax(**kwargs)
+
+    def replace(self, to_replace, value=_SENTINEL, **kwargs) -> TracedSeries:
+        # Simple scalar-to-scalar: x == old ? new : x
+        if (
+            isinstance(to_replace, (int, float, str, bool))
+            and value is not _SENTINEL
+            and isinstance(value, (int, float, str, bool))
+        ):
+            expr = IfThenExpr(
+                BinOp("eq", self._expr, Literal(to_replace)),
+                Literal(value),
+                self._expr,
+            )
+            return TracedSeries(
+                self._ctx, self._source_ir, expr=expr, dtype=self._dtype
+            )
+        # Dict mapping: {old1: new1, old2: new2}
+        if isinstance(to_replace, dict) and value is _SENTINEL:
+            expr = self._expr
+            for old_val, new_val in to_replace.items():
+                expr = IfThenExpr(
+                    BinOp("eq", self._expr, Literal(old_val)),
+                    Literal(new_val),
+                    expr,
+                )
+            return TracedSeries(
+                self._ctx, self._source_ir, expr=expr, dtype=self._dtype
+            )
+        # Complex cases: regex, list, etc. → graph break
+        _, df = self._ctx.materialize(self._source_ir)
+        col = self._column_name or next(iter(df.columns))
+        result = df[col].replace(to_replace, value, **kwargs)
+        result_df = pd.DataFrame({col: result})
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result_df)
+        return TracedSeries(self._ctx, ReadTable(name, infer_schema(result_df)), col)
+
+    def nlargest(self, n=5, keep="first"):
+        col = self._column_name
+        if col is None or keep != "first":
+            _, df = self._ctx.materialize(self._source_ir)
+            col = col or next(iter(df.columns))
+            return df[col].nlargest(n, keep=keep)
+        node = Limit(Sort(self._source_ir, [(col, False)]), n)
+        return TracedSeries(self._ctx, node, col, dtype=self._dtype)
+
+    def nsmallest(self, n=5, keep="first"):
+        col = self._column_name
+        if col is None or keep != "first":
+            _, df = self._ctx.materialize(self._source_ir)
+            col = col or next(iter(df.columns))
+            return df[col].nsmallest(n, keep=keep)
+        node = Limit(Sort(self._source_ir, [(col, True)]), n)
+        return TracedSeries(self._ctx, node, col, dtype=self._dtype)
 
     # --- cumulative (traced via Window IR with expanding frame) ---
 
@@ -803,6 +1292,21 @@ class TracedSeries:
         parent_cols = list(self._source_ir.output_schema().columns.keys())
         proj_node = Project(add_node, parent_cols)
         return TracedSeries(self._ctx, proj_node, col)
+
+    def pct_change(self, periods=1, **kwargs):
+        col = self._column_name
+        lag_col = f"__jit_lag_{col}"
+        if periods >= 0:
+            wfuncs = [(lag_col, col, "lag", periods)]
+        else:
+            wfuncs = [(lag_col, col, "lead", -periods)]
+        window_node = Window(self._source_ir, wfuncs, WindowSpec())
+        diff_expr = BinOp("sub", ColRef(col), ColRef(lag_col))
+        pct_expr = BinOp("div", diff_expr, ColRef(lag_col))
+        add_node = AddColumn(window_node, col, pct_expr, DType.FLOAT64)
+        parent_cols = list(self._source_ir.output_schema().columns.keys())
+        proj_node = Project(add_node, parent_cols)
+        return TracedSeries(self._ctx, proj_node, col, dtype=DType.FLOAT64)
 
     def rank(
         self, method="average", ascending=True, na_option="keep", pct=False, **kwargs
@@ -957,6 +1461,226 @@ class TracedDatetimeAccessor:
     def day_of_year(self) -> TracedSeries:
         return self._extract("DAY_OF_YEAR")
 
+    @property
+    def weekday(self) -> TracedSeries:
+        return self._extract("MONDAY_DAY_OF_WEEK")
+
+    @property
+    def microsecond(self) -> TracedSeries:
+        return self._extract("MICROSECOND")
+
+    @property
+    def nanosecond(self) -> TracedSeries:
+        return self._extract("NANOSECOND")
+
+    @property
+    def week(self) -> TracedSeries:
+        return self._extract("WEEK")
+
+    @property
+    def weekofyear(self) -> TracedSeries:
+        return self._extract("WEEK")
+
+    @property
+    def date(self) -> TracedSeries:
+        expr = FunctionCall(
+            "extract",
+            args=[self._series._expr],
+            options={"component": "DATE"},
+            return_dtype=DType.DATE,
+        )
+        return TracedSeries(
+            self._series._ctx,
+            self._series._source_ir,
+            expr=expr,
+            dtype=DType.DATE,
+        )
+
+    @property
+    def is_month_start(self) -> TracedSeries:
+        day_expr = FunctionCall(
+            "extract",
+            args=[self._series._expr],
+            options={"component": "DAY"},
+            return_dtype=DType.INT64,
+        )
+        expr = BinOp("eq", day_expr, Literal(1))
+        return TracedSeries(
+            self._series._ctx,
+            self._series._source_ir,
+            expr=expr,
+            dtype=DType.BOOL,
+        )
+
+    @property
+    def is_year_start(self) -> TracedSeries:
+        month_expr = FunctionCall(
+            "extract",
+            args=[self._series._expr],
+            options={"component": "MONTH"},
+            return_dtype=DType.INT64,
+        )
+        day_expr = FunctionCall(
+            "extract",
+            args=[self._series._expr],
+            options={"component": "DAY"},
+            return_dtype=DType.INT64,
+        )
+        expr = BinOp(
+            "and",
+            BinOp("eq", month_expr, Literal(1)),
+            BinOp("eq", day_expr, Literal(1)),
+        )
+        return TracedSeries(
+            self._series._ctx,
+            self._series._source_ir,
+            expr=expr,
+            dtype=DType.BOOL,
+        )
+
+    @property
+    def is_quarter_start(self) -> TracedSeries:
+        month_expr = FunctionCall(
+            "extract",
+            args=[self._series._expr],
+            options={"component": "MONTH"},
+            return_dtype=DType.INT64,
+        )
+        day_expr = FunctionCall(
+            "extract",
+            args=[self._series._expr],
+            options={"component": "DAY"},
+            return_dtype=DType.INT64,
+        )
+        month_check = BinOp(
+            "or",
+            BinOp(
+                "or",
+                BinOp("eq", month_expr, Literal(1)),
+                BinOp("eq", month_expr, Literal(4)),
+            ),
+            BinOp(
+                "or",
+                BinOp("eq", month_expr, Literal(7)),
+                BinOp("eq", month_expr, Literal(10)),
+            ),
+        )
+        expr = BinOp(
+            "and",
+            month_check,
+            BinOp("eq", day_expr, Literal(1)),
+        )
+        return TracedSeries(
+            self._series._ctx,
+            self._series._source_ir,
+            expr=expr,
+            dtype=DType.BOOL,
+        )
+
+    @property
+    def is_year_end(self) -> TracedSeries:
+        month_expr = FunctionCall(
+            "extract",
+            args=[self._series._expr],
+            options={"component": "MONTH"},
+            return_dtype=DType.INT64,
+        )
+        day_expr = FunctionCall(
+            "extract",
+            args=[self._series._expr],
+            options={"component": "DAY"},
+            return_dtype=DType.INT64,
+        )
+        expr = BinOp(
+            "and",
+            BinOp("eq", month_expr, Literal(12)),
+            BinOp("eq", day_expr, Literal(31)),
+        )
+        return TracedSeries(
+            self._series._ctx,
+            self._series._source_ir,
+            expr=expr,
+            dtype=DType.BOOL,
+        )
+
+    @property
+    def is_month_end(self) -> TracedSeries:
+        _, df = self._series._ctx.materialize(self._series._source_ir)
+        col = self._series._column_name
+        result_series = df[col].dt.is_month_end
+        result_df = pd.DataFrame({col: result_series})
+        name = self._series._ctx.next_materialized_name()
+        self._series._ctx.register_table(name, result_df)
+        return TracedSeries(
+            self._series._ctx, ReadTable(name, infer_schema(result_df)), col
+        )
+
+    @property
+    def is_quarter_end(self) -> TracedSeries:
+        _, df = self._series._ctx.materialize(self._series._source_ir)
+        col = self._series._column_name
+        result_series = df[col].dt.is_quarter_end
+        result_df = pd.DataFrame({col: result_series})
+        name = self._series._ctx.next_materialized_name()
+        self._series._ctx.register_table(name, result_df)
+        return TracedSeries(
+            self._series._ctx, ReadTable(name, infer_schema(result_df)), col
+        )
+
+    def month_name(self) -> TracedSeries:
+        _, df = self._series._ctx.materialize(self._series._source_ir)
+        col = self._series._column_name
+        result_series = df[col].dt.month_name()
+        result_df = pd.DataFrame({col: result_series})
+        name = self._series._ctx.next_materialized_name()
+        self._series._ctx.register_table(name, result_df)
+        return TracedSeries(
+            self._series._ctx, ReadTable(name, infer_schema(result_df)), col
+        )
+
+    def day_name(self) -> TracedSeries:
+        _, df = self._series._ctx.materialize(self._series._source_ir)
+        col = self._series._column_name
+        result_series = df[col].dt.day_name()
+        result_df = pd.DataFrame({col: result_series})
+        name = self._series._ctx.next_materialized_name()
+        self._series._ctx.register_table(name, result_df)
+        return TracedSeries(
+            self._series._ctx, ReadTable(name, infer_schema(result_df)), col
+        )
+
+    def _dt_graph_break(self, method, *args, **kwargs) -> TracedSeries:
+        _, df = self._series._ctx.materialize(self._series._source_ir)
+        col = self._series._column_name
+        result_series = getattr(df[col].dt, method)(*args, **kwargs)
+        result_df = pd.DataFrame({col: result_series})
+        name = self._series._ctx.next_materialized_name()
+        self._series._ctx.register_table(name, result_df)
+        return TracedSeries(
+            self._series._ctx, ReadTable(name, infer_schema(result_df)), col
+        )
+
+    def strftime(self, date_format) -> TracedSeries:
+        return self._dt_graph_break("strftime", date_format)
+
+    def tz_localize(self, tz, **kwargs) -> TracedSeries:
+        return self._dt_graph_break("tz_localize", tz, **kwargs)
+
+    def tz_convert(self, tz) -> TracedSeries:
+        return self._dt_graph_break("tz_convert", tz)
+
+    def normalize(self) -> TracedSeries:
+        return self._dt_graph_break("normalize")
+
+    def ceil(self, freq, **kwargs) -> TracedSeries:
+        return self._dt_graph_break("ceil", freq, **kwargs)
+
+    def floor(self, freq, **kwargs) -> TracedSeries:
+        return self._dt_graph_break("floor", freq, **kwargs)
+
+    def round(self, freq, **kwargs) -> TracedSeries:
+        return self._dt_graph_break("round", freq, **kwargs)
+
 
 class TracedStringAccessor:
     """Proxy for Series.str — maps to str_* IR expressions."""
@@ -1022,6 +1746,148 @@ class TracedStringAccessor:
             args.append(stop)
         return self._str_func("slice", *args)
 
+    # Case operations
+    def capitalize(self) -> TracedSeries:
+        return self._str_func("capitalize")
+
+    def title(self) -> TracedSeries:
+        return self._str_func("title")
+
+    def swapcase(self) -> TracedSeries:
+        return self._str_func("swapcase")
+
+    # Predicates (return bool)
+    def isdigit(self) -> TracedSeries:
+        return self._str_func("isdigit", return_dtype=DType.BOOL)
+
+    def isalpha(self) -> TracedSeries:
+        return self._str_func("isalpha", return_dtype=DType.BOOL)
+
+    def isnumeric(self) -> TracedSeries:
+        return self._str_func("isnumeric", return_dtype=DType.BOOL)
+
+    def isspace(self) -> TracedSeries:
+        return self._str_func("isspace", return_dtype=DType.BOOL)
+
+    def islower(self) -> TracedSeries:
+        return self._str_func("islower", return_dtype=DType.BOOL)
+
+    def isupper(self) -> TracedSeries:
+        return self._str_func("isupper", return_dtype=DType.BOOL)
+
+    # Search
+    def count(self, sub) -> TracedSeries:
+        return self._str_func("count", sub, return_dtype=DType.INT64)
+
+    def find(self, sub) -> TracedSeries:
+        return self._str_func("find", sub, return_dtype=DType.INT64)
+
+    def cat(self, sep=None) -> TracedSeries:
+        if sep is not None:
+            return self._str_func("cat", sep)
+        return self._str_func("cat")
+
+    # Padding
+    def pad(self, width, side="left", fillchar=" ") -> TracedSeries:
+        return self._str_func("pad", width, side, fillchar)
+
+    def zfill(self, width) -> TracedSeries:
+        return self._str_func("zfill", width)
+
+    def center(self, width, fillchar=" ") -> TracedSeries:
+        return self._str_func("center", width, fillchar)
+
+    def repeat(self, repeats) -> TracedSeries:
+        return self._str_func("repeat", repeats)
+
+    # Graph-break methods that return DataFrames or complex results
+
+    def _graph_break(self, method, *args, **kwargs):
+        """Materialize and call a str method, re-register result."""
+        _, df = self._series._ctx.materialize(self._series._source_ir)
+        col = self._series._column_name
+        result = getattr(df[col].str, method)(*args, **kwargs)
+        if isinstance(result, pd.DataFrame):
+            name = self._series._ctx.next_materialized_name()
+            self._series._ctx.register_table(name, result)
+            return TracedDataFrame(
+                self._series._ctx, ReadTable(name, infer_schema(result))
+            )
+        result_df = pd.DataFrame({col: result})
+        name = self._series._ctx.next_materialized_name()
+        self._series._ctx.register_table(name, result_df)
+        return TracedSeries(
+            self._series._ctx, ReadTable(name, infer_schema(result_df)), col
+        )
+
+    def split(self, pat=None, n=-1, expand=False):
+        return self._graph_break("split", pat=pat, n=n, expand=expand)
+
+    def get(self, i):
+        return self._graph_break("get", i)
+
+    def extract(self, pat, flags=0, expand=True):
+        return self._graph_break("extract", pat, flags=flags, expand=expand)
+
+    def match(self, pat, case=True, flags=0, na=None):
+        return self._graph_break("match", pat, case=case, flags=flags, na=na)
+
+    def fullmatch(self, pat, case=True, flags=0, na=None):
+        return self._graph_break("fullmatch", pat, case=case, flags=flags, na=na)
+
+    def rsplit(self, pat=None, n=-1, expand=False):
+        return self._graph_break("rsplit", pat=pat, n=n, expand=expand)
+
+    def wrap(self, width, **kwargs):
+        return self._graph_break("wrap", width, **kwargs)
+
+    def ljust(self, width, fillchar=" "):
+        return self._graph_break("ljust", width, fillchar=fillchar)
+
+    def rjust(self, width, fillchar=" "):
+        return self._graph_break("rjust", width, fillchar=fillchar)
+
+
+# ---------------------------------------------------------------------------
+# TracedTimedeltaAccessor — .dt for timedelta Series
+# ---------------------------------------------------------------------------
+
+
+class TracedTimedeltaAccessor:
+    """Proxy for Series.dt on timedelta Series — extracts components."""
+
+    def __init__(self, series: TracedSeries):
+        self._series = series
+
+    def _extract_td(self, component: str, return_dtype: DType = DType.INT64):
+        expr = FunctionCall(
+            "extract_td",
+            args=[self._series._expr],
+            options={"component": component},
+            return_dtype=return_dtype,
+        )
+        return TracedSeries(
+            self._series._ctx,
+            self._series._source_ir,
+            expr=expr,
+            dtype=return_dtype,
+        )
+
+    @property
+    def days(self) -> TracedSeries:
+        return self._extract_td("days")
+
+    @property
+    def seconds(self) -> TracedSeries:
+        return self._extract_td("seconds")
+
+    @property
+    def microseconds(self) -> TracedSeries:
+        return self._extract_td("microseconds")
+
+    def total_seconds(self) -> TracedSeries:
+        return self._extract_td("total_seconds", return_dtype=DType.FLOAT64)
+
 
 # ---------------------------------------------------------------------------
 # TracedRolling / TracedExpanding — window proxies (graph break)
@@ -1081,6 +1947,56 @@ class TracedRolling:
     def count(self, **kwargs):
         return self._apply("count", **kwargs)
 
+    def _graph_break(self, method, **method_kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        result = getattr(df.rolling(self._window, **self._kwargs), method)(
+            **method_kwargs
+        )
+        if isinstance(result, pd.DataFrame):
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        return result
+
+    def median(self, **kwargs):
+        return self._graph_break("median", **kwargs)
+
+    def quantile(self, q, **kwargs):
+        return self._graph_break("quantile", q=q, **kwargs)
+
+    def skew(self, **kwargs):
+        return self._graph_break("skew", **kwargs)
+
+    def kurt(self, **kwargs):
+        return self._graph_break("kurt", **kwargs)
+
+    def sem(self, **kwargs):
+        return self._graph_break("sem", **kwargs)
+
+    def rank(self, **kwargs):
+        return self._graph_break("rank", **kwargs)
+
+    def apply(self, func, raw=False, **kwargs):
+        return self._graph_break("apply", func=func, raw=raw, **kwargs)
+
+    def corr(self, other=None, **kwargs):
+        if isinstance(other, TracedDataFrame):
+            other = other._ensure_materialized()
+        return self._graph_break("corr", other=other, **kwargs)
+
+    def cov(self, other=None, **kwargs):
+        if isinstance(other, TracedDataFrame):
+            other = other._ensure_materialized()
+        return self._graph_break("cov", other=other, **kwargs)
+
+    def agg(self, func, *args, **kwargs):
+        _DISPATCH = {"mean", "sum", "std", "var", "min", "max", "count"}
+        if isinstance(func, str) and func in _DISPATCH:
+            return self._apply(func, **kwargs)
+        return self._graph_break("agg", *args, func=func, **kwargs)
+
+    aggregate = agg
+
 
 class TracedExpanding:
     """Proxy for DataFrame.expanding() — builds Window IR node."""
@@ -1127,6 +2043,57 @@ class TracedExpanding:
 
     def max(self, **kwargs):
         return self._apply("max", **kwargs)
+
+    def count(self, **kwargs):
+        return self._apply("count", **kwargs)
+
+    def _graph_break(self, method, **method_kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        result = getattr(df.expanding(**self._kwargs), method)(**method_kwargs)
+        if isinstance(result, pd.DataFrame):
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        return result
+
+    def median(self, **kwargs):
+        return self._graph_break("median", **kwargs)
+
+    def quantile(self, q, **kwargs):
+        return self._graph_break("quantile", q=q, **kwargs)
+
+    def skew(self, **kwargs):
+        return self._graph_break("skew", **kwargs)
+
+    def kurt(self, **kwargs):
+        return self._graph_break("kurt", **kwargs)
+
+    def sem(self, **kwargs):
+        return self._graph_break("sem", **kwargs)
+
+    def rank(self, **kwargs):
+        return self._graph_break("rank", **kwargs)
+
+    def apply(self, func, raw=False, **kwargs):
+        return self._graph_break("apply", func=func, raw=raw, **kwargs)
+
+    def corr(self, other=None, **kwargs):
+        if isinstance(other, TracedDataFrame):
+            other = other._ensure_materialized()
+        return self._graph_break("corr", other=other, **kwargs)
+
+    def cov(self, other=None, **kwargs):
+        if isinstance(other, TracedDataFrame):
+            other = other._ensure_materialized()
+        return self._graph_break("cov", other=other, **kwargs)
+
+    def agg(self, func, *args, **kwargs):
+        _DISPATCH = {"mean", "sum", "std", "var", "min", "max", "count"}
+        if isinstance(func, str) and func in _DISPATCH:
+            return self._apply(func, **kwargs)
+        return self._graph_break("agg", *args, func=func, **kwargs)
+
+    aggregate = agg
 
 
 # ---------------------------------------------------------------------------
@@ -1201,13 +2168,21 @@ class TracedGroupBy:
         return self._simple_agg("var")
 
     def first(self):
-        _, df = self._ctx.materialize(self._source_ir)
-        result = df.groupby(self._keys, as_index=False).first()
-        name = self._ctx.next_materialized_name()
-        self._ctx.register_table(name, result)
-        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        # Traced: Window(row_number, partition_by=keys) + Filter(eq, 1)
+        all_cols = list(self._source_schema.columns.keys())
+        rank_col = "__jit_grp_rn"
+        window_funcs = [(rank_col, self._keys[0], "row_number", 0)]
+        node = Window(
+            self._source_ir,
+            window_funcs,
+            WindowSpec(),
+            partition_by=self._keys,
+        )
+        filter_node = Filter(node, BinOp("eq", ColRef(rank_col), Literal(1.0)))
+        return TracedDataFrame(self._ctx, Project(filter_node, all_cols))
 
     def last(self):
+        # Graph break — no easy way to get last row_number without total count
         _, df = self._ctx.materialize(self._source_ir)
         result = df.groupby(self._keys, as_index=False).last()
         name = self._ctx.next_materialized_name()
@@ -1234,6 +2209,48 @@ class TracedGroupBy:
                 [("size", first_col, "count")],
             ),
         )
+
+    def nunique(self):
+        agg_specs = [
+            (col, col, "count_distinct")
+            for col in self._source_schema.columns
+            if col not in self._keys
+        ]
+        return TracedDataFrame(
+            self._ctx, Aggregate(self._source_ir, self._keys, agg_specs)
+        )
+
+    def head(self, n=5) -> TracedDataFrame:
+        all_cols = list(self._source_schema.columns.keys())
+        rank_col = "__jit_grp_rn"
+        window_funcs = [(rank_col, self._keys[0], "row_number", 0)]
+        node = Window(
+            self._source_ir,
+            window_funcs,
+            WindowSpec(),
+            partition_by=self._keys,
+        )
+        filter_node = Filter(node, BinOp("lte", ColRef(rank_col), Literal(float(n))))
+        return TracedDataFrame(self._ctx, Project(filter_node, all_cols))
+
+    def nth(self, n) -> TracedDataFrame:
+        if n < 0:
+            _, df = self._ctx.materialize(self._source_ir)
+            result = df.groupby(self._keys).nth(n).reset_index(drop=True)
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        all_cols = list(self._source_schema.columns.keys())
+        rank_col = "__jit_grp_rn"
+        window_funcs = [(rank_col, self._keys[0], "row_number", 0)]
+        node = Window(
+            self._source_ir,
+            window_funcs,
+            WindowSpec(),
+            partition_by=self._keys,
+        )
+        filter_node = Filter(node, BinOp("eq", ColRef(rank_col), Literal(float(n + 1))))
+        return TracedDataFrame(self._ctx, Project(filter_node, all_cols))
 
     def _apply_groupby_cumulative(self, func):
         numeric_cols = [
@@ -1270,6 +2287,309 @@ class TracedGroupBy:
     def cumprod(self):
         return self._apply_groupby_cumulative("product")
 
+    def transform(self, func) -> TracedDataFrame:
+        _SUPPORTED = {"sum", "mean", "min", "max", "count", "std", "var"}
+        if isinstance(func, str) and func in _SUPPORTED:
+            numeric_cols = [
+                col
+                for col, dtype in self._source_schema.columns.items()
+                if col not in self._keys and dtype in NUMERIC_DTYPES
+            ]
+            if not numeric_cols:
+                _, df = self._ctx.materialize(self._source_ir)
+                result = df.groupby(self._keys).transform(func)
+                name = self._ctx.next_materialized_name()
+                self._ctx.register_table(name, result)
+                return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+            window_func = {"mean": "avg"}.get(func, func)
+            window_funcs = [(col, col, window_func, 0) for col in numeric_cols]
+            spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=None)
+            node = Window(self._source_ir, window_funcs, spec, partition_by=self._keys)
+            return TracedDataFrame(self._ctx, node)
+        # Non-string or unsupported → graph break
+        _, df = self._ctx.materialize(self._source_ir)
+        result = df.groupby(self._keys).transform(func)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def apply(self, func, *args, **kwargs) -> TracedDataFrame:
+        _, df = self._ctx.materialize(self._source_ir)
+        result = df.groupby(self._keys).apply(func, *args, **kwargs)
+        if isinstance(result, pd.Series):
+            result = result.reset_index(drop=True).to_frame()
+        elif isinstance(result.index, pd.MultiIndex):
+            result = result.reset_index(drop=True)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def median(self, **kwargs) -> TracedDataFrame:
+        _, df = self._ctx.materialize(self._source_ir)
+        result = df.groupby(self._keys).median(**kwargs)
+        result = result.reset_index()
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def quantile(self, q=0.5, **kwargs) -> TracedDataFrame:
+        _, df = self._ctx.materialize(self._source_ir)
+        result = df.groupby(self._keys).quantile(q=q, **kwargs)
+        result = result.reset_index()
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def shift(self, periods=1, **kwargs) -> TracedDataFrame:
+        non_key_cols = [
+            col for col in self._source_schema.columns if col not in self._keys
+        ]
+        if periods >= 0:
+            wfuncs = [(col, col, "lag", periods) for col in non_key_cols]
+        else:
+            wfuncs = [(col, col, "lead", -periods) for col in non_key_cols]
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=None)
+        node = Window(self._source_ir, wfuncs, spec, partition_by=self._keys)
+        return TracedDataFrame(self._ctx, node)
+
+    def diff(self, periods=1, **kwargs) -> TracedDataFrame:
+        numeric_cols = [
+            col
+            for col, dtype in self._source_schema.columns.items()
+            if col not in self._keys and dtype in NUMERIC_DTYPES
+        ]
+        if not numeric_cols:
+            _, df = self._ctx.materialize(self._source_ir)
+            result = df.groupby(self._keys).diff(periods=periods)
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        lag_funcs = [
+            (
+                f"__jit_lag_{col}",
+                col,
+                "lag" if periods >= 0 else "lead",
+                abs(periods),
+            )
+            for col in numeric_cols
+        ]
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=None)
+        window_node = Window(self._source_ir, lag_funcs, spec, partition_by=self._keys)
+        result_ir = window_node
+        for col in numeric_cols:
+            lag_col = f"__jit_lag_{col}"
+            diff_expr = BinOp("sub", ColRef(col), ColRef(lag_col))
+            dtype = self._source_schema.columns[col]
+            result_ir = AddColumn(result_ir, col, diff_expr, dtype)
+        all_cols = list(self._source_schema.columns.keys())
+        proj_node = Project(result_ir, all_cols)
+        return TracedDataFrame(self._ctx, proj_node)
+
+    def pct_change(self, periods=1, **kwargs) -> TracedDataFrame:
+        numeric_cols = [
+            col
+            for col, dtype in self._source_schema.columns.items()
+            if col not in self._keys and dtype in NUMERIC_DTYPES
+        ]
+        if not numeric_cols:
+            _, df = self._ctx.materialize(self._source_ir)
+            result = df.groupby(self._keys).pct_change(periods=periods)
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        lag_funcs = [
+            (
+                f"__jit_lag_{col}",
+                col,
+                "lag" if periods >= 0 else "lead",
+                abs(periods),
+            )
+            for col in numeric_cols
+        ]
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=None)
+        window_node = Window(self._source_ir, lag_funcs, spec, partition_by=self._keys)
+        result_ir = window_node
+        for col in numeric_cols:
+            lag_col = f"__jit_lag_{col}"
+            diff_expr = BinOp("sub", ColRef(col), ColRef(lag_col))
+            pct_expr = BinOp("div", diff_expr, ColRef(lag_col))
+            result_ir = AddColumn(result_ir, col, pct_expr, DType.FLOAT64)
+        all_cols = list(self._source_schema.columns.keys())
+        proj_node = Project(result_ir, all_cols)
+        return TracedDataFrame(self._ctx, proj_node)
+
+    def ffill(self, **kwargs) -> TracedDataFrame:
+        _, df = self._ctx.materialize(self._source_ir)
+        result = df.groupby(self._keys).ffill(**kwargs)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def bfill(self, **kwargs) -> TracedDataFrame:
+        _, df = self._ctx.materialize(self._source_ir)
+        result = df.groupby(self._keys).bfill(**kwargs)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def describe(self, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        return df.groupby(self._keys).describe(**kwargs)
+
+    @property
+    def ngroups(self):
+        _, df = self._ctx.materialize(self._source_ir)
+        return df.groupby(self._keys).ngroups
+
+    def get_group(self, name, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        # pandas requires tuple for single-key groupby in newer versions
+        if not isinstance(name, tuple):
+            name = (name,)
+        result = df.groupby(self._keys).get_group(name, **kwargs)
+        nm = self._ctx.next_materialized_name()
+        self._ctx.register_table(nm, result)
+        return TracedDataFrame(self._ctx, ReadTable(nm, infer_schema(result)))
+
+    def prod(self, **kwargs) -> TracedDataFrame:
+        return self._simple_agg("prod")
+
+    product = prod
+
+    def sem(self, **kwargs) -> TracedDataFrame:
+        _, df = self._ctx.materialize(self._source_ir)
+        result = df.groupby(self._keys).sem(**kwargs).reset_index()
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def skew(self, **kwargs) -> TracedDataFrame:
+        _, df = self._ctx.materialize(self._source_ir)
+        result = df.groupby(self._keys).skew(**kwargs).reset_index()
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def kurt(self, **kwargs) -> TracedDataFrame:
+        _, df = self._ctx.materialize(self._source_ir)
+        result = (
+            df.groupby(self._keys)
+            .apply(
+                lambda g: g.select_dtypes(include="number").kurt(), include_groups=False
+            )
+            .reset_index()
+        )
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def idxmin(self, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        return df.groupby(self._keys).idxmin(**kwargs)
+
+    def idxmax(self, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        return df.groupby(self._keys).idxmax(**kwargs)
+
+    def cumcount(self, ascending=True) -> TracedSeries:
+        rank_col = "__jit_grp_cc"
+        window_funcs = [(rank_col, self._keys[0], "row_number", 0)]
+        node = Window(
+            self._source_ir,
+            window_funcs,
+            WindowSpec(),
+            partition_by=self._keys,
+        )
+        # row_number is 1-based; cumcount is 0-based
+        minus_one = AddColumn(
+            node,
+            rank_col,
+            BinOp("sub", ColRef(rank_col), Literal(1.0)),
+            DType.FLOAT64,
+        )
+        if not ascending:
+            # For descending: count - 1 - cumcount = count - row_number
+            count_col = "__jit_grp_cnt"
+            count_funcs = [(count_col, self._keys[0], "count", 0)]
+            count_node = Window(
+                minus_one,
+                count_funcs,
+                WindowSpec(kind="rows", lower_offset=None, upper_offset=None),
+                partition_by=self._keys,
+            )
+            desc_expr = BinOp(
+                "sub",
+                BinOp("sub", ColRef(count_col), Literal(1.0)),
+                ColRef(rank_col),
+            )
+            minus_one = AddColumn(count_node, rank_col, desc_expr, DType.FLOAT64)
+        return TracedSeries(self._ctx, minus_one, rank_col, dtype=DType.FLOAT64)
+
+    def filter(self, func, *args, **kwargs) -> TracedDataFrame:
+        _, df = self._ctx.materialize(self._source_ir)
+        result = df.groupby(self._keys).filter(func, *args, **kwargs)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def value_counts(self, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        return df.groupby(self._keys).value_counts(**kwargs)
+
+    @property
+    def groups(self):
+        _, df = self._ctx.materialize(self._source_ir)
+        by = self._keys[0] if len(self._keys) == 1 else self._keys
+        return df.groupby(by).groups
+
+    @property
+    def indices(self):
+        _, df = self._ctx.materialize(self._source_ir)
+        by = self._keys[0] if len(self._keys) == 1 else self._keys
+        return df.groupby(by).indices
+
+    def rank(
+        self, method="average", ascending=True, na_option="keep", pct=False, **kwargs
+    ):
+        _RANK_MAP = {"min": "rank", "dense": "dense_rank", "first": "row_number"}
+        if method not in _RANK_MAP or pct or na_option != "keep":
+            _, df = self._ctx.materialize(self._source_ir)
+            result = df.groupby(self._keys).rank(
+                method=method,
+                ascending=ascending,
+                na_option=na_option,
+                pct=pct,
+            )
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        numeric_cols = [
+            col
+            for col, dtype in self._source_schema.columns.items()
+            if col not in self._keys and dtype in NUMERIC_DTYPES
+        ]
+        if not numeric_cols:
+            _, df = self._ctx.materialize(self._source_ir)
+            result = df.groupby(self._keys).rank(
+                method=method,
+                ascending=ascending,
+            )
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        func = _RANK_MAP[method]
+        result_ir = self._source_ir
+        for col in numeric_cols:
+            window_funcs = [(col, col, func, 0)]
+            result_ir = Window(
+                result_ir,
+                window_funcs,
+                WindowSpec(),
+                partition_by=self._keys,
+                order_by=[(col, ascending)],
+            )
+        return TracedDataFrame(self._ctx, result_ir)
+
 
 class TracedGroupBySeries:
     def __init__(self, ctx, source_ir, keys, column, source_schema):
@@ -1299,6 +2619,14 @@ class TracedGroupBySeries:
 
     def var(self):
         return self._agg("var")
+
+    def nunique(self):
+        return self._agg("count_distinct")
+
+    def prod(self):
+        return self._agg("prod")
+
+    product = prod
 
     def rank(
         self, method="average", ascending=True, na_option="keep", pct=False, **kwargs
@@ -1358,6 +2686,153 @@ class TracedGroupBySeries:
     def cumprod(self, **kwargs):
         return self._apply_groupby_cumulative("product")
 
+    def transform(self, func) -> TracedSeries:
+        _SUPPORTED = {"sum", "mean", "min", "max", "count", "std", "var"}
+        if isinstance(func, str) and func in _SUPPORTED:
+            col = self._column
+            window_func = {"mean": "avg"}.get(func, func)
+            window_funcs = [(col, col, window_func, 0)]
+            spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=None)
+            node = Window(self._source_ir, window_funcs, spec, partition_by=self._keys)
+            return TracedSeries(self._ctx, node, col)
+        # Graph break
+        _, df = self._ctx.materialize(self._source_ir)
+        result = df.groupby(self._keys)[self._column].transform(func)
+        result_df = pd.DataFrame({self._column: result})
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result_df)
+        return TracedSeries(
+            self._ctx, ReadTable(name, infer_schema(result_df)), self._column
+        )
+
+    def first(self) -> TracedSeries:
+        rank_col = "__jit_gbs_rn"
+        window_funcs = [(rank_col, self._keys[0], "row_number", 0)]
+        node = Window(
+            self._source_ir,
+            window_funcs,
+            WindowSpec(),
+            partition_by=self._keys,
+        )
+        filter_node = Filter(node, BinOp("eq", ColRef(rank_col), Literal(1.0)))
+        proj = Project(filter_node, [*self._keys, self._column])
+        return TracedSeries(self._ctx, proj, self._column)
+
+    def last(self) -> TracedSeries:
+        _, df = self._ctx.materialize(self._source_ir)
+        result = df.groupby(self._keys, as_index=False)[self._column].last()
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedSeries(
+            self._ctx, ReadTable(name, infer_schema(result)), self._column
+        )
+
+    def shift(self, periods=1, **kwargs) -> TracedSeries:
+        col = self._column
+        if periods >= 0:
+            wfuncs = [(col, col, "lag", periods)]
+        else:
+            wfuncs = [(col, col, "lead", -periods)]
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=None)
+        node = Window(self._source_ir, wfuncs, spec, partition_by=self._keys)
+        return TracedSeries(self._ctx, node, col)
+
+    def diff(self, periods=1, **kwargs) -> TracedSeries:
+        col = self._column
+        lag_col = f"__jit_gbs_lag_{col}"
+        lag_funcs = [(lag_col, col, "lag" if periods >= 0 else "lead", abs(periods))]
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=None)
+        window_node = Window(self._source_ir, lag_funcs, spec, partition_by=self._keys)
+        diff_expr = BinOp("sub", ColRef(col), ColRef(lag_col))
+        dtype = self._source_schema.columns.get(col, DType.FLOAT64)
+        result_ir = AddColumn(window_node, col, diff_expr, dtype)
+        return TracedSeries(self._ctx, result_ir, col)
+
+    def head(self, n=5) -> TracedDataFrame:
+        all_cols = list(self._source_schema.columns.keys())
+        rank_col = "__jit_gbs_rn"
+        window_funcs = [(rank_col, self._keys[0], "row_number", 0)]
+        node = Window(
+            self._source_ir,
+            window_funcs,
+            WindowSpec(),
+            partition_by=self._keys,
+        )
+        filter_node = Filter(node, BinOp("lte", ColRef(rank_col), Literal(float(n))))
+        proj = Project(filter_node, all_cols)
+        return TracedDataFrame(self._ctx, proj)
+
+    def nth(self, n) -> TracedSeries:
+        if n < 0:
+            _, df = self._ctx.materialize(self._source_ir)
+            result = df.groupby(self._keys)[self._column].nth(n)
+            result_df = result.reset_index(drop=True).to_frame()
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result_df)
+            return TracedSeries(
+                self._ctx, ReadTable(name, infer_schema(result_df)), self._column
+            )
+        rank_col = "__jit_gbs_rn"
+        window_funcs = [(rank_col, self._keys[0], "row_number", 0)]
+        node = Window(
+            self._source_ir,
+            window_funcs,
+            WindowSpec(),
+            partition_by=self._keys,
+        )
+        filter_node = Filter(node, BinOp("eq", ColRef(rank_col), Literal(float(n + 1))))
+        proj = Project(filter_node, [*self._keys, self._column])
+        return TracedSeries(self._ctx, proj, self._column)
+
+    def apply(self, func, *args, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        result = df.groupby(self._keys)[self._column].apply(func, *args, **kwargs)
+        if isinstance(result, pd.Series):
+            result_df = result.reset_index(drop=True).to_frame(name=self._column)
+        else:
+            result_df = pd.DataFrame({self._column: [result]})
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result_df)
+        return TracedSeries(
+            self._ctx, ReadTable(name, infer_schema(result_df)), self._column
+        )
+
+    def describe(self, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        return df.groupby(self._keys)[self._column].describe(**kwargs)
+
+    def ffill(self, **kwargs) -> TracedSeries:
+        _, df = self._ctx.materialize(self._source_ir)
+        result = df.groupby(self._keys)[self._column].ffill(**kwargs)
+        result_df = pd.DataFrame({self._column: result})
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result_df)
+        return TracedSeries(
+            self._ctx, ReadTable(name, infer_schema(result_df)), self._column
+        )
+
+    def bfill(self, **kwargs) -> TracedSeries:
+        _, df = self._ctx.materialize(self._source_ir)
+        result = df.groupby(self._keys)[self._column].bfill(**kwargs)
+        result_df = pd.DataFrame({self._column: result})
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result_df)
+        return TracedSeries(
+            self._ctx, ReadTable(name, infer_schema(result_df)), self._column
+        )
+
+    def median(self, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        return df.groupby(self._keys)[self._column].median(**kwargs)
+
+    def quantile(self, q=0.5, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        return df.groupby(self._keys)[self._column].quantile(q=q, **kwargs)
+
+    def value_counts(self, **kwargs):
+        _, df = self._ctx.materialize(self._source_ir)
+        return df.groupby(self._keys)[self._column].value_counts(**kwargs)
+
 
 class TracedGroupByMulti:
     def __init__(self, ctx, source_ir, keys, columns, source_schema):
@@ -1379,11 +2854,236 @@ class TracedGroupByMulti:
     def var(self):
         return self._agg("var")
 
+    def count(self):
+        return self._agg("count")
+
+    def min(self):
+        return self._agg("min")
+
+    def max(self):
+        return self._agg("max")
+
+    def prod(self):
+        return self._agg("prod")
+
+    product = prod
+
+    def nunique(self):
+        agg_specs = [(c, c, "count_distinct") for c in self._columns]
+        return TracedDataFrame(
+            self._ctx, Aggregate(self._source_ir, self._keys, agg_specs)
+        )
+
     def _agg(self, func):
         agg_specs = [(c, c, func) for c in self._columns]
         return TracedDataFrame(
             self._ctx, Aggregate(self._source_ir, self._keys, agg_specs)
         )
+
+    def first(self):
+        all_cols = list(self._source_schema.columns.keys())
+        rank_col = "__jit_gbm_rn"
+        window_funcs = [(rank_col, self._keys[0], "row_number", 0)]
+        node = Window(
+            self._source_ir,
+            window_funcs,
+            WindowSpec(),
+            partition_by=self._keys,
+        )
+        filter_node = Filter(node, BinOp("eq", ColRef(rank_col), Literal(1.0)))
+        return TracedDataFrame(self._ctx, Project(filter_node, all_cols))
+
+    def last(self):
+        _, df = self._ctx.materialize(self._source_ir)
+        result = df.groupby(self._keys, as_index=False)[self._columns].last()
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def head(self, n=5) -> TracedDataFrame:
+        all_cols = list(self._source_schema.columns.keys())
+        rank_col = "__jit_gbm_rn"
+        window_funcs = [(rank_col, self._keys[0], "row_number", 0)]
+        node = Window(
+            self._source_ir,
+            window_funcs,
+            WindowSpec(),
+            partition_by=self._keys,
+        )
+        filter_node = Filter(node, BinOp("lte", ColRef(rank_col), Literal(float(n))))
+        return TracedDataFrame(self._ctx, Project(filter_node, all_cols))
+
+    def nth(self, n) -> TracedDataFrame:
+        if n < 0:
+            _, df = self._ctx.materialize(self._source_ir)
+            result = df.groupby(self._keys)[self._columns].nth(n).reset_index(drop=True)
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        all_cols = list(self._source_schema.columns.keys())
+        rank_col = "__jit_gbm_rn"
+        window_funcs = [(rank_col, self._keys[0], "row_number", 0)]
+        node = Window(
+            self._source_ir,
+            window_funcs,
+            WindowSpec(),
+            partition_by=self._keys,
+        )
+        filter_node = Filter(node, BinOp("eq", ColRef(rank_col), Literal(float(n + 1))))
+        return TracedDataFrame(self._ctx, Project(filter_node, all_cols))
+
+    def shift(self, periods=1, **kwargs) -> TracedDataFrame:
+        if periods >= 0:
+            wfuncs = [(col, col, "lag", periods) for col in self._columns]
+        else:
+            wfuncs = [(col, col, "lead", -periods) for col in self._columns]
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=None)
+        node = Window(self._source_ir, wfuncs, spec, partition_by=self._keys)
+        return TracedDataFrame(self._ctx, node)
+
+    def diff(self, periods=1, **kwargs) -> TracedDataFrame:
+        numeric_cols = [
+            c
+            for c in self._columns
+            if self._source_schema.columns.get(c) in NUMERIC_DTYPES
+        ]
+        if not numeric_cols:
+            _, df = self._ctx.materialize(self._source_ir)
+            result = df.groupby(self._keys)[self._columns].diff(periods=periods)
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        lag_funcs = [
+            (f"__jit_lag_{c}", c, "lag" if periods >= 0 else "lead", abs(periods))
+            for c in numeric_cols
+        ]
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=None)
+        window_node = Window(self._source_ir, lag_funcs, spec, partition_by=self._keys)
+        result_ir = window_node
+        for col in numeric_cols:
+            diff_expr = BinOp("sub", ColRef(col), ColRef(f"__jit_lag_{col}"))
+            dtype = self._source_schema.columns[col]
+            result_ir = AddColumn(result_ir, col, diff_expr, dtype)
+        proj_cols = self._keys + list(self._columns)
+        return TracedDataFrame(self._ctx, Project(result_ir, proj_cols))
+
+    def _apply_multi_cumulative(self, func):
+        target_cols = [
+            c
+            for c in self._columns
+            if self._source_schema.columns.get(c) in NUMERIC_DTYPES
+        ]
+        if not target_cols:
+            _, df = self._ctx.materialize(self._source_ir)
+            pandas_func = {"product": "prod"}.get(func, func)
+            result = getattr(
+                df.groupby(self._keys)[self._columns], f"cum{pandas_func}"
+            )()
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        window_funcs = [(col, col, func, 0) for col in target_cols]
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=0)
+        node = Window(self._source_ir, window_funcs, spec, partition_by=self._keys)
+        return TracedDataFrame(self._ctx, node)
+
+    def cumsum(self):
+        return self._apply_multi_cumulative("sum")
+
+    def cummax(self):
+        return self._apply_multi_cumulative("max")
+
+    def cummin(self):
+        return self._apply_multi_cumulative("min")
+
+    def cumprod(self):
+        return self._apply_multi_cumulative("product")
+
+    def apply(self, func, *args, **kwargs) -> TracedDataFrame:
+        _, df = self._ctx.materialize(self._source_ir)
+        result = df.groupby(self._keys)[self._columns].apply(func, *args, **kwargs)
+        if isinstance(result, pd.Series):
+            result = result.reset_index(drop=True).to_frame()
+        elif isinstance(result.index, pd.MultiIndex):
+            result = result.reset_index(drop=True)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def filter(self, func, *args, **kwargs) -> TracedDataFrame:
+        _, df = self._ctx.materialize(self._source_ir)
+        result = df.groupby(self._keys).filter(func, *args, **kwargs)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def rank(
+        self, method="average", ascending=True, na_option="keep", pct=False, **kwargs
+    ):
+        _RANK_MAP = {"min": "rank", "dense": "dense_rank", "first": "row_number"}
+        if method not in _RANK_MAP or pct or na_option != "keep":
+            _, df = self._ctx.materialize(self._source_ir)
+            result = df.groupby(self._keys)[self._columns].rank(
+                method=method,
+                ascending=ascending,
+                na_option=na_option,
+                pct=pct,
+            )
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        func = _RANK_MAP[method]
+        numeric_cols = [
+            c
+            for c in self._columns
+            if self._source_schema.columns.get(c) in NUMERIC_DTYPES
+        ]
+        if not numeric_cols:
+            _, df = self._ctx.materialize(self._source_ir)
+            result = df.groupby(self._keys)[self._columns].rank(
+                method=method,
+                ascending=ascending,
+            )
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        result_ir = self._source_ir
+        for col in numeric_cols:
+            window_funcs = [(col, col, func, 0)]
+            result_ir = Window(
+                result_ir,
+                window_funcs,
+                WindowSpec(),
+                partition_by=self._keys,
+                order_by=[(col, ascending)],
+            )
+        return TracedDataFrame(self._ctx, result_ir)
+
+    def transform(self, func) -> TracedDataFrame:
+        _SUPPORTED = {"sum", "mean", "min", "max", "count", "std", "var"}
+        if isinstance(func, str) and func in _SUPPORTED:
+            target_cols = [
+                c
+                for c in self._columns
+                if self._source_schema.columns.get(c) in NUMERIC_DTYPES
+            ]
+            if not target_cols:
+                _, df = self._ctx.materialize(self._source_ir)
+                result = df.groupby(self._keys)[self._columns].transform(func)
+                name = self._ctx.next_materialized_name()
+                self._ctx.register_table(name, result)
+                return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+            window_func = {"mean": "avg"}.get(func, func)
+            window_funcs = [(col, col, window_func, 0) for col in target_cols]
+            spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=None)
+            node = Window(self._source_ir, window_funcs, spec, partition_by=self._keys)
+            return TracedDataFrame(self._ctx, node)
+        # Graph break
+        _, df = self._ctx.materialize(self._source_ir)
+        result = df.groupby(self._keys)[self._columns].transform(func)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
 
 
 # ---------------------------------------------------------------------------
@@ -1418,6 +3118,99 @@ class TracedDataFrame:
         if isinstance(self._ir, ReadTable) and self._ir.name in self._ctx.tables:
             return self._ctx.tables[self._ir.name]
         return self._materialize()
+
+    # -- Arithmetic --
+
+    def _arith_scalar(self, op, other):
+        schema = self._ir.output_schema()
+        result_ir = self._ir
+        for col, dtype in schema.columns.items():
+            if dtype in NUMERIC_DTYPES:
+                expr = BinOp(op, ColRef(col), _to_expr(other))
+                result_ir = AddColumn(result_ir, col, expr, dtype)
+        return TracedDataFrame(self._ctx, result_ir)
+
+    def _arith_df(self, op, other):
+        df = self._materialize()
+        if isinstance(other, TracedDataFrame):
+            other = other._ensure_materialized()
+        ops = {
+            "add": "__add__",
+            "sub": "__sub__",
+            "mul": "__mul__",
+            "div": "__truediv__",
+            "floordiv": "__floordiv__",
+            "mod": "__mod__",
+        }
+        result = getattr(df, ops.get(op, f"__{op}__"))(other)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def __add__(self, other):
+        if isinstance(other, (int, float, np.integer, np.floating)):
+            return self._arith_scalar("add", other)
+        return self._arith_df("add", other)
+
+    def __radd__(self, other):
+        return self.__add__(other)
+
+    def __sub__(self, other):
+        if isinstance(other, (int, float, np.integer, np.floating)):
+            return self._arith_scalar("sub", other)
+        return self._arith_df("sub", other)
+
+    def __rsub__(self, other):
+        if isinstance(other, (int, float, np.integer, np.floating)):
+            schema = self._ir.output_schema()
+            result_ir = self._ir
+            for col, dtype in schema.columns.items():
+                if dtype in NUMERIC_DTYPES:
+                    expr = BinOp("sub", _to_expr(other), ColRef(col))
+                    result_ir = AddColumn(result_ir, col, expr, dtype)
+            return TracedDataFrame(self._ctx, result_ir)
+        return NotImplemented
+
+    def __mul__(self, other):
+        if isinstance(other, (int, float, np.integer, np.floating)):
+            return self._arith_scalar("mul", other)
+        return self._arith_df("mul", other)
+
+    def __rmul__(self, other):
+        return self.__mul__(other)
+
+    def __truediv__(self, other):
+        if isinstance(other, (int, float, np.integer, np.floating)):
+            return self._arith_scalar("div", other)
+        return self._arith_df("div", other)
+
+    def __rtruediv__(self, other):
+        if isinstance(other, (int, float, np.integer, np.floating)):
+            schema = self._ir.output_schema()
+            result_ir = self._ir
+            for col, dtype in schema.columns.items():
+                if dtype in NUMERIC_DTYPES:
+                    expr = BinOp("div", _to_expr(other), ColRef(col))
+                    result_ir = AddColumn(result_ir, col, expr, DType.FLOAT64)
+            return TracedDataFrame(self._ctx, result_ir)
+        return NotImplemented
+
+    def __neg__(self):
+        schema = self._ir.output_schema()
+        result_ir = self._ir
+        for col, dtype in schema.columns.items():
+            if dtype in NUMERIC_DTYPES:
+                expr = UnaryOp("negate", ColRef(col))
+                result_ir = AddColumn(result_ir, col, expr, dtype)
+        return TracedDataFrame(self._ctx, result_ir)
+
+    def any(self, **kwargs):
+        df = self._ensure_materialized()
+        return df.any(**kwargs)
+
+    def all(self, **kwargs):
+        df = self._ensure_materialized()
+        return df.all(**kwargs)
 
     # -- Column access --
 
@@ -1515,6 +3308,9 @@ class TracedDataFrame:
             object.__setattr__(self, name, value)
         else:
             raise AttributeError(f"Use df['{name}'] = ... instead of df.{name} = ...")
+
+    def __contains__(self, key) -> bool:
+        return key in self._ir.output_schema().columns
 
     def __getattr__(self, name):
         try:
@@ -1662,6 +3458,13 @@ class TracedDataFrame:
     def head(self, n=5) -> TracedDataFrame:
         return TracedDataFrame(self._ctx, Limit(self._ir, n))
 
+    def tail(self, n=5) -> TracedDataFrame:
+        _, df = self._ctx.materialize(self._ir)
+        result = df.tail(n).reset_index(drop=True)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
     def nlargest(self, n, columns) -> TracedDataFrame:
         if isinstance(columns, str):
             columns = [columns]
@@ -1693,7 +3496,7 @@ class TracedDataFrame:
             combined = BinOp("and", combined, p)
         return TracedDataFrame(self._ctx, Filter(self._ir, combined))
 
-    def fillna(self, value) -> TracedDataFrame:
+    def fillna(self, value=None, **kwargs) -> TracedDataFrame:
         schema = self._ir.output_schema()
         if isinstance(value, dict):
             fill_map = value
@@ -1709,6 +3512,20 @@ class TracedDataFrame:
                     AddColumn(result._ir, col_name, expr, dtype),
                 )
         return result
+
+    def ffill(self, **kwargs) -> TracedDataFrame:
+        df = self._materialize()
+        result = df.ffill(**kwargs)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def bfill(self, **kwargs) -> TracedDataFrame:
+        df = self._materialize()
+        result = df.bfill(**kwargs)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
 
     def abs(self) -> TracedDataFrame:
         schema = self._ir.output_schema()
@@ -1764,10 +3581,24 @@ class TracedDataFrame:
             if subset is None
             else ([subset] if isinstance(subset, str) else list(subset))
         )
-        # Trace when keep="first" and subset covers all columns
-        if keep == "first" and set(cols) == set(all_cols):
-            return TracedDataFrame(self._ctx, Distinct(self._ir, cols))
-        # Graph break for partial subsets or non-first keep
+        if keep == "first":
+            # Full-column distinct
+            if set(cols) == set(all_cols):
+                return TracedDataFrame(self._ctx, Distinct(self._ir, cols))
+            # Partial subset: Window(row_number) partitioned by subset,
+            # filter rank == 1, project original columns
+            rank_col = "__jit_dedup_rank"
+            window_funcs = [(rank_col, cols[0], "row_number", 0)]
+            node = Window(
+                self._ir,
+                window_funcs,
+                WindowSpec(),
+                partition_by=cols,
+            )
+            filter_node = Filter(node, BinOp("eq", ColRef(rank_col), Literal(1.0)))
+            proj_node = Project(filter_node, all_cols)
+            return TracedDataFrame(self._ctx, proj_node)
+        # keep="last" or keep=False → graph break
         df = self._materialize()
         result = df.drop_duplicates(subset=subset, keep=keep, **kwargs).reset_index(
             drop=True
@@ -1854,19 +3685,415 @@ class TracedDataFrame:
         proj_node = Project(result_ir, list(schema.columns.keys()))
         return TracedDataFrame(self._ctx, proj_node)
 
+    def pct_change(self, periods=1, **kwargs):
+        schema = self._ir.output_schema()
+        numeric_cols = [
+            col for col, dtype in schema.columns.items() if dtype in NUMERIC_DTYPES
+        ]
+        if not numeric_cols:
+            df = self._materialize()
+            result = df.pct_change(periods=periods)
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        lag_funcs = [
+            (
+                f"__jit_lag_{col}",
+                col,
+                "lag" if periods >= 0 else "lead",
+                abs(periods),
+            )
+            for col in numeric_cols
+        ]
+        window_node = Window(self._ir, lag_funcs, WindowSpec())
+        result_ir = window_node
+        for col in numeric_cols:
+            lag_col = f"__jit_lag_{col}"
+            diff_expr = BinOp("sub", ColRef(col), ColRef(lag_col))
+            pct_expr = BinOp("div", diff_expr, ColRef(lag_col))
+            result_ir = AddColumn(result_ir, col, pct_expr, DType.FLOAT64)
+        proj_node = Project(result_ir, list(schema.columns.keys()))
+        return TracedDataFrame(self._ctx, proj_node)
+
+    def duplicated(self, subset=None, keep="first", **kwargs):
+        schema = self._ir.output_schema()
+        all_cols = list(schema.columns.keys())
+        cols = (
+            all_cols
+            if subset is None
+            else ([subset] if isinstance(subset, str) else list(subset))
+        )
+        if keep == "first":
+            rank_col = "__jit_dup_rank"
+            window_funcs = [(rank_col, cols[0], "row_number", 0)]
+            node = Window(
+                self._ir,
+                window_funcs,
+                WindowSpec(),
+                partition_by=cols,
+            )
+            expr = BinOp("gt", ColRef(rank_col), Literal(1.0))
+            return TracedSeries(self._ctx, node, expr=expr, dtype=DType.BOOL)
+        # keep="last" or keep=False → graph break
+        df = self._materialize()
+        return df.duplicated(subset=subset, keep=keep, **kwargs)
+
     def rank(
         self, method="average", ascending=True, na_option="keep", pct=False, **kwargs
     ):
+        _RANK_MAP = {"min": "rank", "dense": "dense_rank", "first": "row_number"}
+        if method not in _RANK_MAP or pct or na_option != "keep":
+            df = self._materialize()
+            result = df.rank(
+                method=method,
+                ascending=ascending,
+                na_option=na_option,
+                pct=pct,
+            )
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        schema = self._ir.output_schema()
+        numeric_cols = [
+            col for col, dtype in schema.columns.items() if dtype in NUMERIC_DTYPES
+        ]
+        if not numeric_cols:
+            df = self._materialize()
+            result = df.rank(method=method, ascending=ascending)
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        func = _RANK_MAP[method]
+        result_ir = self._ir
+        for col in numeric_cols:
+            window_funcs = [(col, col, func, 0)]
+            result_ir = Window(
+                result_ir,
+                window_funcs,
+                WindowSpec(),
+                order_by=[(col, ascending)],
+            )
+        return TracedDataFrame(self._ctx, result_ir)
+
+    def round(self, decimals=0, **kwargs) -> TracedDataFrame:
+        schema = self._ir.output_schema()
+        result_ir = self._ir
+        for col_name, dtype in schema.columns.items():
+            if dtype in NUMERIC_DTYPES:
+                expr = FunctionCall(
+                    "round",
+                    args=[ColRef(col_name), Literal(int(decimals))],
+                    return_dtype=dtype,
+                )
+                result_ir = AddColumn(result_ir, col_name, expr, dtype)
+        return TracedDataFrame(self._ctx, result_ir)
+
+    # -- DataFrame-level aggregation (graph breaks) --
+
+    def sum(self, **kwargs):
+        df = self._ensure_materialized()
+        return df.sum(**kwargs)
+
+    def mean(self, **kwargs):
+        df = self._ensure_materialized()
+        return df.mean(**kwargs)
+
+    def min(self, **kwargs):
+        df = self._ensure_materialized()
+        return df.min(**kwargs)
+
+    def max(self, **kwargs):
+        df = self._ensure_materialized()
+        return df.max(**kwargs)
+
+    def count(self, **kwargs):
+        df = self._ensure_materialized()
+        return df.count(**kwargs)
+
+    def std(self, **kwargs):
+        df = self._ensure_materialized()
+        return df.std(**kwargs)
+
+    def var(self, **kwargs):
+        df = self._ensure_materialized()
+        return df.var(**kwargs)
+
+    def median(self, **kwargs):
+        df = self._ensure_materialized()
+        return df.median(**kwargs)
+
+    def quantile(self, q=0.5, **kwargs):
+        df = self._ensure_materialized()
+        return df.quantile(q=q, **kwargs)
+
+    def corr(self, method="pearson", **kwargs):
+        df = self._ensure_materialized()
+        return df.corr(method=method, **kwargs)
+
+    def cov(self, **kwargs):
+        df = self._ensure_materialized()
+        return df.cov(**kwargs)
+
+    def nunique(self, **kwargs):
+        df = self._ensure_materialized()
+        return df.nunique(**kwargs)
+
+    def prod(self, **kwargs):
+        df = self._ensure_materialized()
+        return df.prod(**kwargs)
+
+    product = prod
+
+    def isin(self, values) -> TracedDataFrame:
         df = self._materialize()
-        result = df.rank(
-            method=method,
-            ascending=ascending,
-            na_option=na_option,
-            pct=pct,
-        )
+        result = df.isin(values)
         name = self._ctx.next_materialized_name()
         self._ctx.register_table(name, result)
         return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def idxmin(self, **kwargs):
+        df = self._ensure_materialized()
+        return df.idxmin(**kwargs)
+
+    def idxmax(self, **kwargs):
+        df = self._ensure_materialized()
+        return df.idxmax(**kwargs)
+
+    def join(self, other, on=None, how="left", **kwargs):
+        df = self._materialize()
+        if isinstance(other, TracedDataFrame):
+            other = other._ensure_materialized()
+        result = df.join(other, on=on, how=how, **kwargs)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def combine_first(self, other):
+        df = self._materialize()
+        if isinstance(other, TracedDataFrame):
+            other = other._ensure_materialized()
+        result = df.combine_first(other)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def update(self, other, **kwargs):
+        df = self._materialize()
+        if isinstance(other, TracedDataFrame):
+            other = other._ensure_materialized()
+        df.update(other, **kwargs)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, df)
+        new_ir = ReadTable(name, infer_schema(df))
+        object.__setattr__(self, "_ir", new_ir)
+
+    def filter(self, items=None, like=None, regex=None, axis=1):
+        schema = self._ir.output_schema()
+        cols = list(schema.columns.keys())
+        if items is not None:
+            selected = [c for c in items if c in cols]
+        elif like is not None:
+            selected = [c for c in cols if like in c]
+        elif regex is not None:
+            selected = [c for c in cols if _re.search(regex, c)]
+        else:
+            selected = cols
+        return TracedDataFrame(self._ctx, Project(self._ir, selected))
+
+    def reindex(self, *args, columns=None, **kwargs):
+        if columns is not None and not args and not kwargs.get("index"):
+            schema = self._ir.output_schema()
+            existing = set(schema.columns.keys())
+            selected = [c for c in columns if c in existing]
+            return TracedDataFrame(self._ctx, Project(self._ir, selected))
+        df = self._ensure_materialized()
+        return df.reindex(*args, columns=columns, **kwargs)
+
+    def equals(self, other):
+        df = self._ensure_materialized()
+        if isinstance(other, TracedDataFrame):
+            other = other._ensure_materialized()
+        return df.equals(other)
+
+    def compare(self, other, **kwargs):
+        df = self._ensure_materialized()
+        if isinstance(other, TracedDataFrame):
+            other = other._ensure_materialized()
+        return df.compare(other, **kwargs)
+
+    def explode(self, column, **kwargs):
+        df = self._materialize()
+        result = df.explode(column, **kwargs)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def take(self, indices, axis=0, **kwargs):
+        df = self._ensure_materialized()
+        return df.take(indices, axis=axis, **kwargs)
+
+    def get(self, key, default=None):
+        schema = self._ir.output_schema()
+        if key in schema.columns:
+            return self[key]
+        return default
+
+    def pop(self, item):
+        df = self._materialize()
+        result = df.pop(item)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, df)
+        object.__setattr__(self, "_ir", ReadTable(name, infer_schema(df)))
+        return result
+
+    def xs(self, key, axis=0, level=None, drop_level=True):
+        df = self._ensure_materialized()
+        return df.xs(key, axis=axis, level=level, drop_level=drop_level)
+
+    def memory_usage(self, **kwargs):
+        df = self._ensure_materialized()
+        return df.memory_usage(**kwargs)
+
+    def select_dtypes(self, include=None, exclude=None) -> TracedDataFrame:
+        schema = self._ir.output_schema()
+        _INT_DTYPES = frozenset(
+            {
+                DType.INT8,
+                DType.INT16,
+                DType.INT32,
+                DType.INT64,
+                DType.UINT8,
+                DType.UINT16,
+                DType.UINT32,
+                DType.UINT64,
+            }
+        )
+        _FLOAT_DTYPES = frozenset({DType.FLOAT32, DType.FLOAT64})
+        _DATETIME_DTYPES = frozenset({DType.TIMESTAMP, DType.TIMESTAMP_TZ, DType.DATE})
+        _DTYPE_GROUPS = {
+            "number": NUMERIC_DTYPES,
+            "numeric": NUMERIC_DTYPES,
+            "int": _INT_DTYPES,
+            "integer": _INT_DTYPES,
+            "float": _FLOAT_DTYPES,
+            "bool": frozenset({DType.BOOL}),
+            "object": frozenset({DType.STRING}),
+            "string": frozenset({DType.STRING}),
+            "datetime": _DATETIME_DTYPES,
+            "datetimetz": frozenset({DType.TIMESTAMP_TZ}),
+            "timedelta": frozenset({DType.TIMEDELTA}),
+        }
+
+        def _resolve(types):
+            if types is None:
+                return None
+            if isinstance(types, str):
+                types = [types]
+            result: set[DType] = set()
+            for t in types:
+                if isinstance(t, str) and t in _DTYPE_GROUPS:
+                    result |= _DTYPE_GROUPS[t]
+                elif isinstance(t, str):
+                    result.add(pandas_dtype_to_ir(t))
+                elif isinstance(t, type) and issubclass(t, np.integer):
+                    result |= _INT_DTYPES
+                elif isinstance(t, type) and issubclass(t, np.floating):
+                    result |= _FLOAT_DTYPES
+            return result
+
+        inc = _resolve(include)
+        exc = _resolve(exclude)
+        keep = []
+        for col, dtype in schema.columns.items():
+            if inc is not None and dtype not in inc:
+                continue
+            if exc is not None and dtype in exc:
+                continue
+            keep.append(col)
+        return TracedDataFrame(self._ctx, Project(self._ir, keep))
+
+    def sample(self, n=None, frac=None, **kwargs) -> TracedDataFrame:
+        df = self._ensure_materialized()
+        result = df.sample(n=n, frac=frac, **kwargs)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def to_dict(self, *args, **kwargs):
+        df = self._ensure_materialized()
+        return df.to_dict(*args, **kwargs)
+
+    def to_json(self, *args, **kwargs):
+        df = self._ensure_materialized()
+        return df.to_json(*args, **kwargs)
+
+    def replace(self, to_replace, value=_SENTINEL, **kwargs) -> TracedDataFrame:
+        schema = self._ir.output_schema()
+        # Column-specific mapping: {col: {old: new}}
+        if isinstance(to_replace, dict) and value is _SENTINEL:
+            ir = self._ir
+            for col_name, mapping in to_replace.items():
+                if col_name in schema.columns and isinstance(mapping, dict):
+                    expr: Expr = ColRef(col_name)
+                    for old_val, new_val in mapping.items():
+                        expr = IfThenExpr(
+                            BinOp("eq", ColRef(col_name), Literal(old_val)),
+                            Literal(new_val),
+                            expr,
+                        )
+                    ir = AddColumn(ir, col_name, expr, schema.columns[col_name])
+            return TracedDataFrame(self._ctx, ir)
+        # Simple scalar replace across all columns
+        if (
+            isinstance(to_replace, (int, float, str, bool))
+            and value is not _SENTINEL
+            and isinstance(value, (int, float, str, bool))
+        ):
+            ir = self._ir
+            for col_name, dtype in schema.columns.items():
+                expr = IfThenExpr(
+                    BinOp("eq", ColRef(col_name), Literal(to_replace)),
+                    Literal(value),
+                    ColRef(col_name),
+                )
+                ir = AddColumn(ir, col_name, expr, dtype)
+            return TracedDataFrame(self._ctx, ir)
+        # Complex: graph break
+        df = self._materialize()
+        if value is _SENTINEL:
+            result = df.replace(to_replace, **kwargs)
+        else:
+            result = df.replace(to_replace, value, **kwargs)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
+    def eval(self, expr_str, inplace=False, **kwargs):
+        # Handle "col_name = expression" form
+        if "=" in expr_str and not any(
+            op in expr_str for op in ["==", "!=", "<=", ">="]
+        ):
+            lhs, rhs = expr_str.split("=", 1)
+            col_name = lhs.strip()
+            rhs_str = rhs.strip()
+            try:
+                schema = self._ir.output_schema()
+                parsed_expr = _parse_query_string(rhs_str, schema)
+                node = AddColumn(self._ir, col_name, parsed_expr, DType.FLOAT64)
+                if inplace:
+                    object.__setattr__(self, "_ir", node)
+                    return self
+                return TracedDataFrame(self._ctx, node)
+            except (ValueError, KeyError):
+                pass
+        # Fallback: graph break
+        df = self._materialize()
+        result = df.eval(expr_str, inplace=False, **kwargs)
+        if isinstance(result, pd.DataFrame):
+            name = self._ctx.next_materialized_name()
+            self._ctx.register_table(name, result)
+            return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+        return result
 
     def pivot_table(self, **kwargs) -> TracedDataFrame:
         df = self._materialize()
@@ -2053,6 +4280,27 @@ class TracedDataFrame:
         df = self._ensure_materialized()
         return df.itertuples(**kwargs)
 
+    def items(self):
+        schema = self._ir.output_schema()
+        for col in schema.columns:
+            yield col, self[col]
+
+    def keys(self):
+        return self.columns
+
+    def agg(self, func, *args, **kwargs):
+        df = self._ensure_materialized()
+        return df.agg(func, *args, **kwargs)
+
+    aggregate = agg
+
+    def map(self, func, na_action=None, **kwargs):
+        df = self._materialize()
+        result = df.map(func, na_action=na_action, **kwargs)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, result)
+        return TracedDataFrame(self._ctx, ReadTable(name, infer_schema(result)))
+
     def apply(self, func, axis=0, **kwargs):
         df = self._ensure_materialized()
         result = df.apply(func, axis=axis, **kwargs)
@@ -2094,9 +4342,29 @@ class TracedDataFrame:
         df = self._ensure_materialized()
         return df.info(**kwargs)
 
-    def __iter__(self):
+    def insert(self, loc, column, value, allow_duplicates=False):
+        df = self._materialize()
+        if isinstance(value, TracedSeries):
+            _, val_df = self._ctx.materialize(value._source_ir)
+            col = value._column_name or next(iter(val_df.columns))
+            value = val_df[col]
+        df.insert(loc, column, value, allow_duplicates=allow_duplicates)
+        name = self._ctx.next_materialized_name()
+        self._ctx.register_table(name, df)
+        new_ir = ReadTable(name, infer_schema(df))
+        object.__setattr__(self, "_ir", new_ir)
+
+    @property
+    def T(self):
+        return self.transpose()
+
+    def transpose(self, *args, **kwargs):
         df = self._ensure_materialized()
-        return iter(df)
+        return df.transpose(*args, **kwargs)
+
+    def __iter__(self):
+        schema = self._ir.output_schema()
+        return iter(schema.columns)
 
     # -- Schema inspection (no materialization needed) --
 
@@ -2131,6 +4399,15 @@ class TracedDataFrame:
         return pd.Series(
             {c: dtype_map.get(d, np.dtype("object")) for c, d in schema.columns.items()}
         )
+
+    @property
+    def ndim(self):
+        return 2
+
+    @property
+    def index(self):
+        df = self._ensure_materialized()
+        return df.index
 
     def __repr__(self):
         schema = self._ir.output_schema()
@@ -2269,6 +4546,7 @@ class CompiledFunction:
         self._cached_plans: list[tuple[SchemaGuard, ExecutionPlan]] = []
         self._last_ctx: TraceContext | None = None
         functools.update_wrapper(self, fn)
+        self.__signature__ = inspect.signature(fn)
 
     def _get_backend(self) -> Backend:
         if self._backend is None:
@@ -2373,6 +4651,10 @@ class CompiledFunction:
             _active_trace_ctx = None
         return ctx, result
 
+    def reset_cache(self):
+        """Clear the cached execution plans."""
+        self._cached_plans.clear()
+
     def trace(self, *sample_args: Any, **kwargs: Any) -> TraceContext:
         backend = self._get_backend()
         ctx, result = self._trace(sample_args, kwargs, backend)
@@ -2394,7 +4676,14 @@ class CompiledFunction:
                 ir_lines = explain_ir(seg.ir_node, indent=2)
                 lines.extend(f"      {line}" for line in ir_lines.split("\n"))
             elif isinstance(seg, EagerSegment):
-                lines.append(f"  [{i}] EAGER: {seg.operation} -> {seg.output_names}")
+                reason = (
+                    f" ({seg.reason})"
+                    if seg.reason and seg.reason != seg.operation
+                    else ""
+                )
+                lines.append(
+                    f"  [{i}] EAGER: {seg.operation}{reason} -> {seg.output_names}"
+                )
         lines.append(f"\n  Output: {plan.final_output}")
         return "\n".join(lines)
 

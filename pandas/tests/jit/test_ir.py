@@ -13,6 +13,7 @@ from pandas.jit.ir import (
     BinOp,
     CastExpr,
     ColRef,
+    Distinct,
     DType,
     Filter,
     IfThenExpr,
@@ -27,12 +28,15 @@ from pandas.jit.ir import (
     SingularOrList,
     Sort,
     UnaryOp,
+    Union,
     Window,
     WindowSpec,
     _wrap_literal,
     explain_expr,
     explain_ir,
+    optimize_projections,
     pandas_dtype_to_ir,
+    push_predicates,
 )
 
 # ---------------------------------------------------------------------------
@@ -525,3 +529,359 @@ class TestExplainIR:
 
         result = explain_ir(CustomNode())
         assert "Unknown(CustomNode)" in result
+
+
+# ---------------------------------------------------------------------------
+# Projection pruning optimization
+# ---------------------------------------------------------------------------
+
+
+class TestProjectionPruning:
+    def _schema3(self):
+        return Schema({"a": DType.INT64, "b": DType.STRING, "c": DType.FLOAT64})
+
+    def test_readtable_prunes_unused(self):
+        schema = self._schema3()
+        ir = Project(ReadTable("t", schema), ["a"])
+        opt = optimize_projections(ir)
+        # The outer Project([a]) should still be there;
+        # the inner ReadTable should be wrapped in Project([a])
+        assert isinstance(opt, Project)
+        assert opt.columns == ["a"]
+        inner = opt.input
+        assert isinstance(inner, Project)
+        assert inner.columns == ["a"]
+
+    def test_noop_all_columns_needed(self):
+        schema = self._schema3()
+        ir = ReadTable("t", schema)
+        opt = optimize_projections(ir)
+        # No pruning needed — all columns used
+        assert isinstance(opt, ReadTable)
+
+    def test_filter_preserves_predicate_cols(self):
+        schema = self._schema3()
+        base = ReadTable("t", schema)
+        filtered = Filter(base, BinOp("gt", ColRef("b"), Literal("x")))
+        proj = Project(filtered, ["a"])
+        opt = optimize_projections(proj)
+        # 'a' needed in output, 'b' needed in filter predicate
+        # ReadTable should be pruned to a,b only (not c)
+        assert isinstance(opt, Project)
+        assert opt.columns == ["a"]
+
+    def test_aggregate_prunes_input(self):
+        schema = Schema(
+            {"a": DType.INT64, "b": DType.STRING, "g": DType.STRING, "v": DType.FLOAT64}
+        )
+        base = ReadTable("t", schema)
+        agg = Aggregate(base, ["g"], [("total", "v", "sum")])
+        opt = optimize_projections(agg)
+        # Aggregate only needs g, v from input
+        child = opt.input
+        assert isinstance(child, Project)
+        assert set(child.columns) == {"g", "v"}
+
+    def test_join_prunes_right(self):
+        left_schema = Schema({"id": DType.INT64, "a": DType.STRING})
+        right_schema = Schema(
+            {"id": DType.INT64, "b": DType.STRING, "c": DType.FLOAT64}
+        )
+        left = ReadTable("l", left_schema)
+        right = ReadTable("r", right_schema)
+        join = Join(left, right, "id", "id", "inner")
+        # Only need a and b from join output (not c)
+        opt = optimize_projections(join, needed={"a", "b", "id"})
+        assert isinstance(opt, Join)
+        # Right side should be pruned (only id, b needed)
+        right_child = opt.right
+        assert isinstance(right_child, Project)
+        assert set(right_child.columns) == {"id", "b"}
+
+    def test_window_preserves_partition_order(self):
+        schema = Schema(
+            {"g": DType.STRING, "v": DType.FLOAT64, "x": DType.INT64, "z": DType.STRING}
+        )
+        base = ReadTable("t", schema)
+        wfuncs = [("v", "v", "sum", 0)]
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=0)
+        w = Window(base, wfuncs, spec, partition_by=["g"], order_by=[("x", True)])
+        # Need only v from output, but g (partition) and x (order) must stay; z pruned
+        opt = optimize_projections(w, needed={"v"})
+        assert isinstance(opt, Window)
+        child = opt.input
+        assert isinstance(child, Project)
+        assert set(child.columns) == {"g", "v", "x"}
+
+    def test_addcolumn_preserves_expr_cols(self):
+        schema = self._schema3()
+        base = ReadTable("t", schema)
+        expr = BinOp("add", ColRef("a"), ColRef("c"))
+        add = AddColumn(base, "d", expr, DType.FLOAT64)
+        # Need only d from output
+        opt = optimize_projections(add, needed={"d"})
+        assert isinstance(opt, AddColumn)
+        child = opt.input
+        assert isinstance(child, Project)
+        # a and c needed for the expression
+        assert set(child.columns) == {"a", "c"}
+
+    def test_nested_pipeline(self):
+        schema = self._schema3()
+        base = ReadTable("t", schema)
+        expr = BinOp("mul", ColRef("a"), Literal(2))
+        add = AddColumn(base, "d", expr, DType.INT64)
+        filtered = Filter(add, BinOp("gt", ColRef("d"), Literal(5)))
+        proj = Project(filtered, ["a", "d"])
+        sorted_ir = Sort(proj, [("a", True)])
+        limited = Limit(sorted_ir, 10)
+        opt = optimize_projections(limited)
+        # Should still produce correct output
+        assert set(opt.output_schema().column_names()) >= {"a", "d"}
+
+    def test_union_recurses(self):
+        schema = self._schema3()
+        ir1 = ReadTable("t1", schema)
+        ir2 = ReadTable("t2", schema)
+        union = Union([ir1, ir2])
+        opt = optimize_projections(union, needed={"a"})
+        assert isinstance(opt, Union)
+        for inp in opt.inputs:
+            assert isinstance(inp, Project)
+            assert inp.columns == ["a"]
+
+    def test_rename_maps_back(self):
+        schema = Schema({"x": DType.INT64, "y": DType.STRING})
+        base = ReadTable("t", schema)
+        renamed = RenameColumns(base, {"x": "x_new", "y": "y_new"})
+        opt = optimize_projections(renamed, needed={"x_new"})
+        assert isinstance(opt, RenameColumns)
+        child = opt.input
+        assert isinstance(child, Project)
+        assert child.columns == ["x"]
+
+    def test_distinct_preserves_subset(self):
+        schema = self._schema3()
+        base = ReadTable("t", schema)
+        dist = Distinct(base, ["a", "b"])
+        opt = optimize_projections(dist, needed={"a"})
+        assert isinstance(opt, Distinct)
+        child = opt.input
+        assert isinstance(child, Project)
+        # distinct needs a,b; output needs a → both kept
+        assert set(child.columns) == {"a", "b"}
+
+    def test_optimize_toggle(self):
+        """PandasBackend optimize=False skips the pass."""
+        from pandas import DataFrame
+        from pandas.jit.compiler import PandasBackend
+
+        schema = self._schema3()
+        base = ReadTable("t", schema)
+        proj = Project(base, ["a"])
+        backend = PandasBackend()
+        df = DataFrame({"a": [1, 2], "b": ["x", "y"], "c": [1.0, 2.0]})
+        result = backend.execute(proj, {"t": df}, optimize=False)
+        assert list(result.columns) == ["a"]
+
+
+# ---------------------------------------------------------------------------
+# Predicate Pushdown
+# ---------------------------------------------------------------------------
+
+
+class TestPredicatePushdown:
+    """Tests for push_predicates() optimization pass."""
+
+    def _schema3(self):
+        return Schema({"a": DType.INT64, "b": DType.STRING, "c": DType.FLOAT64})
+
+    def test_push_below_addcolumn(self):
+        """Filter on original col moves below AddColumn."""
+        schema = self._schema3()
+        base = ReadTable("t", schema)
+        add = AddColumn(base, "d", BinOp("add", ColRef("a"), Literal(1)), DType.INT64)
+        filt = Filter(add, BinOp("gt", ColRef("a"), Literal(5)))
+        result = push_predicates(filt)
+        # Filter should be pushed below AddColumn
+        assert isinstance(result, AddColumn)
+        assert isinstance(result.input, Filter)
+
+    def test_no_push_when_pred_uses_added_col(self):
+        """Filter referencing computed col stays above AddColumn."""
+        schema = self._schema3()
+        base = ReadTable("t", schema)
+        add = AddColumn(base, "d", BinOp("add", ColRef("a"), Literal(1)), DType.INT64)
+        filt = Filter(add, BinOp("gt", ColRef("d"), Literal(5)))
+        result = push_predicates(filt)
+        # Filter should stay above
+        assert isinstance(result, Filter)
+        assert isinstance(result.input, AddColumn)
+
+    def test_push_below_sort(self):
+        """Filter moves below Sort."""
+        schema = self._schema3()
+        base = ReadTable("t", schema)
+        sort = Sort(base, [("a", True)])
+        filt = Filter(sort, BinOp("gt", ColRef("a"), Literal(5)))
+        result = push_predicates(filt)
+        assert isinstance(result, Sort)
+        assert isinstance(result.input, Filter)
+
+    def test_no_push_below_limit(self):
+        """Filter stays above Limit."""
+        schema = self._schema3()
+        base = ReadTable("t", schema)
+        limit = Limit(base, 10)
+        filt = Filter(limit, BinOp("gt", ColRef("a"), Literal(5)))
+        result = push_predicates(filt)
+        assert isinstance(result, Filter)
+        assert isinstance(result.input, Limit)
+
+    def test_push_into_join_left(self):
+        """Pred on left-only cols pushed to left input."""
+        left_schema = Schema({"a": DType.INT64, "k": DType.INT64})
+        right_schema = Schema({"b": DType.STRING, "k": DType.INT64})
+        left = ReadTable("l", left_schema)
+        right = ReadTable("r", right_schema)
+        join = Join(left, right, "k", "k", "inner")
+        filt = Filter(join, BinOp("gt", ColRef("a"), Literal(5)))
+        result = push_predicates(filt)
+        assert isinstance(result, Join)
+        assert isinstance(result.left, Filter)
+        assert isinstance(result.right, ReadTable)
+
+    def test_push_into_join_right(self):
+        """Pred on right-only cols pushed to right input."""
+        left_schema = Schema({"a": DType.INT64, "k": DType.INT64})
+        right_schema = Schema({"b": DType.STRING, "k": DType.INT64})
+        left = ReadTable("l", left_schema)
+        right = ReadTable("r", right_schema)
+        join = Join(left, right, "k", "k", "inner")
+        filt = Filter(join, BinOp("gt", ColRef("b"), Literal("x")))
+        result = push_predicates(filt)
+        assert isinstance(result, Join)
+        assert isinstance(result.left, ReadTable)
+        assert isinstance(result.right, Filter)
+
+    def test_push_into_union_branches(self):
+        """Filter pushed into each Union branch."""
+        schema = self._schema3()
+        u = Union([ReadTable("t1", schema), ReadTable("t2", schema)])
+        filt = Filter(u, BinOp("gt", ColRef("a"), Literal(5)))
+        result = push_predicates(filt)
+        assert isinstance(result, Union)
+        assert all(isinstance(inp, Filter) for inp in result.inputs)
+
+    def test_merge_adjacent_filters(self):
+        """Two stacked Filters become AND."""
+        schema = self._schema3()
+        base = ReadTable("t", schema)
+        f1 = Filter(base, BinOp("gt", ColRef("a"), Literal(5)))
+        f2 = Filter(f1, BinOp("lt", ColRef("a"), Literal(10)))
+        result = push_predicates(f2)
+        assert isinstance(result, Filter)
+        assert isinstance(result.input, ReadTable)
+        assert result.predicate.op == "and"
+
+    def test_push_below_window(self):
+        """Filter on non-window col moves below Window."""
+        schema = self._schema3()
+        base = ReadTable("t", schema)
+        spec = WindowSpec(kind="rows", lower_offset=None, upper_offset=0)
+        win = Window(base, [("c", "c", "sum", 0)], spec)
+        # Filter on "a" which is not a window output col — "c" is overwritten
+        filt = Filter(win, BinOp("gt", ColRef("a"), Literal(5)))
+        result = push_predicates(filt)
+        assert isinstance(result, Window)
+        assert isinstance(result.input, Filter)
+
+    def test_noop_readtable(self):
+        """Filter on ReadTable stays (can't push further)."""
+        schema = self._schema3()
+        base = ReadTable("t", schema)
+        filt = Filter(base, BinOp("gt", ColRef("a"), Literal(5)))
+        result = push_predicates(filt)
+        assert isinstance(result, Filter)
+        assert isinstance(result.input, ReadTable)
+
+
+# ---------------------------------------------------------------------------
+# Constant Folding
+# ---------------------------------------------------------------------------
+
+
+class TestConstantFolding:
+    """Tests for fold_constants() expression simplification."""
+
+    def test_fold_arithmetic(self):
+        """Literal(2) + Literal(3) → Literal(5)."""
+        from pandas.jit.ir import fold_constants
+
+        expr = BinOp("add", Literal(2), Literal(3))
+        result = fold_constants(expr)
+        assert isinstance(result, Literal)
+        assert result.value == 5
+
+    def test_fold_comparison(self):
+        """Literal(5) > Literal(3) → Literal(True)."""
+        from pandas.jit.ir import fold_constants
+
+        expr = BinOp("gt", Literal(5), Literal(3))
+        result = fold_constants(expr)
+        assert isinstance(result, Literal)
+        assert result.value is True
+
+    def test_fold_boolean(self):
+        """Literal(True) AND Literal(False) → Literal(False)."""
+        from pandas.jit.ir import fold_constants
+
+        expr = BinOp("and", Literal(True), Literal(False))
+        result = fold_constants(expr)
+        assert isinstance(result, Literal)
+        assert result.value is False
+
+    def test_fold_identity_add_zero(self):
+        """ColRef("x") + Literal(0) → ColRef("x")."""
+        from pandas.jit.ir import fold_constants
+
+        expr = BinOp("add", ColRef("x"), Literal(0))
+        result = fold_constants(expr)
+        assert isinstance(result, ColRef)
+        assert result.name == "x"
+
+    def test_fold_identity_mul_one(self):
+        """ColRef("x") * Literal(1) → ColRef("x")."""
+        from pandas.jit.ir import fold_constants
+
+        expr = BinOp("mul", ColRef("x"), Literal(1))
+        result = fold_constants(expr)
+        assert isinstance(result, ColRef)
+        assert result.name == "x"
+
+    def test_fold_mul_zero(self):
+        """ColRef("x") * Literal(0) → Literal(0)."""
+        from pandas.jit.ir import fold_constants
+
+        expr = BinOp("mul", ColRef("x"), Literal(0))
+        result = fold_constants(expr)
+        assert isinstance(result, Literal)
+        assert result.value == 0
+
+    def test_double_not(self):
+        """NOT(NOT(ColRef("x"))) → ColRef("x")."""
+        from pandas.jit.ir import fold_constants
+
+        expr = UnaryOp("not", UnaryOp("not", ColRef("x")))
+        result = fold_constants(expr)
+        assert isinstance(result, ColRef)
+        assert result.name == "x"
+
+    def test_no_fold_non_literal(self):
+        """ColRef("x") + ColRef("y") unchanged."""
+        from pandas.jit.ir import fold_constants
+
+        expr = BinOp("add", ColRef("x"), ColRef("y"))
+        result = fold_constants(expr)
+        assert isinstance(result, BinOp)
+        assert result.op == "add"

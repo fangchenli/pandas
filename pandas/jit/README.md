@@ -99,6 +99,9 @@ any backend without materialization.
 | `df.mask(cond, other)` | `AddColumn(IfThenExpr)` | Inverse of where |
 | `df.abs()` | `AddColumn(UnaryOp("abs"))` | Numeric columns only; non-numeric pass through |
 | `df.clip(lower, upper)` | `AddColumn(IfThenExpr)` | Scalar bounds; dict/Series bounds graph-break |
+| `df.round(decimals)` | `AddColumn(FunctionCall("round"))` | Numeric columns only |
+| `df.rank(method=...)` | `Window(rank/dense_rank/row_number)` | Per-column; `min`/`dense`/`first` traced; others graph-break |
+| `df.eval("col = expr")` | `AddColumn` via `_parse_query_string` | Assignment form only; bare expressions graph-break |
 | `df.drop_duplicates()` | `Distinct` | When `keep="first"` and subset covers all columns |
 | `df.cumsum()` | `Window` | Expanding window with sum |
 | `df.cummax()` | `Window` | Expanding window with max |
@@ -113,6 +116,14 @@ any backend without materialization.
 | `df.reset_index(drop=True)` | no-op | Relational algebra has no row index |
 | `df.copy()` | no-op | Returns same proxy |
 | `df.pipe(func)` | pass-through | Calls `func(self)`, stays traced if func uses traced API |
+| `df.filter(items=...)` | `Project` | Column selection by name, `like=`, or `regex=` |
+| `df.reindex(columns=...)` | `Project` | Column reindex only; row reindex graph-breaks |
+| `df.get(key, default)` | `ColRef` or default | Returns `TracedSeries` if key exists, else default |
+| `df + scalar` / `df - scalar` / `df * scalar` / `df / scalar` | `AddColumn(BinOp)` | Element-wise arithmetic on numeric columns; DataFrame operand graph-breaks |
+| `-df` | `AddColumn(BinOp("mul", -1))` | Negate numeric columns |
+| `list(df)` / `for col in df` | schema iteration | Iterates column names without materialization |
+| `df.items()` | schema iteration | Yields `(col_name, TracedSeries)` pairs without materialization |
+| `df.keys()` | alias for `df.columns` | No materialization |
 
 ### Series operations
 
@@ -130,13 +141,53 @@ any backend without materialization.
 | `series.fillna(val)` | `BinOp("coalesce")` | `TracedSeries` |
 | `series.between(lo, hi)` | `AND(GTE, LTE)` | `TracedSeries[BOOL]` |
 | `series.clip(lower, upper)` | `IfThenExpr` | Scalar bounds only; Series bounds graph-break |
+| `series.where(cond, other)` | `IfThenExpr` | Scalar `other`; Series cond stays traced |
+| `series.mask(cond, other)` | `IfThenExpr(NOT)` | Inverse of where |
+| `series.astype(dtype)` | `CastExpr` | Recognized pandas/numpy dtypes; unknown graph-break |
+| `series.round(decimals)` | `FunctionCall("round")` | `TracedSeries` |
+| `series.sqrt()` | `FunctionCall("sqrt")` | `TracedSeries[FLOAT64]` |
+| `series.log()` | `FunctionCall("log")` | `TracedSeries[FLOAT64]`; natural log |
+| `series.log10()` | `FunctionCall("log10")` | `TracedSeries[FLOAT64]` |
+| `series.exp()` | `FunctionCall("exp")` | `TracedSeries[FLOAT64]` |
+| `series.ceil()` | `FunctionCall("ceil")` | `TracedSeries` |
+| `series.floor()` | `FunctionCall("floor")` | `TracedSeries` |
+| `series.sign()` | `FunctionCall("sign")` | `TracedSeries` |
+| `np.sqrt(series)` | `__array_ufunc__` → `FunctionCall` | Intercepts numpy ufuncs |
 | `series.rank(method=...)` | `Window(rank/dense_rank/row_number)` | `TracedSeries[FLOAT64]`; methods `min`/`dense`/`first` |
 | `series.cumsum()` | `Window(sum, expanding)` | `TracedSeries`; composable via cross-IR |
 | `series.cummax()` | `Window(max, expanding)` | `TracedSeries` |
 | `series.cummin()` | `Window(min, expanding)` | `TracedSeries` |
 | `series.cumprod()` | `Window(product, expanding)` | `TracedSeries` |
 | `series.diff(n)` | `Window(lag) + BinOp(sub)` | `TracedSeries`; col minus lagged col |
+| `series.pct_change(n)` | `Window(lag) + BinOp(sub,div)` | `TracedSeries[FLOAT64]`; `(x - lag(x,n)) / lag(x,n)` |
 | `series.shift(n)` | `Window(lag/lead)` | `TracedSeries`; positive n → lag, negative → lead |
+| `series.copy()` | no-op | Returns new `TracedSeries` with same IR |
+| `series.replace(dict)` | `IfThenExpr` chain | Dict and scalar-to-scalar traced; complex patterns graph-break |
+| `series.map(dict)` | `IfThenExpr` chain + `AddColumn` | Dict arg traced (unmapped → NaN); callable arg graph-breaks |
+
+### Series properties
+
+| Property | Returns | Notes |
+|----------|---------|-------|
+| `series.name` | `str` | Column name (no materialization) |
+| `series.dtype` | `pandas.dtype` | Mapped from IR dtype |
+| `series.ndim` | `1` | Always 1 (no materialization) |
+| `series.hasnans` | `bool` | Graph break — materializes |
+| `series.is_unique` | `bool` | Graph break — materializes |
+| `series.is_monotonic_increasing` | `bool` | Graph break — materializes |
+| `series.is_monotonic_decreasing` | `bool` | Graph break — materializes |
+| `series.empty` | `bool` | Graph break — materializes |
+
+### DataFrame properties
+
+| Property | Returns | Notes |
+|----------|---------|-------|
+| `df.columns` | `pd.Index` | From IR schema (no materialization) |
+| `df.dtypes` | `pd.Series` | From IR schema (no materialization) |
+| `df.ndim` | `2` | Always 2 (no materialization) |
+| `df.shape` | `tuple` | Graph break — materializes |
+| `df.index` | `pd.Index` | Graph break — materializes |
+| `df.empty` | `bool` | Graph break — materializes |
 
 ### Aggregation functions
 
@@ -151,15 +202,48 @@ Available on `groupby()`, `groupby()[col]`, and `groupby()[[cols]]`:
 | `count()` | `count:any` | Returns INT64; includes non-numeric columns |
 | `std()` | `std_dev:fp64` | Returns FLOAT64 |
 | `var()` | `variance:fp64` | Returns FLOAT64 |
+| `prod()` / `product()` | `multiply:i64` | Numeric columns only |
 | `size()` | `count:any` | Returns single column named `"size"` |
+| `nunique()` | `count_distinct:any` | Returns count of unique values per column |
 | `agg({col: func})` | varies | Dict mapping columns to function names |
-| `first()` | — | **Graph break** (no Substrait equivalent) |
-| `last()` | — | **Graph break** (no Substrait equivalent) |
+| `first()` | `Window(row_number) + Filter` | Traced: partitioned row_number = 1 |
+| `last()` | — | **Graph break** |
+| `head(n)` | `Window(row_number) + Filter` | Traced: partitioned row_number ≤ n |
+| `nth(n)` | `Window(row_number) + Filter` | Traced for n ≥ 0; negative n graph-breaks |
 | `rank(method=...)` | `Window(rank/dense_rank/row_number)` | Traced for `min`/`dense`/`first`; others graph-break |
 | `cumsum()` | `Window(sum, expanding)` | Partitioned by group keys |
 | `cummax()` | `Window(max, expanding)` | Partitioned by group keys |
 | `cummin()` | `Window(min, expanding)` | Partitioned by group keys |
 | `cumprod()` | `Window(product, expanding)` | Partitioned by group keys |
+| `cumcount()` | `Window(row_number) - 1` | Traced; 0-based; supports `ascending=False` |
+| `shift(n)` | `Window(lag/lead)` | Traced with partition_by group keys |
+| `diff(n)` | `Window(lag) + BinOp(sub)` | Traced; numeric columns only |
+| `pct_change(n)` | `Window(lag) + BinOp(sub,div)` | Traced; numeric columns only |
+| `transform(func)` | `Window` | Traced for `sum`/`mean`/`min`/`max`/`count`/`std`/`var`; others graph-break |
+
+All aggregation and window methods above also work on `groupby()[[col1, col2]]` (multi-column
+selection via `TracedGroupByMulti`), including `shift()`, `diff()`, `cumsum()`/`cummax()`/`cummin()`/`cumprod()`, `rank()`, `first()`, `head()`, and `nth()`.
+
+### GroupBySeries operations (`groupby()[col]`)
+
+Available on `TracedGroupBySeries` — single-column groupby access:
+
+| Method | How it works | Notes |
+|--------|-------------|-------|
+| `sum()`, `mean()`, `count()`, `min()`, `max()`, `std()`, `var()`, `nunique()`, `prod()` | `Aggregate` | Traced; returns `TracedDataFrame` |
+| `cumsum()`, `cummax()`, `cummin()`, `cumprod()` | `Window(expanding)` | Traced; returns `TracedSeries` |
+| `transform(func)` | `Window` | Traced for string funcs; others graph-break |
+| `rank(method=...)` | `Window(rank/dense_rank/row_number)` | Traced for `min`/`dense`/`first` |
+| `first()` | `Window(row_number) + Filter` | Traced; returns `TracedSeries` |
+| `last()` | — | Graph break |
+| `shift(n)` | `Window(lag/lead)` | Traced; returns `TracedSeries` |
+| `diff(n)` | `Window(lag) + BinOp(sub)` | Traced; returns `TracedSeries` |
+| `head(n)` | `Window(row_number) + Filter` | Traced |
+| `nth(n)` | `Window(row_number) + Filter` | Traced for n ≥ 0 |
+| `apply(func)` | — | Graph break |
+| `ffill()`, `bfill()` | — | Graph break |
+| `median()`, `quantile()` | — | Graph break |
+| `describe()`, `value_counts()` | — | Graph break |
 
 ### DeferredScalar — series-level aggregations
 
@@ -213,6 +297,24 @@ Available on `df.rolling(window)` and `df.expanding()` for numeric columns:
 | `expanding().max()` | `rows(unbounded, 0)` | |
 
 Both support `partition_by` and `order_by` via the `Window` IR node.
+
+### Rolling/Expanding graph-break methods
+
+These methods materialize the IR and delegate to pandas. Available on both
+`rolling()` and `expanding()`:
+
+| Method | Notes |
+|--------|-------|
+| `median()` | Statistical median |
+| `quantile(q)` | Quantile computation |
+| `skew()` | Skewness |
+| `kurt()` | Kurtosis |
+| `sem()` | Standard error of the mean |
+| `rank()` | Rolling/expanding rank |
+| `apply(func)` | Custom rolling/expanding function |
+| `corr(other)` | Correlation |
+| `cov(other)` | Covariance |
+| `agg(func)` / `aggregate(func)` | Dispatches to traced method for known string funcs (`mean`, `sum`, etc.); otherwise graph-breaks |
 
 ### Positional window functions
 
@@ -285,6 +387,26 @@ Traced via `FunctionCall("extract", ...)`. Supported on all backends.
 | `.dt.quarter` | `QUARTER` |
 | `.dt.dayofweek` / `.dt.day_of_week` | `MONDAY_DAY_OF_WEEK` |
 | `.dt.dayofyear` / `.dt.day_of_year` | `DAY_OF_YEAR` |
+| `.dt.microsecond` | `MICROSECOND` |
+| `.dt.nanosecond` | via extraction |
+| `.dt.week` / `.dt.weekofyear` | `ISO_WEEK` |
+| `.dt.date` | via extraction |
+
+**Boolean properties** (traced): `.dt.is_month_start`, `.dt.is_month_end`,
+`.dt.is_quarter_start`, `.dt.is_quarter_end`, `.dt.is_year_start`, `.dt.is_year_end`
+
+**Graph-break methods**: `.dt.strftime()`, `.dt.tz_localize()`, `.dt.tz_convert()`,
+`.dt.normalize()`, `.dt.ceil()`, `.dt.floor()`, `.dt.round()`, `.dt.month_name()`,
+`.dt.day_name()`
+
+### Timedelta accessor (`.td`)
+
+| Property | Notes |
+|----------|-------|
+| `.dt.days` | Traced via extraction |
+| `.dt.seconds` | Traced via extraction |
+| `.dt.microseconds` | Traced via extraction |
+| `.dt.total_seconds()` | Traced via extraction |
 
 ### String accessor (`.str`)
 
@@ -303,6 +425,34 @@ Traced via `FunctionCall("str_*", ...)`.
 | `.str.endswith(pat)` | `ends_with:str_str` |
 | `.str.replace(pat, repl)` | `replace:str_str_str` |
 | `.str.slice(start, stop)` | `substring:str_i32_i32` |
+| `.str.capitalize()` | `capitalize:str` |
+| `.str.title()` | `title:str` |
+| `.str.swapcase()` | `swapcase:str` |
+| `.str.isdigit()` | `is_digit:str` |
+| `.str.isalpha()` | `is_alpha:str` |
+| `.str.isnumeric()` | `is_numeric:str` |
+| `.str.isspace()` | `is_space:str` |
+| `.str.islower()` | `is_lower:str` |
+| `.str.isupper()` | `is_upper:str` |
+| `.str.count(sub)` | `count_substring:str_str` |
+| `.str.find(sub)` | `strpos:str_str` |
+| `.str.cat(sep)` | `concat:str_str` |
+| `.str.pad(width, side)` | `str_pad:str_i32` |
+| `.str.center(width)` | `str_center:str_i32` |
+| `.str.zfill(width)` | `str_zfill:str_i32` |
+| `.str.repeat(n)` | `str_repeat:str_i32` |
+
+**Graph-break `.str` methods**: `.str.split()`, `.str.rsplit()`, `.str.get()`,
+`.str.extract()`, `.str.match()`, `.str.fullmatch()`, `.str.wrap()`,
+`.str.ljust()`, `.str.rjust()`
+
+### IR optimization
+
+The module includes a **projection pruning** pass (`optimize_projections()` in `ir.py`)
+that is applied automatically before execution. It walks the IR tree top-down and
+inserts `Project` nodes to eliminate unused columns early, reducing memory and
+compute for wide-table pipelines. The pass is enabled by default and can be
+disabled with `optimize=False` on `PandasBackend.execute()` or `SubstraitCompiler.compile()`.
 
 ## Graph-break operations
 
@@ -324,19 +474,60 @@ transparently — the user doesn't need to do anything special.
 | `df.to_csv()`, `df.to_parquet()` | Materialize, write |
 | `df.describe()`, `df.info()`, `df.value_counts()` | Materialize, return |
 | `df.drop_duplicates(subset=[...])` | Materialize when partial subset or `keep != "first"` |
-| `df.rank(...)` | Materialize, rank all columns, re-wrap |
+| `df.rank(method="average")` | Materialize; `min`/`dense`/`first` are now traced |
 | `df.reset_index(drop=False)` | Materialize when index is meaningful (non-default RangeIndex) |
 | `df.set_index(keys)` | Materialize, set index, re-wrap |
 | `df.pivot_table(...)` | Materialize, pivot, re-wrap |
 | `df.melt(...)` | Materialize, melt, re-wrap |
 | `df.stack()`, `df.unstack()` | Materialize, reshape |
+| `df.corr()`, `df.cov()` | Materialize, return correlation/covariance matrix |
+| `df.nunique()` | Materialize, return Series of unique counts |
+| `df.prod()` / `df.product()` | Materialize, return Series of products |
+| `df.isin(values)` | Materialize, return boolean DataFrame |
+| `df.idxmin()`, `df.idxmax()` | Materialize, return Series of index labels |
+| `df.join(other)` | Materialize both sides, join, re-wrap |
+| `df.combine_first(other)` | Materialize, combine, re-wrap |
+| `df.update(other)` | Materialize, update in-place, re-wrap |
+| `df.equals(other)` | Materialize both sides, compare |
+| `df.compare(other)` | Materialize both sides, compare |
+| `df.explode(column)` | Materialize, explode, re-wrap |
+| `df.take(indices)` | Materialize, return rows |
+| `df.pop(item)` | Materialize, remove column, return Series |
+| `df.xs(key)` | Materialize, return cross-section |
+| `df.memory_usage()` | Materialize, return memory info |
+| `df.insert(loc, col, val)` | Materialize, insert column, re-wrap |
+| `df.T` / `df.transpose()` | Materialize, return transposed DataFrame |
+| `df.sample(...)` | Materialize, return random sample |
+| `df.agg(func)` / `df.aggregate(func)` | Materialize, aggregate, return |
+| `df.map(func)` | Materialize, apply element-wise, re-wrap |
+| `df.any()` / `df.all()` | Materialize, return Series |
+| `df + other_df` | Materialize both sides, operate, re-wrap |
+
+### GroupBy graph breaks
+
+| Operation | What happens |
+|-----------|-------------|
+| `groupby().median()` | Materialize, aggregate, re-wrap |
+| `groupby().quantile(q)` | Materialize, aggregate, re-wrap |
+| `groupby().sem()` | Materialize, aggregate, re-wrap |
+| `groupby().skew()` | Materialize, aggregate, re-wrap |
+| `groupby().kurt()` | Materialize, aggregate, re-wrap |
+| `groupby().idxmin()`, `idxmax()` | Materialize, return |
+| `groupby().filter(func)` | Materialize, filter groups, re-wrap |
+| `groupby().apply(func)` | Materialize, apply, re-wrap |
+| `groupby().describe()` | Materialize, return |
+| `groupby().ffill()`, `bfill()` | Materialize, fill, re-wrap |
+| `groupby().value_counts()` | Materialize, return |
+| `groupby().ngroups` | Materialize, return int |
+| `groupby().groups` | Materialize, return dict |
+| `groupby().get_group(name)` | Materialize, extract group, re-wrap |
 
 ### Series graph breaks
 
 | Operation | What happens |
 |-----------|-------------|
 | `series.apply(func)` | Materialize, apply |
-| `series.map(func)` | Materialize, map |
+| `series.map(func)` | Materialize for callable arg; dict arg is traced |
 | `series.unique()` | Materialize, return array |
 | `series.nunique()` | Materialize, return int |
 | `series.value_counts()` | Materialize, return Series |
@@ -344,6 +535,31 @@ transparently — the user doesn't need to do anything special.
 | `series.reset_index(drop=False)` | Materialize, returns DataFrame |
 | `bool(series)`, `series.item()` | Materialize scalar value |
 | `len(series)` | Materialize, return int |
+| `series.median()` | Materialize, return scalar |
+| `series.quantile(q)` | Materialize, return scalar |
+| `series.prod()` / `product()` | Materialize, return scalar |
+| `series.sem()`, `skew()`, `kurt()` | Materialize, return scalar |
+| `series.corr(other)`, `cov(other)` | Materialize both, return scalar |
+| `series.idxmin()`, `idxmax()` | Materialize, return index label |
+| `series.duplicated(keep)` | Materialize, return boolean TracedSeries |
+| `series.factorize()` | Materialize, return (codes, uniques) tuple |
+| `series.explode()` | Materialize, return TracedSeries |
+| `series.searchsorted(value)` | Materialize, return insertion index |
+| `series.tolist()` / `to_list()` | Materialize, return list |
+| `series.__array__()` | Materialize, return numpy array |
+| `series.ffill()`, `bfill()` | Materialize, fill, re-wrap |
+| `series.describe()`, `mode()` | Materialize, return |
+| `series.nlargest(n)`, `nsmallest(n)` | Materialize, return |
+| `series.replace(...)` | Materialize for complex patterns; dict/scalar traced |
+| `series.to_numpy()` | Materialize, return numpy array |
+| `series.to_dict()` | Materialize, return dict |
+| `series.to_csv()` / `to_json()` | Materialize, write |
+| `series.items()` | Materialize, iterate |
+| `for val in series` | Materialize, iterate |
+| `val in series` | Materialize, check membership |
+| `series.values` | Materialize, return numpy array |
+| `series.shape` | Materialize, return tuple |
+| `series.index` | Materialize, return Index |
 
 After a graph break, tracing continues automatically:
 
@@ -405,24 +621,11 @@ instead.
 
 | Operation | Why it can't be compiled |
 |-----------|------------------------|
-| `groupby().first()` / `last()` | No first/last aggregation function in Substrait |
 | `resample()` | Temporal bucketing has no Substrait equivalent |
 
-### Missing accessor methods
-
-Many `.dt` and `.str` methods are not yet traced. They fall through to pandas
-via graph break but produce correct results.
-
-**Not-yet-traced `.dt` methods:** `date`, `time`, `nanosecond`, `microsecond`,
-`is_month_start/end`, `is_quarter_start/end`, `is_year_start/end`,
-`is_leap_year`, `tz`, `freq`, `normalize()`, `strftime()`, `tz_localize()`,
-`tz_convert()`, `floor()`, `ceil()`, `round()`, `total_seconds()`.
-
-**Not-yet-traced `.str` methods:** `split`, `rsplit`, `extract`, `findall`,
-`match`, `pad`, `center`, `zfill`, `wrap`, `get`, `join`, `cat`, `repeat`,
-`normalize`, `encode`, `decode`, `translate`, `capitalize`, `title`,
-`swapcase`, `isnumeric`, `isalpha`, `isdigit`, `isspace`, `islower`,
-`isupper`, `istitle`.
+Note: `groupby().first()` is now traced via `Window(row_number) + Filter(eq, 1)`.
+`groupby().last()` still graph-breaks as there's no efficient way to get the last
+row without knowing group sizes.
 
 ### Plan caching limitation
 
@@ -579,18 +782,18 @@ the eager functions may depend on runtime values.
 `FLOAT32`, `FLOAT64`, `STRING`, `BINARY`, `BOOL`, `DATE`, `TIME`,
 `TIMESTAMP`, `TIMESTAMP_TZ`, `TIMEDELTA`, `DECIMAL`
 
-### Substrait function registry — 46 entries
+### Substrait function registry — 66 entries
 
 | Category | Functions |
 |----------|----------|
 | Comparison | `gt`, `gte`, `lt`, `lte`, `eq`, `ne`, `is_null`, `coalesce` |
-| Arithmetic | `add`, `sub`, `mul`, `div`, `floordiv`, `mod`, `pow`, `abs`, `negate` |
+| Arithmetic | `add`, `sub`, `mul`, `div`, `floordiv`, `mod`, `pow`, `abs`, `negate`, `round`, `sqrt`, `log`, `log10`, `exp`, `ceil`, `floor`, `sign` |
 | Boolean | `and`, `or`, `not` |
 | Aggregate | `sum`, `avg`/`mean`, `min`, `max`, `count`, `std`, `var`, `product` |
 | Positional window | `lag`, `lead` |
 | Rank window | `rank`, `dense_rank`, `row_number` |
 | Datetime | `extract` |
-| String | `str_upper`, `str_lower`, `str_strip`, `str_lstrip`, `str_rstrip`, `str_len`, `str_contains`, `str_startswith`, `str_endswith`, `str_replace`, `str_slice` |
+| String | `str_upper`, `str_lower`, `str_strip`, `str_lstrip`, `str_rstrip`, `str_len`, `str_contains`, `str_startswith`, `str_endswith`, `str_replace`, `str_slice`, `str_capitalize`, `str_title`, `str_swapcase`, `str_isdigit`, `str_isalpha`, `str_isnumeric`, `str_isspace`, `str_islower`, `str_isupper`, `str_count`, `str_find`, `str_cat` |
 
 ## Public API
 
