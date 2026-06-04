@@ -835,7 +835,10 @@ class LazyDataFrame:
         """
         import numpy as np
 
-        from pandas import DataFrame as PdDataFrame
+        from pandas import (
+            DataFrame as PdDataFrame,
+            Series,
+        )
         from pandas.lazy.eval import Evaluator
         from pandas.lazy.expr import extract_output_name
         from pandas.lazy.plan import (
@@ -857,8 +860,16 @@ class LazyDataFrame:
         # Apply optimization if requested
         plan = self._get_optimized_plan() if optimize else self._plan
 
+        # Whether the user explicitly set an index via set_index(). An
+        # explicit index is always kept in the result, regardless of
+        # preserve_index (mirrors ExecutionContext.user_set_index in the
+        # physical planner).
+        user_set_index = False
+
         def evaluate(plan: LogicalPlan) -> DataFrame:
             """Evaluate a plan node."""
+            nonlocal user_set_index
+
             if isinstance(plan, DataFrameSource):
                 return plan.df.copy()
 
@@ -869,8 +880,17 @@ class LazyDataFrame:
                 for expr in plan.exprs:
                     name = extract_output_name(expr)
                     value = evaluator.evaluate(expr._ir)
+                    if isinstance(value, Series) and not value.index.equals(
+                        input_df.index
+                    ):
+                        # Expression results are positional; realign to the
+                        # input index so DataFrame construction does not
+                        # misalign rows (e.g. row_index on non-RangeIndex).
+                        value = value.set_axis(input_df.index)
                     result[name] = value
-                return PdDataFrame(result)
+                # Pass the input index explicitly so all-scalar projections
+                # broadcast to the input length instead of raising.
+                return PdDataFrame(result, index=input_df.index)
 
             elif isinstance(plan, Filter):
                 input_df = evaluate(plan.input)
@@ -882,11 +902,15 @@ class LazyDataFrame:
                         return input_df.copy()
                     else:
                         return input_df.iloc[:0].copy()
-                return input_df.loc[mask].reset_index(drop=True)
+                # Keep the input index labels; the final index policy
+                # (RangeIndex vs preserved) is applied once at the end.
+                return input_df.loc[mask]
 
             elif isinstance(plan, Aggregate):
                 input_df = evaluate(plan.input)
-                return _evaluate_aggregate(input_df, plan)
+                return _evaluate_aggregate(
+                    input_df, plan, preserve_index=preserve_index
+                )
 
             elif isinstance(plan, Sort):
                 input_df = evaluate(plan.input)
@@ -903,14 +927,16 @@ class LazyDataFrame:
             elif isinstance(plan, Join):
                 left_df = evaluate(plan.left)
                 right_df = evaluate(plan.right)
-                return _evaluate_join(left_df, right_df, plan)
+                return _evaluate_join(
+                    left_df, right_df, plan, preserve_index=preserve_index
+                )
 
             elif isinstance(plan, Concat):
                 # Evaluate all inputs and concatenate
                 import pandas as pd
 
                 dfs = [evaluate(inp) for inp in plan.inputs]
-                return pd.concat(dfs, ignore_index=True)
+                return pd.concat(dfs, ignore_index=not preserve_index)
 
             elif isinstance(plan, Convert):
                 # Convert node handles backend conversion (Arrow <-> NumPy)
@@ -925,6 +951,7 @@ class LazyDataFrame:
 
             elif isinstance(plan, SetIndex):
                 input_df = evaluate(plan.input)
+                user_set_index = True
                 keys = list(plan.keys)
                 if len(keys) == 1:
                     result = input_df.set_index(keys[0], drop=plan.drop)
@@ -934,12 +961,21 @@ class LazyDataFrame:
 
             elif isinstance(plan, ResetIndex):
                 input_df = evaluate(plan.input)
+                user_set_index = False
                 return input_df.reset_index(drop=plan.drop)
 
             else:
                 raise NotImplementedError(f"Unknown plan type: {type(plan)}")
 
-        return evaluate(plan)
+        result = evaluate(plan)
+
+        # Apply the index contract: an explicit set_index() is always kept;
+        # otherwise preserve_index=True keeps source index labels and the
+        # default returns a positional RangeIndex (matching the physical
+        # planner).
+        if not user_set_index and not preserve_index:
+            result = result.reset_index(drop=True)
+        return result
 
     def _collect_physical(
         self,
@@ -1490,7 +1526,9 @@ class LazyGroupBy:
         return f"LazyGroupBy(by={group_names})"
 
 
-def _evaluate_aggregate(df: DataFrame, plan: Aggregate) -> DataFrame:
+def _evaluate_aggregate(
+    df: DataFrame, plan: Aggregate, *, preserve_index: bool = False
+) -> DataFrame:
     """
     Evaluate an Aggregate plan node.
 
@@ -1500,6 +1538,8 @@ def _evaluate_aggregate(df: DataFrame, plan: Aggregate) -> DataFrame:
         The input DataFrame.
     plan : Aggregate
         The aggregation plan.
+    preserve_index : bool, default False
+        If True, group keys become the result index instead of columns.
 
     Returns
     -------
@@ -1598,6 +1638,10 @@ def _evaluate_aggregate(df: DataFrame, plan: Aggregate) -> DataFrame:
     # Perform the aggregation with named output columns
     result = grouped.agg(**named_agg)
 
+    if preserve_index:
+        # Group keys become the index (pandas-style, matches physical planner)
+        return result[[name for _, name in result_names]]
+
     # Reset index to get group columns as regular columns
     result = result.reset_index()
 
@@ -1645,9 +1689,10 @@ def _evaluate_sort(df: DataFrame, plan: Sort) -> DataFrame:
             sort_keys.append(temp_name)
             temp_cols.append(temp_name)
 
-    # Perform sort
+    # Perform sort. Index labels are kept; the final index policy is
+    # applied once at the end of _collect_eager.
     ascending = [not d for d in plan.descending]
-    result = df.sort_values(by=sort_keys, ascending=ascending).reset_index(drop=True)
+    result = df.sort_values(by=sort_keys, ascending=ascending)
 
     # Remove temporary columns
     if temp_cols:
@@ -1674,13 +1719,13 @@ def _evaluate_limit(df: DataFrame, plan: Limit) -> DataFrame:
     """
     if plan.offset == -1:
         # Tail operation
-        return df.tail(plan.n).reset_index(drop=True)
+        return df.tail(plan.n)
     elif plan.offset > 0:
         # Skip + limit
-        return df.iloc[plan.offset : plan.offset + plan.n].reset_index(drop=True)
+        return df.iloc[plan.offset : plan.offset + plan.n]
     else:
         # Simple head/limit
-        return df.head(plan.n).reset_index(drop=True)
+        return df.head(plan.n)
 
 
 def _evaluate_distinct(df: DataFrame, plan) -> DataFrame:
@@ -1700,7 +1745,7 @@ def _evaluate_distinct(df: DataFrame, plan) -> DataFrame:
         The deduplicated result.
     """
     subset = list(plan.subset) if plan.subset else None
-    return df.drop_duplicates(subset=subset).reset_index(drop=True)
+    return df.drop_duplicates(subset=subset)
 
 
 def _evaluate_topk(df: DataFrame, plan) -> DataFrame:
@@ -1764,8 +1809,6 @@ def _evaluate_topk(df: DataFrame, plan) -> DataFrame:
         ascending = [not d for d in plan.descending]
         result = df.sort_values(by=sort_keys, ascending=ascending).head(k)
 
-    result = result.reset_index(drop=True)
-
     # Remove temporary columns
     if temp_cols:
         result = result.drop(columns=temp_cols)
@@ -1773,7 +1816,9 @@ def _evaluate_topk(df: DataFrame, plan) -> DataFrame:
     return result
 
 
-def _evaluate_join(left_df: DataFrame, right_df: DataFrame, plan) -> DataFrame:
+def _evaluate_join(
+    left_df: DataFrame, right_df: DataFrame, plan, *, preserve_index: bool = False
+) -> DataFrame:
     """
     Evaluate a Join plan node.
 
@@ -1785,12 +1830,26 @@ def _evaluate_join(left_df: DataFrame, right_df: DataFrame, plan) -> DataFrame:
         The right input DataFrame.
     plan : Join
         The join plan.
+    preserve_index : bool, default False
+        If True, the left side's index is carried through the join
+        (matching the physical planner).
 
     Returns
     -------
     DataFrame
         The joined result.
     """
+    index_cols: list[str] = []
+    index_names: list = []
+    if preserve_index:
+        # pd.merge discards the index, so carry the left index through
+        # the merge as temporary columns and restore it afterwards.
+        index_names = list(left_df.index.names)
+        index_cols = [f"__left_index_{i}__" for i in range(left_df.index.nlevels)]
+        left_df = left_df.copy()
+        for i, tmp_name in enumerate(index_cols):
+            left_df[tmp_name] = left_df.index.get_level_values(i)
+
     if plan.on is not None:
         # Same column name(s) in both DataFrames
         result = left_df.merge(
@@ -1814,6 +1873,21 @@ def _evaluate_join(left_df: DataFrame, right_df: DataFrame, plan) -> DataFrame:
     else:
         raise ValueError("Invalid join parameters")
 
+    if preserve_index:
+        from pandas import (
+            Index,
+            MultiIndex,
+        )
+
+        if len(index_cols) == 1:
+            result.index = Index(result[index_cols[0]], name=index_names[0])
+        else:
+            result.index = MultiIndex.from_arrays(
+                [result[c] for c in index_cols], names=index_names
+            )
+        result = result.drop(columns=index_cols)
+        return result
+
     return result.reset_index(drop=True)
 
 
@@ -1834,6 +1908,14 @@ def concat(dfs: list[LazyDataFrame] | tuple[LazyDataFrame, ...]) -> LazyDataFram
     -------
     LazyDataFrame
         A new LazyDataFrame representing the concatenation of all inputs.
+
+    Raises
+    ------
+    ValueError
+        If the inputs do not all have the same column names, or if
+        ``dfs`` is empty.
+    TypeError
+        If any input is not a LazyDataFrame.
 
     Examples
     --------

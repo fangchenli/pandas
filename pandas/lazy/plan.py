@@ -993,9 +993,29 @@ class Concat(LogicalPlan):
         self._cached_schema = None
         if len(self.inputs) == 0:
             raise ValueError("Concat requires at least one input")
+        # Validate that all inputs have compatible schemas (same column
+        # names). Without this check, eager and physical execution produce
+        # different (and both wrong) results for mismatched inputs.
+        first_names = set(self.inputs[0].resolve_schema().names)
+        for i, inp in enumerate(self.inputs[1:], start=1):
+            names = set(inp.resolve_schema().names)
+            if names != first_names:
+                missing = sorted(first_names - names)
+                extra = sorted(names - first_names)
+                parts = []
+                if missing:
+                    parts.append(f"missing {missing}")
+                if extra:
+                    parts.append(f"unexpected {extra}")
+                raise ValueError(
+                    f"concat input {i} has incompatible columns "
+                    f"({', '.join(parts)}); all inputs must have the same "
+                    f"column names as input 0: {sorted(first_names)}"
+                )
 
     def _resolve_schema_impl(self) -> Schema:
-        # Use schema from first input (all should be compatible)
+        # Use schema from first input (all inputs validated compatible
+        # in __post_init__)
         return self.inputs[0].resolve_schema()
 
     def children(self) -> list[LogicalPlan]:

@@ -382,11 +382,13 @@ class Evaluator:
             return Series(range(1, len(args[0]) + 1), index=args[0].index)
 
         elif func == "row_index":
-            # Row index is 0-based by default, with optional offset
+            # Row index is 0-based by default, with optional offset.
+            # Align to the input index so downstream DataFrame construction
+            # does not misalign rows for non-RangeIndex inputs.
             from pandas import Series
 
             offset = node.kwargs.get("offset", 0)
-            return Series(range(offset, offset + len(self._df)))
+            return Series(range(offset, offset + len(self._df)), index=self._df.index)
 
         elif func == "lag":
             n = node.kwargs.get("n", 1)

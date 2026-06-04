@@ -672,3 +672,60 @@ class TestLazyDataFrameComplexWorkflows:
             {"value": [10, 20, 30, 40, 50], "is_high": [False, False, True, True, True]}
         )
         tm.assert_frame_equal(result, expected)
+
+
+class TestScalarProjection:
+    """Regression tests: all-scalar projections must broadcast in the
+    eager path instead of raising ValueError."""
+
+    def test_all_scalar_projection_eager(self):
+        from pandas.lazy import lit
+
+        df = pd.DataFrame({"a": [1, 2, 3]})
+        result = df.select(lit(1).alias("one")).collect()
+        assert len(result) == 3
+        assert list(result["one"]) == [1, 1, 1]
+
+    def test_all_scalar_projection_matches_physical(self):
+        from pandas.lazy import lit
+
+        df = pd.DataFrame({"a": [1, 2, 3]})
+        eager = df.select(lit(1).alias("one")).collect()
+        physical = df.select(lit(1).alias("one")).collect(use_physical_planner=True)
+        tm.assert_frame_equal(eager, physical, check_dtype=False)
+
+    def test_mixed_scalar_and_column_projection(self):
+        from pandas.lazy import lit
+
+        df = pd.DataFrame({"a": [1, 2, 3]})
+        result = df.select(col("a"), lit("x").alias("tag")).collect()
+        assert list(result["a"]) == [1, 2, 3]
+        assert list(result["tag"]) == ["x", "x", "x"]
+
+
+class TestConcatValidation:
+    """Regression tests: concat() must validate schema compatibility."""
+
+    def test_concat_mismatched_columns_raises(self):
+        from pandas.lazy import concat
+
+        df1 = pd.DataFrame({"a": [1, 2]})
+        df2 = pd.DataFrame({"b": [3, 4]})
+        with pytest.raises(ValueError, match="incompatible columns"):
+            concat([df1.select("a"), df2.select("b")])
+
+    def test_concat_partial_overlap_raises(self):
+        from pandas.lazy import concat
+
+        df1 = pd.DataFrame({"a": [1], "b": [2]})
+        df2 = pd.DataFrame({"a": [3], "c": [4]})
+        with pytest.raises(ValueError, match="incompatible columns"):
+            concat([df1.select(), df2.select()])
+
+    def test_concat_compatible_schemas_ok(self):
+        from pandas.lazy import concat
+
+        df1 = pd.DataFrame({"a": [1, 2]})
+        df2 = pd.DataFrame({"a": [3, 4]})
+        result = concat([df1.select(), df2.select()]).collect()
+        assert list(result["a"]) == [1, 2, 3, 4]

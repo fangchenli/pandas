@@ -139,3 +139,11 @@ doc/source/savefig/
 # Pyodide/WASM related files #
 ##############################
 /.pyodide-xbuildenv-*
+
+# Generated benchmark outputs #
+###############################
+/benchmark_results*.json
+/BENCHMARK_REPORT*.md
+/STREAMING_BENCHMARK_REPORT.md
+/calibrated_thresholds.json
+test-data.xml

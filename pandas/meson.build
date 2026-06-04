@@ -41,7 +41,17 @@ subdirs_list = [
     'util',
 ]
 foreach subdir : subdirs_list
-    install_subdir(subdir, install_dir: py.get_install_dir() / 'pandas')
+    if subdir == 'lazy'
+        # Don't ship development-only material (benchmark scripts, result
+        # reports, design docs) in the installed package
+        install_subdir(
+            subdir,
+            install_dir: py.get_install_dir() / 'pandas',
+            exclude_directories: ['benchmarks', 'docs'],
+        )
+    else
+        install_subdir(subdir, install_dir: py.get_install_dir() / 'pandas')
+    endif
 endforeach
 
 top_level_py_list = [

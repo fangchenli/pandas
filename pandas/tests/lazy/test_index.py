@@ -487,3 +487,102 @@ class TestGroupByIndexPreservation:
         # cat: 1+3=4, dog: 2+4=6
         assert result.loc["cat", "count"] == 4
         assert result.loc["dog", "count"] == 6
+
+
+class TestEagerIndexContract:
+    """Eager execution honors the documented collect() index contract.
+
+    Regression tests: eager paths used to preserve the source index by
+    default for projections while resetting it for filter/sort/head even
+    with preserve_index=True.
+    """
+
+    def test_projection_default_rangeindex(self):
+        df = pd.DataFrame({"a": [1, 2, 3]}, index=pd.Index([10, 20, 30], name="idx"))
+        result = df.select().collect()
+        assert isinstance(result.index, pd.RangeIndex)
+
+    def test_projection_preserve_index(self):
+        idx = pd.Index([10, 20, 30], name="idx")
+        df = pd.DataFrame({"a": [1, 2, 3]}, index=idx)
+        result = df.select().collect(preserve_index=True)
+        tm.assert_index_equal(result.index, idx)
+
+    def test_filter_preserve_index(self):
+        df = pd.DataFrame({"a": [1, 2, 3]}, index=pd.Index([10, 20, 30], name="idx"))
+        result = df.select().filter(col("a") > 1).collect(preserve_index=True)
+        tm.assert_index_equal(result.index, pd.Index([20, 30], name="idx"))
+
+    def test_filter_default_rangeindex(self):
+        df = pd.DataFrame({"a": [1, 2, 3]}, index=pd.Index([10, 20, 30], name="idx"))
+        result = df.select().filter(col("a") > 1).collect()
+        assert isinstance(result.index, pd.RangeIndex)
+
+    def test_sort_preserve_index(self):
+        df = pd.DataFrame({"a": [1, 2, 3]}, index=pd.Index([10, 20, 30], name="idx"))
+        result = df.select().sort("a", descending=True).collect(preserve_index=True)
+        tm.assert_index_equal(result.index, pd.Index([30, 20, 10], name="idx"))
+
+    def test_head_preserve_index(self):
+        df = pd.DataFrame({"a": [1, 2, 3]}, index=pd.Index([10, 20, 30], name="idx"))
+        result = df.select().head(2).collect(preserve_index=True)
+        tm.assert_index_equal(result.index, pd.Index([10, 20], name="idx"))
+
+    def test_distinct_preserve_index(self):
+        df = pd.DataFrame({"a": [1, 1, 2]}, index=pd.Index([10, 20, 30], name="idx"))
+        result = df.select().distinct().collect(preserve_index=True)
+        tm.assert_index_equal(result.index, pd.Index([10, 30], name="idx"))
+
+    def test_groupby_default_keys_as_columns(self):
+        df = pd.DataFrame({"g": ["A", "A", "B"], "v": [1, 2, 3]})
+        result = df.select().group_by("g").agg(col("v").sum().alias("v")).collect()
+        assert isinstance(result.index, pd.RangeIndex)
+        assert "g" in result.columns
+
+    def test_groupby_preserve_keys_as_index(self):
+        df = pd.DataFrame({"g": ["A", "A", "B"], "v": [1, 2, 3]})
+        result = (
+            df.select()
+            .group_by("g")
+            .agg(col("v").sum().alias("v"))
+            .collect(preserve_index=True)
+        )
+        assert result.index.name == "g"
+        assert "g" not in result.columns
+        assert result.loc["A", "v"] == 3
+        assert result.loc["B", "v"] == 3
+
+    def test_join_preserve_left_index(self):
+        left = pd.DataFrame(
+            {"id": [1, 2, 3], "val": [10, 20, 30]},
+            index=pd.Index([100, 200, 300], name="left_idx"),
+        )
+        right = pd.DataFrame({"id": [2, 3, 4], "other": ["a", "b", "c"]})
+        result = (
+            left.select().join(right.select(), on="id").collect(preserve_index=True)
+        )
+        tm.assert_index_equal(result.index, pd.Index([200, 300], name="left_idx"))
+
+    def test_join_default_rangeindex(self):
+        left = pd.DataFrame(
+            {"id": [1, 2], "val": [10, 20]},
+            index=pd.Index([100, 200], name="left_idx"),
+        )
+        right = pd.DataFrame({"id": [1, 2], "other": ["a", "b"]})
+        result = left.select().join(right.select(), on="id").collect()
+        assert isinstance(result.index, pd.RangeIndex)
+
+    def test_set_index_kept_without_preserve_index(self):
+        df = pd.DataFrame({"g": ["A", "B"], "v": [1, 2]})
+        result = df.select().set_index("g").collect()
+        assert result.index.name == "g"
+        assert list(result.index) == ["A", "B"]
+
+    def test_with_row_index_non_rangeindex_input(self):
+        # Regression: row_index used to misalign against non-RangeIndex
+        # inputs, doubling rows with NaNs.
+        df = pd.DataFrame({"a": [1, 2, 3]}, index=[10, 20, 30])
+        result = df.select().with_row_index("row").collect()
+        assert len(result) == 3
+        assert list(result["row"]) == [0, 1, 2]
+        assert list(result["a"]) == [1, 2, 3]
