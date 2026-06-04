@@ -285,8 +285,8 @@ The `scan()` function enables lazy reading of files with optimization pushdown.
 
 | Format | Status | Pushdown Support |
 |--------|--------|------------------|
-| Parquet | ✅ Implemented | Predicate + Projection |
-| CSV | 🚧 Planned | Projection only |
+| Parquet | ✅ Implemented | Predicate (incl. row-group statistics) + Projection |
+| CSV | ✅ Implemented | Projection |
 | JSON | 🚧 Planned | Projection only |
 
 ### Path Types
@@ -330,7 +330,7 @@ result = ldf.collect(use_physical_planner=True)
 | File | Description |
 |------|-------------|
 | `pandas/lazy/scan.py` | `scan()` function and format detection |
-| `pandas/lazy/physical.py` | Physical operators (1800+ lines) |
+| `pandas/lazy/physical.py` | Physical operators |
 | `pandas/lazy/backends/__init__.py` | Kernel registry and dispatch |
 | `pandas/lazy/backends/_bottleneck.py` | Bottleneck integration and configuration |
 | `pandas/lazy/backends/router.py` | Backend routing logic |

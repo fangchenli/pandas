@@ -19,10 +19,10 @@ from dataclasses import (
 )
 import gc
 import json
+from pathlib import Path
 import platform
 import sys
 import time
-from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -32,9 +32,6 @@ from pandas.lazy import (
     scan,
 )
 from pandas.lazy.benchmarks.shared import DATA_DIR
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 # =============================================================================
 # Configuration
@@ -599,13 +596,16 @@ if __name__ == "__main__":
 
     report = generate_report(results)
 
-    # Save results
-    with open("benchmark_streaming_results.json", "w") as f:
+    # Save results next to this benchmark, not in the current directory
+    out_dir = Path(__file__).parent
+    results_path = out_dir / "benchmark_streaming_results.json"
+    with open(results_path, "w") as f:
         json.dump([asdict(r) for r in results], f, indent=2)
-    print("Results saved to benchmark_streaming_results.json")
+    print(f"Results saved to {results_path}")
 
-    with open("STREAMING_BENCHMARK_REPORT.md", "w") as f:
+    report_path = out_dir / "STREAMING_BENCHMARK_REPORT.md"
+    with open(report_path, "w") as f:
         f.write(report)
-    print("Report saved to STREAMING_BENCHMARK_REPORT.md")
+    print(f"Report saved to {report_path}")
 
     print("\n" + report)
