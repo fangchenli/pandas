@@ -12,7 +12,6 @@ import pandas._testing as tm
 from pandas.lazy import col
 from pandas.lazy.physical import (
     ExecutionContext,
-    FusedOperation,
     PhysicalDistinct,
     PhysicalFilter,
     PhysicalFusedPipeline,

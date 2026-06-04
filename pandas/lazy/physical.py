@@ -575,17 +575,17 @@ class PhysicalFusedPipeline(PhysicalPlan):
 
     After fusion:
         Scan → FusedPipeline([
-            filter(x > 0),
-            project(x, y*2),
-            filter(y < 10),
-            limit(100)
+            Filter(x > 0),
+            Project(x, y*2),
+            Filter(y < 10),
+            Limit(100)
         ])
 
     The fused pipeline processes batches:
     1. Load batch from scan
-    2. Apply filter(x > 0) to get mask
+    2. Apply Filter(x > 0) to get mask
     3. For passing rows, compute y*2
-    4. Apply filter(y < 10) on computed values
+    4. Apply Filter(y < 10) on computed values
     5. Emit rows until 100 reached, then stop
 
     Parameters
@@ -762,6 +762,7 @@ class PhysicalFusedPipeline(PhysicalPlan):
                     arr = arr.combine_chunks()
                 pa_mask = pa.array(mask)
                 import pyarrow.compute as pc
+
                 result[name] = pc.filter(arr, pa_mask)
             else:
                 # NumPy boolean indexing
@@ -5204,7 +5205,7 @@ class PhysicalPlanner:
         new_children = [self._apply_fusion(child) for child in children]
 
         # If no changes, return original
-        if all(new is old for new, old in zip(new_children, children)):
+        if all(new is old for new, old in zip(new_children, children, strict=True)):
             return plan
 
         # Create new node with optimized children
@@ -5253,9 +5254,7 @@ class PhysicalPlanner:
 
             elif isinstance(current, PhysicalLimit) and current.offset != -1:
                 # Only fuse head() operations, not tail()
-                operations.append(
-                    FusedOperation(op_type="limit", limit_n=current.n)
-                )
+                operations.append(FusedOperation(op_type="limit", limit_n=current.n))
                 current = current.input
 
             elif isinstance(current, PhysicalFusedPipeline):

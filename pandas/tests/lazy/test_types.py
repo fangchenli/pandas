@@ -145,7 +145,8 @@ class TestSchema:
 
     def test_from_dataframe_object_dtype(self):
         # Object dtype columns are categorized as "object", not "string"
-        # Use mixed types to ensure object dtype (pandas coerces pure strings to StringDtype)
+        # Use mixed types to ensure object dtype (pandas coerces pure strings
+        # to StringDtype)
         df = pd.DataFrame(
             {
                 "mixed_col": [1, "hello", 3.14],  # mixed types force object dtype
