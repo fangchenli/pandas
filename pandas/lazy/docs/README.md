@@ -32,6 +32,8 @@ print(ldf.explain(physical=True))    # physical plan with pipeline boundaries
 
 | Document | Contents |
 |----------|----------|
+| [PROPOSAL.md](PROPOSAL.md) | **Start here for a design review** — motivation, API tour, status, open questions for maintainers |
+| [examples.py](examples.py) | Runnable end-to-end tour (`python pandas/lazy/docs/examples.py`) |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | System design: expression IR, logical/physical plans, array-based execution, backends, joins, streaming, spilling |
 | [OPTIMIZER.md](OPTIMIZER.md) | Query optimizer: passes, ordering rationale, safety rules, engine selection |
 | [KERNELS.md](KERNELS.md) | Kernel reference: which operations run on which backend (Arrow/NumPy/Bottleneck) and how they perform |
