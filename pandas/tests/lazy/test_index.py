@@ -62,8 +62,8 @@ class TestIndexPreservation:
         """Preserving RangeIndex (the default) works."""
         df = pd.DataFrame({"a": [1, 2, 3]})  # Default RangeIndex
         result = df.select().collect(use_physical_planner=True, preserve_index=True)
-        # Original RangeIndex should be preserved
-        tm.assert_index_equal(result.index, df.index)
+        # Original RangeIndex should be preserved (materialized as int64 Index)
+        tm.assert_index_equal(result.index, df.index, exact="equiv")
 
     def test_preserve_index_streaming(self):
         """Index preservation works in streaming mode."""

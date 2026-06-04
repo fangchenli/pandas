@@ -192,7 +192,7 @@ def numpy_dt_day_of_week(arr: np.ndarray, count_from_zero: bool = True) -> np.nd
     """
     import pandas as pd
 
-    dow = pd.DatetimeIndex(arr).dayofweek.to_numpy()
+    dow = pd.DatetimeIndex(arr).day_of_week.to_numpy()
     if not count_from_zero:
         dow = dow + 1
     return dow
@@ -215,7 +215,7 @@ def numpy_dt_day_of_year(arr: np.ndarray) -> np.ndarray:
     """
     import pandas as pd
 
-    return pd.DatetimeIndex(arr).dayofyear.to_numpy()
+    return pd.DatetimeIndex(arr).day_of_year.to_numpy()
 
 
 @register_kernel("dt_week", "numpy")
@@ -472,7 +472,7 @@ def numpy_dt_weekday(arr: np.ndarray) -> np.ndarray:
     """
     import pandas as pd
 
-    return pd.DatetimeIndex(arr).weekday.to_numpy()
+    return pd.DatetimeIndex(arr).day_of_week.to_numpy()
 
 
 @register_kernel("dt_is_month_start", "numpy")

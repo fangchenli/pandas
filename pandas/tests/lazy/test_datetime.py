@@ -171,7 +171,7 @@ class TestEvaluatorDatetimeOps:
         evaluator = Evaluator(sample_df)
         node = Call("dt_weekday", (FieldRef("ts"),))
         result = evaluator.evaluate(node)
-        expected = sample_df["ts"].dt.weekday
+        expected = sample_df["ts"].dt.day_of_week
         tm.assert_series_equal(result, expected)
 
     def test_dt_dayofyear(self, sample_df):
@@ -181,7 +181,7 @@ class TestEvaluatorDatetimeOps:
         evaluator = Evaluator(sample_df)
         node = Call("dt_dayofyear", (FieldRef("ts"),))
         result = evaluator.evaluate(node)
-        expected = sample_df["ts"].dt.dayofyear
+        expected = sample_df["ts"].dt.day_of_year
         tm.assert_series_equal(result, expected)
 
     def test_dt_quarter(self, sample_df):

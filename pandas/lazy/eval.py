@@ -338,9 +338,9 @@ class Evaluator:
         elif func == "dt_second":
             return args[0].dt.second
         elif func == "dt_weekday":
-            return args[0].dt.weekday
+            return args[0].dt.day_of_week
         elif func == "dt_dayofyear":
-            return args[0].dt.dayofyear
+            return args[0].dt.day_of_year
         elif func == "dt_quarter":
             return args[0].dt.quarter
         elif func == "dt_is_month_start":
