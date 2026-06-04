@@ -91,9 +91,10 @@ def test_nonexistent_path(all_parsers):
     parser = all_parsers
     path = f"{uuid.uuid4()}.csv"
 
-    msg = rf"No such file or directory: '{path}'"
-    with pytest.raises(FileNotFoundError, match=msg):
+    msg = r"\[Errno 2\]"
+    with pytest.raises(FileNotFoundError, match=msg) as e:
         parser.read_csv(path)
+    assert path == e.value.filename
 
 
 @pytest.mark.skipif(WASM, reason="limited file system access on WASM")
@@ -249,7 +250,7 @@ def test_temporary_file(all_parsers, temp_file):
         new_file.seek(0)
 
         if parser.engine == "pyarrow":
-            msg = "the 'pyarrow' engine does not support regex separators"
+            msg = "the 'pyarrow' engine does not support separators > 1 char"
             with pytest.raises(ValueError, match=msg):
                 parser.read_csv(new_file, sep=r"\s+", header=None)
             return
@@ -315,21 +316,21 @@ def test_invalid_file_buffer_class(all_parsers):
         pass
 
     parser = all_parsers
-    msg = "Expected file path name or file-like object"
+    msg = "Invalid file path or buffer object type"
 
-    with pytest.raises(TypeError, match=msg):
+    with pytest.raises(ValueError, match=msg):
         parser.read_csv(InvalidBuffer())
 
 
 def test_invalid_file_buffer_mock(all_parsers):
     # see gh-15337
     parser = all_parsers
-    msg = "Expected file path name or file-like object"
+    msg = "Invalid file path or buffer object type"
 
     class Foo:
         pass
 
-    with pytest.raises(TypeError, match=msg):
+    with pytest.raises(ValueError, match=msg):
         parser.read_csv(Foo())
 
 

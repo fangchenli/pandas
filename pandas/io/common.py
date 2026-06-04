@@ -10,7 +10,6 @@ import codecs
 from collections import defaultdict
 from collections.abc import (
     Hashable,
-    Iterable,
     Mapping,
     Sequence,
 )
@@ -24,13 +23,11 @@ from io import (
     StringIO,
     TextIOBase,
     TextIOWrapper,
+    UnsupportedOperation,
 )
 import mmap
 import os
-from pathlib import (
-    Path,
-    PurePosixPath,
-)
+from pathlib import Path
 import re
 import tarfile
 from typing import (
@@ -46,7 +43,6 @@ from typing import (
     overload,
 )
 from urllib.parse import (
-    unquote,
     urljoin,
     urlparse as parse_url,
     uses_netloc,
@@ -60,7 +56,6 @@ from pandas._typing import (
     BaseBuffer,
     ReadCsvBuffer,
 )
-from pandas.compat import is_platform_windows
 from pandas.compat._optional import import_optional_dependency
 from pandas.util._exceptions import find_stack_level
 
@@ -105,6 +100,7 @@ class IOArgs:
     mode: str
     compression: CompressionDict
     should_close: bool = False
+    close_handles: list[Any] = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass
@@ -206,7 +202,7 @@ def validate_header_arg(header: object) -> None:
     if header is None:
         return
     if is_integer(header):
-        header = cast(int, header)
+        header = cast("int", header)
         if header < 0:
             # GH 27779
             raise ValueError(
@@ -215,7 +211,7 @@ def validate_header_arg(header: object) -> None:
             )
         return
     if is_list_like(header, allow_sets=False):
-        header = cast(Sequence, header)
+        header = cast("Sequence", header)
         if not all(map(is_integer, header)):
             raise ValueError("header must be integer or list of integers")
         if any(i < 0 for i in header):
@@ -270,7 +266,7 @@ def stringify_path(
         # GH 38125: some fsspec objects implement os.PathLike but have already opened a
         # file. This prevents opening the file a second time. infer_compression calls
         # this function with convert_file_like=True to infer the compression.
-        return cast(BaseBufferT, filepath_or_buffer)
+        return cast("BaseBufferT", filepath_or_buffer)
 
     if isinstance(filepath_or_buffer, os.PathLike):
         filepath_or_buffer = filepath_or_buffer.__fspath__()
@@ -373,7 +369,7 @@ def _get_filepath_or_buffer(
         and encoding in ["utf-16", "utf-32"]
     ):
         warnings.warn(
-            f"{compression} will not write the byte order mark for {encoding}",
+            f"{compression_method} will not write the byte order mark for {encoding}",
             UnicodeWarning,
             stacklevel=find_stack_level(),
         )
@@ -453,9 +449,10 @@ def _get_filepath_or_buffer(
             pass
 
         try:
-            file_obj = fsspec.open(
+            open_file = fsspec.open(
                 filepath_or_buffer, mode=fsspec_mode, **(storage_options or {})
-            ).open()
+            )
+            file_obj = open_file.open()
         # GH 34626 Reads from Public Buckets without Credentials needs anon=True
         except tuple(err_types_to_retry_with_anon):
             if storage_options is None:
@@ -464,14 +461,16 @@ def _get_filepath_or_buffer(
                 # don't mutate user input.
                 storage_options = dict(storage_options)
                 storage_options["anon"] = True
-            file_obj = fsspec.open(
+            open_file = fsspec.open(
                 filepath_or_buffer, mode=fsspec_mode, **(storage_options or {})
-            ).open()
+            )
+            file_obj = open_file.open()
 
         return IOArgs(
             filepath_or_buffer=file_obj,
             encoding=encoding,
             compression=compression,
+            close_handles=[open_file],
             should_close=True,
             mode=fsspec_mode,
         )
@@ -489,8 +488,6 @@ def _get_filepath_or_buffer(
             mode=mode,
         )
 
-    # is_file_like requires (read | write) & __iter__ but __iter__ is only
-    # needed for read_csv(engine=python)
     if not (
         hasattr(filepath_or_buffer, "read") or hasattr(filepath_or_buffer, "write")
     ):
@@ -852,7 +849,14 @@ def get_handle(
                 handles.append(handle)
                 zip_names = handle.buffer.namelist()
                 if len(zip_names) == 1:
-                    handle = handle.buffer.open(zip_names.pop())
+                    # Read the entire zip entry into memory rather than
+                    # returning a streaming ZipExtFile via .open(). On
+                    # Python <3.12, ZipExtFile has poor buffering that
+                    # causes O(n²) performance with pickle.load() and
+                    # other consumers that issue many small reads
+                    # (GH#59279). Can be reverted to .open() once the
+                    # minimum Python version is 3.12.
+                    handle = BytesIO(handle.buffer.read(zip_names.pop()))
                 elif not zip_names:
                     raise ValueError(f"Zero files found in ZIP file {path_or_buf}")
                 else:
@@ -982,6 +986,7 @@ def get_handle(
     if ioargs.should_close:
         assert not isinstance(ioargs.filepath_or_buffer, str)
         handles.append(ioargs.filepath_or_buffer)
+        handles.extend(ioargs.close_handles)
 
     return IOHandles(
         # error: Argument "handle" to "IOHandles" has incompatible type
@@ -1123,7 +1128,7 @@ class _IOWrapper:
     # and writable. If we have a read-only buffer, we shouldn't need writable and vice
     # versa. Some buffers, are seek/read/writ-able but they do not have the "-able"
     # methods, e.g., tempfile.SpooledTemporaryFile.
-    # If a buffer does not have the above "-able" methods, we simple assume they are
+    # If a buffer does not have the above "-able" methods, we simply assume they are
     # seek/read/writ-able.
     def __init__(self, buffer: BaseBuffer) -> None:
         self.buffer = buffer
@@ -1186,7 +1191,7 @@ def _maybe_memory_map(
         return handle, memory_map, handles
 
     # mmap used by only read_csv
-    handle = cast(ReadCsvBuffer, handle)
+    handle = cast("ReadCsvBuffer", handle)
 
     # need to open the file first
     if isinstance(handle, str):
@@ -1204,6 +1209,14 @@ def _maybe_memory_map(
                 access=mmap.ACCESS_READ,  # type: ignore[arg-type]
             )
         )
+    except UnsupportedOperation as err:
+        # GH#45630 in-memory buffers like BytesIO/StringIO have a fileno
+        # method but raise UnsupportedOperation when it is called
+        raise ValueError(
+            "memory_map=True is only supported when reading from a file path "
+            "or a file-like object backed by a real file descriptor; "
+            "in-memory buffers (e.g. BytesIO, StringIO) are not supported."
+        ) from err
     finally:
         for handle in reversed(handles):
             # error: "BaseBuffer" has no attribute "close"
@@ -1249,7 +1262,7 @@ def _is_binary_mode(handle: FilePath | BaseBuffer, mode: str) -> bool:
 
 @functools.lru_cache
 def _get_binary_io_classes() -> tuple[type, ...]:
-    """IO classes that that expect bytes"""
+    """IO classes that expect bytes"""
     binary_classes: tuple[type, ...] = (BufferedIOBase, RawIOBase)
 
     # python-zstandard doesn't use any of the builtin base classes; instead we
@@ -1331,199 +1344,3 @@ def dedup_names(
         counts[col] = cur_count + 1
 
     return names
-
-
-def _infer_protocol(path: str) -> str:
-    """
-    Infer the protocol of a given path string.
-    Parameters
-    ----------
-    path : str
-        The path string to infer the protocol from.
-    Returns
-    -------
-    str
-        The inferred protocol.
-    """
-    # Treat Windows drive letters like C:\ as local file paths
-    if is_platform_windows() and re.match(r"^[a-zA-Z]:[\\/]", path):
-        return "file"
-
-    if is_fsspec_url(path) or path.startswith("http"):
-        parsed = parse_url(path)
-        return parsed.scheme
-    return "file"
-
-
-def _match_file(
-    path: Path | PurePosixPath, extensions: set[str] | None, glob: str | None
-) -> bool:
-    """
-    Check if the file matches the given extensions and glob pattern.
-    Parameters
-    ----------
-    path : Path or PurePosixPath
-        The file path to check.
-    extensions : set[str]
-        A set of file extensions to match against.
-    glob : str
-        A glob pattern to match against.
-    Returns
-    -------
-    bool
-        True if the file matches the extensions and glob pattern, False otherwise.
-    """
-    return (extensions is None or path.suffix.lower() in extensions) and (
-        glob is None or path.match(glob)
-    )
-
-
-def _resolve_local_path(path_str: str) -> Path:
-    """
-    Resolve a local file path, handling Windows paths and file URLs.
-    Parameters
-    ----------
-    path_str : str
-        The path string to resolve.
-    Returns
-    -------
-    Path
-        A Path object representing the resolved local path.
-    """
-    parsed = parse_url(path_str)
-
-    if is_platform_windows():
-        if parsed.scheme == "file":
-            if parsed.netloc:
-                return Path(f"//{parsed.netloc}{unquote(parsed.path)}")
-            return Path(unquote(parsed.path.lstrip("/")))
-
-        if re.match(r"^[a-zA-Z]:[\\/]", path_str):
-            return Path(unquote(path_str))
-
-    return Path(unquote(parsed.path))
-
-
-def iterdir(
-    path: FilePath | ReadCsvBuffer[bytes] | ReadCsvBuffer[str],
-    extensions: str | Iterable[str] | None = None,
-    glob: str | None = None,
-    storage_options: StorageOptions | None = None,
-) -> FilePath | list[FilePath] | ReadCsvBuffer[bytes] | ReadCsvBuffer[str]:
-    """
-    Return file paths in a directory (no nesting allowed). File-like objects
-    and string URLs are returned directly. Remote paths are handled via fsspec.
-
-    Supports:
-    - Local paths (str, os.PathLike)
-    - file:// URLs
-    - Remote paths (e.g., s3://) via fsspec (if installed)
-
-    Parameters
-    ----------
-    path : FilePath
-        Path to the directory (local or remote).
-    extensions : str or list of str, optional
-        Only return files with the given extension(s). Case-insensitive.
-        If None, all files are returned.
-    glob : str, optional
-        Only return files matching the given glob pattern.
-        If None, all files are returned.
-
-    Returns
-    -------
-    FilePath or list[FilePath] or ReadCsvBuffer
-        If `path` is a file-like object, returns it directly.
-        Otherwise, returns a list of file paths in the directory.
-
-    Raises
-    ------
-    TypeError
-        If `path` is not a string, os.PathLike, or file-like object.
-    FileNotFoundError
-        If the specified path does not exist.
-    ValueError
-        If the specified path is neither a file nor a directory.
-    ImportError
-        If fsspec is required but not installed.
-    """
-
-    # file-like objects and urls are returned directly
-    if hasattr(path, "read") or hasattr(path, "write") or is_url(path):
-        return path
-
-    if not isinstance(path, (str, os.PathLike)):
-        raise TypeError(
-            f"Expected file path name or file-like object, got {type(path)} type"
-        )
-
-    if extensions is not None:
-        if isinstance(extensions, str):
-            extensions = {extensions.lower()}
-        else:
-            extensions = {ext.lower() for ext in extensions}
-
-    path_str = os.fspath(path)
-    scheme = _infer_protocol(path_str)
-
-    if scheme == "file":
-        resolved_path = _resolve_local_path(path_str)
-        if not resolved_path.exists():
-            raise FileNotFoundError(f"No such file or directory: '{resolved_path}'")
-
-        result = []
-        if resolved_path.is_file():
-            if _match_file(
-                resolved_path,
-                extensions,
-                glob,
-            ):
-                result.append(resolved_path)
-                return result  # type: ignore[return-value]
-
-        if resolved_path.is_dir():
-            for entry in resolved_path.iterdir():
-                if entry.is_file():
-                    if _match_file(
-                        entry,
-                        extensions,
-                        glob,
-                    ):
-                        result.append(entry)
-            return result  # type: ignore[return-value]
-
-        raise ValueError(
-            f"The path '{resolved_path}' is neither a file nor a directory."
-        )
-
-    # Remote paths
-    fsspec = import_optional_dependency("fsspec")
-
-    # GH #11071
-    # Two legacy S3 protocols (s3n and s3a) are replaced with s3
-    if path_str.startswith("s3n://"):
-        path_str = path_str.replace("s3n://", "s3://")
-    if path_str.startswith("s3a://"):
-        path_str = path_str.replace("s3a://", "s3://")
-
-    fs, inner_path = fsspec.core.url_to_fs(path_str, **(storage_options or {}))
-    if fs.isfile(inner_path):
-        path_obj = PurePosixPath(inner_path)
-        if _match_file(
-            path_obj,
-            extensions,
-            glob,
-        ):
-            return [path]
-
-    result = []
-    for file in fs.ls(inner_path, detail=True):
-        if file["type"] == "file":
-            path_obj = PurePosixPath(file["name"])
-            if _match_file(
-                path_obj,
-                extensions,
-                glob,
-            ):
-                result.append(f"{scheme}://{path_obj}")  # type: ignore[arg-type]
-    return result  # type: ignore[return-value]

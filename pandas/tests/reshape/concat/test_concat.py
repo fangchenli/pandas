@@ -127,7 +127,9 @@ class TestConcatenate:
         )
 
         tm.assert_index_equal(result.columns.levels[0], Index(level, name="group_key"))
-        tm.assert_index_equal(result.columns.levels[1], Index([0, 1, 2, 3]))
+        tm.assert_index_equal(
+            result.columns.levels[1], RangeIndex(start=0, stop=4, step=1), exact=True
+        )
 
         assert result.columns.names == ["group_key", None]
 
@@ -707,7 +709,7 @@ def test_concat_repeated_keys(keys, integrity):
     # GH: 20816
     series_list = [Series({"a": 1}), Series({"b": 2}), Series({"c": 3})]
     result = concat(series_list, keys=keys, verify_integrity=integrity)
-    tuples = list(zip(keys, ["a", "b", "c"]))
+    tuples = list(zip(keys, ["a", "b", "c"], strict=True))
     expected = Series([1, 2, 3], index=MultiIndex.from_tuples(tuples))
     tm.assert_series_equal(result, expected)
 

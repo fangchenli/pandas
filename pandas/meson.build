@@ -47,7 +47,6 @@ endforeach
 top_level_py_list = [
     '__init__.py',
     '_typing.py',
-    '_version.py',
     'conftest.py',
     'testing.py',
 ]

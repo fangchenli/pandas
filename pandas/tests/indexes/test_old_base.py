@@ -355,15 +355,17 @@ class TestBase:
             assert res_without_engine > 0
             assert res_with_engine > 0
 
-    def test_argsort(self, index):
+    def test_argsort(self, index_sortable):
+        index = index_sortable
         if isinstance(index, CategoricalIndex):
             pytest.skip(f"{type(self).__name__} separately tested")
 
         result = index.argsort()
         expected = np.array(index).argsort()
-        tm.assert_numpy_array_equal(result, expected, check_dtype=False)
+        tm.assert_numpy_array_equal(result, expected)
 
-    def test_numpy_argsort(self, index):
+    def test_numpy_argsort(self, index_sortable):
+        index = index_sortable
         result = np.argsort(index)
         expected = index.argsort()
         tm.assert_numpy_array_equal(result, expected)
@@ -669,7 +671,7 @@ class TestBase:
     @pytest.mark.parametrize(
         "mapper",
         [
-            lambda values, index: {i: e for e, i in zip(values, index)},
+            lambda values, index: {i: e for e, i in zip(values, index, strict=True)},
             lambda values, index: Series(values, index),
         ],
     )
@@ -847,7 +849,7 @@ class TestBase:
         if idx.dtype.kind in ["i", "u"]:
             res = ~idx
             expected = Index(~idx.values, name=idx.name)
-            tm.assert_index_equal(res, expected)
+            tm.assert_index_equal(res, expected, exact="equiv")
 
             # check that we are matching Series behavior
             res2 = ~Series(idx)

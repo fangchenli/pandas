@@ -13,7 +13,10 @@ from pathlib import Path
 
 import pytest
 
-from pandas.errors import ParserError
+from pandas.errors import (
+    Pandas4Warning,
+    ParserError,
+)
 
 import pandas._testing as tm
 
@@ -103,8 +106,12 @@ x   q   30      3    -0.6662 -0.5243 -0.3580  0.89145  2.5838"""
             )
 
             kwargs = {default: object()}
+            warn = Pandas4Warning if default == "float_precision" else None
             with pytest.raises(ValueError, match=msg):
-                read_csv(StringIO(data), engine=python_engine, **kwargs)
+                with tm.assert_produces_warning(
+                    warn, match="float_precision", check_stacklevel=False
+                ):
+                    read_csv(StringIO(data), engine=python_engine, **kwargs)
 
     def test_python_engine_file_no_iter(self, python_engine):
         # see gh-16530
@@ -147,8 +154,12 @@ x   q   30      3    -0.6662 -0.5243 -0.3580  0.89145  2.5838"""
             elif default == "on_bad_lines":
                 kwargs[default] = "warn"
 
+            warn = Pandas4Warning if default == "float_precision" else None
             with pytest.raises(ValueError, match=msg):
-                read_csv(StringIO(data), engine="pyarrow", **kwargs)
+                with tm.assert_produces_warning(
+                    warn, match="float_precision", check_stacklevel=False
+                ):
+                    read_csv(StringIO(data), engine="pyarrow", **kwargs)
 
     def test_on_bad_lines_callable_python_or_pyarrow(self, all_parsers):
         # GH 5686
@@ -185,10 +196,15 @@ def test_close_file_handle_on_invalid_usecols(all_parsers, temp_file):
     os.unlink(fname)
 
 
-def test_invalid_file_inputs(all_parsers):
+def test_invalid_file_inputs(request, all_parsers):
     # GH#45957
     parser = all_parsers
-    with pytest.raises(TypeError, match="Expected file path name or file-like"):
+    if parser.engine == "python":
+        request.applymarker(
+            pytest.mark.xfail(reason=f"{parser.engine} engine supports lists.")
+        )
+
+    with pytest.raises(ValueError, match="Invalid"):
         parser.read_csv([])
 
 
