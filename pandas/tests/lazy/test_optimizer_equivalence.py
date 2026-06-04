@@ -18,10 +18,14 @@ Note: Some tests are marked xfail to document known limitations or bugs.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 import pandas as pd
 from pandas import testing as tm
-from pandas.lazy import col
+from pandas.lazy import (
+    col,
+    lit,
+)
 
 
 def assert_values_equal(left, right, check_dtype=False):
@@ -634,3 +638,70 @@ class TestComplexQueryEquivalence:
         physical_sorted = physical_result.sort_values("region").reset_index(drop=True)
 
         tm.assert_frame_equal(eager_sorted, physical_sorted)
+
+
+def _index_contract_source():
+    return pd.DataFrame(
+        {
+            "g": ["A", "B", "A", "B", "A"],
+            "a": [1, 2, 3, 4, 5],
+            "b": [10.0, 20.0, 30.0, 40.0, 50.0],
+        },
+        index=pd.Index([100, 200, 300, 400, 500], name="idx"),
+    )
+
+
+def _index_contract_right():
+    return pd.DataFrame({"g": ["A", "B"], "tag": ["x", "y"]})
+
+
+INDEX_CONTRACT_QUERIES = {
+    "project": lambda src, right: src.select(),
+    "computed": lambda src, right: src.select(col("a"), (col("b") * 2).alias("b2")),
+    "scalar_proj": lambda src, right: src.select(lit(1).alias("one")),
+    "filter": lambda src, right: src.select().filter(col("a") > 2),
+    "sort": lambda src, right: src.select().sort("a", descending=True),
+    "head": lambda src, right: src.select().head(3),
+    "distinct": lambda src, right: src.select("g").distinct(),
+    "groupby": lambda src, right: (
+        src.select().group_by("g").agg(col("a").sum().alias("a"))
+    ),
+    "join": lambda src, right: src.select().join(right.select(), on="g"),
+    "row_index": lambda src, right: src.select().with_row_index("row"),
+    "filter_head": lambda src, right: src.select().filter(col("a") > 1).head(2),
+    "set_index": lambda src, right: src.select("g", "a").set_index("g"),
+}
+
+# Ops whose output row order is not guaranteed to match between engines
+_ORDER_INSENSITIVE = {"groupby", "distinct", "join"}
+
+
+class TestEagerVsPhysicalIndexContract:
+    """Eager and physical execution agree on the collect() index contract.
+
+    Regression guard: the eager path used to preserve the source index by
+    default and ignore preserve_index for filter/sort/head/distinct.
+    """
+
+    @pytest.mark.parametrize("query_name", sorted(INDEX_CONTRACT_QUERIES))
+    @pytest.mark.parametrize("preserve_index", [False, True])
+    def test_eager_physical_parity(self, query_name, preserve_index):
+        build = INDEX_CONTRACT_QUERIES[query_name]
+        src = _index_contract_source()
+        right = _index_contract_right()
+
+        eager = build(src, right).collect(preserve_index=preserve_index)
+        physical = build(src, right).collect(
+            use_physical_planner=True, preserve_index=preserve_index
+        )
+
+        if query_name in _ORDER_INSENSITIVE:
+            if preserve_index:
+                eager = eager.sort_index()
+                physical = physical.sort_index()
+            else:
+                cols = list(eager.columns)
+                eager = eager.sort_values(cols).reset_index(drop=True)
+                physical = physical.sort_values(cols).reset_index(drop=True)
+
+        tm.assert_frame_equal(eager, physical, check_dtype=False, check_exact=False)
