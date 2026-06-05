@@ -879,3 +879,52 @@ class TestParallelExecutionPaths:
         out_arr = result["text"].array
         out_addr = out_arr._pa_array.chunk(0).buffers()[2].address
         assert out_addr == in_addr, "pass-through column was copied"
+
+    @pytest.mark.parametrize("how", ["inner", "left", "right", "outer"])
+    def test_join_values_match_eager_all_types(self, how):
+        # Regression for the indexer-based join rewrite: values must match
+        # eager pd.merge for every join type (NA representation may differ:
+        # physical uses nullable dtypes, eager uses NaN upcast).
+        lt = pd.DataFrame(
+            {
+                "id": [1, 2, 3, 5],
+                "v": [10.0, 20.0, 30.0, 50.0],
+                "s": pd.array(["a", "b", "c", "e"]),
+            }
+        )
+        rt = pd.DataFrame({"id": [2, 3, 4], "w": [200, 300, 400]})
+
+        phys = (
+            lt.select()
+            .join(rt.select(), on="id", how=how)
+            .collect(use_physical_planner=True)
+        )
+        eager = lt.merge(rt, on="id", how=how)
+
+        assert len(phys) == len(eager)
+        pk = phys.sort_values("id", na_position="last").reset_index(drop=True)
+        ek = eager.sort_values("id", na_position="last").reset_index(drop=True)
+        for c in ["id", "v", "w"]:
+            pv = pk[c].to_numpy(dtype="float64", na_value=np.nan)
+            ev = ek[c].to_numpy(dtype="float64", na_value=np.nan)
+            tm.assert_numpy_array_equal(pv, ev)
+        # string column: compare with nulls normalized
+        assert list(pk["s"].fillna("<NA>")) == list(ek["s"].fillna("<NA>"))
+
+    def test_join_passthrough_arrow_column_stays_arrow(self):
+        # Payload columns must be gathered in their native backend: the
+        # join previously np.asarray'd every column, converting Arrow
+        # string payloads to object arrays on input.
+        lt = pd.DataFrame(
+            {
+                "id": np.arange(1_000),
+                "text": pd.array([f"item_{i}" for i in range(1_000)]),
+            }
+        )
+        rt = pd.DataFrame({"id": np.arange(0, 1_000, 2), "w": np.arange(500)})
+
+        result = (
+            lt.select().join(rt.select(), on="id").collect(use_physical_planner=True)
+        )
+        assert str(result["text"].dtype) == "string"
+        assert result["id"].dtype.kind in ("i", "u")

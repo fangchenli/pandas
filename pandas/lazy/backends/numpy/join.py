@@ -69,217 +69,50 @@ def _create_composite_key_vectorized(arrays: list[np.ndarray]) -> np.ndarray:
     return composite
 
 
-def _build_right_index_vectorized(
-    right_codes: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _key_for_indexer(arr):
     """
-    Build index structures for right table using vectorized operations.
+    Normalize a key column for pandas' join-indexer machinery.
 
-    Returns
-    -------
-    tuple
-        (unique_codes, code_starts, code_counts) for O(1) lookup
+    pandas' _factorize_keys handles NumPy arrays and ExtensionArrays;
+    raw PyArrow arrays are wrapped zero-copy as ArrowExtensionArray so
+    only the *key* columns ever interact with pandas — payload columns
+    are gathered in their native format afterwards.
     """
-    if len(right_codes) == 0:
-        return (
-            np.array([], dtype=np.int64),
-            np.array([], dtype=np.int64),
-            np.array([], dtype=np.int64),
-        )
+    import pyarrow as pa
 
-    # Sort right codes to group identical keys together
-    sort_indices = np.argsort(right_codes)
-    sorted_codes = right_codes[sort_indices]
+    if isinstance(arr, (pa.Array, pa.ChunkedArray)):
+        import pandas as pd
 
-    # Find unique codes and their positions
-    unique_mask = np.concatenate([[True], sorted_codes[1:] != sorted_codes[:-1]])
-    unique_codes = sorted_codes[unique_mask]
-    unique_positions = np.where(unique_mask)[0]
-
-    # Count occurrences of each unique code
-    counts = np.diff(np.concatenate([unique_positions, [len(sorted_codes)]]))
-
-    return unique_codes, sort_indices, unique_positions, counts
+        chunked = pa.chunked_array([arr]) if isinstance(arr, pa.Array) else arr
+        return pd.arrays.ArrowExtensionArray(chunked)
+    return arr
 
 
-def _vectorized_inner_join(
-    left_codes: np.ndarray,
-    right_codes: np.ndarray,
+def _get_join_indexers(
+    left_keys: list,
+    right_keys: list,
+    join_type: str,
+    *,
+    n_left: int,
+    n_right: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Perform inner join matching using vectorized operations.
+    Compute (left_indices, right_indices) via pandas' Cython hash join.
 
-    Returns
-    -------
-    tuple[np.ndarray, np.ndarray]
-        (left_indices, right_indices) for matched rows
+    -1 in an indexer means "no match" (missing row). pandas may return
+    None for an indexer to mean "all rows in original order"; that is
+    normalized to an explicit arange here.
     """
-    n_left = len(left_codes)
-    n_right = len(right_codes)
+    from pandas.core.reshape.merge import get_join_indexers
 
-    if n_left == 0 or n_right == 0:
-        return np.array([], dtype=np.intp), np.array([], dtype=np.intp)
-
-    # Build index on right table
-    unique_codes, right_sort_idx, unique_pos, counts = _build_right_index_vectorized(
-        right_codes
+    left_idx, right_idx = get_join_indexers(
+        left_keys, right_keys, sort=False, how=join_type
     )
-
-    if len(unique_codes) == 0:
-        return np.array([], dtype=np.intp), np.array([], dtype=np.intp)
-
-    # For each left code, find matching right codes using searchsorted
-    # searchsorted gives us the position in unique_codes where left_code would go
-    insert_pos = np.searchsorted(unique_codes, left_codes)
-
-    # Check which left codes actually match
-    valid_match = (insert_pos < len(unique_codes)) & (
-        unique_codes[np.minimum(insert_pos, len(unique_codes) - 1)] == left_codes
-    )
-
-    # For matched codes, we need to expand based on counts
-    matched_left_idx = np.where(valid_match)[0]
-    if len(matched_left_idx) == 0:
-        return np.array([], dtype=np.intp), np.array([], dtype=np.intp)
-
-    matched_insert_pos = insert_pos[valid_match]
-    matched_counts = counts[matched_insert_pos]
-    matched_starts = unique_pos[matched_insert_pos]
-
-    # Total result size
-    total_matches = matched_counts.sum()
-
-    # Build result indices
-    left_indices = np.repeat(matched_left_idx, matched_counts)
-
-    # Build right indices - need to expand ranges
-    right_indices = np.empty(total_matches, dtype=np.intp)
-    pos = 0
-    for i, (start, count) in enumerate(
-        zip(matched_starts, matched_counts, strict=False)
-    ):
-        right_indices[pos : pos + count] = right_sort_idx[start : start + count]
-        pos += count
-
-    return left_indices, right_indices
-
-
-def _vectorized_left_join(
-    left_codes: np.ndarray,
-    right_codes: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Perform left join matching using vectorized operations.
-
-    Returns
-    -------
-    tuple[np.ndarray, np.ndarray]
-        (left_indices, right_indices) where right_indices=-1 means no match
-    """
-    n_left = len(left_codes)
-
-    if n_left == 0:
-        return np.array([], dtype=np.intp), np.array([], dtype=np.intp)
-
-    if len(right_codes) == 0:
-        # All left rows, no matches
-        return np.arange(n_left, dtype=np.intp), np.full(n_left, -1, dtype=np.intp)
-
-    # Build index on right table
-    unique_codes, right_sort_idx, unique_pos, counts = _build_right_index_vectorized(
-        right_codes
-    )
-
-    # Find matches
-    insert_pos = np.searchsorted(unique_codes, left_codes)
-    valid_match = (insert_pos < len(unique_codes)) & (
-        unique_codes[np.minimum(insert_pos, len(unique_codes) - 1)] == left_codes
-    )
-
-    # Separate matched and unmatched
-    matched_mask = valid_match
-    unmatched_mask = ~valid_match
-
-    # For matched: expand based on counts
-    matched_left_idx = np.where(matched_mask)[0]
-    unmatched_left_idx = np.where(unmatched_mask)[0]
-
-    if len(matched_left_idx) == 0:
-        # No matches - all left rows with -1 right
-        return np.arange(n_left, dtype=np.intp), np.full(n_left, -1, dtype=np.intp)
-
-    matched_insert_pos = insert_pos[matched_mask]
-    matched_counts = counts[matched_insert_pos]
-    matched_starts = unique_pos[matched_insert_pos]
-
-    # Build matched indices
-    total_matched = matched_counts.sum()
-    matched_left = np.repeat(matched_left_idx, matched_counts)
-    matched_right = np.empty(total_matched, dtype=np.intp)
-    pos = 0
-    for start, count in zip(matched_starts, matched_counts, strict=False):
-        matched_right[pos : pos + count] = right_sort_idx[start : start + count]
-        pos += count
-
-    # Combine matched and unmatched
-    n_unmatched = len(unmatched_left_idx)
-    total_rows = total_matched + n_unmatched
-
-    left_indices = np.empty(total_rows, dtype=np.intp)
-    right_indices = np.empty(total_rows, dtype=np.intp)
-
-    left_indices[:total_matched] = matched_left
-    right_indices[:total_matched] = matched_right
-    left_indices[total_matched:] = unmatched_left_idx
-    right_indices[total_matched:] = -1
-
-    # Sort by left index to maintain order
-    sort_order = np.argsort(left_indices)
-    return left_indices[sort_order], right_indices[sort_order]
-
-
-def _vectorized_outer_join(
-    left_codes: np.ndarray,
-    right_codes: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Perform full outer join matching using vectorized operations.
-
-    Returns
-    -------
-    tuple[np.ndarray, np.ndarray]
-        (left_indices, right_indices) where -1 means no match
-    """
-    n_left = len(left_codes)
-    n_right = len(right_codes)
-
-    if n_left == 0 and n_right == 0:
-        return np.array([], dtype=np.intp), np.array([], dtype=np.intp)
-
-    if n_left == 0:
-        return np.full(n_right, -1, dtype=np.intp), np.arange(n_right, dtype=np.intp)
-
-    if n_right == 0:
-        return np.arange(n_left, dtype=np.intp), np.full(n_left, -1, dtype=np.intp)
-
-    # Get left join results
-    left_indices, right_indices = _vectorized_left_join(left_codes, right_codes)
-
-    # Find right rows that weren't matched
-    matched_right = set(right_indices[right_indices >= 0])
-    unmatched_right = np.array(
-        [i for i in range(n_right) if i not in matched_right], dtype=np.intp
-    )
-
-    if len(unmatched_right) == 0:
-        return left_indices, right_indices
-
-    # Add unmatched right rows
-    n_unmatched = len(unmatched_right)
-    full_left = np.concatenate([left_indices, np.full(n_unmatched, -1, dtype=np.intp)])
-    full_right = np.concatenate([right_indices, unmatched_right])
-
-    return full_left, full_right
+    if left_idx is None:
+        left_idx = np.arange(n_left, dtype=np.intp)
+    if right_idx is None:
+        right_idx = np.arange(n_right, dtype=np.intp)
+    return left_idx, right_idx
 
 
 @register_kernel("hash_join", "numpy")
@@ -331,42 +164,18 @@ def numpy_hash_join(
         left_key_cols = left_keys or []
         right_key_cols = right_keys or []
 
-    # Create composite keys using vectorized factorize
-    left_key_arrays = [left_arrays[k] for k in left_key_cols]
-    right_key_arrays = [right_arrays[k] for k in right_key_cols]
-
-    # For join, we need to factorize both sides together to get consistent codes
-    # Concatenate and factorize, then split
-    if len(left_key_arrays) > 0 and len(right_key_arrays) > 0:
-        n_left = len(left_key_arrays[0]) if left_key_arrays else 0
-
-        # Concatenate corresponding key columns
-        combined_arrays = []
-        for left_arr, right_arr in zip(left_key_arrays, right_key_arrays, strict=False):
-            combined_arrays.append(np.concatenate([left_arr, right_arr]))
-
-        # Create composite codes for combined data
-        combined_codes = _create_composite_key_vectorized(combined_arrays)
-
-        # Split back
-        left_codes = combined_codes[:n_left]
-        right_codes = combined_codes[n_left:]
-    else:
-        left_codes = _create_composite_key_vectorized(left_key_arrays)
-        right_codes = _create_composite_key_vectorized(right_key_arrays)
-
-    # Perform join using vectorized matching
-    if join_type == "inner":
-        left_indices, right_indices = _vectorized_inner_join(left_codes, right_codes)
-    elif join_type == "left":
-        left_indices, right_indices = _vectorized_left_join(left_codes, right_codes)
-    elif join_type == "right":
-        # Right join = swap and do left join
-        right_indices, left_indices = _vectorized_left_join(right_codes, left_codes)
-    elif join_type == "outer":
-        left_indices, right_indices = _vectorized_outer_join(left_codes, right_codes)
-    else:
-        raise ValueError(f"Unsupported join type: {join_type}")
+    # Compute join indexers with pandas' Cython merge machinery — the
+    # same code path eager pd.merge uses. This replaced a pure-NumPy
+    # factorize/searchsorted implementation that was ~6x slower at
+    # 1M x 100K rows, and it makes row-order and NaN-key semantics match
+    # the eager evaluator by construction.
+    left_indices, right_indices = _get_join_indexers(
+        [_key_for_indexer(left_arrays[k]) for k in left_key_cols],
+        [_key_for_indexer(right_arrays[k]) for k in right_key_cols],
+        join_type,
+        n_left=len(next(iter(left_arrays.values()))) if left_arrays else 0,
+        n_right=len(next(iter(right_arrays.values()))) if right_arrays else 0,
+    )
 
     # Build result arrays
     result = {}
@@ -422,6 +231,15 @@ def _take_key_column_coalesced(
 
     This is vectorized - no Python loops.
     """
+    import pyarrow as pa
+
+    # Key columns may be Arrow-backed; the coalescing logic below is
+    # NumPy-based, so convert keys (only keys) up front.
+    if isinstance(left_arr, (pa.Array, pa.ChunkedArray)):
+        left_arr = left_arr.to_numpy(zero_copy_only=False)
+    if right_arr is not None and isinstance(right_arr, (pa.Array, pa.ChunkedArray)):
+        right_arr = right_arr.to_numpy(zero_copy_only=False)
+
     n = len(left_indices)
     if n == 0:
         return np.array([], dtype=left_arr.dtype)
@@ -457,22 +275,35 @@ def _take_key_column_coalesced(
     return result
 
 
-def _take_with_missing(arr: np.ndarray, indices: np.ndarray) -> np.ndarray:
+def _take_with_missing(arr, indices: np.ndarray):
     """
     Take elements from array, handling -1 as missing.
 
+    Arrow arrays are gathered natively with pc.take (missing indices
+    become nulls) so payload columns never round-trip through NumPy
+    object arrays.
+
     Parameters
     ----------
-    arr : np.ndarray
+    arr : np.ndarray, pa.Array, or pa.ChunkedArray
         Source array.
     indices : np.ndarray
         Indices to take (-1 means missing).
 
     Returns
     -------
-    np.ndarray
-        Result array with NaN/None for missing values.
+    Array of the same backend with NaN/None/null for missing values.
     """
+    import pyarrow as pa
+
+    if isinstance(arr, (pa.Array, pa.ChunkedArray)):
+        import pyarrow.compute as pc
+
+        # -1 indices become nulls via the mask; Arrow take maps null
+        # indices to null output values
+        pa_indices = pa.array(indices, mask=indices < 0)
+        return pc.take(arr, pa_indices)
+
     mask = indices >= 0
     has_missing = not mask.all()
 

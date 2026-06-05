@@ -4077,18 +4077,16 @@ class PhysicalHashJoin(PhysicalPlan):
         right_data: ArrayDict,
         swapped: bool = False,
     ) -> ArrayDict:
-        """Execute join using NumPy kernel."""
-        import numpy as np
-
+        """Execute join using the indexer-based hash join kernel."""
         from pandas.lazy.backends import dispatch_kernel
 
-        # Convert to dict[str, np.ndarray]
-        left_arrays: dict[str, np.ndarray] = {
-            k: np.asarray(v) for k, v in left_data.items()
-        }
-        right_arrays: dict[str, np.ndarray] = {
-            k: np.asarray(v) for k, v in right_data.items()
-        }
+        # Pass arrays through in their native backend: the kernel computes
+        # indexers from key columns only and gathers payload columns with
+        # backend-preserving takes. (A previous np.asarray here converted
+        # Arrow string columns to object arrays on input - a full copy of
+        # every pass-through column.)
+        left_arrays = dict(left_data)
+        right_arrays = dict(right_data)
 
         # Determine keys
         if self.on is not None:

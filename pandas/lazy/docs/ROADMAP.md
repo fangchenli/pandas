@@ -34,11 +34,15 @@ cause, isolated and measured: see item 1 below.
    2.4x win over Polars; up to -70% on physical pipeline baselines).
    Output now wraps Arrow columns zero-copy and leaves NumPy columns
    alone — locked by `test_passthrough_arrow_column_not_copied`.
-   **Remaining: input-side conversions in joins and groupby** — the
-   benchmark shows both unmoved by the output fix (joins ~0.06x of
-   Polars), pointing at whole-table conversions inside those operators.
-   Same playbook: profile, isolate the conversion, convert only key
-   columns.
+   *Join side fixed too*: the NumPy join np.asarray'd every column
+   (Arrow strings → object) and used a pure-NumPy indexer ~6x slower
+   than pandas' Cython hash join. The kernel now computes indexers via
+   `pandas.core.reshape.merge.get_join_indexers` (the same machinery as
+   eager `pd.merge` — row order and NaN-key semantics match by
+   construction) and gathers payload columns in their native backend.
+   10M×1M inner join: ~13,000 ms → **846 ms** (eager merge: 636 ms;
+   Polars: ~712 ms). **Remaining: groupby input-side conversions**
+   (~0.08x of Polars, unmoved) — same playbook.
 
 2. **`head()`/limit fast path.** Polars answers `head(10)` on in-memory data
    in ~10µs; we spend milliseconds planning and copying. Needs a trivial-plan
