@@ -23,7 +23,9 @@ and an honest benchmark story (some 2–10x wins over eager pandas; still well
 behind Polars in several categories — see [Status](#status-and-performance)).
 
 **This document is a request for direction, not a merge request.** See
-[Open questions](#open-questions-for-maintainers).
+[Positioning and open questions](#positioning-and-open-questions) — in
+particular the positioning question, which the author considers the real
+one.
 
 ## Motivation
 
@@ -218,9 +220,10 @@ real, with a clear path on the remaining gaps.
 | `pandas/lazy/benchmarks/` (not shipped) | ~13k |
 
 All isolated under `pandas/lazy/`; benchmarks and these docs are excluded
-from wheels. If the direction is approved, the integration plan would be
-reviewed piece-by-piece (plan/IR → optimizer → physical engine → scans),
-not as one PR.
+from wheels. Note that the layers (IR, logical plan, optimizer, physical
+engine) were designed as one system and do not split into independently
+useful PRs — how something this size could land is itself one of the open
+questions below.
 
 ## How to try it
 
@@ -235,22 +238,73 @@ python pandas/lazy/docs/examples.py        # runnable tour
 python -m pytest pandas/tests/lazy -q      # 1,488 tests, ~2s
 ```
 
-## Open questions for maintainers
+## Positioning and open questions
 
-1. **Is there appetite for lazy execution in pandas at all**, or is the
-   ecosystem position "that's Polars/DuckDB territory"? This is the
-   threshold question; everything below assumes a qualified yes.
-2. **API shape** — is a Polars-style expression API (`col`, `lit`,
-   chained verbs) acceptable, or should this look more like
-   `DataFrame.query`/`eval` string expressions? Is `df.select()` the right
-   entry point, or e.g. `df.lazy()`?
-3. **Namespace** — `pandas.lazy` vs `pandas.api.lazy` vs a separate
-   distribution (`pandas-lazy`) that pandas could later absorb?
-4. **Process** — should this become a PDEP? The author is happy to convert
-   this document; circulating the working prototype first seemed more
-   useful than an abstract proposal.
-5. **Scope of a first merge** — if the direction is right, what is the
-   smallest piece worth reviewing on its own (e.g. plan/IR + optimizer +
-   eager evaluator, deferring the physical engine)?
+### 1. What is lazy pandas *for*? — the real question
+
+An honest self-assessment first: judged as a Polars competitor, the current
+prototype is "Polars, but worse" — a similar API over a slower engine (see
+[Status](#status-and-performance)). That framing would not justify the
+maintenance cost, so the positioning question has to be answered before any
+technical one. The candidate positions, with very different bars:
+
+- **(a) A native optimization layer for pandas users.** The comparison
+  target is *eager pandas*, not Polars: existing pandas users get pushdown,
+  fusion, streaming, and out-of-core for their pipelines while keeping
+  pandas semantics (index, NA, dtypes) and the ecosystem, with no
+  migration. The prototype already clears this bar in several categories
+  and the remaining gaps are engineering, not research.
+- **(b) A genuine competitor to Polars/DuckDB for data pipelines.** This
+  requires a real breakthrough, not parity-chasing — something engines that
+  require a rewrite structurally cannot offer. The most promising candidate:
+  **transparently accelerating existing eager pandas code** (capturing
+  eager call sequences into plans behind the scenes), where pandas'
+  position as the incumbent API is the moat. Absent a differentiator of
+  that order, (b) is not worth pursuing.
+- **(c) Incubation outside the main tree** (a `pandas-lazy` package or
+  long-lived experimental branch) until (a)-vs-(b) is settled by usage.
+
+The author's current read: (a) is defensible today; (b) should be treated
+as a research question to answer deliberately — not an assumption; the
+in-tree vs (c) choice is process, not design. Maintainer views on this
+framing are the most valuable feedback this document can get.
+
+### 2. Entry point and API shape
+
+`df.select()` as the lazy entry point has already drawn significant
+pushback (it reads as relational "select columns" while actually switching
+evaluation modes and return type). Alternatives to weigh:
+
+- `df.lazy()` — Polars precedent, unambiguous about what it does
+- top-level constructors only — `pd.lazy.from_dataframe(df)`,
+  `pd.lazy.scan(...)`
+- `scan()` as the *only* entry point — arguably honest, since lazy
+  execution pays off on I/O-rooted pipelines
+
+The expression API itself (`col`/`lit`/`when` + chained verbs) has been
+less controversial; whether pandas would prefer `query`/`eval`-style string
+expressions remains open.
+
+### 3. Namespace and process — positions, not questions
+
+- **Namespace**: `pandas.lazy`, not `pandas.api.lazy`.
+- **Process**: if this moves forward in any form, it will be a PDEP. This
+  document is the pre-PDEP draft, circulated with the working prototype
+  because concrete code makes a better discussion anchor than an abstract
+  proposal.
+
+### 4. How could something this size land?
+
+Merging piece-by-piece is not realistic: the IR, logical plan, optimizer,
+and physical engine were designed together, and the early pieces are not
+independently useful (a plan/IR layer with no engine helps nobody).
+Realistic options:
+
+- one large, explicitly **experimental** merge — module marked unstable,
+  API exempt from the deprecation policy until graduation
+- incubate out-of-tree (`pandas-lazy`) with pandas reserving the namespace,
+  absorbing it only after the positioning question is settled
+- keep it a fork/branch as a design probe, harvesting individual ideas
+  (e.g. kernel dispatch, threshold calibration) into pandas piecemeal
 
 Feedback welcome by issue/discussion on the fork, or directly to the author.
