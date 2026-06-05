@@ -620,12 +620,17 @@ class TestSortKernels:
         assert result.tolist() == expected
 
     def test_numpy_sort_indices_descending(self):
-        """Test NumPy sort_indices with descending order."""
+        """Test NumPy sort_indices with descending order (stable).
+
+        Lazy sorts are stable by contract: the tied values (1 at indices
+        1 and 3) keep their original relative order, matching the Arrow
+        backend and eager kind="stable" sorts.
+        """
         from pandas.lazy.backends import dispatch_kernel
 
         arr = np.array([3, 1, 4, 1, 5, 9, 2, 6])
         result = dispatch_kernel("sort_indices", "numpy", arr, descending=True)
-        expected = [5, 7, 4, 2, 0, 6, 3, 1]
+        expected = [5, 7, 4, 2, 0, 6, 1, 3]
         assert result.tolist() == expected
 
     def test_numpy_sort_indices_with_nan(self):

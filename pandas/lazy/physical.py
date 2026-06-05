@@ -297,6 +297,30 @@ class ExecutionContext:
     _spill_manager: SpillManager | None = field(default=None, repr=False)
     _spill_config: SpillConfig | None = field(default=None, repr=False)
 
+    def clone_for_subplan(self) -> ExecutionContext:
+        """
+        Create an independent context for executing a subplan concurrently.
+
+        Configuration (backend preference, strict mode, parallelism,
+        streaming, thresholds, spill settings) is carried over; mutable
+        per-execution state (CSE cache, index metadata, user_set_index)
+        starts fresh so concurrent subplans cannot race on it. Callers
+        decide which subplan's index metadata to propagate back.
+        """
+        return ExecutionContext(
+            preferred_backend=self.preferred_backend,
+            strict=self.strict,
+            preserve_index=self.preserve_index,
+            n_workers=self.n_workers,
+            parallel_threshold=self.parallel_threshold,
+            batch_size=self.batch_size,
+            streaming_enabled=self.streaming_enabled,
+            _threshold_config=self._threshold_config,
+            adaptive_thresholds=self.adaptive_thresholds,
+            _spill_manager=self._spill_manager,
+            _spill_config=self._spill_config,
+        )
+
     @property
     def spill_manager(self) -> SpillManager | None:
         """
@@ -4335,9 +4359,11 @@ class PhysicalHashJoin(PhysicalPlan):
         """
         from concurrent.futures import ThreadPoolExecutor
 
-        # Create separate contexts for each side to avoid race conditions
-        left_context = ExecutionContext()
-        right_context = ExecutionContext()
+        # Create separate contexts for each side to avoid race conditions,
+        # carrying over the parent's configuration (backend, thresholds,
+        # preserve_index, spill settings)
+        left_context = context.clone_for_subplan()
+        right_context = context.clone_for_subplan()
 
         def execute_left():
             return self.left.execute(left_context)
@@ -4883,11 +4909,21 @@ class PhysicalConcat(PhysicalPlan):
         import pyarrow as pa
 
         if len(self.inputs) > 1:
+            # Each input gets an independent context: scans/set_index mutate
+            # index metadata, which must not race across concurrent inputs.
+            # The first input's metadata wins, matching Concat.resolve_schema.
+            input_contexts = [context.clone_for_subplan() for _ in self.inputs]
             n_workers = min(8, os.cpu_count() or 4, len(self.inputs))
             with ThreadPoolExecutor(n_workers) as ex:
                 input_results = list(
-                    ex.map(lambda plan: plan.execute(context), self.inputs)
+                    ex.map(
+                        lambda pair: pair[0].execute(pair[1]),
+                        zip(self.inputs, input_contexts, strict=True),
+                    )
                 )
+            context.index_names = input_contexts[0].index_names
+            context.index_is_multi = input_contexts[0].index_is_multi
+            context.user_set_index = input_contexts[0].user_set_index
         else:
             input_results = [plan.execute(context) for plan in self.inputs]
 

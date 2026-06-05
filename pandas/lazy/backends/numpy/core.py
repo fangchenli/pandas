@@ -410,11 +410,12 @@ def _merge_sorted_runs(key: np.ndarray, ia: np.ndarray, ib: np.ndarray) -> np.nd
 
 def _parallel_argsort(arr: np.ndarray) -> np.ndarray:
     """
-    Multi-threaded argsort: sort chunks concurrently, then merge.
+    Multi-threaded *stable* argsort: sort chunks concurrently, then merge.
 
     np.argsort releases the GIL, so chunk sorts run in parallel on a
     thread pool; runs are combined with a vectorized searchsorted-based
     pairwise merge (~1.5x over single-threaded argsort at 10M rows).
+    Equivalent permutation to ``np.argsort(arr, kind="stable")``.
     """
     from concurrent.futures import ThreadPoolExecutor
     import os
@@ -424,7 +425,10 @@ def _parallel_argsort(arr: np.ndarray) -> np.ndarray:
 
     def sort_chunk(i: int) -> np.ndarray:
         lo, hi = bounds[i], bounds[i + 1]
-        return np.argsort(arr[lo:hi]) + lo
+        # Stable within chunks; the searchsorted merge (side="right")
+        # keeps earlier-chunk rows ahead of later-chunk rows on ties, so
+        # the overall result is a stable sort.
+        return np.argsort(arr[lo:hi], kind="stable") + lo
 
     with ThreadPoolExecutor(n_chunks) as ex:
         runs = list(ex.map(sort_chunk, range(n_chunks)))
@@ -439,10 +443,15 @@ def _parallel_argsort(arr: np.ndarray) -> np.ndarray:
 
 
 def _argsort(arr: np.ndarray) -> np.ndarray:
-    """argsort, parallelized for large numeric arrays."""
+    """Stable argsort, parallelized for large numeric arrays.
+
+    Stability is part of the lazy sort contract: it is the only tie
+    order on which the eager evaluator, the NumPy engine, and the Arrow
+    engine (whose sorts are stable) can all agree.
+    """
     if len(arr) >= PARALLEL_SORT_MIN_ROWS and arr.dtype.kind in ("i", "u", "f"):
         return _parallel_argsort(arr)
-    return np.argsort(arr)
+    return np.argsort(arr, kind="stable")
 
 
 @register_kernel("sort_indices", "numpy")
@@ -478,18 +487,23 @@ def numpy_sort_indices(
 
     if has_nan:
         # Create a copy for sorting with NaN replaced
-        arr_copy = arr.copy()
+        sort_arr = arr.copy()
         if null_placement == "at_end":
             fill_val = np.inf if not descending else -np.inf
         else:  # at_start
             fill_val = -np.inf if not descending else np.inf
-        arr_copy[mask] = fill_val
-        indices = _argsort(arr_copy)
+        sort_arr[mask] = fill_val
     else:
-        indices = _argsort(arr)
+        sort_arr = arr
 
     if descending:
-        indices = indices[::-1]
+        # Stable descending: a plain indices[::-1] would reverse the
+        # order of tied rows. Stable-argsort the reversed view and map
+        # positions back; ties keep their original relative order.
+        n = len(sort_arr)
+        indices = (n - 1 - _argsort(sort_arr[::-1]))[::-1]
+    else:
+        indices = _argsort(sort_arr)
 
     return indices
 

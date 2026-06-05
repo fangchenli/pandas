@@ -1692,7 +1692,9 @@ def _evaluate_sort(df: DataFrame, plan: Sort) -> DataFrame:
     # Perform sort. Index labels are kept; the final index policy is
     # applied once at the end of _collect_eager.
     ascending = [not d for d in plan.descending]
-    result = df.sort_values(by=sort_keys, ascending=ascending)
+    # kind="stable" so tie order matches the physical engine, whose
+    # NumPy and Arrow sort paths are both stable
+    result = df.sort_values(by=sort_keys, ascending=ascending, kind="stable")
 
     # Remove temporary columns
     if temp_cols:
@@ -1807,7 +1809,9 @@ def _evaluate_topk(df: DataFrame, plan) -> DataFrame:
     else:
         # Multiple keys or mixed directions - fall back to sort + head
         ascending = [not d for d in plan.descending]
-        result = df.sort_values(by=sort_keys, ascending=ascending).head(k)
+        result = df.sort_values(by=sort_keys, ascending=ascending, kind="stable").head(
+            k
+        )
 
     # Remove temporary columns
     if temp_cols:

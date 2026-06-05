@@ -147,3 +147,17 @@ doc/source/savefig/
 /STREAMING_BENCHMARK_REPORT.md
 /calibrated_thresholds.json
 test-data.xml
+
+# Local experiments and scratch (swisstable hash table work, ad-hoc scripts)
+# — not part of the lazy-pandas branch; kept out of the review surface
+/CLAUDE.md
+/MODERN_HASH_TABLES_RESEARCH.md
+/SWISSTABLE_*.md
+/benchmark_*.py
+/pandas/_libs/swisstable/
+/scripts/benchmark_arrow_string_methods.py
+/scripts/benchmark_duration_components.py
+/test_dtype_exceptions.py
+/data/
+/uv.lock
+/subprojects/

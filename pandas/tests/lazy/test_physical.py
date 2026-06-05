@@ -8,6 +8,7 @@ These tests verify that:
 """
 
 import numpy as np
+import pytest
 
 import pandas as pd
 import pandas._testing as tm
@@ -661,7 +662,11 @@ class TestParallelExecutionPaths:
     small test data.
     """
 
-    def test_parallel_argsort_matches_numpy(self):
+    def test_parallel_argsort_is_stable_exact_permutation(self):
+        # Lazy sorts are stable by contract: the parallel path must return
+        # the EXACT same permutation as np.argsort(kind="stable"), so that
+        # tied rows keep their original relative order. Comparing only the
+        # sorted key values would miss tie-order divergence.
         from pandas.lazy.backends.numpy.core import _parallel_argsort
 
         rng = np.random.default_rng(42)
@@ -669,11 +674,13 @@ class TestParallelExecutionPaths:
             rng.standard_normal(10_001),
             np.arange(5_000, dtype=np.float64),
             np.arange(5_000, dtype=np.float64)[::-1].copy(),
-            rng.integers(0, 100, 10_000),
+            rng.integers(0, 100, 10_000),  # heavy ties across chunks
+            rng.integers(0, 3, 10_000),  # extreme ties
+            np.zeros(10_000),  # all ties
         ):
             result = _parallel_argsort(arr)
-            expected = np.argsort(arr)
-            tm.assert_numpy_array_equal(arr[result], arr[expected])
+            expected = np.argsort(arr, kind="stable")
+            tm.assert_numpy_array_equal(result, expected)
 
     def test_sort_kernel_uses_parallel_path(self, monkeypatch):
         import pandas.lazy.backends.numpy.core as np_core
@@ -685,6 +692,52 @@ class TestParallelExecutionPaths:
         result = df.select().sort("k").collect(use_physical_planner=True)
         expected = df.sort_values("k").reset_index(drop=True)
         tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    @pytest.mark.parametrize("descending", [False, True])
+    def test_sort_ties_match_across_engines(self, monkeypatch, descending):
+        # Duplicate keys: payload order for tied rows must be identical
+        # between the eager evaluator and the physical engine (stable sort
+        # contract), including through the parallel argsort path.
+        import pandas.lazy.backends.numpy.core as np_core
+        import pandas.lazy.physical as phys
+
+        monkeypatch.setattr(np_core, "PARALLEL_SORT_MIN_ROWS", 10)
+        monkeypatch.setattr(phys, "PARALLEL_TAKE_MIN_ROWS", 10)
+        rng = np.random.default_rng(3)
+        df = pd.DataFrame(
+            {
+                "k": rng.integers(0, 5, 4_000).astype("float64"),
+                "payload": np.arange(4_000),
+            }
+        )
+
+        ldf = df.select().sort("k", descending=descending)
+        eager = ldf.collect()
+        physical = ldf.collect(use_physical_planner=True)
+        tm.assert_frame_equal(eager, physical, check_dtype=False)
+        # Stability: tied rows keep original (ascending payload) order
+        for value in np.unique(df["k"]):
+            payloads = physical.loc[physical["k"] == value, "payload"].to_numpy()
+            assert (np.diff(payloads) > 0).all()
+
+    def test_multikey_sort_ties_match_across_engines(self, monkeypatch):
+        import pandas.lazy.physical as phys
+
+        monkeypatch.setattr(phys, "ARROW_MULTIKEY_SORT_MIN_ROWS", 10)
+        monkeypatch.setattr(phys, "PARALLEL_TAKE_MIN_ROWS", 10)
+        rng = np.random.default_rng(4)
+        df = pd.DataFrame(
+            {
+                "k1": rng.integers(0, 3, 2_000),
+                "k2": rng.integers(0, 3, 2_000),
+                "payload": np.arange(2_000),
+            }
+        )
+
+        ldf = df.select().sort("k1", "k2")
+        eager = ldf.collect()
+        physical = ldf.collect(use_physical_planner=True)
+        tm.assert_frame_equal(eager, physical, check_dtype=False)
 
     def test_arrow_multikey_sort_path(self, monkeypatch):
         import pandas.lazy.physical as phys
@@ -756,3 +809,17 @@ class TestParallelExecutionPaths:
         expected = pd.DataFrame({"a": np.arange(400)})
         # Input order must be preserved despite parallel execution
         tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_parallel_concat_index_metadata_deterministic(self):
+        # Concurrent concat inputs must not race on context index
+        # metadata: the first input's metadata wins, deterministically
+        # (matches Concat.resolve_schema using the first input's schema).
+        from pandas.lazy import concat as lazy_concat
+
+        df1 = pd.DataFrame({"a": [1, 2]}, index=pd.Index([10, 20], name="first_idx"))
+        df2 = pd.DataFrame({"a": [3, 4]}, index=pd.Index([30, 40], name="second_idx"))
+
+        ldf = lazy_concat([df1.select(), df2.select()])
+        for _ in range(5):  # repeated runs: no completion-order dependence
+            result = ldf.collect(use_physical_planner=True, preserve_index=True)
+            assert result.index.name == "first_idx"

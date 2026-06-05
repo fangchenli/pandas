@@ -204,6 +204,10 @@ small data never pays pool overhead.
   `searchsorted` pairwise merge (~1.5x at 10M rows). Large multi-key sorts
   route through Arrow's multi-threaded table `sort_indices` instead of
   `np.lexsort` (~1.65x), with a lexsort fallback for unsupported key types.
+  **Lazy sorts are stable by contract** (ties keep their original relative
+  order): it is the only tie order the eager evaluator, NumPy engine, and
+  Arrow engine (whose sorts are inherently stable) can all agree on, and
+  the equivalence suite asserts it.
 - **Parallel gather** (`physical.py:_take_all_columns`) — applying sort
   indices to result columns fans out per column (~2.5x for 4 columns at
   10M rows); used by single- and multi-key sort paths.
