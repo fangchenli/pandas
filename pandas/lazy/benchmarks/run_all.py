@@ -6,15 +6,19 @@ Usage:
     python run_all.py                     # Run all benchmarks
     python run_all.py filter              # Run specific benchmark
     python run_all.py --all               # Include optional benchmarks
+    python run_all.py --quick             # ~10x smaller data (pre-push smoke)
     python run_all.py --update-baseline   # Re-record regression baselines
     python run_all.py --threshold 10      # Stricter regression gate
 
 Baseline flags are forwarded to baseline-aware benchmarks (those that
 end with shared.baseline_cli); a regression beyond the threshold makes
-this script exit non-zero.
+this script exit non-zero. Quick mode (env LAZY_BENCH_QUICK=1) scales
+data sizes down in benchmarks that use shared.scale_sizes and gates
+against separate baselines/<name>.quick.json files.
 """
 
 import argparse
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -99,6 +103,12 @@ def main():
         help="Include optional benchmarks (polars comparison, NYC taxi)",
     )
     parser.add_argument(
+        "--quick",
+        action="store_true",
+        help="Run with ~10x smaller data sizes (fast pre-push smoke); "
+        "gates against separate .quick baselines",
+    )
+    parser.add_argument(
         "--update-baseline",
         action="store_true",
         help="Re-record regression baselines for baseline-aware benchmarks",
@@ -111,6 +121,9 @@ def main():
     )
     args = parser.parse_args()
 
+    if args.quick:
+        os.environ["LAZY_BENCH_QUICK"] = "1"
+
     baseline_args: list[str] = []
     if args.update_baseline:
         baseline_args.append("--update-baseline")
@@ -120,14 +133,20 @@ def main():
     benchmark_dir = Path(__file__).parent
     all_benchmarks = BENCHMARKS + (OPTIONAL_BENCHMARKS if args.all else [])
 
-    # Filter benchmarks if specific one requested
+    # Filter benchmarks if specific one requested. An exact name match
+    # (e.g. "join" -> bench_join.py) wins over substring matches so that
+    # "join" does not also pull in bench_join_edge_cases.py.
     if args.benchmark:
-        matching = [b for b in all_benchmarks if args.benchmark in b]
-        if not matching:
-            print(f"No benchmark matching '{args.benchmark}'")
-            print(f"Available: {', '.join(all_benchmarks)}")
-            return 1
-        benchmarks = matching
+        exact = f"bench_{args.benchmark}.py"
+        if exact in all_benchmarks:
+            benchmarks = [exact]
+        else:
+            matching = [b for b in all_benchmarks if args.benchmark in b]
+            if not matching:
+                print(f"No benchmark matching '{args.benchmark}'")
+                print(f"Available: {', '.join(all_benchmarks)}")
+                return 1
+            benchmarks = matching
     else:
         benchmarks = all_benchmarks if args.all else BENCHMARKS
 

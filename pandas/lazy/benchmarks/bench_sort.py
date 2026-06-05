@@ -27,11 +27,12 @@ from shared import (
     print_header,
     print_result,
     print_speedup,
+    scale_sizes,
 )
 
 import pandas as pd
 
-SIZES = [1_000_000, 10_000_000]
+SIZES = scale_sizes([1_000_000, 10_000_000])
 
 
 def make_sort_data(n: int, seed: int = 42) -> pd.DataFrame:

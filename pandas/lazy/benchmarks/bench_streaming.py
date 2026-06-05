@@ -25,7 +25,10 @@ import sys
 import time
 
 import numpy as np
-from shared import DATA_DIR
+from shared import (
+    DATA_DIR,
+    is_quick,
+)
 
 import pandas as pd
 from pandas.lazy import (
@@ -37,15 +40,15 @@ from pandas.lazy import (
 # Configuration
 # =============================================================================
 TAXI_FILES = sorted([f.name for f in DATA_DIR.glob("yellow_tripdata_*.parquet")])
-WARMUP_RUNS = 3
-TIMED_RUNS = 7
+WARMUP_RUNS = 1 if is_quick() else 3
+TIMED_RUNS = 3 if is_quick() else 7
 SEED = 42
 
 # Limit sizes to test
-HEAD_SIZES = [10, 100, 1000, 10000]
+HEAD_SIZES = [10, 1000] if is_quick() else [10, 100, 1000, 10000]
 
 # Batch sizes for streaming
-BATCH_SIZES = [1024, 8192, 65536]
+BATCH_SIZES = [65536] if is_quick() else [1024, 8192, 65536]
 
 
 # =============================================================================

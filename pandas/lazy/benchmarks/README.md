@@ -21,9 +21,22 @@ python run_all.py join
 # Run with optional benchmarks (Polars comparison, NYC Taxi)
 python run_all.py --all
 
+# Fast pre-push smoke: ~10x smaller data, separate .quick baselines
+python run_all.py --quick
+
 # Use specific Python interpreter
 python run_all.py --python /path/to/python
 ```
+
+## Quick Mode
+
+`--quick` (or env `LAZY_BENCH_QUICK=1`) scales data sizes down ~10x in
+benchmarks that use `shared.scale_sizes` (currently the baseline-aware
+set) so the suite works as a fast pre-push smoke (~10s per benchmark
+instead of minutes). Quick runs gate against separate
+`baselines/<name>.quick.json` files — scaled sizes produce different
+metric keys and timings — and use a looser default threshold (50% vs
+25%) because smaller absolute timings are relatively noisier.
 
 ## Regression Workflow (baselines)
 
@@ -438,6 +451,21 @@ python -m cProfile -s cumtime bench_filter.py
 # Memory profiling
 python -m memory_profiler bench_memory.py
 ```
+
+## Continuous Integration
+
+`.github/workflows/lazy-benchmarks.yml` wires the suite into CI:
+
+- **smoke** (push to `lazy-pandas` touching `pandas/lazy/**`, or manual
+  dispatch): builds pandas, runs the lazy test suite, then the quick
+  benchmark suite for sort/filter/join/aggregations. Fresh runners have
+  no baselines, so this job gates on crashes and correctness, not
+  timing.
+- **ab-regression** (manual dispatch with a `base_ref` input): on a
+  single runner, builds the base ref, records quick baselines, rebuilds
+  HEAD, and compares with a configurable threshold (default 30%).
+  Same-runner A/B is the only honest timing comparison on shared CI
+  hardware; cross-run timing tracking needs a dedicated quiet machine.
 
 ## Results Storage
 

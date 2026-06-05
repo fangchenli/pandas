@@ -12,6 +12,7 @@ import sys
 from shared import (
     baseline_cli,
     create_test_data,
+    scale_sizes,
     timeit,
 )
 
@@ -60,7 +61,7 @@ def bench_lazy_chained_filter(
 
 def run_benchmarks() -> int:
     """Run all filter benchmarks."""
-    sizes = [10_000, 100_000, 1_000_000]
+    sizes = scale_sizes([10_000, 100_000, 1_000_000])
     metrics: dict[str, float] = {}
 
     print("=" * 70)

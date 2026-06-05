@@ -19,6 +19,7 @@ import numpy as np
 from shared import (
     baseline_cli,
     benchmark,
+    is_quick,
 )
 
 import pandas as pd
@@ -55,6 +56,12 @@ def benchmark_inner_join(metrics: dict[str, float]):
         (100_000, 100_000, 10_000, "100k_100k", "Both equal size"),
         (1_000_000, 10_000, 5_000, "1m_10k", "Left very large, Right small"),
     ]
+
+    if is_quick():
+        scenarios = [
+            (ls // 10, rs // 10, kc // 10, slug, desc)
+            for ls, rs, kc, slug, desc in scenarios
+        ]
 
     for left_size, right_size, key_card, slug, desc in scenarios:
         print(f"\n{desc}:")
@@ -112,6 +119,11 @@ def benchmark_semi_anti_join(metrics: dict[str, float]):
         (100_000, 100_000, 10_000, "100k_100k", "100K left, 100K right"),
         (1_000_000, 10_000, 5_000, "1m_10k", "1M left, 10K right"),
     ]
+    if is_quick():
+        scenarios = [
+            (ls // 10, rs // 10, kc // 10, slug, desc)
+            for ls, rs, kc, slug, desc in scenarios
+        ]
 
     for left_size, right_size, key_card, slug, desc in scenarios:
         print(f"\n{desc}:")

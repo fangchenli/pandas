@@ -12,6 +12,7 @@ import sys
 from shared import (
     baseline_cli,
     create_grouped_data,
+    scale_sizes,
     timeit,
 )
 
@@ -202,7 +203,7 @@ def lazy_multi_compute(
 
 def run_benchmarks() -> int:
     """Run all aggregation pipeline benchmarks."""
-    sizes = [10_000, 100_000, 1_000_000]
+    sizes = scale_sizes([10_000, 100_000, 1_000_000])
     metrics: dict[str, float] = {}
 
     print("=" * 70)

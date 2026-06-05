@@ -648,6 +648,7 @@ def compare_to_baseline(
     current: dict[str, float],
     baseline: dict[str, float],
     threshold_pct: float = 10.0,
+    min_gate_ms: float = 1.0,
 ) -> tuple[bool, list[dict[str, Any]]]:
     """
     Compare current results to baseline and detect regressions.
@@ -660,6 +661,10 @@ def compare_to_baseline(
         Baseline benchmark results (metric_name -> value_ms)
     threshold_pct : float, default 10.0
         Regression threshold as percentage (fail if slower by more than this)
+    min_gate_ms : float, default 1.0
+        Metrics where both baseline and current are below this are
+        reported but never fail the gate: sub-millisecond timings have
+        unbounded relative noise (a 0.03 ms wiggle is a 50% "regression").
 
     Returns
     -------
@@ -679,7 +684,9 @@ def compare_to_baseline(
         else:
             diff_pct = 0.0
 
-        if diff_pct > threshold_pct:
+        if max(curr_val, base_val) < min_gate_ms:
+            status = "NOISE" if abs(diff_pct) > threshold_pct else "OK"
+        elif diff_pct > threshold_pct:
             status = "REGRESSION"
             passed = False
         elif diff_pct < -threshold_pct:
@@ -788,6 +795,42 @@ def run_ci_comparison(
     return passed
 
 
+# =============================================================================
+# Quick mode
+# =============================================================================
+
+
+def is_quick() -> bool:
+    """
+    Whether quick mode is active (LAZY_BENCH_QUICK=1).
+
+    Quick mode shrinks data sizes (see scale_sizes) so the suite runs as
+    a fast pre-push smoke. Quick runs use separate baseline files
+    (baselines/<name>.quick.json) because the scaled sizes produce
+    different metric keys and timings than full runs.
+    """
+    import os
+
+    return os.environ.get("LAZY_BENCH_QUICK", "") not in ("", "0")
+
+
+def scale_sizes(sizes: list[int], factor: int = 10, floor: int = 1_000) -> list[int]:
+    """
+    Scale benchmark data sizes down in quick mode.
+
+    Returns sizes unchanged when quick mode is off; otherwise divides by
+    `factor` (not below `floor`) and deduplicates while preserving order.
+    """
+    if not is_quick():
+        return sizes
+    scaled = []
+    for n in sizes:
+        m = max(n // factor, floor)
+        if m not in scaled:
+            scaled.append(m)
+    return scaled
+
+
 def baseline_cli(metrics: dict[str, float], bench_name: str) -> int:
     """
     Standard baseline/regression CLI for benchmark scripts.
@@ -798,8 +841,10 @@ def baseline_cli(metrics: dict[str, float], bench_name: str) -> int:
     --baseline-dir DIR   directory holding per-benchmark baseline JSONs
                          (default: ./baselines next to the benchmarks)
     --update-baseline    overwrite the baseline with the current results
-    --threshold PCT      regression threshold percentage (default 25;
-                         benchmark noise on shared machines is real)
+    --threshold PCT      regression threshold percentage (default 25,
+                         or 50 in quick mode where smaller data makes
+                         timings noisier; benchmark noise on shared
+                         machines is real)
 
     Returns a process exit code: 0 if no regressions (or no baseline
     yet, in which case the current run is saved as the baseline),
@@ -824,12 +869,20 @@ def baseline_cli(metrics: dict[str, float], bench_name: str) -> int:
         "--baseline-dir", default=str(Path(__file__).parent / "baselines")
     )
     parser.add_argument("--update-baseline", action="store_true")
-    parser.add_argument("--threshold", type=float, default=25.0)
+    parser.add_argument("--threshold", type=float, default=None)
     args, _ = parser.parse_known_args()
+
+    if args.threshold is None:
+        # Quick mode shrinks data ~10x; smaller absolute timings mean
+        # larger relative noise, so the default gate is looser.
+        args.threshold = 50.0 if is_quick() else 25.0
 
     baseline_dir = Path(args.baseline_dir)
     baseline_dir.mkdir(parents=True, exist_ok=True)
-    baseline_path = baseline_dir / f"{bench_name}.json"
+    # Quick-mode runs use different data sizes, so they gate against
+    # their own baselines rather than polluting full-run baselines.
+    suffix = ".quick" if is_quick() else ""
+    baseline_path = baseline_dir / f"{bench_name}{suffix}.json"
 
     if args.update_baseline:
         save_benchmark_results({"metrics": metrics}, baseline_path)
