@@ -166,7 +166,7 @@ def benchmark_filter_project(
 
     # Simple filter
     def lazy_pandas_filter():
-        return pdf.select().filter(col("value1") > 0).collect()
+        return pdf.select().filter(col("value1") > 0).collect(use_physical_planner=True)
 
     def polars_filter():
         return pldf.lazy().filter(pl.col("value1") > 0).collect()
@@ -190,7 +190,7 @@ def benchmark_filter_project(
             pdf.select()
             .filter(col("value1") > 0)
             .select("id", "group", "value1")
-            .collect()
+            .collect(use_physical_planner=True)
         )
 
     def polars_filter_select():
@@ -217,7 +217,9 @@ def benchmark_filter_project(
     # Multiple filters (AND)
     def lazy_pandas_multi_filter():
         return (
-            pdf.select().filter((col("value1") > 0) & (col("int_val") < 500)).collect()
+            pdf.select()
+            .filter((col("value1") > 0) & (col("int_val") < 500))
+            .collect(use_physical_planner=True)
         )
 
     def polars_multi_filter():
@@ -245,7 +247,7 @@ def benchmark_filter_project(
         return (
             pdf.select()
             .with_columns((col("value1") + col("value2")).alias("sum_vals"))
-            .collect()
+            .collect(use_physical_planner=True)
         )
 
     def polars_with_column():
@@ -284,7 +286,7 @@ def benchmark_aggregations(
             pdf.select()
             .group_by("group")
             .agg(col("value1").sum().alias("sum"))
-            .collect()
+            .collect(use_physical_planner=True)
         )
 
     def polars_groupby_sum():
@@ -319,7 +321,7 @@ def benchmark_aggregations(
                 col("value2").max().alias("max_v2"),
                 col("int_val").count().alias("count"),
             )
-            .collect()
+            .collect(use_physical_planner=True)
         )
 
     def polars_groupby_multi():
@@ -354,7 +356,7 @@ def benchmark_aggregations(
             pdf.select()
             .group_by("category")
             .agg(col("value1").sum().alias("sum"))
-            .collect()
+            .collect(use_physical_planner=True)
         )
 
     def polars_groupby_highcard():
@@ -395,7 +397,9 @@ def benchmark_joins(
     # Inner join
     def lazy_pandas_inner_join():
         return (
-            pdf_left.select().join(pdf_right.select(), on="key", how="inner").collect()
+            pdf_left.select()
+            .join(pdf_right.select(), on="key", how="inner")
+            .collect(use_physical_planner=True)
         )
 
     def polars_inner_join():
@@ -417,7 +421,9 @@ def benchmark_joins(
     # Left join
     def lazy_pandas_left_join():
         return (
-            pdf_left.select().join(pdf_right.select(), on="key", how="left").collect()
+            pdf_left.select()
+            .join(pdf_right.select(), on="key", how="left")
+            .collect(use_physical_planner=True)
         )
 
     def polars_left_join():
@@ -448,7 +454,11 @@ def benchmark_string_ops(
 
     # String contains
     def lazy_pandas_str_contains():
-        return pdf.select().filter(col("text").str.contains("foo")).collect()
+        return (
+            pdf.select()
+            .filter(col("text").str.contains("foo"))
+            .collect(use_physical_planner=True)
+        )
 
     def polars_str_contains():
         return pldf.lazy().filter(pl.col("text").str.contains("foo")).collect()
@@ -471,7 +481,7 @@ def benchmark_string_ops(
         return (
             pdf.select()
             .with_columns(col("text").str.lower().alias("text_lower"))
-            .collect()
+            .collect(use_physical_planner=True)
         )
 
     def polars_str_lower():
@@ -497,7 +507,9 @@ def benchmark_string_ops(
     # String length
     def lazy_pandas_str_len():
         return (
-            pdf.select().with_columns(col("text").str.len().alias("text_len")).collect()
+            pdf.select()
+            .with_columns(col("text").str.len().alias("text_len"))
+            .collect(use_physical_planner=True)
         )
 
     def polars_str_len():
@@ -639,7 +651,7 @@ def benchmark_head_limit(
     for limit in [10, 100, 1000]:
 
         def lazy_pandas_head(lim=limit):
-            return pdf.select().head(lim).collect()
+            return pdf.select().head(lim).collect(use_physical_planner=True)
 
         def polars_head(lim=limit):
             return pldf.lazy().head(lim).collect()
@@ -667,7 +679,7 @@ def benchmark_sort(pdf: pd.DataFrame, pldf: pl.DataFrame) -> list[BenchmarkResul
 
     # Sort by single column
     def lazy_pandas_sort():
-        return pdf.select().sort("value1").collect()
+        return pdf.select().sort("value1").collect(use_physical_planner=True)
 
     def polars_sort():
         return pldf.lazy().sort("value1").collect()
@@ -687,7 +699,7 @@ def benchmark_sort(pdf: pd.DataFrame, pldf: pl.DataFrame) -> list[BenchmarkResul
 
     # Sort by multiple columns
     def lazy_pandas_sort_multi():
-        return pdf.select().sort("group", "value1").collect()
+        return pdf.select().sort("group", "value1").collect(use_physical_planner=True)
 
     def polars_sort_multi():
         return pldf.lazy().sort("group", "value1").collect()

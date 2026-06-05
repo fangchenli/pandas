@@ -5,28 +5,42 @@ in [ARCHITECTURE.md](ARCHITECTURE.md), [PLANNING.md](PLANNING.md), and
 [OPTIMIZER.md](OPTIMIZER.md); dated performance reports live in
 `../benchmarks/`.
 
-## Competitive Standing (vs Polars, Jan 2026)
+## Competitive Standing (vs Polars, June 2026 — corrected methodology)
 
 From `../benchmarks/LAZY_VS_POLARS_BENCHMARK.md` (1M–10M rows, Apple
-Silicon). Speedup > 1.0 = lazy pandas faster:
+Silicon), measured on **both** execution paths after discovering that the
+January report had measured only the eager path. Speedup > 1.0 = lazy
+pandas faster:
 
-| Category | Avg speedup | Notes |
-|----------|-------------|-------|
-| string | 0.86x (up to 2.1x) | `str.lower` beats Polars; `contains`/`len` behind |
-| parquet_scan | 0.28x | scan+filter+head competitive (0.68x); glob scans behind |
-| sort | 0.22x | |
-| aggregation | 0.19x | multi-agg best case 0.43x |
-| join | 0.15x | |
-| filter_project | 0.14x | |
-| limit | ~0x | `head(N)` is Polars' best case (µs) vs our ms — see below |
+| Category | Physical engine | Eager path | Notes |
+|----------|----------------|------------|-------|
+| string | 0.27x | up to **2.6x** | eager `str.lower` beats Polars; physical loses it to pass-through conversion |
+| parquet_scan | 0.27x (0.65x best) | — | physical-only path |
+| sort | 0.20x | ~0.17x | numeric-only sorts (bench_sort) beat eager pandas 1.2–2x; this data has string payload columns |
+| aggregation | 0.08x | 0.06–0.39x | |
+| join | 0.06x | **0.56–0.70x** | eager rides pandas 3.1 merge improvements; physical pays conversion |
+| filter_project | 0.11x | 0.07–0.25x | |
+| limit | ~0x | ~0x | `head(N)` is Polars' best case (µs) vs our ms — see below |
+
+The physical-vs-eager gap on this benchmark is dominated by a single
+cause, isolated and measured: see item 1 below.
 
 ## High-Impact Opportunities
 
-1. **`head()`/limit fast path.** Polars answers `head(10)` on in-memory data
+1. **Stop converting pass-through columns (top priority).** The physical
+   engine Arrow-converts object-string columns on output even when no
+   operation touches them: `with_columns(v1+v2)` at 10M rows is 55 ms on
+   a numeric-only frame but 379 ms with one untouched object-string
+   column (eager: 50 ms). On realistic mixed-dtype data this single cost
+   inverts every benchmark category. Fix: preserve each column's input
+   backend through the ArrayDict and on output; convert only columns an
+   operation actually consumed or produced.
+
+2. **`head()`/limit fast path.** Polars answers `head(10)` on in-memory data
    in ~10µs; we spend milliseconds planning and copying. Needs a trivial-plan
    short-circuit that slices without entering the physical pipeline.
 
-2. **Planning-overhead fast paths.** Single filter/select queries pay
+3. **Planning-overhead fast paths.** Single filter/select queries pay
    60–80% of their lazy overhead in the optimizer. Heuristics worth
    implementing (from `bench_planning_phases.py`):
 
@@ -38,14 +52,14 @@ Silicon). Speedup > 1.0 = lazy pandas faster:
    | No limits | LimitPushdown, SortLimitToTopK | ~5% |
    | < 10K rows | lazy path entirely (use eager) | all of it |
 
-3. **Sort performance.** 0.2x of Polars; needs parallel sort and/or Arrow
+4. **Sort performance.** 0.2x of Polars; needs parallel sort and/or Arrow
    sort improvements; multi-key sort is the worst case.
 
-4. **Join performance.** 0.15x of Polars despite build/probe + parallel
+5. **Join performance.** 0.15x of Polars despite build/probe + parallel
    sides; profile hash table build (a swisstable-style hash table is one
    candidate) and output materialization.
 
-5. **Cardinality estimation.** Row estimates exist for sources and
+6. **Cardinality estimation.** Row estimates exist for sources and
    size-preserving nodes but stop at filters (`estimate_row_count()`
    returns None — no selectivity model). Simple selectivity estimates
    (histogram/sample/default-10%) would make engine selection and

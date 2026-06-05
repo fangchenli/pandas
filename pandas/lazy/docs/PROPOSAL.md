@@ -211,11 +211,16 @@ Honest numbers (Apple Silicon; details in
   (10×+ on multi-file globs), Arrow string pipelines 2–10×, plus
   streaming/spill enabling workloads eager pandas cannot run. Single simple
   operations are 2–5× *slower* (planning overhead) — lazy is for pipelines.
-- **vs Polars**: behind almost everywhere except `str.lower`-style string
-  kernels (≈2× faster). Aggregations ~0.2×, joins ~0.15×, sort ~0.2×,
-  `head()` is Polars' best case and our worst. [ROADMAP.md](ROADMAP.md)
-  itemizes the causes (no fast-path for trivial plans, no cardinality
-  estimation, single-threaded sort).
+- **vs Polars** (June 2026, both execution paths measured after a
+  methodology fix — the earlier report had measured only the eager path):
+  behind almost everywhere. Best categories: eager-path `str.lower` ≈2.6×
+  *faster* than Polars and eager-path joins at 0.56–0.70×; physical-engine
+  numbers on mixed-dtype data are currently dominated by a single isolated
+  cost (pass-through string columns are Arrow-converted on output even
+  when untouched — 55 ms vs 379 ms on an otherwise identical query), which
+  is the top engine priority. `head()` remains Polars' best case and our
+  worst. [ROADMAP.md](ROADMAP.md) itemizes the causes and the dual-path
+  numbers.
 
 The prototype's claim is not "faster than Polars" — it is that the
 architecture is sound, results are value-compatible with eager pandas, and

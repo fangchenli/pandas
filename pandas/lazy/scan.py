@@ -106,7 +106,10 @@ def scan(
     """
     # Infer format from path if not specified
     if format is None:
-        format = _infer_format(path)
+        import os
+
+    path = os.fspath(path)
+    format = _infer_format(path)
 
     if format is None:
         raise ValueError(
