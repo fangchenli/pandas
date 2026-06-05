@@ -27,14 +27,18 @@ cause, isolated and measured: see item 1 below.
 
 ## High-Impact Opportunities
 
-1. **Stop converting pass-through columns (top priority).** The physical
-   engine Arrow-converts object-string columns on output even when no
-   operation touches them: `with_columns(v1+v2)` at 10M rows is 55 ms on
-   a numeric-only frame but 379 ms with one untouched object-string
-   column (eager: 50 ms). On realistic mixed-dtype data this single cost
-   inverts every benchmark category. Fix: preserve each column's input
-   backend through the ArrayDict and on output; convert only columns an
-   operation actually consumed or produced.
+1. **Stop converting pass-through columns.** *Output side fixed*: the
+   final DataFrame assembly was round-tripping untouched Arrow columns
+   through object arrays (379 ms → 51 ms for `with_columns` at 10M with
+   one string column; physical `str.lower` went from a 0.39x loss to a
+   2.4x win over Polars; up to -70% on physical pipeline baselines).
+   Output now wraps Arrow columns zero-copy and leaves NumPy columns
+   alone — locked by `test_passthrough_arrow_column_not_copied`.
+   **Remaining: input-side conversions in joins and groupby** — the
+   benchmark shows both unmoved by the output fix (joins ~0.06x of
+   Polars), pointing at whole-table conversions inside those operators.
+   Same playbook: profile, isolate the conversion, convert only key
+   columns.
 
 2. **`head()`/limit fast path.** Polars answers `head(10)` on in-memory data
    in ~10µs; we spend milliseconds planning and copying. Needs a trivial-plan

@@ -852,3 +852,30 @@ class TestParallelExecutionPaths:
         physical = ldf.collect(use_physical_planner=True)
         assert len(eager) > 0  # non-trivial result
         tm.assert_frame_equal(eager, physical, check_dtype=False)
+
+    def test_passthrough_arrow_column_not_copied(self):
+        # Regression: arrays_to_dataframe round-tripped pass-through
+        # Arrow columns through object arrays (to_pandas + re-inference),
+        # copying data twice for columns no operation touched. The output
+        # must wrap the same Arrow buffers zero-copy.
+        df = pd.DataFrame(
+            {
+                "v1": np.arange(1_000, dtype="float64"),
+                "v2": np.arange(1_000, dtype="float64"),
+                "text": pd.array([f"item_{i}" for i in range(1_000)]),
+            }
+        )
+        in_addr = df["text"].array._pa_array.chunk(0).buffers()[2].address
+
+        result = (
+            df.select()
+            .with_columns((col("v1") + col("v2")).alias("s"))
+            .collect(use_physical_planner=True)
+        )
+
+        # Untouched numpy columns stay numpy-backed
+        assert result["v1"].dtype == "float64"
+        # Untouched Arrow-backed string column shares the input buffers
+        out_arr = result["text"].array
+        out_addr = out_arr._pa_array.chunk(0).buffers()[2].address
+        assert out_addr == in_addr, "pass-through column was copied"

@@ -512,11 +512,34 @@ def arrays_to_dataframe(
             # Traditional conversion - copies data to NumPy arrays
             df = table.to_pandas()
     else:
-        # Mixed or NumPy arrays - convert individually
+        # Mixed or NumPy arrays - convert individually.
+        #
+        # Arrow columns are wrapped zero-copy into pandas extension arrays
+        # rather than round-tripped through arr.to_pandas(). The round trip
+        # was pathological for pass-through string columns: to_pandas()
+        # materialized object arrays, then the DataFrame constructor
+        # re-inferred them back into Arrow-backed string arrays - two full
+        # copies of data no operation ever touched (~320 ms at 10M rows).
         def to_pandas_array(arr):
             """Convert array to pandas-compatible format with proper null handling."""
             if isinstance(arr, (pa.Array, pa.ChunkedArray)):
-                return arr.to_pandas()
+                if not use_arrow_dtype:
+                    return arr.to_pandas()
+                chunked = pa.chunked_array([arr]) if isinstance(arr, pa.Array) else arr
+                if pa.types.is_string(chunked.type) or pa.types.is_large_string(
+                    chunked.type
+                ):
+                    # Match pandas' default Arrow-backed str dtype
+                    # (zero-copy wrap of the existing buffers)
+                    try:
+                        from pandas.core.arrays.string_arrow import (
+                            ArrowStringArray,
+                        )
+
+                        return ArrowStringArray(chunked)
+                    except (TypeError, ValueError):
+                        pass
+                return pd.arrays.ArrowExtensionArray(chunked)
 
             # For numpy arrays, convert float arrays with NaN to nullable dtypes
             # This ensures we use pd.NA instead of np.nan

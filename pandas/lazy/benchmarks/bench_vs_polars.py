@@ -827,6 +827,16 @@ def generate_report(results: list[BenchmarkResult]) -> str:
         f"- Warmup runs: {WARMUP_RUNS}",
         f"- Timed runs: {TIMED_RUNS}",
         "",
+        "## Methodology",
+        "",
+        "Lazy pandas timings use the **physical engine** "
+        "(`collect(use_physical_planner=True)`). Reports generated before "
+        "June 2026 measured the eager evaluation path for every category "
+        "except parquet scans and are not directly comparable. The test "
+        "data is mixed-dtype (numeric + string columns), so conversion "
+        "boundaries are part of what is measured. Absolute timings vary "
+        "with machine load; treat ratios as the signal.",
+        "",
         "## Summary",
         "",
         "**Speedup interpretation:** Values > 1.0 mean lazy pandas is faster, "
