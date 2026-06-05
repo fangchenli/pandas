@@ -53,11 +53,10 @@ Silicon). Speedup > 1.0 = lazy pandas faster:
 
 ## Known Semantic Issues (bugs, not design choices)
 
-- **NaN vs null in Arrow aggregation**: physical-engine groupby `sum` over
-  `[1.0, NaN]` returns `NaN` while eager pandas and the eager lazy path
-  return `1.0` (skipna). The Arrow kernels must map float `NaN` to null (or
-  mask it) before aggregating. The equivalence suite needs NaN-payload
-  cases to lock the fix.
+- ~~**NaN vs null in aggregation**~~ **Fixed**: Arrow kernels mask NaN→null
+  before aggregating (`mask_nan_to_null`), NumPy kernels drop NaN values and
+  negative factorize codes, and rows with missing group keys are dropped
+  (pandas `dropna=True`). Locked by `TestNaNAggregationSemantics`.
 - **Output dtype instability**: the physical engine returns Arrow-backed
   dtypes on some paths (large filters) and NumPy dtypes on others
   (small data, groupby outputs). Pick one contract and enforce it.

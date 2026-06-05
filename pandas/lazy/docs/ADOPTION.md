@@ -21,11 +21,22 @@ adds a capture layer above it. Neither requires rearchitecting.
                                   semantics fallback)
 ```
 
-## Direction 2 first: pluggable execution backends
+## Direction 2: pluggable execution backends
 
-Lower risk, immediately attacks our worst gaps (join 0.15x, sort 0.2x,
-aggregation 0.2x vs Polars — all DuckDB strengths), and the prototype is
-~90% shaped for it already.
+> **Status: contested.** The author's objection: moving execution to
+> engines that are themselves competitors (DuckDB) is not obviously a
+> winning strategy — pandas would own the API while ceding the part that
+> wins benchmarks, and maintainers may reasonably balk at a hard or soft
+> dependency on a competing project. The counter-argument is the
+> commoditization thesis (engines are becoming interchangeable
+> infrastructure, like compilers — nobody considers LLVM a "competitor").
+> This section documents *how* delegation would work if pursued; whether
+> to pursue it is an open positioning question, and nothing in Direction 1
+> depends on it — capture works identically over our built-in engine.
+
+Technically lower risk, and immediately attacks our worst gaps (join
+0.15x, sort 0.2x, aggregation 0.2x vs Polars — all DuckDB strengths);
+the prototype is ~90% shaped for it already.
 
 ### Why the prototype is ready
 
@@ -78,9 +89,10 @@ aggregation 0.2x vs Polars — all DuckDB strengths), and the prototype is
    decided once and enforced for both our Arrow kernels and DuckDB — this
    is the same fix as the known NaN bug).
 
-**Prerequisites from the known-issues list**: fix NaN-vs-null in Arrow
-aggregation and pin the output-dtype contract *before* adding a third
-engine — otherwise we triple the divergence surface.
+**Prerequisites from the known-issues list**: ~~fix NaN-vs-null in
+aggregation~~ (done — kernels now enforce pandas skipna/dropna semantics)
+and pin the output-dtype contract *before* adding a third engine —
+otherwise we multiply the divergence surface.
 
 **Spike to prove it** (small): translate
 `Filter→Aggregate(group_by)→Sort→Limit` chains only, benchmark
@@ -90,9 +102,14 @@ commoditization premise fails early and cheaply.
 
 ## Direction 1: transparent capture of eager pandas
 
-Higher risk, staged behind Direction 2 (capture without fast execution
-underneath would re-run the Ibis-pandas-backend failure: lazy API over slow
-execution).
+Higher risk and higher ceiling — and unlike Direction 2, uncontested as a
+strategy: it strengthens pandas with no dependence on anyone else's engine.
+It runs over whatever execution layer exists (the built-in engine today;
+delegated backends later only if Direction 2 is ever adopted). The main
+sequencing concern stands regardless: capture is only compelling if the
+execution underneath makes captured pipelines visibly faster than plain
+eager pandas, so the optimizer-win categories (fusion, pushdown, early
+termination, streaming) should headline the first demo.
 
 ### Design (each piece has prior art)
 
@@ -149,11 +166,13 @@ execution).
 
 ## Sequence summary
 
-1. Fix the NaN-vs-null bug + pin the output dtype contract (prereqs, small)
-2. **D2 spike**: DuckDB relational backend for agg/join/sort subtrees;
-   benchmark against the known gaps — cheap kill-or-commit signal
-3. D2 productionize: `PhysicalDelegated`, thresholds, equivalence engine
-   axis, explain labels
-4. **D1 Phase 2a**: scoped capture over the now-fast plan layer
-5. Revisit Substrait when the DuckDB extension catches up (unlocks
+1. ~~Fix the NaN-vs-null bug~~ (done) + pin the output dtype contract
+2. **D1 Phase 2a**: scoped capture over the existing plan layer — the
+   uncontested direction goes first
+3. Decide the Direction 2 question (delegate vs build vs neither) with
+   maintainers as part of the positioning discussion; if delegation is
+   accepted, the spike (DuckDB relational backend for agg/join/sort
+   subtrees, benchmarked against the known gaps) is a cheap
+   kill-or-commit signal
+4. Revisit Substrait when the DuckDB extension catches up (unlocks
    DataFusion/Velox as backends with zero new translation code)

@@ -71,9 +71,9 @@ semantics" should be a hard requirement is part of the positioning question.
 **Goals**
 
 - Opt-in, zero impact on eager pandas (additive API only)
-- Value-compatible results with eager pandas, enforced by an equivalence
-  test suite (known divergences are tracked as strict xfails — see
-  [Semantics](#semantics-what-is-kept-and-what-deviates))
+- Value-compatible results with eager pandas (including NaN-as-missing
+  semantics), enforced by an equivalence test suite — see
+  [Semantics](#semantics-what-is-kept-and-what-deviates)
 - Real optimizer wins: pushdown, pruning, fusion, TopK, early termination
 - Out-of-core capability: streaming batches + disk spill
 - Lazy file scans (Parquet, CSV) with predicate/projection pushdown
@@ -151,8 +151,7 @@ available, used as the fallback when a kernel is missing) and a physical
 engine that operates on raw arrays with per-operation backend routing
 (string/null ops → Arrow; numeric ops follow data; thresholds decide
 crossovers). The two engines are held to identical results by an
-equivalence suite; the one known divergence (NaN in Arrow aggregation) is
-pinned as a strict xfail.
+equivalence suite, including NaN-as-missing aggregation semantics.
 
 The deeper documents, in reading order for a design review:
 
@@ -203,7 +202,7 @@ What works today (each backed by tests):
 | Out-of-core | `SpillConfig` — Arrow IPC spill files, external sort, grace hash join |
 | File scans | Parquet (predicate incl. row-group stats + projection pushdown), CSV; glob + fsspec URLs |
 | Index contract | Default RangeIndex / `preserve_index=True`, identical between engines |
-| Tests | 1,489 in `pandas/tests/lazy`: 1,488 passing + 1 strict xfail pinning a known engine divergence; incl. eager↔physical equivalence suite (12 query shapes × index modes) |
+| Tests | 1,505 in `pandas/tests/lazy`, incl. eager↔physical equivalence suite (12 query shapes × index modes) and NaN-semantics regression coverage |
 
 Honest numbers (Apple Silicon; details in
 [`../benchmarks/`](../benchmarks/README.md)):
@@ -227,9 +226,10 @@ the optimizer wins are real, with a clear path on the remaining gaps.
 "Keeps pandas semantics" would overstate the current prototype. The honest
 breakdown, verified empirically:
 
-**Kept**: values (one known exception below), NA presence, column order and
-naming (including pandas' `_x`/`_y` join suffixes), `collect()` returning an
-ordinary `DataFrame` that the whole ecosystem accepts.
+**Kept**: values (including NaN-as-missing skipna/dropna semantics in
+aggregations), NA presence, column order and naming (including pandas'
+`_x`/`_y` join suffixes), `collect()` returning an ordinary `DataFrame`
+that the whole ecosystem accepts.
 
 **Deliberately Polars/Arrow-style instead of pandas-style:**
 
@@ -242,10 +242,6 @@ ordinary `DataFrame` that the whole ecosystem accepts.
 
 **Known gaps / divergences (bugs, not choices):**
 
-- Arrow-backed groupby aggregation treats float `NaN` as a value, not
-  missing: `sum([1.0, NaN])` is `1.0` in eager pandas and the eager lazy
-  path but `NaN` through the physical engine. The engines currently
-  disagree; the equivalence suite must grow NaN-payload cases.
 - Physical-engine output dtypes are not stable across operators and data
   sizes (NumPy-backed for some paths, Arrow-backed for others).
 - Duplicate column labels are unsupported and fail with an unhelpful error.
@@ -308,13 +304,15 @@ technical one. The candidate positions, with very different bars:
   requires a real breakthrough, not parity-chasing — something engines that
   require a rewrite structurally cannot offer. A research pass over prior
   art ([COMPETITIVE_RESEARCH.md](COMPETITIVE_RESEARCH.md)) identifies the
-  candidate: **transparent lazy capture of existing eager pandas code**
-  (validated piecewise by cudf.pandas, LaFP, Dias, Modin) **combined with
-  pluggable best-of-breed execution backends via IR** (validated by
-  Ibis→Substrait→DuckDB; engine kernels are commoditizing per the
-  composable-data-systems thesis). Incumbent API + owned semantics +
-  commoditized execution is a position Polars/DuckDB structurally cannot
-  take. Absent committing to that composite, (b) is not worth pursuing.
+  core candidate: **transparent lazy capture of existing eager pandas
+  code** (validated piecewise by cudf.pandas, LaFP, Dias, Modin) — the
+  incumbent-API moat Polars/DuckDB structurally cannot take. How the
+  execution gap underneath gets closed is contested: the research favors
+  pluggable engine backends via IR (engine kernels are commoditizing per
+  the composable-data-systems thesis), but delegating execution to
+  competing projects is itself a strategic question — see
+  [ADOPTION.md](ADOPTION.md). Absent committing to capture, (b) is not
+  worth pursuing.
 - **(c) Incubation outside the main tree** (a `pandas-lazy` package or
   long-lived experimental branch) until (a)-vs-(b) is settled by usage.
 

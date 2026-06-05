@@ -225,9 +225,9 @@ eager pandas under nullable-dtype semantics:
 
 - same values and column order (dtypes may differ: nullable/Arrow-backed
   output is documented behavior)
-- same NA presence — with one known divergence: the Arrow groupby path
-  treats float `NaN` as a value rather than missing (see the semantics
-  section of [PROPOSAL.md](PROPOSAL.md))
+- same NA presence and NaN-as-missing semantics: aggregation kernels mask
+  float NaN to null (Arrow) or drop it (NumPy), and rows with missing
+  group keys are dropped, matching pandas `skipna`/`dropna` defaults
 - `collect(optimize=False)` and `collect(use_physical_planner=False)` are
   always available as reference paths; equivalence is enforced by
   `tests/lazy/test_optimizer_equivalence.py`

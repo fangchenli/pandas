@@ -139,6 +139,22 @@ def _numpy_groupby_aggregate(
     # Get unique keys and indices using the factorize kernel
     codes, unique_keys, n_groups = factorize(keys)
 
+    # pandas semantics: rows with missing group keys are dropped
+    # (groupby dropna=True). factorize encodes missing keys as -1, which
+    # would otherwise be interpreted as the last group by np.add.at etc.
+    valid = codes >= 0
+    if not valid.all():
+        codes = codes[valid]
+        values = values[valid]
+
+    # pandas skipna semantics: float NaN values are missing and excluded
+    # from every aggregation (sum/mean/count/min/max/std/var/first/last).
+    if np.issubdtype(values.dtype, np.floating):
+        nan_mask = np.isnan(values)
+        if nan_mask.any():
+            codes = codes[~nan_mask]
+            values = values[~nan_mask]
+
     # Aggregation functions mapping
     if agg_func == "sum":
         # Use bincount for numeric sum (very fast)

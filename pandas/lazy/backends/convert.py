@@ -227,8 +227,40 @@ def to_arrow(arr: ArrayLike) -> PyArrowArray:
         getattr(arr, "_pa_array", None), pa.ChunkedArray
     ):
         return arr._pa_array
-    # NumPy to Arrow
-    return pa.array(arr)
+    # NumPy to Arrow. from_pandas=True maps float NaN to null, matching
+    # pandas semantics where NaN means missing.
+    return pa.array(arr, from_pandas=True)
+
+
+def mask_nan_to_null(arr: PyArrowArray) -> PyArrowArray:
+    """
+    Replace floating-point NaN values with null.
+
+    pandas treats NaN as missing data (``isna``/``skipna`` semantics),
+    while Arrow treats NaN as an ordinary float value and only skips
+    *nulls* in aggregations. Arrow kernels that must match pandas
+    aggregation semantics call this on floating-point inputs first.
+
+    Parameters
+    ----------
+    arr : PyArrowArray
+        The array to sanitize. Non-floating arrays are returned as-is.
+
+    Returns
+    -------
+    PyArrowArray
+        Array with NaN replaced by null.
+    """
+    import pyarrow.compute as pc
+
+    if not pa.types.is_floating(arr.type):
+        return arr
+    # is_nan returns null for null inputs; treat those as "not NaN" so
+    # existing nulls pass through unchanged.
+    nan_mask = pc.fill_null(pc.is_nan(arr), False)
+    if not pc.any(nan_mask).as_py():
+        return arr
+    return pc.if_else(nan_mask, pa.scalar(None, type=arr.type), arr)
 
 
 def to_numpy(arr: ArrayLike) -> np.ndarray:

@@ -247,10 +247,12 @@ class TestNaNNASemantics:
         result = ldf.collect(use_physical_planner=True)
         result = result.sort_values("group").reset_index(drop=True)
 
-        # Group A: 1.0 + NaN = NaN (pandas behavior)
-        # Group B: 3.0 + 4.0 = 7.0
-        assert np.isnan(result[result["group"] == "A"]["total"].iloc[0])
-        assert result[result["group"] == "B"]["total"].iloc[0] == 7.0
+        # pandas groupby.sum() skips NaN (skipna=True default):
+        # Group A: 1.0 (NaN excluded), Group B: 3.0 + 4.0 = 7.0.
+        # Verify against eager pandas as the source of truth.
+        expected = df.groupby("group")["value"].sum()
+        assert result[result["group"] == "A"]["total"].iloc[0] == expected["A"] == 1.0
+        assert result[result["group"] == "B"]["total"].iloc[0] == expected["B"] == 7.0
 
     def test_all_na_column_in_filter(self):
         """Filter on all-NA column should return empty result."""
@@ -707,26 +709,48 @@ class TestEagerVsPhysicalIndexContract:
         tm.assert_frame_equal(eager, physical, check_dtype=False, check_exact=False)
 
 
-class TestKnownSemanticDivergences:
-    """Known engine divergences, tracked as strict xfails.
+class TestNaNAggregationSemantics:
+    """NaN means missing in pandas: aggregations skip it (skipna) and
+    rows with missing group keys are dropped (groupby dropna=True).
 
-    See docs/ROADMAP.md "Known Semantic Issues". When a divergence is
-    fixed, the xfail will XPASS and must be converted into a plain
-    equivalence assertion.
+    Regression tests: the Arrow path used to treat NaN as a value
+    (sum([1.0, NaN]) -> NaN) and the NumPy path added NaN-keyed rows to
+    the last group (factorize code -1 + np.add.at negative indexing).
     """
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Arrow groupby treats float NaN as a value, not missing; "
-        "physical sum([1.0, NaN]) returns NaN while eager pandas and the "
-        "eager lazy path return 1.0 (skipna)",
+    @pytest.mark.parametrize("dtype", ["float64", "double[pyarrow]", "Float64"])
+    @pytest.mark.parametrize(
+        "agg, expected",
+        [("sum", 1.0), ("mean", 1.0), ("count", 1), ("min", 1.0), ("max", 1.0)],
     )
-    def test_groupby_sum_skips_nan_physical(self):
-        df = pd.DataFrame({"g": ["a", "a"], "v": [1.0, np.nan]})
-        ldf = df.select().group_by("g").agg(col("v").sum().alias("v"))
+    def test_groupby_agg_skips_nan(self, dtype, agg, expected):
+        df = pd.DataFrame({"g": ["a", "a"], "v": pd.array([1.0, np.nan], dtype=dtype)})
+        expr = getattr(col("v"), agg)().alias("v")
+        ldf = df.select().group_by("g").agg(expr)
 
         eager = ldf.collect()
         physical = ldf.collect(use_physical_planner=True)
 
-        assert eager["v"].iloc[0] == 1.0
-        assert float(physical["v"].iloc[0]) == 1.0  # currently NaN
+        assert float(eager["v"].iloc[0]) == expected
+        assert float(physical["v"].iloc[0]) == expected
+
+    def test_groupby_nan_key_rows_dropped(self):
+        # pandas groupby dropna=True: the NaN-keyed row contributes to
+        # no group (it must NOT leak into another group's aggregate)
+        df = pd.DataFrame({"g": [1.0, np.nan, 1.0], "v": [1, 2, 3]})
+        ldf = df.select().group_by("g").agg(col("v").sum().alias("v"))
+
+        for kwargs in ({}, {"use_physical_planner": True}):
+            result = ldf.collect(**kwargs)
+            assert len(result) == 1
+            assert float(result["g"].iloc[0]) == 1.0
+            assert int(result["v"].iloc[0]) == 4
+
+    def test_groupby_none_key_rows_dropped(self):
+        df = pd.DataFrame({"g": ["a", None, "a"], "v": [1.0, 2.0, 3.0]})
+        ldf = df.select().group_by("g").agg(col("v").sum().alias("v"))
+
+        for kwargs in ({}, {"use_physical_planner": True}):
+            result = ldf.collect(**kwargs)
+            assert len(result) == 1
+            assert float(result["v"].iloc[0]) == 4.0

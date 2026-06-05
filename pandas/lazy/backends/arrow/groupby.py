@@ -59,6 +59,50 @@ def factorize(
 # =============================================================================
 
 
+def _apply_pandas_nan_semantics(
+    table: pa.Table,
+    group_keys: list[str],
+    value_cols: list[str],
+) -> pa.Table:
+    """
+    Adjust an Arrow table so group_by matches pandas groupby semantics.
+
+    pandas treats float NaN as missing and (with the default dropna=True)
+    drops rows whose group key is missing. Arrow's group_by treats NaN as
+    a regular value and keeps null keys as their own group. This helper:
+
+    1. Replaces NaN with null in floating-point value columns, so Arrow's
+       skip-nulls aggregation matches pandas skipna.
+    2. Replaces NaN with null in floating-point key columns, then drops
+       rows where any group key is null (pandas dropna=True).
+    """
+    from pandas.lazy.backends.convert import mask_nan_to_null
+
+    for col in set(value_cols):
+        if col in group_keys:
+            continue
+        idx = table.column_names.index(col)
+        masked = mask_nan_to_null(table.column(idx))
+        if masked is not table.column(idx):
+            table = table.set_column(idx, col, masked)
+
+    null_key_mask = None
+    for col in group_keys:
+        idx = table.column_names.index(col)
+        masked = mask_nan_to_null(table.column(idx))
+        if masked is not table.column(idx):
+            table = table.set_column(idx, col, masked)
+        col_nulls = pc.is_null(table.column(idx))
+        null_key_mask = (
+            col_nulls if null_key_mask is None else pc.or_(null_key_mask, col_nulls)
+        )
+
+    if null_key_mask is not None and pc.any(null_key_mask).as_py():
+        table = table.filter(pc.invert(null_key_mask))
+
+    return table
+
+
 @register_kernel("group_by", "arrow")
 def arrow_group_by(
     table: pa.Table,
@@ -108,6 +152,10 @@ def arrow_group_by(
     # Check if we need single-threaded execution (for first/last)
     needs_single_thread = any(
         agg_func in ("first", "last") for _, _, agg_func in aggregations
+    )
+
+    table = _apply_pandas_nan_semantics(
+        table, group_keys, [input_col for _, input_col, _ in aggregations]
     )
 
     # Build aggregation specs for pyarrow
@@ -175,6 +223,7 @@ def arrow_hash_aggregate(
     columns.update(dict(zip(val_names, values, strict=True)))
 
     table = pa.table(columns)
+    table = _apply_pandas_nan_semantics(table, key_names, val_names)
 
     # Build aggregation specs
     # Map: agg_name -> (pa_function, output_suffix)

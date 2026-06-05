@@ -381,54 +381,62 @@ def arrow_invert(arr: PyArrowArray) -> PyArrowArray:
 # =============================================================================
 # Aggregation Operations
 # =============================================================================
+# All scalar aggregations apply mask_nan_to_null first: pandas treats NaN
+# as missing (skipna), while Arrow only skips nulls.
+
+
+def _skipna(arr: PyArrowArray) -> PyArrowArray:
+    from pandas.lazy.backends.convert import mask_nan_to_null
+
+    return mask_nan_to_null(arr)
 
 
 @register_kernel("sum", "arrow")
 def arrow_sum(arr: PyArrowArray):
     """Sum of array elements."""
-    result = pc.sum(arr)
+    result = pc.sum(_skipna(arr))
     return result.as_py()
 
 
 @register_kernel("mean", "arrow")
 def arrow_mean(arr: PyArrowArray):
     """Mean of array elements."""
-    result = pc.mean(arr)
+    result = pc.mean(_skipna(arr))
     return result.as_py()
 
 
 @register_kernel("min", "arrow")
 def arrow_min(arr: PyArrowArray):
     """Minimum of array elements."""
-    result = pc.min(arr)
+    result = pc.min(_skipna(arr))
     return result.as_py()
 
 
 @register_kernel("max", "arrow")
 def arrow_max(arr: PyArrowArray):
     """Maximum of array elements."""
-    result = pc.max(arr)
+    result = pc.max(_skipna(arr))
     return result.as_py()
 
 
 @register_kernel("count", "arrow")
 def arrow_count(arr: PyArrowArray) -> int:
-    """Count non-null elements."""
-    result = pc.count(arr)
+    """Count non-null (and non-NaN, matching pandas) elements."""
+    result = pc.count(_skipna(arr))
     return result.as_py()
 
 
 @register_kernel("std", "arrow")
 def arrow_std(arr: PyArrowArray, *, ddof: int = 1):
     """Standard deviation."""
-    result = pc.stddev(arr, ddof=ddof)
+    result = pc.stddev(_skipna(arr), ddof=ddof)
     return result.as_py()
 
 
 @register_kernel("var", "arrow")
 def arrow_var(arr: PyArrowArray, *, ddof: int = 1):
     """Variance."""
-    result = pc.variance(arr, ddof=ddof)
+    result = pc.variance(_skipna(arr), ddof=ddof)
     return result.as_py()
 
 
