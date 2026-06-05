@@ -56,9 +56,15 @@ numbers, whether it belongs in pandas.
 
 Users with existing pandas codebases, the pandas API muscle memory, and the
 pandas ecosystem (sklearn, statsmodels, matplotlib, …) pay a real migration
-cost. An opt-in lazy mode lets them keep pandas semantics and
-interoperability and adopt deferred execution only where it pays — one
-pipeline at a time, with `collect()` returning an ordinary `DataFrame`.
+cost. An opt-in lazy mode lets them keep pandas interoperability and adopt
+deferred execution only where it pays — one pipeline at a time, with
+`collect()` returning an ordinary `DataFrame`.
+
+A caveat this document should not gloss over: the prototype keeps pandas
+*values and interoperability*, not full pandas semantics — several defaults
+deliberately follow Polars/Arrow conventions instead (see
+[Semantics](#semantics-what-is-kept-and-what-deviates)). How far "pandas
+semantics" should be a hard requirement is part of the positioning question.
 
 ## Goals and non-goals
 
@@ -208,8 +214,44 @@ Honest numbers (Apple Silicon; details in
   estimation, single-threaded sort).
 
 The prototype's claim is not "faster than Polars" — it is that the
-architecture is sound, the semantics are pandas', and the optimizer wins are
-real, with a clear path on the remaining gaps.
+architecture is sound, results are value-compatible with eager pandas, and
+the optimizer wins are real, with a clear path on the remaining gaps.
+
+## Semantics: what is kept and what deviates
+
+"Keeps pandas semantics" would overstate the current prototype. The honest
+breakdown, verified empirically:
+
+**Kept**: values (one known exception below), NA presence, column order and
+naming (including pandas' `_x`/`_y` join suffixes), `collect()` returning an
+ordinary `DataFrame` that the whole ecosystem accepts.
+
+**Deliberately Polars/Arrow-style instead of pandas-style:**
+
+| Behavior | Eager pandas | Lazy default |
+|---|---|---|
+| Index after ops | label-preserving | positional `RangeIndex` (`preserve_index=True` opts back in) |
+| GroupBy result | keys as sorted index | keys as columns, first-appearance order |
+| Nulls from `lag`/window ops | `NaN` + float64 upcast | `pd.NA` + nullable dtype (no upcast) |
+| Output dtypes (physical engine) | NumPy dtypes | may be Arrow-backed |
+
+**Known gaps / divergences (bugs, not choices):**
+
+- Arrow-backed groupby aggregation treats float `NaN` as a value, not
+  missing: `sum([1.0, NaN])` is `1.0` in eager pandas and the eager lazy
+  path but `NaN` through the physical engine. The engines currently
+  disagree; the equivalence suite must grow NaN-payload cases.
+- Physical-engine output dtypes are not stable across operators and data
+  sizes (NumPy-backed for some paths, Arrow-backed for others).
+- Duplicate column labels are unsupported and fail with an unhelpful error.
+- The optimizer can change observable results for position-dependent
+  expressions (`with_row_index` before a pushed-down filter).
+- No UDFs (`apply`/`map`) — only the implemented expression vocabulary.
+
+Whether the deliberate deviations are features (modern defaults) or bugs
+(breaking the "no migration" promise of position (a)) is part of the
+positioning question — if "pandas semantics" is the differentiator, the
+defaults above arguably have it backwards.
 
 ## Code size and maintenance
 
@@ -251,9 +293,12 @@ technical one. The candidate positions, with very different bars:
 - **(a) A native optimization layer for pandas users.** The comparison
   target is *eager pandas*, not Polars: existing pandas users get pushdown,
   fusion, streaming, and out-of-core for their pipelines while keeping
-  pandas semantics (index, NA, dtypes) and the ecosystem, with no
-  migration. The prototype already clears this bar in several categories
-  and the remaining gaps are engineering, not research.
+  pandas values, objects, and the ecosystem, with no migration. The
+  prototype clears the performance bar in several categories, but note
+  that this position makes *pandas semantics* the differentiator — and the
+  current defaults deviate from them (see
+  [Semantics](#semantics-what-is-kept-and-what-deviates)); committing to
+  (a) likely means flipping those defaults back toward pandas.
 - **(b) A genuine competitor to Polars/DuckDB for data pipelines.** This
   requires a real breakthrough, not parity-chasing — something engines that
   require a rewrite structurally cannot offer. The most promising candidate:

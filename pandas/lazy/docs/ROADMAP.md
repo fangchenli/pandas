@@ -49,6 +49,21 @@ Silicon). Speedup > 1.0 = lazy pandas faster:
    selectivity estimates (histogram/sample/default-10%) would make engine
    selection and join-side choice cost-based instead of threshold-based.
 
+## Known Semantic Issues (bugs, not design choices)
+
+- **NaN vs null in Arrow aggregation**: physical-engine groupby `sum` over
+  `[1.0, NaN]` returns `NaN` while eager pandas and the eager lazy path
+  return `1.0` (skipna). The Arrow kernels must map float `NaN` to null (or
+  mask it) before aggregating. The equivalence suite needs NaN-payload
+  cases to lock the fix.
+- **Output dtype instability**: the physical engine returns Arrow-backed
+  dtypes on some paths (large filters) and NumPy dtypes on others
+  (small data, groupby outputs). Pick one contract and enforce it.
+- **Duplicate column labels** crash with `AttributeError` instead of a
+  clear "unsupported" error at plan construction.
+- **`shift` is unimplemented in the eager evaluator** while `lag` works in
+  both engines — audit Expr-API coverage parity between engines.
+
 ## Smaller Items
 
 - **JSON scanning** — `scan.py` accepts `format="json"` but raises

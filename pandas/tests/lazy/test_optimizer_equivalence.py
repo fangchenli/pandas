@@ -705,3 +705,28 @@ class TestEagerVsPhysicalIndexContract:
                 physical = physical.sort_values(cols).reset_index(drop=True)
 
         tm.assert_frame_equal(eager, physical, check_dtype=False, check_exact=False)
+
+
+class TestKnownSemanticDivergences:
+    """Known engine divergences, tracked as strict xfails.
+
+    See docs/ROADMAP.md "Known Semantic Issues". When a divergence is
+    fixed, the xfail will XPASS and must be converted into a plain
+    equivalence assertion.
+    """
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="Arrow groupby treats float NaN as a value, not missing; "
+        "physical sum([1.0, NaN]) returns NaN while eager pandas and the "
+        "eager lazy path return 1.0 (skipna)",
+    )
+    def test_groupby_sum_skips_nan_physical(self):
+        df = pd.DataFrame({"g": ["a", "a"], "v": [1.0, np.nan]})
+        ldf = df.select().group_by("g").agg(col("v").sum().alias("v"))
+
+        eager = ldf.collect()
+        physical = ldf.collect(use_physical_planner=True)
+
+        assert eager["v"].iloc[0] == 1.0
+        assert float(physical["v"].iloc[0]) == 1.0  # currently NaN

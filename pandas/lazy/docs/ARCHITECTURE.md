@@ -220,12 +220,18 @@ eager pandas.
 
 ## Invariants
 
-Every optimization and execution path must be **semantics-preserving**
-relative to eager pandas with nullable dtypes:
+Every optimization and execution path targets **value equivalence** with
+eager pandas under nullable-dtype semantics:
 
-- same values, column order, and dtypes (modulo documented Arrow-backed
-  output dtypes)
-- same NaN/NA propagation
+- same values and column order (dtypes may differ: nullable/Arrow-backed
+  output is documented behavior)
+- same NA presence — with one known divergence: the Arrow groupby path
+  treats float `NaN` as a value rather than missing (see the semantics
+  section of [PROPOSAL.md](PROPOSAL.md))
 - `collect(optimize=False)` and `collect(use_physical_planner=False)` are
   always available as reference paths; equivalence is enforced by
   `tests/lazy/test_optimizer_equivalence.py`
+
+Note that *index, groupby shape, and null-representation defaults
+deliberately differ* from eager pandas (Polars-style positional results);
+see PROPOSAL.md for the full kept-vs-deviates breakdown.
