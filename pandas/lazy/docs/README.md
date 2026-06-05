@@ -41,6 +41,7 @@ print(ldf.explain(physical=True))    # physical plan with pipeline boundaries
 | [THRESHOLDS.md](THRESHOLDS.md) | Cost-based decision thresholds: configuration, calibration, adaptive tuning |
 | [ROADMAP.md](ROADMAP.md) | Known gaps, open questions, and future work |
 | [COMPETITIVE_RESEARCH.md](COMPETITIVE_RESEARCH.md) | Researched answer to "can this compete with Polars/DuckDB?" — prior-art post-mortems, ranked directions |
+| [ADOPTION.md](ADOPTION.md) | How the competitive directions map onto the prototype: pluggable engine backends, then transparent capture — phased plan |
 | [../benchmarks/README.md](../benchmarks/README.md) | Benchmark suite: how to run, methodology, key findings |
 
 ## Module Layout
