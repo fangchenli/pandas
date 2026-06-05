@@ -454,18 +454,20 @@ python -m memory_profiler bench_memory.py
 
 ## Continuous Integration
 
-`.github/workflows/lazy-benchmarks.yml` wires the suite into CI:
+**Benchmarks are deliberately not run in CI.** Shared runners are too
+noisy for timing gates — they would either cry wolf or hide real
+regressions behind loose thresholds. CI
+(`.github/workflows/lazy-tests.yml`) runs correctness only: build + the
+lazy test suite on every push touching `pandas/lazy/**`.
 
-- **smoke** (push to `lazy-pandas` touching `pandas/lazy/**`, or manual
-  dispatch): builds pandas, runs the lazy test suite, then the quick
-  benchmark suite for sort/filter/join/aggregations. Fresh runners have
-  no baselines, so this job gates on crashes and correctness, not
-  timing.
-- **ab-regression** (manual dispatch with a `base_ref` input): on a
-  single runner, builds the base ref, records quick baselines, rebuilds
-  HEAD, and compares with a configurable threshold (default 30%).
-  Same-runner A/B is the only honest timing comparison on shared CI
-  hardware; cross-run timing tracking needs a dedicated quiet machine.
+Performance regression detection happens where timings are trustworthy:
+
+- **Locally** (per developer, per machine): the baseline workflow above —
+  `--update-baseline` on a known-good state, plain runs gate against it;
+  `--quick` for the pre-push smoke.
+- **Dedicated/cluster hardware** (when available): the same workflow,
+  with tighter thresholds (`--threshold 10`) since quiet machines have
+  low run-to-run noise.
 
 ## Results Storage
 

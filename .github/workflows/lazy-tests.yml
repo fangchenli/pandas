@@ -1,0 +1,55 @@
+name: Lazy Pandas Tests
+
+# Correctness only. Benchmarks are deliberately NOT run in CI: shared
+# runners are too noisy for timing gates - benchmark regressions are
+# caught locally (or on dedicated hardware) via the baseline workflow in
+# pandas/lazy/benchmarks/README.md.
+
+on:
+  push:
+    branches: [lazy-pandas]
+    paths:
+      - "pandas/lazy/**"
+      - "pandas/tests/lazy/**"
+      - ".github/workflows/lazy-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lazy-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Build + lazy test suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Use setup-pixi directly rather than ./.github/actions/setup-pixi:
+      # the shared action only writes its cache on pushes to main, but this
+      # workflow lives on a fork branch (lazy-pandas) that never pushes to
+      # main, and forks do not inherit upstream caches - without
+      # cache-write here every run would cold-install the environment.
+      - name: Create virtual environment with Pixi
+        uses: prefix-dev/setup-pixi@a0af7a228712d6121d37aba47adf55c1332c9c2e # v0.9.4
+        with:
+          pixi-version: v0.69.0
+          manifest-path: pixi.toml
+          environments: py313
+          cache: true
+          cache-write: ${{ github.event_name == 'push' }}
+
+      - name: Build pandas
+        run: |
+          pixi run --environment py313 build-pandas --editable
+
+      - name: Run lazy test suite
+        run: |
+          pixi run --environment py313 python -m pytest pandas/tests/lazy -q
