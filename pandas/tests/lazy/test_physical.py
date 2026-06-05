@@ -7,6 +7,8 @@ These tests verify that:
 3. Different physical plan nodes execute correctly
 """
 
+import numpy as np
+
 import pandas as pd
 import pandas._testing as tm
 from pandas.lazy import col
@@ -650,3 +652,107 @@ class TestOperatorFusion:
         # Tail should be PhysicalLimit with offset=-1
         assert isinstance(physical, PhysicalLimit)
         assert physical.offset == -1
+
+
+class TestParallelExecutionPaths:
+    """Regression tests for parallel sort/take/concat execution paths.
+
+    Thresholds are monkeypatched down so the parallel code paths run on
+    small test data.
+    """
+
+    def test_parallel_argsort_matches_numpy(self):
+        from pandas.lazy.backends.numpy.core import _parallel_argsort
+
+        rng = np.random.default_rng(42)
+        for arr in (
+            rng.standard_normal(10_001),
+            np.arange(5_000, dtype=np.float64),
+            np.arange(5_000, dtype=np.float64)[::-1].copy(),
+            rng.integers(0, 100, 10_000),
+        ):
+            result = _parallel_argsort(arr)
+            expected = np.argsort(arr)
+            tm.assert_numpy_array_equal(arr[result], arr[expected])
+
+    def test_sort_kernel_uses_parallel_path(self, monkeypatch):
+        import pandas.lazy.backends.numpy.core as np_core
+
+        monkeypatch.setattr(np_core, "PARALLEL_SORT_MIN_ROWS", 10)
+        rng = np.random.default_rng(0)
+        df = pd.DataFrame({"k": rng.standard_normal(5_000), "v": np.arange(5_000)})
+
+        result = df.select().sort("k").collect(use_physical_planner=True)
+        expected = df.sort_values("k").reset_index(drop=True)
+        tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_arrow_multikey_sort_path(self, monkeypatch):
+        import pandas.lazy.physical as phys
+
+        monkeypatch.setattr(phys, "ARROW_MULTIKEY_SORT_MIN_ROWS", 10)
+        monkeypatch.setattr(phys, "PARALLEL_TAKE_MIN_ROWS", 10)
+        rng = np.random.default_rng(0)
+        df = pd.DataFrame(
+            {
+                "k1": rng.integers(0, 5, 1_000),
+                "k2": rng.standard_normal(1_000),
+                "v": np.arange(1_000),
+            }
+        )
+
+        result = df.select().sort("k1", "k2").collect(use_physical_planner=True)
+        expected = df.sort_values(["k1", "k2"]).reset_index(drop=True)
+        tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_arrow_multikey_sort_mixed_directions(self, monkeypatch):
+        import pandas.lazy.physical as phys
+
+        monkeypatch.setattr(phys, "ARROW_MULTIKEY_SORT_MIN_ROWS", 10)
+        rng = np.random.default_rng(1)
+        df = pd.DataFrame(
+            {
+                "k1": rng.integers(0, 5, 500),
+                "k2": rng.standard_normal(500),
+            }
+        )
+
+        result = (
+            df.select()
+            .sort("k1", "k2", descending=[True, False])
+            .collect(use_physical_planner=True)
+        )
+        expected = df.sort_values(["k1", "k2"], ascending=[False, True]).reset_index(
+            drop=True
+        )
+        tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_parallel_take_after_single_key_sort(self, monkeypatch):
+        import pandas.lazy.physical as phys
+
+        monkeypatch.setattr(phys, "PARALLEL_TAKE_MIN_ROWS", 10)
+        rng = np.random.default_rng(2)
+        df = pd.DataFrame(
+            {
+                "k": rng.standard_normal(1_000),
+                "a": np.arange(1_000),
+                "b": rng.standard_normal(1_000),
+                "s": pd.array(
+                    rng.choice(["x", "y", "z"], 1_000), dtype="string[pyarrow]"
+                ),
+            }
+        )
+
+        result = df.select().sort("k").collect(use_physical_planner=True)
+        expected = df.sort_values("k").reset_index(drop=True)
+        tm.assert_frame_equal(result, expected, check_dtype=False)
+
+    def test_parallel_concat_execute(self):
+        from pandas.lazy import concat as lazy_concat
+
+        dfs = [pd.DataFrame({"a": np.arange(i * 100, (i + 1) * 100)}) for i in range(4)]
+        result = lazy_concat([d.select() for d in dfs]).collect(
+            use_physical_planner=True
+        )
+        expected = pd.DataFrame({"a": np.arange(400)})
+        # Input order must be preserved despite parallel execution
+        tm.assert_frame_equal(result, expected, check_dtype=False)

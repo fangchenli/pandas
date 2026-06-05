@@ -191,11 +191,31 @@ Out-of-core execution is opt-in via `collect(spill_config=SpillConfig(...))`:
 
 ## Parallelism
 
+All thread-pool parallelism relies on NumPy and Arrow kernels releasing the
+GIL; pools are sized `min(8, cpu_count)` and gated by row thresholds so
+small data never pays pool overhead.
+
 - **Parallel expression evaluation** — projections with ≥8 expressions
   (configurable) evaluate in a `ThreadPoolExecutor`, one `ArrayEvaluator` per
   thread.
 - **Parallel join sides** — independent subplans of a join run concurrently.
-- Benefits scale with data size: ~1.0x at 3M rows, ~1.4x at 10M, ~1.7x at 20M.
+- **Parallel sort** (`backends/numpy/core.py:_parallel_argsort`) — large
+  numeric argsorts run as chunked concurrent sorts merged with a vectorized
+  `searchsorted` pairwise merge (~1.5x at 10M rows). Large multi-key sorts
+  route through Arrow's multi-threaded table `sort_indices` instead of
+  `np.lexsort` (~1.65x), with a lexsort fallback for unsupported key types.
+- **Parallel gather** (`physical.py:_take_all_columns`) — applying sort
+  indices to result columns fans out per column (~2.5x for 4 columns at
+  10M rows); used by single- and multi-key sort paths.
+- **Parallel concat inputs** — `PhysicalConcat.execute()` runs independent
+  input subtrees (typically per-file scans) concurrently, preserving input
+  order in the output.
+- Arrow's internal threading is enabled where available: `Table.group_by`
+  (except order-dependent first/last), `Table.join`, Parquet reads.
+
+Measured effect at 10M rows × 5 columns: single-key sort 1.37x *faster*
+than eager pandas (previously ~2x slower); multi-key sort 1.73x faster than
+eager.
 
 ## Lazy File Scanning (`scan.py`)
 

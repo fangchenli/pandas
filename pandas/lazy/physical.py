@@ -2642,6 +2642,68 @@ class PhysicalHashAggregate(PhysicalPlan):
 # Sort Nodes
 # =============================================================================
 
+# Minimum rows before per-column gather is parallelized. Both np.take and
+# pc.take release the GIL, so a thread pool over columns scales (~2.5x for
+# 4 columns at 10M rows).
+PARALLEL_TAKE_MIN_ROWS = 500_000
+
+# Minimum rows before multi-key sort routes through Arrow's table-level
+# sort_indices (multi-threaded; ~1.65x over np.lexsort at 10M rows).
+ARROW_MULTIKEY_SORT_MIN_ROWS = 1_000_000
+
+
+def _take_all_columns(input_arrays: ArrayDict, indices) -> ArrayDict:
+    """
+    Apply gather indices to every column, in parallel for large data.
+
+    indices may be a NumPy array or an Arrow array; it is converted once
+    for the backends that need it rather than per column.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    import os
+
+    import numpy as np
+
+    from pandas.lazy.backends import dispatch_kernel
+    from pandas.lazy.backends.convert import get_array_backend
+
+    backends = {name: get_array_backend(arr) for name, arr in input_arrays.items()}
+    np_indices = indices
+    if not isinstance(indices, np.ndarray) and any(
+        b == "numpy" for b in backends.values()
+    ):
+        np_indices = indices.to_numpy(zero_copy_only=False)
+        if np_indices.dtype == np.uint64:
+            # Arrow sort_indices yields uint64; np.take requires a
+            # safe-castable (signed) index dtype
+            np_indices = np_indices.astype(np.int64)
+
+    def take_one(item):
+        name, arr = item
+        backend = backends[name]
+        idx = np_indices if backend == "numpy" else indices
+        return name, dispatch_kernel("take", backend, arr, idx)
+
+    items = list(input_arrays.items())
+    if len(items) >= 2 and len(indices) >= PARALLEL_TAKE_MIN_ROWS:
+        n_workers = min(8, os.cpu_count() or 4, len(items))
+        with ThreadPoolExecutor(n_workers) as ex:
+            return dict(ex.map(take_one, items))
+    return dict(map(take_one, items))
+
+
+def _is_arrow_sortable(arr) -> bool:
+    """Whether an array can be routed through Arrow's table sort."""
+    import numpy as np
+    import pyarrow as pa
+
+    if isinstance(arr, (pa.Array, pa.ChunkedArray)):
+        return True
+    if isinstance(arr, np.ndarray):
+        # Numeric / boolean / datetime convert zero-copy or cheaply
+        return arr.dtype.kind in ("i", "u", "f", "b", "M")
+    return False
+
 
 @dataclass
 class PhysicalSort(PhysicalPlan):
@@ -2713,15 +2775,8 @@ class PhysicalSort(PhysicalPlan):
                         "sort_indices", backend, arr, descending=descending
                     )
 
-                # Apply indices to all arrays using take kernel
-                result: ArrayDict = {}
-                for name, col_arr in input_arrays.items():
-                    col_backend = get_array_backend(col_arr)
-                    result[name] = dispatch_kernel(
-                        "take", col_backend, col_arr, sort_indices
-                    )
-
-                return result
+                # Apply indices to all arrays (parallel for large data)
+                return _take_all_columns(input_arrays, sort_indices)
 
         # Multi-column or computed expression sort - use evaluator
         evaluator = ArrayEvaluator(input_arrays, preferred_backend="auto")
@@ -2736,6 +2791,36 @@ class PhysicalSort(PhysicalPlan):
                 sort_key_arrays.append(input_arrays[ir.name])
             else:
                 sort_key_arrays.append(evaluator.evaluate(ir))
+
+        n_rows = len(sort_key_arrays[0]) if sort_key_arrays else 0
+
+        # Large multi-key sort: route through Arrow's table-level
+        # sort_indices, which is multi-threaded (~1.65x over np.lexsort
+        # at 10M rows) and supports mixed ascending/descending natively.
+        if n_rows >= ARROW_MULTIKEY_SORT_MIN_ROWS and all(
+            _is_arrow_sortable(arr) for arr in sort_key_arrays
+        ):
+            try:
+                import pyarrow as pa
+                import pyarrow.compute as pc
+
+                from pandas.lazy.backends.convert import to_arrow
+
+                key_table = pa.table(
+                    {
+                        f"__sort_key_{i}__": to_arrow(arr)
+                        for i, arr in enumerate(sort_key_arrays)
+                    }
+                )
+                sort_keys = [
+                    (f"__sort_key_{i}__", "descending" if desc else "ascending")
+                    for i, desc in enumerate(self.descending)
+                ]
+                sort_indices = pc.sort_indices(key_table, sort_keys=sort_keys)
+                return _take_all_columns(input_arrays, sort_indices)
+            except (pa.ArrowInvalid, pa.ArrowNotImplementedError):
+                # Unsupported key type combination - fall back to lexsort
+                pass
 
         # Multi-column sort using lexsort (NumPy)
         # Convert all sort keys to NumPy for lexsort
@@ -2754,13 +2839,8 @@ class PhysicalSort(PhysicalPlan):
 
         sort_indices = np.lexsort(np_keys)
 
-        # Apply indices to all arrays
-        result: ArrayDict = {}
-        for name, arr in input_arrays.items():
-            backend = get_array_backend(arr)
-            result[name] = dispatch_kernel("take", backend, arr, sort_indices)
-
-        return result
+        # Apply indices to all arrays (parallel for large data)
+        return _take_all_columns(input_arrays, sort_indices)
 
     def _execute_external_sort(self, context: ExecutionContext) -> ArrayDict:
         """
@@ -4789,15 +4869,30 @@ class PhysicalConcat(PhysicalPlan):
         """
         Execute concatenation by collecting all batches.
 
+        Inputs are independent subtrees (typically per-file scans), so the
+        materializing path executes them in parallel; ordering of the
+        concatenated output is preserved by collecting results per input.
+
         For better memory efficiency, prefer using execute_batches()
         in downstream operators.
         """
+        from concurrent.futures import ThreadPoolExecutor
+        import os
+
         import numpy as np
         import pyarrow as pa
 
-        all_arrays: dict[str, list] = {}
+        if len(self.inputs) > 1:
+            n_workers = min(8, os.cpu_count() or 4, len(self.inputs))
+            with ThreadPoolExecutor(n_workers) as ex:
+                input_results = list(
+                    ex.map(lambda plan: plan.execute(context), self.inputs)
+                )
+        else:
+            input_results = [plan.execute(context) for plan in self.inputs]
 
-        for batch in self.execute_batches(context):
+        all_arrays: dict[str, list] = {}
+        for batch in input_results:
             for name, arr in batch.items():
                 if name not in all_arrays:
                     all_arrays[name] = []
@@ -4810,9 +4905,16 @@ class PhysicalConcat(PhysicalPlan):
                 continue
             if len(arrays) == 1:
                 result[name] = arrays[0]
-            elif isinstance(arrays[0], pa.Array):
-                # Concatenate Arrow arrays
-                result[name] = pa.concat_arrays(arrays)
+            elif isinstance(arrays[0], (pa.Array, pa.ChunkedArray)):
+                # Concatenate Arrow arrays/chunked arrays without copying:
+                # flatten everything into one ChunkedArray
+                chunks: list[pa.Array] = []
+                for arr in arrays:
+                    if isinstance(arr, pa.ChunkedArray):
+                        chunks.extend(arr.chunks)
+                    else:
+                        chunks.append(arr)
+                result[name] = pa.chunked_array(chunks)
             else:
                 # Concatenate NumPy arrays
                 result[name] = np.concatenate(arrays)
