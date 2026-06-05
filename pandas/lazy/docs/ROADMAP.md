@@ -41,7 +41,8 @@ Silicon). Speedup > 1.0 = lazy pandas faster:
    sort improvements; multi-key sort is the worst case.
 
 4. **Join performance.** 0.15x of Polars despite build/probe + parallel
-   sides; profile hash table build (candidate for the swisstable work) and
+   sides; profile hash table build (a swisstable-style hash table is one
+   candidate) and
    output materialization.
 
 5. **Cardinality estimation.** Plan nodes carry no row estimates; filters

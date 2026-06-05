@@ -18,7 +18,7 @@ with a single integration point (`DataFrame.select()`) and everything else
 isolated under a new `pandas.lazy` module.
 
 The prototype is complete enough to evaluate the design: ~30k lines of
-implementation, 1,488 tests (including an eager↔physical equivalence suite),
+implementation, ~1,500 tests (including an eager↔physical equivalence suite),
 and an honest benchmark story (some 2–10x wins over eager pandas; still well
 behind Polars in several categories — see [Status](#status-and-performance)).
 
@@ -198,7 +198,7 @@ What works today (each backed by tests):
 | Out-of-core | `SpillConfig` — Arrow IPC spill files, external sort, grace hash join |
 | File scans | Parquet (predicate incl. row-group stats + projection pushdown), CSV; glob + fsspec URLs |
 | Index contract | Default RangeIndex / `preserve_index=True`, identical between engines |
-| Tests | 1,488 in `pandas/tests/lazy`, incl. eager↔physical equivalence suite (12 query shapes × index modes) |
+| Tests | 1,489 in `pandas/tests/lazy`: 1,488 passing + 1 strict xfail pinning a known engine divergence; incl. eager↔physical equivalence suite (12 query shapes × index modes) |
 
 Honest numbers (Apple Silicon; details in
 [`../benchmarks/`](../benchmarks/README.md)):
@@ -273,11 +273,11 @@ questions below.
 git clone https://github.com/fangchenli/pandas.git --branch lazy-pandas
 cd pandas
 # standard pandas dev setup:
-mamba env create --file environment.yml && conda activate pandas-dev
+mamba env create --file environment.yml && mamba activate pandas-dev
 python -m pip install -ve . --no-build-isolation -Ceditable-verbose=true
 
 python pandas/lazy/docs/examples.py        # runnable tour
-python -m pytest pandas/tests/lazy -q      # 1,488 tests, ~2s
+python -m pytest pandas/tests/lazy -q      # ~1,500 tests, ~2s
 ```
 
 ## Positioning and open questions
