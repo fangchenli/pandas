@@ -1,8 +1,9 @@
 # Lazy Pandas Architecture
 
 This document describes the lazy pandas execution architecture as implemented.
-For the optimizer specifically, see [OPTIMIZER.md](OPTIMIZER.md); for
-per-operation backend choices, see [KERNELS.md](KERNELS.md).
+For plan construction and the physical planner in depth, see
+[PLANNING.md](PLANNING.md); for the optimizer, [OPTIMIZER.md](OPTIMIZER.md);
+for per-operation backend choices, [KERNELS.md](KERNELS.md).
 
 ## Execution Pipeline
 

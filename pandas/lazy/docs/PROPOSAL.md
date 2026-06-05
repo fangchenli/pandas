@@ -147,13 +147,16 @@ The deeper documents, in reading order for a design review:
 
 1. [ARCHITECTURE.md](ARCHITECTURE.md) — plan/IR/type system, array
    execution, joins (grace hash + sort-merge fallback), streaming, spilling
-2. [OPTIMIZER.md](OPTIMIZER.md) — the 11 passes, ordering rationale, and the
+2. [PLANNING.md](PLANNING.md) — logical plan construction and the physical
+   planner: node mapping, materialization boundaries, operator fusion,
+   plan-time vs run-time decisions
+3. [OPTIMIZER.md](OPTIMIZER.md) — the 11 passes, ordering rationale, and the
    safety rules (lineage tracking, dependency DAGs, required-columns)
-3. [KERNELS.md](KERNELS.md) — which op runs on which backend, with
+4. [KERNELS.md](KERNELS.md) — which op runs on which backend, with
    performance notes
-4. [THRESHOLDS.md](THRESHOLDS.md) — the cost-model knobs
+5. [THRESHOLDS.md](THRESHOLDS.md) — the cost-model knobs
    (`pd.set_option("compute.lazy.*")`), calibration, adaptive tuning
-5. [ROADMAP.md](ROADMAP.md) — known gaps and what we'd build next
+6. [ROADMAP.md](ROADMAP.md) — known gaps and what we'd build next
 
 A runnable tour lives in [`examples.py`](examples.py) (stdlib + pandas +
 pyarrow only):
