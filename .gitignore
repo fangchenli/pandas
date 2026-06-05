@@ -161,3 +161,6 @@ test-data.xml
 /data/
 /uv.lock
 /subprojects/
+
+# Machine-specific benchmark baselines (each dev records their own)
+pandas/lazy/benchmarks/baselines/

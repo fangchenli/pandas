@@ -786,3 +786,55 @@ def run_ci_comparison(
         print(f"\n❌ {len(regressions)} regression(s) detected (>{threshold_pct}%)")
 
     return passed
+
+
+def baseline_cli(metrics: dict[str, float], bench_name: str) -> int:
+    """
+    Standard baseline/regression CLI for benchmark scripts.
+
+    Call at the end of a benchmark with collected metrics
+    (metric_name -> milliseconds). Parses standard arguments:
+
+    --baseline-dir DIR   directory holding per-benchmark baseline JSONs
+                         (default: ./baselines next to the benchmarks)
+    --update-baseline    overwrite the baseline with the current results
+    --threshold PCT      regression threshold percentage (default 25;
+                         benchmark noise on shared machines is real)
+
+    Returns a process exit code: 0 if no regressions (or no baseline
+    yet, in which case the current run is saved as the baseline),
+    1 if any metric regressed beyond the threshold.
+
+    Usage::
+
+        def main() -> int:
+            metrics = {}
+            metrics["sort_1m_single"] = benchmark(...)["min_ms"]
+            ...
+            return baseline_cli(metrics, "sort")
+
+
+        if __name__ == "__main__":
+            sys.exit(main())
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "--baseline-dir", default=str(Path(__file__).parent / "baselines")
+    )
+    parser.add_argument("--update-baseline", action="store_true")
+    parser.add_argument("--threshold", type=float, default=25.0)
+    args, _ = parser.parse_known_args()
+
+    baseline_dir = Path(args.baseline_dir)
+    baseline_dir.mkdir(parents=True, exist_ok=True)
+    baseline_path = baseline_dir / f"{bench_name}.json"
+
+    if args.update_baseline:
+        save_benchmark_results({"metrics": metrics}, baseline_path)
+        print(f"\nBaseline updated: {baseline_path}")
+        return 0
+
+    passed = run_ci_comparison(metrics, baseline_path, threshold_pct=args.threshold)
+    return 0 if passed else 1

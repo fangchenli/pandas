@@ -6,12 +6,12 @@ Tests operations that weren't comprehensively benchmarked before.
 """
 
 import numpy as np
-
-import pandas as pd
-from pandas.lazy.benchmarks.shared import (
+from shared import (
     create_join_data,
     timeit,
 )
+
+import pandas as pd
 
 
 def create_test_data(n_rows: int, n_groups: int = 100) -> pd.DataFrame:

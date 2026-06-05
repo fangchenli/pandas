@@ -5,11 +5,12 @@ Benchmark: Filter operations
 Compares lazy vs eager execution for filter/where operations.
 """
 
-import pandas as pd
-from pandas.lazy.benchmarks.shared import (
+from shared import (
     create_test_data,
     timeit,
 )
+
+import pandas as pd
 
 
 def bench_eager_filter(df: pd.DataFrame) -> pd.DataFrame:

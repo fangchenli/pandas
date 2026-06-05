@@ -14,10 +14,10 @@ Usage:
 from __future__ import annotations
 
 import numpy as np
+from shared import benchmark
 
 import pandas as pd
 from pandas.lazy import col
-from pandas.lazy.benchmarks.shared import benchmark
 
 
 def generate_join_data(left_size: int, right_size: int, key_cardinality: int):

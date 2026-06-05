@@ -7,11 +7,12 @@ Note: The lazy API returns DataFrames, so aggregations that return scalars
 work differently than in eager mode.
 """
 
-import pandas as pd
-from pandas.lazy.benchmarks.shared import (
+from shared import (
     create_grouped_data,
     timeit,
 )
+
+import pandas as pd
 
 # =============================================================================
 # Filter then compute (common aggregation-like pipeline)

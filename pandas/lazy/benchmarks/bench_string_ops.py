@@ -6,11 +6,12 @@ Compares Arrow vs NumPy string operations.
 String ops are a key area where Arrow excels.
 """
 
-import pandas as pd
-from pandas.lazy.benchmarks.shared import (
+from shared import (
     create_string_data,
     timeit,
 )
+
+import pandas as pd
 
 
 def bench_eager_str_lower(df: pd.DataFrame) -> pd.DataFrame:

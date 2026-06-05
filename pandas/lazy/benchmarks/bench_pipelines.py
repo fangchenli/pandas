@@ -6,12 +6,13 @@ Tests realistic query patterns that chain multiple operations.
 These scenarios benefit most from lazy execution optimizations.
 """
 
-import pandas as pd
-from pandas.lazy.benchmarks.shared import (
+from shared import (
     create_sales_data,
     create_wide_data,
     timeit,
 )
+
+import pandas as pd
 
 # =============================================================================
 # Pipeline 1: Filter -> Compute -> Filter

@@ -3,9 +3,15 @@
 Run all lazy pandas benchmarks.
 
 Usage:
-    python run_all.py           # Run all benchmarks
-    python run_all.py --quick   # Run with smaller data sizes
-    python run_all.py filter    # Run specific benchmark
+    python run_all.py                     # Run all benchmarks
+    python run_all.py filter              # Run specific benchmark
+    python run_all.py --all               # Include optional benchmarks
+    python run_all.py --update-baseline   # Re-record regression baselines
+    python run_all.py --threshold 10      # Stricter regression gate
+
+Baseline flags are forwarded to baseline-aware benchmarks (those that
+end with shared.baseline_cli); a regression beyond the threshold makes
+this script exit non-zero.
 """
 
 import argparse
@@ -26,6 +32,7 @@ BENCHMARKS = [
     "bench_conversion.py",
     "bench_filter.py",
     "bench_select.py",
+    "bench_sort.py",
     "bench_arithmetic.py",
     "bench_string_ops.py",
     "bench_expressions.py",
@@ -42,10 +49,19 @@ BENCHMARKS = [
 OPTIONAL_BENCHMARKS = [
     "bench_vs_polars.py",  # Requires polars
     "bench_nyc_taxi.py",  # Requires NYC taxi data
+    "bench_1tb_transactions.py",  # Requires S3 access or generated data
 ]
 
+# Benchmarks that support the baseline/regression flags
+# (--baseline-dir / --update-baseline / --threshold via shared.baseline_cli)
+BASELINE_AWARE = {
+    "bench_sort.py",
+}
 
-def run_benchmark(script: Path, python_path: str) -> int:
+
+def run_benchmark(
+    script: Path, python_path: str, extra_args: list[str] | None = None
+) -> int:
     """Run a single benchmark script."""
     print("\n")
     print("#" * 70)
@@ -54,7 +70,7 @@ def run_benchmark(script: Path, python_path: str) -> int:
     print()
 
     result = subprocess.run(
-        [python_path, str(script)],
+        [python_path, str(script), *(extra_args or [])],
         check=False,
         cwd=script.parent,
     )
@@ -78,7 +94,24 @@ def main():
         action="store_true",
         help="Include optional benchmarks (polars comparison, NYC taxi)",
     )
+    parser.add_argument(
+        "--update-baseline",
+        action="store_true",
+        help="Re-record regression baselines for baseline-aware benchmarks",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="Regression threshold percentage for baseline-aware benchmarks",
+    )
     args = parser.parse_args()
+
+    baseline_args: list[str] = []
+    if args.update_baseline:
+        baseline_args.append("--update-baseline")
+    if args.threshold is not None:
+        baseline_args += ["--threshold", str(args.threshold)]
 
     benchmark_dir = Path(__file__).parent
     all_benchmarks = BENCHMARKS + (OPTIONAL_BENCHMARKS if args.all else [])
@@ -102,7 +135,8 @@ def main():
             print(f"Warning: {script} not found")
             continue
 
-        returncode = run_benchmark(script, args.python)
+        extra = baseline_args if bench in BASELINE_AWARE else None
+        returncode = run_benchmark(script, args.python, extra)
         if returncode != 0:
             failed.append(bench)
 

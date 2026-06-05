@@ -25,6 +25,34 @@ python run_all.py --all
 python run_all.py --python /path/to/python
 ```
 
+## Regression Workflow (baselines)
+
+Baseline-aware benchmarks (currently `bench_sort.py`; adopt by ending a
+benchmark with `shared.baseline_cli(metrics, name)`) support recording
+and gating against per-machine baselines:
+
+```bash
+# Record (or re-record) the baseline on this machine
+python bench_sort.py --update-baseline
+
+# Compare against the baseline; exits non-zero on regression
+python bench_sort.py
+python bench_sort.py --threshold 10     # stricter gate
+
+# Same flags via the runner (forwarded to baseline-aware benchmarks)
+python run_all.py sort --update-baseline
+```
+
+Baselines are stored in `baselines/<name>.json` with hardware metadata
+and are **machine-specific** (gitignored — each developer records their
+own). The default threshold is 25% because run-to-run noise on shared
+machines is real; tighten it on quiet dedicated hardware.
+
+**Use this before and after engine/planner changes** — record a baseline
+on main, apply your change, run the comparison. The sort benchmark
+exists because a sort optimization was once developed against ad-hoc
+scripts and review found a tie-order bug the scripts could not see.
+
 ## Benchmark Categories
 
 ### Planning Overhead Analysis
@@ -45,6 +73,7 @@ python run_all.py --python /path/to/python
 | Conversion | `bench_conversion.py` | Arrow ↔ NumPy conversion costs |
 | Filter | `bench_filter.py` | Single and chained filter operations |
 | Select | `bench_select.py` | Column selection and projection |
+| Sort | `bench_sort.py` | Single/multi-key, descending, tie-heavy, TopK; eager vs physical; baseline-aware |
 | Arithmetic | `bench_arithmetic.py` | Numeric expressions and computations |
 | String Ops | `bench_string_ops.py` | String methods (lower, contains, replace) |
 | Expressions | `bench_expressions.py` | Complex nested expressions, case-when |

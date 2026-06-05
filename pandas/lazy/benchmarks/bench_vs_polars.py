@@ -26,15 +26,15 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import polars as pl
+from shared import (
+    DATA_DIR,
+    materialize_result,
+)
 
 import pandas as pd
 from pandas.lazy import (
     col,
     scan,
-)
-from pandas.lazy.benchmarks.shared import (
-    DATA_DIR,
-    materialize_result,
 )
 
 if TYPE_CHECKING:
