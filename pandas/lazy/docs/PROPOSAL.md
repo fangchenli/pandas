@@ -306,11 +306,15 @@ technical one. The candidate positions, with very different bars:
   (a) likely means flipping those defaults back toward pandas.
 - **(b) A genuine competitor to Polars/DuckDB for data pipelines.** This
   requires a real breakthrough, not parity-chasing — something engines that
-  require a rewrite structurally cannot offer. The most promising candidate:
-  **transparently accelerating existing eager pandas code** (capturing
-  eager call sequences into plans behind the scenes), where pandas'
-  position as the incumbent API is the moat. Absent a differentiator of
-  that order, (b) is not worth pursuing.
+  require a rewrite structurally cannot offer. A research pass over prior
+  art ([COMPETITIVE_RESEARCH.md](COMPETITIVE_RESEARCH.md)) identifies the
+  candidate: **transparent lazy capture of existing eager pandas code**
+  (validated piecewise by cudf.pandas, LaFP, Dias, Modin) **combined with
+  pluggable best-of-breed execution backends via IR** (validated by
+  Ibis→Substrait→DuckDB; engine kernels are commoditizing per the
+  composable-data-systems thesis). Incumbent API + owned semantics +
+  commoditized execution is a position Polars/DuckDB structurally cannot
+  take. Absent committing to that composite, (b) is not worth pursuing.
 - **(c) Incubation outside the main tree** (a `pandas-lazy` package or
   long-lived experimental branch) until (a)-vs-(b) is settled by usage.
 

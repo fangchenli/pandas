@@ -40,6 +40,7 @@ print(ldf.explain(physical=True))    # physical plan with pipeline boundaries
 | [KERNELS.md](KERNELS.md) | Kernel reference: which operations run on which backend (Arrow/NumPy/Bottleneck) and how they perform |
 | [THRESHOLDS.md](THRESHOLDS.md) | Cost-based decision thresholds: configuration, calibration, adaptive tuning |
 | [ROADMAP.md](ROADMAP.md) | Known gaps, open questions, and future work |
+| [COMPETITIVE_RESEARCH.md](COMPETITIVE_RESEARCH.md) | Researched answer to "can this compete with Polars/DuckDB?" — prior-art post-mortems, ranked directions |
 | [../benchmarks/README.md](../benchmarks/README.md) | Benchmark suite: how to run, methodology, key findings |
 
 ## Module Layout
