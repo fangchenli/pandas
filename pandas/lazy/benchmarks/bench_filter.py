@@ -2,15 +2,25 @@
 """
 Benchmark: Filter operations
 
-Compares lazy vs eager execution for filter/where operations.
+Compares lazy vs eager execution for filter/where operations across
+NumPy- and Arrow-backed data. Baseline-aware: ends with baseline_cli
+(--update-baseline / --threshold; exits non-zero on regression).
 """
 
+import sys
+
 from shared import (
+    baseline_cli,
     create_test_data,
     timeit,
 )
 
 import pandas as pd
+
+# Sizes below this produce sub-millisecond timings whose run-to-run
+# noise would make regression gates flaky; they are printed but not
+# recorded as baseline metrics.
+METRIC_MIN_ROWS = 100_000
 
 
 def bench_eager_filter(df: pd.DataFrame) -> pd.DataFrame:
@@ -48,76 +58,42 @@ def bench_lazy_chained_filter(
     return lf.collect(use_physical_planner=use_physical_planner)
 
 
-def run_benchmarks():
+def run_benchmarks() -> int:
     """Run all filter benchmarks."""
     sizes = [10_000, 100_000, 1_000_000]
+    metrics: dict[str, float] = {}
 
     print("=" * 70)
     print("FILTER BENCHMARKS")
     print("=" * 70)
     print()
 
+    cases = [
+        ("simple_eager", bench_eager_filter, {}),
+        ("simple_lazy", bench_lazy_filter, {}),
+        ("simple_physical", bench_lazy_filter, {"use_physical_planner": True}),
+        ("chained_eager", bench_eager_chained_filter, {}),
+        ("chained_lazy", bench_lazy_chained_filter, {}),
+        ("chained_physical", bench_lazy_chained_filter, {"use_physical_planner": True}),
+    ]
+
     for n_rows in sizes:
         print(f"\n{'=' * 70}")
         print(f"Dataset size: {n_rows:,} rows")
         print("=" * 70)
 
-        # NumPy-backed DataFrame
-        df_numpy = create_test_data(n_rows, use_arrow=False)
+        for backend_label, use_arrow in (("numpy", False), ("arrow", True)):
+            df = create_test_data(n_rows, use_arrow=use_arrow)
+            print(f"\n--- {backend_label} backend ---")
+            for case_label, fn, kwargs in cases:
+                mean, std = timeit(lambda fn=fn, kwargs=kwargs: fn(df, **kwargs))
+                print(f"{case_label:24s} {mean:8.2f} ms ± {std:.2f} ms")
+                if n_rows >= METRIC_MIN_ROWS:
+                    size_label = f"{n_rows // 1000}k"
+                    metrics[f"filter_{case_label}_{backend_label}_{size_label}"] = mean
 
-        # Arrow-backed DataFrame
-        df_arrow = create_test_data(n_rows, use_arrow=True)
-
-        # Simple filter
-        print("\n--- Simple Filter (a > 50) ---")
-
-        mean, std = timeit(lambda: bench_eager_filter(df_numpy))
-        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
-
-        mean, std = timeit(lambda: bench_lazy_filter(df_numpy))
-        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
-
-        mean, std = timeit(
-            lambda: bench_lazy_filter(df_numpy, use_physical_planner=True)
-        )
-        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
-
-        mean, std = timeit(lambda: bench_eager_filter(df_arrow))
-        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
-
-        mean, std = timeit(lambda: bench_lazy_filter(df_arrow))
-        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
-
-        mean, std = timeit(
-            lambda: bench_lazy_filter(df_arrow, use_physical_planner=True)
-        )
-        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
-
-        # Chained filters
-        print("\n--- Chained Filters (a > 50 AND b < 0.5) ---")
-
-        mean, std = timeit(lambda: bench_eager_chained_filter(df_numpy))
-        print(f"Eager (NumPy):        {mean:8.2f} ms ± {std:.2f} ms")
-
-        mean, std = timeit(lambda: bench_lazy_chained_filter(df_numpy))
-        print(f"Lazy (NumPy):         {mean:8.2f} ms ± {std:.2f} ms")
-
-        mean, std = timeit(
-            lambda: bench_lazy_chained_filter(df_numpy, use_physical_planner=True)
-        )
-        print(f"Lazy+Phys (NumPy):    {mean:8.2f} ms ± {std:.2f} ms")
-
-        mean, std = timeit(lambda: bench_eager_chained_filter(df_arrow))
-        print(f"Eager (Arrow):        {mean:8.2f} ms ± {std:.2f} ms")
-
-        mean, std = timeit(lambda: bench_lazy_chained_filter(df_arrow))
-        print(f"Lazy (Arrow):         {mean:8.2f} ms ± {std:.2f} ms")
-
-        mean, std = timeit(
-            lambda: bench_lazy_chained_filter(df_arrow, use_physical_planner=True)
-        )
-        print(f"Lazy+Phys (Arrow):    {mean:8.2f} ms ± {std:.2f} ms")
+    return baseline_cli(metrics, "filter")
 
 
 if __name__ == "__main__":
-    run_benchmarks()
+    sys.exit(run_benchmarks())

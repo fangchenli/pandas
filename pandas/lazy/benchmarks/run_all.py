@@ -55,7 +55,11 @@ OPTIONAL_BENCHMARKS = [
 # Benchmarks that support the baseline/regression flags
 # (--baseline-dir / --update-baseline / --threshold via shared.baseline_cli)
 BASELINE_AWARE = {
+    "bench_aggregations.py",
+    "bench_filter.py",
+    "bench_join.py",
     "bench_sort.py",
+    "bench_streaming.py",
 }
 
 

@@ -27,7 +27,8 @@ python run_all.py --python /path/to/python
 
 ## Regression Workflow (baselines)
 
-Baseline-aware benchmarks (currently `bench_sort.py`; adopt by ending a
+Baseline-aware benchmarks (`bench_sort`, `bench_filter`, `bench_join`,
+`bench_aggregations`, `bench_streaming`; adopt by ending a
 benchmark with `shared.baseline_cli(metrics, name)`) support recording
 and gating against per-machine baselines:
 

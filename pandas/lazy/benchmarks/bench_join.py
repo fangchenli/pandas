@@ -13,8 +13,13 @@ Usage:
 
 from __future__ import annotations
 
+import sys
+
 import numpy as np
-from shared import benchmark
+from shared import (
+    baseline_cli,
+    benchmark,
+)
 
 import pandas as pd
 from pandas.lazy import col
@@ -37,21 +42,21 @@ def generate_join_data(left_size: int, right_size: int, key_cardinality: int):
     return left_df, right_df
 
 
-def benchmark_inner_join():
+def benchmark_inner_join(metrics: dict[str, float]):
     """Benchmark inner join with build/probe optimization."""
     print("\n" + "=" * 70)
     print("Inner Join Benchmark (Build/Probe Optimization)")
     print("=" * 70)
 
     scenarios = [
-        # (left_size, right_size, key_cardinality, description)
-        (100_000, 10_000, 5_000, "Left large, Right small"),
-        (10_000, 100_000, 5_000, "Left small, Right large"),
-        (100_000, 100_000, 10_000, "Both equal size"),
-        (1_000_000, 10_000, 5_000, "Left very large, Right small"),
+        # (left_size, right_size, key_cardinality, slug, description)
+        (100_000, 10_000, 5_000, "100k_10k", "Left large, Right small"),
+        (10_000, 100_000, 5_000, "10k_100k", "Left small, Right large"),
+        (100_000, 100_000, 10_000, "100k_100k", "Both equal size"),
+        (1_000_000, 10_000, 5_000, "1m_10k", "Left very large, Right small"),
     ]
 
-    for left_size, right_size, key_card, desc in scenarios:
+    for left_size, right_size, key_card, slug, desc in scenarios:
         print(f"\n{desc}:")
         print(f"  Left: {left_size:,} rows, Right: {right_size:,} rows")
 
@@ -69,14 +74,29 @@ def benchmark_inner_join():
 
         lazy_result = benchmark(lazy_join)
 
-        speedup = eager_result["mean_ms"] / lazy_result["mean_ms"]
+        # Physical engine (array-native hash join)
+        def physical_join():
+            return (
+                left_df.select()
+                .join(right_df.select(), on="id")
+                .collect(use_physical_planner=True)
+            )
+
+        physical_result = benchmark(physical_join)
+
+        speedup = eager_result["mean_ms"] / physical_result["mean_ms"]
 
         print(f"  Eager pandas:  {eager_result['mean_ms']:.2f} ms")
-        print(f"  Lazy pandas:   {lazy_result['mean_ms']:.2f} ms")
-        print(f"  Speedup:       {speedup:.2f}x")
+        print(f"  Lazy (eager):  {lazy_result['mean_ms']:.2f} ms")
+        print(f"  Lazy physical: {physical_result['mean_ms']:.2f} ms")
+        print(f"  Speedup:       {speedup:.2f}x (eager vs physical)")
+
+        metrics[f"join_inner_{slug}_eager"] = eager_result["min_ms"]
+        metrics[f"join_inner_{slug}_lazy"] = lazy_result["min_ms"]
+        metrics[f"join_inner_{slug}_physical"] = physical_result["min_ms"]
 
 
-def benchmark_semi_anti_join():
+def benchmark_semi_anti_join(metrics: dict[str, float]):
     """Benchmark semi and anti joins vs equivalent filter operations."""
     print("\n" + "=" * 70)
     print("Semi/Anti Join Benchmark")
@@ -88,12 +108,12 @@ def benchmark_semi_anti_join():
     )
 
     scenarios = [
-        (100_000, 10_000, 5_000, "100K left, 10K right"),
-        (100_000, 100_000, 10_000, "100K left, 100K right"),
-        (1_000_000, 10_000, 5_000, "1M left, 10K right"),
+        (100_000, 10_000, 5_000, "100k_10k", "100K left, 10K right"),
+        (100_000, 100_000, 10_000, "100k_100k", "100K left, 100K right"),
+        (1_000_000, 10_000, 5_000, "1m_10k", "1M left, 10K right"),
     ]
 
-    for left_size, right_size, key_card, desc in scenarios:
+    for left_size, right_size, key_card, slug, desc in scenarios:
         print(f"\n{desc}:")
 
         left_df, right_df = generate_join_data(left_size, right_size, key_card)
@@ -143,6 +163,9 @@ def benchmark_semi_anti_join():
         anti_speedup = isin_anti_result["mean_ms"] / anti_result["mean_ms"]
         print(f"  Anti speedup:      {anti_speedup:.2f}x")
 
+        metrics[f"join_semi_kernel_{slug}"] = semi_result["min_ms"]
+        metrics[f"join_anti_kernel_{slug}"] = anti_result["min_ms"]
+
 
 def benchmark_cardinality_estimation():
     """Verify cardinality estimation is working."""
@@ -183,7 +206,7 @@ def benchmark_cardinality_estimation():
     print(f"  Cross join (100 x 50):       {cross.estimate_row_count()}")
 
 
-def benchmark_build_probe_effect():
+def benchmark_build_probe_effect(metrics: dict[str, float]):
     """Show the effect of build/probe optimization."""
     print("\n" + "=" * 70)
     print("Build/Probe Optimization Effect")
@@ -210,6 +233,9 @@ def benchmark_build_probe_effect():
 
     result2 = benchmark(join_small_large)
 
+    metrics["join_build_probe_large_small"] = result1["min_ms"]
+    metrics["join_build_probe_small_large"] = result2["min_ms"]
+
     print(f"  Large.join(Small): {result1['mean_ms']:.2f} ms")
     print(f"  Small.join(Large): {result2['mean_ms']:.2f} ms")
     max_time = max(result1["mean_ms"], result2["mean_ms"])
@@ -219,14 +245,20 @@ def benchmark_build_probe_effect():
     print("  (Should be similar due to build/probe swap optimization)")
 
 
-if __name__ == "__main__":
+def main() -> int:
     print("Join Performance Benchmark")
     print("=" * 70)
 
-    benchmark_inner_join()
-    benchmark_semi_anti_join()
+    metrics: dict[str, float] = {}
+    benchmark_inner_join(metrics)
+    benchmark_semi_anti_join(metrics)
     benchmark_cardinality_estimation()
-    benchmark_build_probe_effect()
+    benchmark_build_probe_effect(metrics)
 
     print("\n" + "=" * 70)
     print("Benchmark complete!")
+    return baseline_cli(metrics, "join")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

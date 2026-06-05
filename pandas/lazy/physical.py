@@ -5396,8 +5396,13 @@ class PhysicalPlanner:
                 current = current.input
 
             elif isinstance(current, PhysicalFusedPipeline):
-                # Already fused - extend with its operations
-                operations.extend(current.operations)
+                # Already fused - absorb its operations. They are stored
+                # in execution (bottom-up) order, but this collection loop
+                # builds a top-down list that is reversed at the end, so
+                # they must be added reversed to survive that reversal.
+                # (Getting this wrong made later projections drop columns
+                # that earlier fused filters still referenced.)
+                operations.extend(reversed(current.operations))
                 current = current.input
 
             else:

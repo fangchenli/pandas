@@ -823,3 +823,32 @@ class TestParallelExecutionPaths:
         for _ in range(5):  # repeated runs: no completion-order dependence
             result = ldf.collect(use_physical_planner=True, preserve_index=True)
             assert result.index.name == "first_idx"
+
+    def test_fused_pipeline_absorption_preserves_order(self):
+        # Regression: when _try_fuse absorbed an already-fused inner
+        # pipeline, its operations (stored in execution order) were
+        # appended to the top-down collection list and wrongly flipped
+        # by the final reverse, making later projections drop computed
+        # columns that subsequent filters referenced (KeyError) or
+        # silently reorder operations.
+        rng = np.random.default_rng(0)
+        df = pd.DataFrame(
+            {
+                "g": rng.choice(["X", "Y", "Z"], 2_000),
+                "v1": rng.uniform(0, 100, 2_000),
+                "v2": rng.uniform(0, 1_000, 2_000),
+            }
+        )
+
+        ldf = (
+            df.select()
+            .filter((col("g") == "X") | (col("g") == "Y"))
+            .with_columns((col("v1") + col("v2")).alias("total"))
+            .filter(col("total") > 500)
+            .with_columns((col("v1") / col("total")).alias("score"))
+        )
+
+        eager = ldf.collect()
+        physical = ldf.collect(use_physical_planner=True)
+        assert len(eager) > 0  # non-trivial result
+        tm.assert_frame_equal(eager, physical, check_dtype=False)

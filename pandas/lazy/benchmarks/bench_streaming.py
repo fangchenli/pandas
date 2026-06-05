@@ -577,12 +577,12 @@ def run_all_benchmarks() -> list[BenchmarkResult]:
     return results
 
 
-if __name__ == "__main__":
+def main() -> int:
     # Check if data exists
     if not DATA_DIR.exists() or not TAXI_FILES:
         print(f"ERROR: NYC Taxi data not found in {DATA_DIR}/")
         print("Please download the data first.")
-        sys.exit(1)
+        return 1
 
     print(f"pandas={pd.__version__}")
     print(f"Files: {len(TAXI_FILES)} parquet files")
@@ -609,3 +609,16 @@ if __name__ == "__main__":
     print(f"Report saved to {report_path}")
 
     print("\n" + report)
+
+    # Regression gate on streaming timings. Data-dependent: baselines
+    # only make sense across runs against the same local taxi files.
+    from shared import baseline_cli
+
+    metrics = {
+        f"streaming_{r.category}_{r.operation}": r.streaming_time_ms for r in results
+    }
+    return baseline_cli(metrics, "streaming")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
