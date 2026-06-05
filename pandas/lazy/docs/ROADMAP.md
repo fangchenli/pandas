@@ -1,8 +1,9 @@
 # Lazy Pandas Roadmap
 
 Open work, known gaps, and design questions. Implemented work is documented
-in [ARCHITECTURE.md](ARCHITECTURE.md) / [OPTIMIZER.md](OPTIMIZER.md); dated
-performance reports live in `../benchmarks/`.
+in [ARCHITECTURE.md](ARCHITECTURE.md), [PLANNING.md](PLANNING.md), and
+[OPTIMIZER.md](OPTIMIZER.md); dated performance reports live in
+`../benchmarks/`.
 
 ## Competitive Standing (vs Polars, Jan 2026)
 
@@ -42,13 +43,13 @@ Silicon). Speedup > 1.0 = lazy pandas faster:
 
 4. **Join performance.** 0.15x of Polars despite build/probe + parallel
    sides; profile hash table build (a swisstable-style hash table is one
-   candidate) and
-   output materialization.
+   candidate) and output materialization.
 
-5. **Cardinality estimation.** Plan nodes carry no row estimates; filters
-   assume nothing about selectivity. Row-count propagation + simple
-   selectivity estimates (histogram/sample/default-10%) would make engine
-   selection and join-side choice cost-based instead of threshold-based.
+5. **Cardinality estimation.** Row estimates exist for sources and
+   size-preserving nodes but stop at filters (`estimate_row_count()`
+   returns None — no selectivity model). Simple selectivity estimates
+   (histogram/sample/default-10%) would make engine selection and
+   join-side choice cost-based instead of threshold-based.
 
 ## Known Semantic Issues (bugs, not design choices)
 

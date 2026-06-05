@@ -71,8 +71,9 @@ semantics" should be a hard requirement is part of the positioning question.
 **Goals**
 
 - Opt-in, zero impact on eager pandas (additive API only)
-- Same results as eager pandas (nullable/NA semantics included), enforced by
-  an equivalence test suite
+- Value-compatible results with eager pandas, enforced by an equivalence
+  test suite (known divergences are tracked as strict xfails — see
+  [Semantics](#semantics-what-is-kept-and-what-deviates))
 - Real optimizer wins: pushdown, pruning, fusion, TopK, early termination
 - Out-of-core capability: streaming batches + disk spill
 - Lazy file scans (Parquet, CSV) with predicate/projection pushdown
@@ -149,7 +150,9 @@ Two execution paths share one plan: a pandas-based evaluator (always
 available, used as the fallback when a kernel is missing) and a physical
 engine that operates on raw arrays with per-operation backend routing
 (string/null ops → Arrow; numeric ops follow data; thresholds decide
-crossovers). Results are identical by construction and by test.
+crossovers). The two engines are held to identical results by an
+equivalence suite; the one known divergence (NaN in Arrow aggregation) is
+pinned as a strict xfail.
 
 The deeper documents, in reading order for a design review:
 
@@ -183,7 +186,9 @@ python pandas/lazy/docs/examples.py
   joins, rolling/fill (Bottleneck-accelerated when present). Arrow is
   required for Parquet scans and is strongly preferred for string/null ops.
 - Nullable dtypes with `pd.NA` semantics throughout; physical-engine output
-  uses Arrow-backed dtypes (near zero-copy) by design.
+  prefers Arrow-backed dtypes (near zero-copy). Making output dtypes fully
+  consistent across operators is a known gap (see
+  [Semantics](#semantics-what-is-kept-and-what-deviates)).
 
 ## Status and performance
 
@@ -352,4 +357,5 @@ Realistic options:
 - keep it a fork/branch as a design probe, harvesting individual ideas
   (e.g. kernel dispatch, threshold calibration) into pandas piecemeal
 
-Feedback welcome by issue/discussion on the fork, or directly to the author.
+Feedback is welcome directly to the author; a discussion thread will be
+linked from the header once opened.

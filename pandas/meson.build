@@ -43,11 +43,13 @@ subdirs_list = [
 foreach subdir : subdirs_list
     if subdir == 'lazy'
         # Don't ship development-only material (benchmark scripts, result
-        # reports, design docs) in the installed package
+        # reports, design docs, and the README that points to them) in the
+        # installed package
         install_subdir(
             subdir,
             install_dir: py.get_install_dir() / 'pandas',
             exclude_directories: ['benchmarks', 'docs'],
+            exclude_files: ['README.md'],
         )
     else
         install_subdir(subdir, install_dir: py.get_install_dir() / 'pandas')
