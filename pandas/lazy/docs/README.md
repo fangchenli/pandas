@@ -36,6 +36,7 @@ print(ldf.explain(physical=True))    # physical plan with pipeline boundaries
 | [examples.py](examples.py) | Runnable end-to-end tour (`python pandas/lazy/docs/examples.py`) |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | System design: expression IR, logical/physical plans, array-based execution, backends, joins, streaming, spilling |
 | [PLANNING.md](PLANNING.md) | Logical plan construction and the physical planner: node mapping, materialization boundaries, operator fusion, plan-time vs run-time decisions |
+| [ENGINE_DESIGN.md](ENGINE_DESIGN.md) | **The target architecture**: morsel-driven pipeline engine — principles, scheduler, parallel sinks, GIL analysis, evolutionary milestones |
 | [OPTIMIZER.md](OPTIMIZER.md) | Query optimizer: passes, ordering rationale, safety rules, engine selection |
 | [KERNELS.md](KERNELS.md) | Kernel reference: which operations run on which backend (Arrow/NumPy/Bottleneck) and how they perform |
 | [THRESHOLDS.md](THRESHOLDS.md) | Cost-based decision thresholds: configuration, calibration, adaptive tuning |

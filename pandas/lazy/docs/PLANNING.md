@@ -1,5 +1,10 @@
 # Logical and Physical Planning
 
+> **Note**: this documents the *current* planner. The approved target
+> architecture (morsel-driven pipeline engine) and the evolutionary
+> migration plan live in [ENGINE_DESIGN.md](ENGINE_DESIGN.md); sections
+> here will be updated as milestones land.
+
 How a lazy query becomes an executable plan: construction of the logical
 plan, and the physical planner that turns the optimized logical plan into
 executable operators. The optimization passes between the two layers are
