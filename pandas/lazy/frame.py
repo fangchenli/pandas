@@ -809,6 +809,15 @@ class LazyDataFrame:
                 spill_config=spill_config,
             )
 
+        # Trivial-plan fast path: head()/tail()/slice over pure column
+        # selections of an in-memory DataFrame slices the source directly
+        # (microseconds) instead of running the planner and engine
+        # (milliseconds). Polars answers head(10) in ~10us; without this
+        # short-circuit we paid full pipeline cost for it.
+        fast = self._try_trivial_slice(preserve_index)
+        if fast is not None:
+            return fast
+
         if use_physical_planner:
             return self._collect_physical(
                 optimize=optimize,
@@ -819,6 +828,75 @@ class LazyDataFrame:
             )
         else:
             return self._collect_eager(optimize=optimize, preserve_index=preserve_index)
+
+    def _try_trivial_slice(self, preserve_index: bool) -> DataFrame | None:
+        """
+        Fast path for ``Limit`` over pure column selections over an
+        in-memory ``DataFrameSource``: slice the source directly.
+
+        Returns None when the plan is anything more than that (filters,
+        computed expressions, file scans, joins, ...), in which case the
+        normal execution paths run. Safe under Copy-on-Write: returned
+        slices share buffers with the source and copy lazily on mutation.
+        """
+        from pandas.lazy.ir import (
+            Alias,
+            FieldRef,
+        )
+        from pandas.lazy.plan import (
+            DataFrameSource,
+            Limit,
+            Project,
+        )
+
+        plan = self._plan
+        if not isinstance(plan, Limit):
+            return None
+
+        # Walk down through projections that only reference/rename
+        # columns, composing output-name -> source-column mapping.
+        # None mapping means identity (all source columns, source order).
+        mapping: dict[str, str] | None = None
+        node = plan.input
+        while isinstance(node, Project):
+            this_map: dict[str, str] = {}
+            for expr in node.exprs:
+                ir = expr._ir
+                if isinstance(ir, Alias) and isinstance(ir.arg, FieldRef):
+                    this_map[ir.name] = ir.arg.name
+                elif isinstance(ir, FieldRef):
+                    this_map[ir.name] = ir.name
+                else:
+                    return None  # computed expression - not trivial
+            if mapping is None:
+                mapping = this_map
+            else:
+                try:
+                    mapping = {out: this_map[src] for out, src in mapping.items()}
+                except KeyError:
+                    return None
+            node = node.input
+
+        if not isinstance(node, DataFrameSource):
+            return None
+
+        df = node.df
+        n, offset = plan.n, plan.offset
+        if offset == -1:
+            sliced = df.tail(n)
+        elif offset > 0:
+            sliced = df.iloc[offset : offset + n]
+        else:
+            sliced = df.head(n)
+
+        if mapping is not None:
+            sliced = sliced[list(mapping.values())]
+            if list(mapping.keys()) != list(mapping.values()):
+                sliced = sliced.set_axis(list(mapping.keys()), axis=1)
+
+        if not preserve_index:
+            sliced = sliced.reset_index(drop=True)
+        return sliced
 
     def _collect_eager(
         self, optimize: bool = True, preserve_index: bool = False

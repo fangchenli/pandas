@@ -160,6 +160,27 @@ class LazyDtype:
         return f"LazyDtype({', '.join(parts)})"
 
 
+def _cheap_has_nulls(ser) -> bool:
+    """
+    Null presence from metadata only — never scans column data.
+
+    - Arrow-backed arrays: null_count is chunk metadata (O(num_chunks))
+    - Masked extension arrays (Int64, Float64, boolean): mask.any() is a
+      fast vectorized check on a bool array
+    - NumPy int/uint/bool: cannot hold nulls
+    - NumPy float/object/datetime: would require an O(n) scan; report
+      False and let kernels handle actual NaN values at execution time
+    """
+    arr = ser.array
+    pa_arr = getattr(arr, "_pa_array", None)
+    if pa_arr is not None:
+        return pa_arr.null_count > 0
+    mask = getattr(arr, "_mask", None)
+    if mask is not None:
+        return bool(mask.any())
+    return False
+
+
 @dataclass
 class Schema:
     """Schema for lazy operations - column names and types."""
@@ -173,12 +194,23 @@ class Schema:
 
     @classmethod
     def from_dataframe(cls, df: DataFrame) -> Schema:
-        """Build schema from DataFrame."""
+        """Build schema from DataFrame.
+
+        Plan construction must be O(1) per column: a previous version
+        scanned every column with isna().any() to set the nullability
+        flag, adding ~5 ms per df.select() at 10M rows x 3 columns. The
+        flag only feeds advisory dtype inference, so it is now derived
+        from metadata that is free to read: Arrow null counts (chunk
+        metadata), extension-array masks, and the fact that NumPy
+        int/uint/bool arrays cannot hold nulls. NumPy float/object
+        columns report has_nulls=False without scanning; actual NaN
+        handling happens in the kernels, not the schema.
+        """
         fields = {}
         for col in df.columns:
-            dtype = df[col].dtype
-            has_nulls = df[col].isna().any()
-            fields[str(col)] = LazyDtype.from_pandas_dtype(dtype, has_nulls)
+            ser = df[col]
+            dtype = ser.dtype
+            fields[str(col)] = LazyDtype.from_pandas_dtype(dtype, _cheap_has_nulls(ser))
         return cls(fields)
 
     @classmethod

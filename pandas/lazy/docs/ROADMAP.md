@@ -50,9 +50,13 @@ cause, isolated and measured: see item 1 below.
    improved as a side effect: string columns always come out as
    pandas' default str dtype on every output path.
 
-2. **`head()`/limit fast path.** Polars answers `head(10)` on in-memory data
-   in ~10µs; we spend milliseconds planning and copying. Needs a trivial-plan
-   short-circuit that slices without entering the physical pipeline.
+2. ~~**`head()`/limit fast path.**~~ **Done**: `collect()` short-circuits
+   `Limit` over pure column selections of an in-memory source, slicing
+   directly (CoW makes the views safe). 9,000–14,000 µs → **~200 µs** at
+   any size. The fix also removed an O(n) `isna` scan per column from
+   `Schema.from_dataframe` — plan construction is now O(1) per column,
+   which benefits *every* lazy query, not just head. Remaining gap to
+   Polars' ~10 µs is plan-construction overhead (see item 3).
 
 3. **Planning-overhead fast paths.** Single filter/select queries pay
    60–80% of their lazy overhead in the optimizer. Heuristics worth

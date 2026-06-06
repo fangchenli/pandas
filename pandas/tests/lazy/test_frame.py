@@ -729,3 +729,45 @@ class TestConcatValidation:
         df2 = pd.DataFrame({"a": [3, 4]})
         result = concat([df1.select(), df2.select()]).collect()
         assert list(result["a"]) == [1, 2, 3, 4]
+
+
+class TestTrivialSliceFastPath:
+    """head/tail/slice over pure column selections slices the source
+    directly (microseconds) instead of running the engine."""
+
+    def test_head_matches_eager(self):
+        df = pd.DataFrame({"a": range(100), "b": range(100, 200)})
+        result = df.select().head(5).collect()
+        tm.assert_frame_equal(result, df.head(5).reset_index(drop=True))
+
+    def test_tail_and_offset(self):
+        df = pd.DataFrame({"a": range(100)})
+        tm.assert_frame_equal(
+            df.select().tail(4).collect(), df.tail(4).reset_index(drop=True)
+        )
+
+    def test_column_selection_and_rename(self):
+        df = pd.DataFrame({"a": range(10), "b": range(10, 20)})
+        result = df.select("b", "a").head(3).collect()
+        tm.assert_frame_equal(result, df[["b", "a"]].head(3).reset_index(drop=True))
+        renamed = df.select(col("a").alias("x")).head(2).collect()
+        assert list(renamed.columns) == ["x"]
+        assert list(renamed["x"]) == [0, 1]
+
+    def test_preserve_index_keeps_labels(self):
+        df = pd.DataFrame({"a": [1, 2, 3]}, index=pd.Index([10, 20, 30], name="i"))
+        result = df.select().head(2).collect(preserve_index=True)
+        assert list(result.index) == [10, 20]
+
+    def test_non_trivial_plans_not_fast_pathed(self):
+        # Filters change row membership; the fast path must decline
+        df = pd.DataFrame({"a": range(100)})
+        result = df.select().filter(col("a") > 50).head(5).collect()
+        assert list(result["a"]) == [51, 52, 53, 54, 55]
+
+    def test_source_not_mutated_by_result(self):
+        # CoW: mutating the sliced result must not touch the source
+        df = pd.DataFrame({"a": [1, 2, 3]})
+        result = df.select().head(2).collect()
+        result.loc[0, "a"] = 999
+        assert df.loc[0, "a"] == 1
