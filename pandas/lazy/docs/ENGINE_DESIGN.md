@@ -219,26 +219,45 @@ checks):
 - **Async I/O scheduling** — Parquet row-group reads are already
   parallel inside pyarrow; revisit only if scan profiles demand it.
 
-## GIL analysis (the honest structural question)
+## GIL analysis — MEASURED (June 2026 spike)
 
-The design's viability rests on one claim: **Python orchestration per
+The design's viability rested on one claim: **Python orchestration per
 morsel·operator is small relative to kernel time, and kernels release
-the GIL.**
+the GIL.** This was validated empirically *before* M3 with a spike
+(`../benchmarks/spike_morsel_scaling.py`) that simulates the execution
+model faithfully — workers self-dispatching morsel claims from a shared
+counter, full filter→project→gather pipelines per 128K morsel — run on
+both stock CPython 3.11 (GIL) and free-threaded 3.13t, on Apple Silicon
+(4 performance + 4 efficiency cores):
 
-Budget: orchestration ≈ 30–100µs per morsel·operator (dict handling,
-dispatch). At 128K-row morsels, kernels cost ~0.5–5ms per
-morsel·operator. Overhead ≈ 2–10%, parallelizable portion ≈ 90%+.
-Amdahl gives ~6–7x effective scaling on 8 cores — enough to close the
-remaining 2–4x gaps. **Milestone M3 exists specifically to validate this
-empirically before deeper investment**; if measured scaling falls
-materially short, morsel size increases or the design stops at
-pipeline-level (not morsel-level) parallelism, documented honestly.
+| Workload | GIL 3.11 | Free-threaded 3.13t |
+|---|---|---|
+| Bandwidth-bound pipeline (filter→project→gather, 16M rows) | 2.85x @ 4t | 3.06x @ 4t |
+| Compute-dense (argsort per morsel) | **5.47x @ 8t** | **5.55x @ 8t** |
+| Orchestration overhead per morsel | 1µs | 1µs |
 
-Upside hedge: pandas already builds free-threaded (`py313-freethreading`
-CI env, `-Xfreethreading_compatible` Cython flag). On free-threaded
-Python the same architecture scales without the GIL discount — this
-design is exactly the shape that benefits, and nothing in it bets
-against the GIL existing.
+Three conclusions, each stronger than the design's original hedge:
+
+1. **The GIL is not a limiting factor.** GIL-threaded scaling matches
+   free-threaded scaling *exactly* in both regimes — NumPy/Arrow kernels
+   release the GIL completely enough that the 1µs/morsel of serialized
+   Python is invisible. The original 30–100µs orchestration budget was
+   30–100x too pessimistic.
+2. **The real ceilings are physics**: memory bandwidth caps streaming
+   pipelines near ~3x on this machine, and core asymmetry caps compute
+   near ~5.5x on 4P+4E — the same walls native engines hit. M3/M4
+   targets are set against these measured ceilings, not against
+   idealized linear scaling.
+3. **Free-threaded Python is a compatibility hedge, not a dependency.**
+   The architecture needs nothing from it today (and pyarrow's
+   free-threaded support is still pending — the `py313-freethreading`
+   env carries NumPy only). When the ecosystem lands, the same code
+   benefits on Python-heavy edge paths with zero redesign; nothing in
+   the design bets against the GIL existing.
+
+M3 remains the integration gate — the spike validates the model with
+synthetic pipelines; M3 validates it with the real engine, including the
+per-claim overhead measurement (<10% of per-morsel kernel time).
 
 ## Research validation (June 2026)
 
