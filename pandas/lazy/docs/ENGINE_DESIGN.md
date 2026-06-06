@@ -92,8 +92,13 @@ only execution path.
 
 A **Morsel** is a contiguous row-slice of an ArrayDict plus metadata:
 `(arrays, offset, length, seq)` where `seq` is a sequence number for
-order-preserving merges. Default morsel size ~128K rows (tuned so that
-per-morsel Python overhead is <5% of kernel time; see GIL analysis).
+order-preserving merges. Default morsel size ~128K rows — in the
+canonical range (Leis et al. recommend ~100K; DuckDB uses ~100K rows
+and a 122,880-row ROW_GROUP_SIZE; the literature shows performance is
+flat above ~10K, so the exact value is not load-bearing) — but
+**exposed as a tunable** (`compute.lazy.morsel_size`), not hardcoded,
+since the optimum is hardware-dependent and our per-morsel Python
+overhead is higher than a native engine's (see GIL analysis).
 
 **Column representation is declared per pipeline at plan time** (P2/P3):
 each column carries its backend (`arrow` | `numpy`) as a physical plan
@@ -106,22 +111,44 @@ converted, because conversion only exists as an operator.
 ### Execution: the scheduler
 
 One process-wide worker pool (`min(cores, 8+)` threads — kernels release
-the GIL, so threads suffice; see GIL analysis):
+the GIL, so threads suffice; see GIL analysis).
 
-1. The scheduler walks the pipeline graph in dependency order.
-2. For each pipeline, the source partitions input into morsels; workers
-   pull morsels, run the *entire* operator chain on their morsel
-   (filter→project→…), and push results into the sink.
+**The scheduler is a passive data structure, not a dispatcher thread.**
+This follows HyPer's explicit rejection of a dedicated dispatcher
+("would need a core to run on or might preempt query evaluation threads
+and could become a source of contention. Therefore, the dispatcher is
+implemented as a lock-free data structure only; the dispatcher's code is
+executed by the work-requesting query evaluation thread itself"). The
+research flagged a central Python dispatcher as this design's single
+biggest risk — per-morsel dispatch through one coordinator is exactly
+the contention pattern the canonical engine avoided, and Python
+magnifies it. Concretely:
+
+1. Plan state is shared: per-pipeline morsel cursors (an atomic claim
+   index over the input range) plus the dependency graph.
+2. **Workers self-dispatch**: each worker claims the next morsel range
+   directly from the pipeline's cursor (a single atomic/locked
+   increment), runs the *entire* operator chain on it
+   (filter→project→…), and pushes the result into the sink. No thread
+   hands work to another thread.
 3. Sinks accumulate thread-locally where possible (partial aggregates,
    sort runs, hash partitions) and merge in `finalize()`.
 4. Ordered outputs (limits, stable requirements) merge by `seq`;
    unordered sinks (aggregation) skip the ordering cost.
-5. Early termination: a satisfied limit cancels remaining morsels for
-   its pipeline (generalizes today's streaming `head()` behavior).
+5. Early termination: a satisfied limit flips the pipeline's cursor to
+   exhausted; workers simply find no more morsels (generalizes today's
+   streaming `head()` behavior).
+6. **Backpressure**: in-flight morsels per pipeline are bounded by a
+   semaphore so a fast source cannot queue unbounded sink input —
+   Polars' new engine pairs morsel-driven scheduling with exactly such
+   a flow-control layer rather than a textbook scheduler.
 
-This replaces the five ad-hoc thread pools with one scheduler, and makes
-parallelism a property of *every* pipeline rather than of individual
-operators that happen to implement it.
+This replaces the five ad-hoc thread pools with one worker pool over a
+passive claim structure, and makes parallelism a property of *every*
+pipeline rather than of individual operators that happen to implement
+it. **M3 must measure the per-claim cost explicitly** (target: claim +
+result handoff < 10% of per-morsel kernel time at the default morsel
+size).
 
 ### Breakers as parallel algorithms
 
@@ -130,10 +157,35 @@ prototypes in the current codebase:
 
 | Sink | Parallel form | Existing prototype |
 |---|---|---|
-| Aggregate | per-worker partial aggregation (Arrow `group_by` per morsel or pandas Cython) → merge partials | streaming aggregation's partial states |
-| Sort | per-worker stable sorted runs → k-way merge | `_parallel_argsort` (chunked sort + pairwise merge); external sorter's run merging |
+| Aggregate | per-worker partial aggregation (Arrow `group_by` per morsel or pandas Cython), **radix over-partitioned** → parallel per-partition merge | streaming aggregation's partial states |
+| Sort | per-worker stable sorted runs → **k-way merge with computed non-overlapping intersections** | `_parallel_argsort` (chunked sort; its pairwise merge is upgraded — see below); external sorter's run merging |
 | Join build | partition-by-hash into per-worker hash tables; probe pipelines stream morsels against them | grace hash join partitioning; `get_join_indexers` per partition |
 | Distinct | per-worker seen-sets on hashed keys → merge | — |
+
+Research-driven specifications for the two hardest sinks:
+
+- **Aggregate — over-partition** (DuckDB's production guidance): each
+  worker keeps one internally radix-partitioned table with *more
+  partitions than threads* (e.g. 32), so the phase-2 merge parallelizes
+  per partition with zero synchronization (identical hashes land in one
+  partition) and partitions spill independently under memory pressure.
+  Documented weakness of thread-local partials (Xue & Marcus 2025):
+  inverse scaling past ~32 threads at high cardinality, with
+  O(threads × distinct keys) memory. Our pool is ≤16 threads so the
+  scaling cliff is distant, but the memory term is real — the sink
+  monitors partial-table cardinality and at high cardinality switches
+  to merging more eagerly per partition (and, as a possible later
+  refinement, a shared atomic-update table, which the 2025 results show
+  matches or beats partitioning for high-cardinality/low-skew loads).
+- **Sort — k-way Merge Path, not cascading two-way merges** (DuckDB's
+  2025 sort redesign): generate thread-local sorted runs in the sink,
+  then compute where the k runs intersect for evenly-sized output
+  chunks (searchsorted gives the intersections — our existing
+  `_merge_sorted_runs` generalizes) so threads merge disjoint output
+  ranges with no synchronization. DuckDB measured ~6.5x at 8 threads
+  for k-way vs ~3.5x for the cascading pairwise merge that
+  `_parallel_argsort` currently uses — upgrading the merge shape is
+  worth roughly as much as parallelizing in the first place.
 
 Memory and spill attach at the sink level (P3): each sink gets a budget
 from the spill manager; exceeding it spills partials/runs/partitions
@@ -187,6 +239,25 @@ CI env, `-Xfreethreading_compatible` Cython flag). On free-threaded
 Python the same architecture scales without the GIL discount — this
 design is exactly the shape that benefits, and nothing in it bets
 against the GIL existing.
+
+## Research validation (June 2026)
+
+A deep research pass (26 sources, 25 adversarially-verified claims; full
+trail in the session record) checked every load-bearing choice against
+the literature and the engines we benchmark:
+
+| Design choice | Verdict | Source of truth |
+|---|---|---|
+| ~128K morsels | **Confirmed** — canonical range (Leis et al. ~100K, DuckDB ~100K/122,880); perf flat above ~10K; made tunable | Leis et al. 2014; DuckDB external aggregation |
+| Pipelines-between-breakers, workers run whole chains per morsel | **Confirmed verbatim** against the founding paper | Leis et al. 2014 |
+| Central scheduler | **Challenged — amended.** HyPer explicitly rejected a dispatcher thread (contention); dispatcher is a passive lock-free structure, workers self-dispatch. Design updated accordingly; M3 measures per-claim cost | Leis et al. 2014 §dispatcher |
+| Thread-local partial-agg sinks | **Confirmed as mainstream** (HyPer/DuckDB/DataFusion all partition); amended with radix over-partitioning and a documented high-cardinality weakness + fallback | DuckDB aggregate-hashtable posts; Xue & Marcus 2025 |
+| Sorted-run + k-way merge sort sink | **Confirmed**, sharpened: k-way Merge Path beats cascading pairwise ~6.5x vs ~3.5x at 8 threads | DuckDB 2025 sort redesign; Green et al. Merge Path |
+| Morsel-driven for a *dataframe* engine | **Confirmed by the competitor**: Polars' new streaming engine is explicitly morsel-driven (citing the same paper), hybridized with async state machines and flow control — hence the backpressure semaphore added to the scheduler section | Polars engineering posts |
+
+The research found no documented failure of the GIL-threads-over-native-
+kernels model at our scale, but also no positive proof — M3 remains the
+empirical gate, now with an explicit per-dispatch overhead measurement.
 
 ## Migration: evolutionary milestones
 
