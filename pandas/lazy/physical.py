@@ -721,8 +721,28 @@ class PhysicalFusedPipeline(PhysicalPlan):
                     current_mask = new_mask
 
             elif op.op_type == "project":
-                # Apply current mask to arrays before projection
+                # Apply current mask to arrays before projection — but only
+                # to the columns the projection actually references (plus
+                # index columns). Masking first and projecting second spent
+                # ~60% of filter+select runtime filtering payload columns
+                # (often strings) that the projection immediately dropped.
                 if current_mask is not None:
+                    if op.exprs:
+                        from pandas.lazy.optimize.utils import (
+                            get_referenced_columns,
+                        )
+
+                        needed: set[str] = set()
+                        for expr in op.exprs:
+                            needed |= get_referenced_columns(expr)
+                        if needed.issubset(current_arrays.keys()):
+                            current_arrays = {
+                                name: arr
+                                for name, arr in current_arrays.items()
+                                if name in needed or is_index_col(name)
+                            }
+                        # else: a reference is missing (should not happen);
+                        # fall through and mask everything - safe fallback
                     current_arrays = self._apply_mask(current_arrays, current_mask)
                     current_mask = None  # Mask is now applied
 
@@ -772,27 +792,18 @@ class PhysicalFusedPipeline(PhysicalPlan):
         return current_arrays
 
     def _apply_mask(self, arrays: ArrayDict, mask: np.ndarray) -> ArrayDict:
-        """Apply boolean mask to all arrays."""
-        import pyarrow as pa
+        """Apply boolean mask to all arrays.
 
-        from pandas.lazy.backends.convert import get_array_backend
+        Converts the mask to indices once and delegates to
+        _take_all_columns: backend-preserving gathers (pc.take handles
+        ChunkedArray directly - the previous per-column loop paid a
+        combine_chunks copy and rebuilt the Arrow mask per column) and
+        threshold-gated parallel fan-out across columns.
+        """
+        import numpy as np
 
-        result: ArrayDict = {}
-        for name, arr in arrays.items():
-            backend = get_array_backend(arr)
-            if backend == "arrow":
-                # Arrow filter
-                if isinstance(arr, pa.ChunkedArray):
-                    arr = arr.combine_chunks()
-                pa_mask = pa.array(mask)
-                import pyarrow.compute as pc
-
-                result[name] = pc.filter(arr, pa_mask)
-            else:
-                # NumPy boolean indexing
-                result[name] = arr[mask]
-
-        return result
+        indices = np.flatnonzero(np.asarray(mask))
+        return _take_all_columns(arrays, indices)
 
     def _slice_arrays(self, arrays: ArrayDict, start: int, end: int) -> ArrayDict:
         """Slice all arrays."""

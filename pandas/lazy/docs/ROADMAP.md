@@ -19,7 +19,7 @@ pandas faster:
 | sort | 0.20x | ~0.17x | numeric-only sorts (bench_sort) beat eager pandas 1.2–2x; this data has string payload columns |
 | aggregation | 0.08x | 0.06–0.39x | |
 | join | 0.06x | **0.56–0.70x** | eager rides pandas 3.1 merge improvements; physical pays conversion |
-| filter_project | 0.11x | 0.07–0.25x | |
+| filter_project | 0.11x → ~0.2x+ | 0.07–0.25x | fused pipeline now prunes columns before applying deferred filter masks (filter+select @10M: 652→46 ms) |
 | limit | ~0x | ~0x | `head(N)` is Polars' best case (µs) vs our ms — see below |
 
 The physical-vs-eager gap on this benchmark is dominated by a single

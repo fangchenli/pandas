@@ -968,3 +968,42 @@ class TestParallelExecutionPaths:
         # Approximate: Arrow's multi-threaded sum accumulates in a
         # different order than pandas' sequential sum
         assert np.allclose(got, expected.to_numpy())
+
+    def test_fused_filter_select_prunes_before_masking(self):
+        # Regression: the fused pipeline applied the deferred filter mask
+        # to ALL scan columns (including string payloads) before the
+        # projection dropped them. Correctness check over a wide
+        # mixed-dtype frame against the eager path.
+        rng = np.random.default_rng(7)
+        n = 5_000
+        df = pd.DataFrame(
+            {
+                "id": np.arange(n),
+                "group": pd.array(rng.choice(["A", "B", "C"], n)),
+                "value1": rng.standard_normal(n),
+                "value2": rng.standard_normal(n),
+                "text": pd.array([f"t{i % 50}" for i in range(n)]),
+            }
+        )
+        ldf = df.select().filter(col("value1") > 0).select("id", "group", "value1")
+        eager = ldf.collect()
+        physical = ldf.collect(use_physical_planner=True)
+        tm.assert_frame_equal(eager, physical, check_dtype=False)
+
+    def test_fused_project_computed_expr_keeps_referenced_inputs(self):
+        # The pre-mask pruning must keep columns referenced INSIDE computed
+        # expressions, not just projection output names: here 'value2' is
+        # consumed by the expression but absent from the output.
+        rng = np.random.default_rng(8)
+        n = 3_000
+        df = pd.DataFrame(
+            {
+                "a": rng.standard_normal(n),
+                "value2": rng.standard_normal(n),
+                "junk": pd.array([f"j{i % 10}" for i in range(n)]),
+            }
+        )
+        ldf = df.select().filter(col("a") > 0).select((col("value2") * 2).alias("d"))
+        eager = ldf.collect()
+        physical = ldf.collect(use_physical_planner=True)
+        tm.assert_frame_equal(eager, physical, check_dtype=False)
