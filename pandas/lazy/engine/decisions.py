@@ -13,6 +13,14 @@ Decisions migrated so far:
   input schema's per-column storage backends using the same
   relevant-columns rule the runtime fix established — Arrow if any
   group key or aggregation value column is Arrow-backed.
+- **Filter backend** (schema-decidable case): when every data column is
+  Arrow-backed by schema, the Arrow filter path is planned; mixed
+  backends remain a runtime threshold decision, where the actual row
+  count is strictly better information ("runtime adapts within planned
+  bounds").
+- **Join build side**: surfaced from the node's existing plan-time row
+  estimates (`left/right_rows_estimate`); the runtime re-check against
+  actual materialized sizes stays authoritative.
 
 The pass also annotates every pipeline with its per-column backends and
 explicit conversion points, surfaced in ``explain(physical=True)`` so a
@@ -35,7 +43,11 @@ from pandas.lazy.engine.pipeline import (
 )
 from pandas.lazy.physical import (
     PhysicalConvert,
+    PhysicalFilter,
     PhysicalHashAggregate,
+    PhysicalHashJoin,
+    PhysicalSort,
+    PhysicalTopK,
 )
 
 if TYPE_CHECKING:
@@ -127,17 +139,59 @@ class DecisionLayer:
                 if isinstance(op, PhysicalConvert):
                     target = getattr(op, "target_backend", "?")
                     decisions.conversions.append(f"-> {target}")
+                elif isinstance(op, PhysicalFilter):
+                    self._plan_filter(op, decisions)
 
-            if isinstance(pipeline.sink, NodeSink) and isinstance(
-                pipeline.sink.node, PhysicalHashAggregate
-            ):
-                input_schema = _pipeline_output_schema(pipeline)
-                if input_schema is not None:
-                    planned = _plan_groupby_backend(pipeline.sink.node, input_schema)
-                    pipeline.sink.node.planned_backend = planned
-                    decisions.sink_decision = f"groupby[{planned}]"
+            if isinstance(pipeline.sink, NodeSink):
+                self._plan_sink(pipeline.sink, pipeline, decisions)
 
             pipeline.decisions = decisions
+
+    def _plan_filter(self, op: PhysicalFilter, decisions: PipelineDecisions) -> None:
+        """Plan the filter backend when decidable from schema alone."""
+        input_schema = op.children()[0].output_schema
+        if input_schema is None or not input_schema.names:
+            return
+        backends = {input_schema[n].storage_backend for n in input_schema.names}
+        if backends == {"arrow"}:
+            op.planned_backend = "arrow"
+            decisions.conversions.append("filter[arrow]")
+        # mixed/numpy: runtime threshold decides (actual row count wins)
+
+    def _plan_sink(
+        self, sink: NodeSink, pipeline: Pipeline, decisions: PipelineDecisions
+    ) -> None:
+        node = sink.node
+
+        if isinstance(node, PhysicalHashAggregate):
+            input_schema = _pipeline_output_schema(pipeline)
+            if input_schema is not None:
+                planned = _plan_groupby_backend(node, input_schema)
+                node.planned_backend = planned
+                decisions.sink_decision = f"groupby[{planned}]"
+
+        elif isinstance(node, PhysicalHashJoin):
+            # Surface the build-side expectation from the node's existing
+            # plan-time row estimates; the runtime re-check against actual
+            # materialized sizes stays authoritative.
+            left_est = node.left_rows_estimate
+            right_est = node.right_rows_estimate
+            if left_est is not None and right_est is not None:
+                build = "right" if right_est <= left_est else "left"
+                decisions.sink_decision = (
+                    f"join[build={build}, est={left_est}x{right_est}]"
+                )
+            else:
+                decisions.sink_decision = "join[build=runtime]"
+
+        elif isinstance(node, (PhysicalSort, PhysicalTopK)):
+            input_schema = _pipeline_output_schema(pipeline)
+            if input_schema is not None and input_schema.names:
+                backends = sorted(
+                    {input_schema[n].storage_backend for n in input_schema.names}
+                )
+                kind = "topk" if isinstance(node, PhysicalTopK) else "sort"
+                decisions.sink_decision = f"{kind}[{'/'.join(backends)}]"
 
 
 def annotate_decisions(graph: PipelineGraph) -> PipelineGraph:

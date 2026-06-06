@@ -1601,6 +1601,11 @@ class PhysicalFilter(PhysicalPlan):
     predicate: Expr
     schema: Schema
     backend: Literal["auto", "arrow", "numpy"] = "auto"
+    # Set by the engine's decision layer when the choice is decidable
+    # from the schema alone (all data columns Arrow-backed). Mixed
+    # backends stay a runtime threshold decision (actual row count is
+    # strictly better information there).
+    planned_backend: str | None = None
 
     @property
     def supports_streaming(self) -> bool:
@@ -1659,9 +1664,10 @@ class PhysicalFilter(PhysicalPlan):
             isinstance(arr, (pa.Array, pa.ChunkedArray)) for arr in data_arrays.values()
         )
 
-        # For streaming, prefer Arrow path as data is typically Arrow from scan
-        use_arrow_filter = all_data_arrow
-        if not all_data_arrow:
+        # For streaming, prefer Arrow path as data is typically Arrow from scan.
+        # The decision layer may have planned this from the schema already.
+        use_arrow_filter = all_data_arrow or self.planned_backend == "arrow"
+        if not use_arrow_filter:
             # Use threshold config to determine if Arrow filter is beneficial
             threshold = context.threshold_config.filter_arrow_threshold
             if n_rows > threshold:

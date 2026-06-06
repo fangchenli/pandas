@@ -277,3 +277,45 @@ class TestDecisionLayer:
             physical["s"].to_numpy(dtype="float64"),
             eager["s"].to_numpy(dtype="float64"),
         )
+
+    def test_filter_backend_planned_when_all_arrow(self):
+        # All data columns arrow-backed -> filter[arrow] planned from
+        # schema; PhysicalFilter.planned_backend set
+        df = pd.DataFrame(
+            {
+                "s": pd.array(["a", "b", "c", "d"]),
+                "t": pd.array(["x", "y", "z", "w"]),
+            }
+        )
+        # disable fusion so a bare PhysicalFilter survives planning
+        from pandas.lazy.engine.decisions import annotate_decisions
+        from pandas.lazy.physical import (
+            PhysicalFilter,
+            PhysicalPlanner,
+        )
+
+        ldf = df.select().filter(col("s") == "a")
+        physical = PhysicalPlanner().plan(
+            ldf._get_optimized_plan(), enable_fusion=False
+        )
+        graph = annotate_decisions(PipelineCompiler().compile(physical))
+
+        filters = [
+            op
+            for p in graph.pipelines
+            for op in p.operators
+            if isinstance(op, PhysicalFilter)
+        ]
+        assert filters, "expected an unfused PhysicalFilter"
+        assert all(f.planned_backend == "arrow" for f in filters)
+
+    def test_join_build_side_annotated_from_estimates(self):
+        left = pd.DataFrame({"k": range(1000), "v": [1.0] * 1000})
+        right = pd.DataFrame({"k": range(100), "w": [2.0] * 100})
+        text = left.select().join(right.select(), on="k").explain(physical=True)
+        assert "join[build=right, est=1000x100]" in text
+
+    def test_sort_sink_annotated(self):
+        df = pd.DataFrame({"a": [3.0, 1.0, 2.0]})
+        text = df.select().sort("a").explain(physical=True)
+        assert "sink: sort[numpy]" in text
