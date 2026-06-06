@@ -398,26 +398,27 @@ def numpy_str_strip(arr: np.ndarray) -> np.ndarray:
 PARALLEL_SORT_MIN_ROWS = 500_000
 
 
-def _merge_sorted_runs(key: np.ndarray, ia: np.ndarray, ib: np.ndarray) -> np.ndarray:
-    """Merge two index runs whose key values are each sorted ascending."""
-    pos = np.searchsorted(key[ia], key[ib], side="right")
-    out = np.empty(len(ia) + len(ib), dtype=ia.dtype)
-    b_positions = pos + np.arange(len(ib))
-    mask = np.zeros(len(out), dtype=bool)
-    mask[b_positions] = True
-    out[b_positions] = ib
-    out[~mask] = ia
-    return out
-
-
 def _parallel_argsort(arr: np.ndarray) -> np.ndarray:
     """
-    Multi-threaded *stable* argsort: sort chunks concurrently, then merge.
+    Multi-threaded *stable* argsort: sorted runs + k-way segment merge.
 
-    np.argsort releases the GIL, so chunk sorts run in parallel on a
-    thread pool; runs are combined with a vectorized searchsorted-based
-    pairwise merge (~1.5x over single-threaded argsort at 10M rows).
-    Equivalent permutation to ``np.argsort(arr, kind="stable")``.
+    Phase 1: contiguous chunks stable-argsort concurrently (np.argsort
+    releases the GIL). Phase 2: pivot values sampled from the first run
+    split every run with ``searchsorted(..., side="right")`` — all ties
+    with a pivot land left of the boundary — partitioning the output
+    into disjoint value segments; each segment gathers its run slices
+    *in run order* and stable-argsorts locally, in parallel.
+
+    Stability: runs are contiguous original-index ranges in order, so
+    global stable tie order == (run, within-run position) == position
+    in the run-ordered gather; the local stable argsort breaks value
+    ties by exactly that position. Equivalent permutation to
+    ``np.argsort(arr, kind="stable")``.
+
+    This replaces a cascading pairwise merge (log2(k) full passes over
+    all rows). DuckDB's 2025 sort redesign measured the k-way shape at
+    ~6.5x vs ~3.5x for cascading two-way at 8 threads; here the segment
+    merge is one parallel compare-heavy pass plus one concatenation.
     """
     from concurrent.futures import ThreadPoolExecutor
     import os
@@ -427,21 +428,42 @@ def _parallel_argsort(arr: np.ndarray) -> np.ndarray:
 
     def sort_chunk(i: int) -> np.ndarray:
         lo, hi = bounds[i], bounds[i + 1]
-        # Stable within chunks; the searchsorted merge (side="right")
-        # keeps earlier-chunk rows ahead of later-chunk rows on ties, so
-        # the overall result is a stable sort.
         return np.argsort(arr[lo:hi], kind="stable") + lo
 
     with ThreadPoolExecutor(n_chunks) as ex:
         runs = list(ex.map(sort_chunk, range(n_chunks)))
 
-    while len(runs) > 1:
-        pairs = [(runs[i], runs[i + 1]) for i in range(0, len(runs) - 1, 2)]
-        leftover = [runs[-1]] if len(runs) % 2 else []
-        with ThreadPoolExecutor(len(pairs)) as ex:
-            runs = list(ex.map(lambda p: _merge_sorted_runs(arr, *p), pairs))
-        runs += leftover
-    return runs[0]
+    # Pivots: evenly spaced sample from the first run's sorted values.
+    # Approximate splitters are fine — segments need not be equal-sized,
+    # only value-disjoint; heavy duplicate keys skew one segment, which
+    # costs balance, not correctness.
+    n_segments = n_chunks
+    first_keys = arr[runs[0]]
+    pivot_pos = np.linspace(0, len(first_keys) - 1, n_segments + 1, dtype=np.int64)[
+        1:-1
+    ]
+    pivots = first_keys[pivot_pos]
+
+    # Per-run split positions for each pivot (side="right": pivot-equal
+    # values stay left of the boundary in every run).
+    splits = np.empty((len(runs), n_segments + 1), dtype=np.int64)
+    splits[:, 0] = 0
+    for r, run in enumerate(runs):
+        splits[r, 1:-1] = np.searchsorted(arr[run], pivots, side="right")
+        splits[r, -1] = len(run)
+
+    def merge_segment(j: int) -> np.ndarray:
+        parts = [run[splits[r, j] : splits[r, j + 1]] for r, run in enumerate(runs)]
+        candidates = np.concatenate(parts)
+        if len(candidates) == 0:
+            return candidates
+        order = np.argsort(arr[candidates], kind="stable")
+        return candidates[order]
+
+    with ThreadPoolExecutor(n_segments) as ex:
+        segments = list(ex.map(merge_segment, range(n_segments)))
+
+    return np.concatenate(segments)
 
 
 def _argsort(arr: np.ndarray) -> np.ndarray:
