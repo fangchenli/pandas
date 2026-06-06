@@ -212,12 +212,42 @@ checks):
 
 ### What we deliberately do not build
 
-- **Codegen/JIT** — out of reach for a Python-orchestrated engine and
-  unnecessary while Arrow/Cython kernels are within 2x of hand-tuned
-  code for our workloads.
+- **Codegen/JIT** — we do not build our own; but see "Future backends"
+  below: an XLA-backed kernel backend (JAX) would supply fused codegen
+  without us writing a compiler.
 - **Our own SIMD kernels** — commoditized; Arrow's are fine (P1).
 - **Async I/O scheduling** — Parquet row-group reads are already
   parallel inside pyarrow; revisit only if scan profiles demand it.
+
+### Future backends: the JAX door (kept open, not committed)
+
+The architecture admits an XLA-backed numeric kernel backend with no
+structural changes, and several design choices make it unusually cheap:
+
+- The kernel registry is backend-pluggable (`register_kernel(op,
+  "jax")`); the router already arbitrates backends per operation.
+- **Per-column backends** (M2) contain JAX's hardest limitation — no
+  string dtype — by routing numeric columns to JAX while strings stay
+  Arrow, a decision the layer already makes per column.
+- **Fixed-size morsels neutralize XLA's static-shape requirement**: one
+  compilation serves every morsel of a pipeline (pad the tail morsel).
+- **Pipelines are the lowering unit**: a streaming-operator chain of
+  element-wise ops can compile into a single `jax.jit` kernel — fused
+  codegen in one memory pass, which is exactly the lever against the
+  measured memory-bandwidth ceiling (~3x) that per-op NumPy/Arrow
+  kernels cannot beat.
+- **Conversions-as-plan-ops** (P2) price the dlpack/device transfer at
+  the boundary, so JAX is chosen only when a pipeline is compute-dense
+  enough to pay it.
+
+Scope if pursued: element-wise expression pipelines, reductions,
+segment-based aggregations, windows — a kernel backend, never the
+engine. Constraints to design around: no nullable types (NaN for
+floats, explicit masks for nullable ints), float32 defaults and
+accumulation-order differences (equivalence suite needs tolerance
+policies for JAX-routed paths), strictly optional dependency. GPU
+morsel offload is the speculative extension once the CPU backend
+proves itself.
 
 ## GIL analysis — MEASURED (June 2026 spike)
 
