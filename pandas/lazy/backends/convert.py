@@ -447,31 +447,23 @@ def arrays_to_dataframe(
     -----
     Zero-Copy Conversion with Arrow-Backed Dtypes
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    When ``use_arrow_dtype=True``, we use
-    ``table.to_pandas(types_mapper=pd.ArrowDtype)`` which provides
-    near-zero-copy conversion. This works because:
+    When ``use_arrow_dtype=True``, Arrow columns are wrapped per column
+    into pandas extension arrays without copying:
 
-    1. pandas creates an ``ArrowExtensionArray`` that **wraps** the existing
-       PyArrow array rather than copying data
-    2. ``ArrowExtensionArray`` stores a reference to the ``ChunkedArray`` in
-       its internal ``_pa_array`` attribute
-    3. The underlying Arrow memory buffers are shared, not copied
+    1. string/large_string columns become ``ArrowStringArray`` — pandas'
+       default Arrow-backed ``str`` dtype, matching the eager path
+    2. other Arrow columns become ``ArrowExtensionArray`` (``ArrowDtype``),
+       which stores a reference to the ``ChunkedArray`` in ``_pa_array``
+    3. the underlying Arrow memory buffers are shared, not copied
+    4. NumPy columns pass through untouched (floats containing NaN are
+       converted to nullable ``Float64`` for ``pd.NA`` semantics)
 
-    In contrast, the default ``to_pandas()`` must:
+    ``pa.Table.to_pandas`` is deliberately NOT used here: pyarrow's
+    ``table_to_dataframe`` constructs ``DataFrame(BlockManager)``, which
+    is deprecated in pandas and varies by installed pyarrow build.
 
-    1. Allocate new NumPy arrays with contiguous memory
-    2. Convert Arrow null bitmaps to NumPy's ``np.nan`` or pandas' ``pd.NA``
-    3. Copy all values from Arrow buffers to NumPy buffers
-
-    Performance comparison (800K rows, 3 columns):
-
-    - ``to_pandas()``: ~3.4 ms (copies data)
-    - ``to_pandas(types_mapper=pd.ArrowDtype)``: ~0.2 ms (zero-copy, ~15-18x faster)
-
-    The tradeoff is that the output DataFrame has Arrow-backed dtypes
-    (e.g., ``double[pyarrow]`` instead of ``float64``). These are fully
-    compatible with pandas operations but may behave slightly differently
-    in edge cases.
+    With ``use_arrow_dtype=False``, Arrow columns are converted per column
+    via ``arr.to_pandas()`` (copies into NumPy-backed arrays).
 
     References
     ~~~~~~~~~~
@@ -495,71 +487,53 @@ def arrays_to_dataframe(
         # Empty DataFrame
         return pd.DataFrame()
 
-    # Check if all data columns are Arrow-backed for batch conversion
-    all_arrow = all(
-        isinstance(arr, (pa.Array, pa.ChunkedArray)) for arr in data_cols.values()
-    )
+    # One unified per-column conversion path for every backend mix.
+    #
+    # Two earlier designs were rejected for cause:
+    # - pa.Table.to_pandas(types_mapper) for all-Arrow outputs: pyarrow's
+    #   table_to_dataframe constructs DataFrame(BlockManager), which is
+    #   deprecated in pandas (Pandas4Warning, soon an error) and varies by
+    #   installed pyarrow build (broke CI while passing locally).
+    # - arr.to_pandas() per Arrow column: round-tripped pass-through
+    #   string columns through object arrays, which the DataFrame
+    #   constructor re-inferred back to Arrow - two full copies of data
+    #   no operation ever touched (~320 ms at 10M rows).
+    #
+    # The extension-array wraps below are zero-copy and never enter
+    # pyarrow's pandas_compat.
+    def to_pandas_array(arr):
+        """Convert array to pandas-compatible format with proper null handling."""
+        if isinstance(arr, (pa.Array, pa.ChunkedArray)):
+            if not use_arrow_dtype:
+                return arr.to_pandas()
+            chunked = pa.chunked_array([arr]) if isinstance(arr, pa.Array) else arr
+            if pa.types.is_string(chunked.type) or pa.types.is_large_string(
+                chunked.type
+            ):
+                # Match pandas' default Arrow-backed str dtype
+                # (zero-copy wrap of the existing buffers)
+                try:
+                    from pandas.core.arrays.string_arrow import (
+                        ArrowStringArray,
+                    )
 
-    if all_arrow:
-        # Batch convert using Arrow Table - more efficient than per-column
-        table = pa.table(data_cols)
-        if use_arrow_dtype:
-            # Zero-copy conversion using Arrow-backed dtypes
-            # This is ~18x faster than converting to NumPy-backed dtypes
-            # (0.14ms vs 2.55ms for 800K rows). String columns map to
-            # pandas' default Arrow-backed str dtype rather than
-            # ArrowDtype so output dtypes match the eager path.
-            def _types_mapper(pa_type):
-                if pa.types.is_string(pa_type) or pa.types.is_large_string(pa_type):
-                    return pd.StringDtype("pyarrow", na_value=np.nan)
-                return pd.ArrowDtype(pa_type)
+                    return ArrowStringArray(chunked)
+                except (TypeError, ValueError):
+                    pass
+            return pd.arrays.ArrowExtensionArray(chunked)
 
-            df = table.to_pandas(types_mapper=_types_mapper)
-        else:
-            # Traditional conversion - copies data to NumPy arrays
-            df = table.to_pandas()
-    else:
-        # Mixed or NumPy arrays - convert individually.
-        #
-        # Arrow columns are wrapped zero-copy into pandas extension arrays
-        # rather than round-tripped through arr.to_pandas(). The round trip
-        # was pathological for pass-through string columns: to_pandas()
-        # materialized object arrays, then the DataFrame constructor
-        # re-inferred them back into Arrow-backed string arrays - two full
-        # copies of data no operation ever touched (~320 ms at 10M rows).
-        def to_pandas_array(arr):
-            """Convert array to pandas-compatible format with proper null handling."""
-            if isinstance(arr, (pa.Array, pa.ChunkedArray)):
-                if not use_arrow_dtype:
-                    return arr.to_pandas()
-                chunked = pa.chunked_array([arr]) if isinstance(arr, pa.Array) else arr
-                if pa.types.is_string(chunked.type) or pa.types.is_large_string(
-                    chunked.type
-                ):
-                    # Match pandas' default Arrow-backed str dtype
-                    # (zero-copy wrap of the existing buffers)
-                    try:
-                        from pandas.core.arrays.string_arrow import (
-                            ArrowStringArray,
-                        )
+        # For numpy arrays, convert float arrays with NaN to nullable dtypes
+        # This ensures we use pd.NA instead of np.nan
+        if isinstance(arr, np.ndarray) and arr.dtype.kind == "f":
+            # Check if array has any NaN values
+            mask = np.isnan(arr)
+            if mask.any():
+                # Convert to nullable dtype with pd.NA
+                return pd.array(arr, dtype=pd.Float64Dtype())
+        return arr
 
-                        return ArrowStringArray(chunked)
-                    except (TypeError, ValueError):
-                        pass
-                return pd.arrays.ArrowExtensionArray(chunked)
-
-            # For numpy arrays, convert float arrays with NaN to nullable dtypes
-            # This ensures we use pd.NA instead of np.nan
-            if isinstance(arr, np.ndarray) and arr.dtype.kind == "f":
-                # Check if array has any NaN values
-                mask = np.isnan(arr)
-                if mask.any():
-                    # Convert to nullable dtype with pd.NA
-                    return pd.array(arr, dtype=pd.Float64Dtype())
-            return arr
-
-        pandas_data = {name: to_pandas_array(arr) for name, arr in data_cols.items()}
-        df = pd.DataFrame(pandas_data)
+    pandas_data = {name: to_pandas_array(arr) for name, arr in data_cols.items()}
+    df = pd.DataFrame(pandas_data)
 
     # Index reconstruction
     # Reconstruct index if preserve_index=True AND index columns exist

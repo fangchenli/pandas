@@ -1202,9 +1202,13 @@ class TestJoinKernels:
         result = dispatch_kernel("left_join", "arrow", left, right, ["key"])
 
         assert len(result) == 3  # All left rows preserved
-        # Key 1 should have null for b
-        result_df = result.to_pandas()
-        assert result_df[result_df["key"] == 1]["b"].isna().all()
+        # Key 1 should have null for b. Assert in Arrow directly:
+        # Table.to_pandas goes through pyarrow's deprecated
+        # DataFrame(BlockManager) construction on some pyarrow builds.
+        import pyarrow.compute as pc
+
+        b_for_key1 = result.filter(pc.equal(result["key"], 1)).column("b")
+        assert b_for_key1.null_count == len(b_for_key1)
 
     def test_arrow_right_join(self):
         """Test Arrow right join kernel."""
@@ -1216,9 +1220,11 @@ class TestJoinKernels:
         result = dispatch_kernel("right_join", "arrow", left, right, ["key"])
 
         assert len(result) == 3  # All right rows preserved
-        # Key 4 should have null for a
-        result_df = result.to_pandas()
-        assert result_df[result_df["key"] == 4]["a"].isna().all()
+        # Key 4 should have null for a (Arrow-native assert, see above)
+        import pyarrow.compute as pc
+
+        a_for_key4 = result.filter(pc.equal(result["key"], 4)).column("a")
+        assert a_for_key4.null_count == len(a_for_key4)
 
     def test_arrow_outer_join(self):
         """Test Arrow outer join kernel."""
