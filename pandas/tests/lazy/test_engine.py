@@ -319,3 +319,106 @@ class TestDecisionLayer:
         df = pd.DataFrame({"a": [3.0, 1.0, 2.0]})
         text = df.select().sort("a").explain(physical=True)
         assert "sink: sort[numpy]" in text
+
+
+class TestMorselParallelism:
+    """M3: morsel-parallel execution of stateless pipelines."""
+
+    def _wide_query(self, n=2_000):
+        rng = np.random.default_rng(9)
+        df = pd.DataFrame(
+            {
+                "id": np.arange(n),
+                "v1": rng.standard_normal(n),
+                "v2": rng.standard_normal(n),
+                "text": pd.array([f"t{i % 50}" for i in range(n)]),
+            }
+        )
+        return (
+            df.select()
+            .filter(col("v1") > -3)
+            .with_columns(
+                (col("v1") * 2 + col("v2") * col("v2")).alias("d"),
+                col("text").str.upper().alias("T"),
+            )
+        )
+
+    def test_parallel_matches_sequential_exactly(self, monkeypatch):
+        import pandas.lazy.engine.parallel as par
+
+        q = self._wide_query()
+        # shrink morsels so the parallel path runs on test-sized data
+        monkeypatch.setattr(par, "MORSEL_SIZE", 256)
+        monkeypatch.setattr(par, "MIN_PARALLEL_ROWS", 512)
+
+        result_par = q.collect(use_physical_planner=True)
+
+        monkeypatch.setattr(par, "pipeline_is_morsel_parallel", lambda p: False)
+        result_seq = q.collect(use_physical_planner=True)
+
+        # exact equality including row order: the stable-order contract
+        tm.assert_frame_equal(result_par, result_seq, check_dtype=False)
+
+    def test_low_compute_chains_stay_sequential(self):
+        from pandas.lazy.engine.decisions import annotate_decisions
+        from pandas.lazy.engine.parallel import (
+            pipeline_is_morsel_parallel,
+        )
+
+        df = pd.DataFrame({"a": np.arange(1000), "b": np.arange(1000)})
+        ldf = df.select().filter(col("a") > 1).select("a")
+        graph = annotate_decisions(compile_graph(ldf))
+        assert not any(pipeline_is_morsel_parallel(p) for p in graph.pipelines)
+
+    def test_string_chains_are_parallel_eligible(self):
+        from pandas.lazy.engine.parallel import (
+            pipeline_is_morsel_parallel,
+        )
+
+        df = pd.DataFrame(
+            {"v": np.arange(1000, dtype="float64"), "s": pd.array(["x"] * 1000)}
+        )
+        ldf = (
+            df.select()
+            .filter(col("v") > 0)
+            .with_columns(col("s").str.upper().alias("S"))
+        )
+        graph = compile_graph(ldf)
+        assert any(pipeline_is_morsel_parallel(p) for p in graph.pipelines)
+
+    def test_aggregate_and_window_exprs_excluded(self):
+        from pandas.lazy.engine.parallel import (
+            pipeline_is_morsel_parallel,
+        )
+
+        df = pd.DataFrame({"v": np.arange(1000, dtype="float64")})
+        # scalar aggregate broadcast in a projection: not morsel-safe
+        ldf1 = df.select().with_columns(col("v").sum().alias("total"))
+        graph1 = compile_graph(ldf1)
+        assert not any(pipeline_is_morsel_parallel(p) for p in graph1.pipelines)
+        # cumulative: order-dependent, not morsel-safe
+        ldf2 = df.select().with_columns(col("v").cum_sum().alias("c"))
+        graph2 = compile_graph(ldf2)
+        assert not any(pipeline_is_morsel_parallel(p) for p in graph2.pipelines)
+
+    def test_tail_morsel_backend_normalized(self, monkeypatch):
+        # uneven tail morsel + mixed result backends must concat cleanly
+        import pandas.lazy.engine.parallel as par
+
+        monkeypatch.setattr(par, "MORSEL_SIZE", 300)  # 1000 rows -> 4 morsels
+        monkeypatch.setattr(par, "MIN_PARALLEL_ROWS", 600)
+        df = pd.DataFrame(
+            {
+                "v": np.arange(1000, dtype="float64"),
+                "s": pd.array([f"x{i}" for i in range(1000)]),
+            }
+        )
+        q = (
+            df.select()
+            .filter(col("v") >= 0)
+            .with_columns(col("s").str.upper().alias("S"))
+        )
+        result = q.collect(use_physical_planner=True)
+        assert len(result) == 1000
+        assert result["S"].iloc[299] == "X299"
+        assert result["S"].iloc[999] == "X999"

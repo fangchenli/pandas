@@ -9,7 +9,7 @@ sinks; a sink's finalized output is the source of downstream pipelines.
 M1 is deliberately a pure refactor: execution still flows through every
 node's existing ``execute()`` — the compiler only re-routes plumbing.
 Each operator/breaker is applied by swapping its plan input(s) for a
-``_Precomputed`` adapter holding already-materialized arrays
+``PrecomputedInput`` adapter holding already-materialized arrays
 (``dataclasses.replace``), so operator logic, context mutations, spill
 behavior, and semantics are byte-identical to the recursive executor.
 The whole input flows as a single morsel; M3 introduces real morsel
@@ -55,7 +55,7 @@ SOURCE_TYPES = (PhysicalScan, PhysicalParquetScan, PhysicalCSVScan)
 
 # Nodes that stream morsel-by-morsel and therefore chain inside one
 # pipeline. Everything else terminates a pipeline as a sink.
-# PhysicalMaterialize is included: with a _Precomputed input its
+# PhysicalMaterialize is included: with a PrecomputedInput input its
 # execute() is a pass-through plus bookkeeping, identical to today.
 STREAMING_TYPES = (
     PhysicalFilter,
@@ -86,7 +86,7 @@ class Morsel:
 
 
 @dataclass
-class _Precomputed(PhysicalPlan):
+class PrecomputedInput(PhysicalPlan):
     """Adapter: a plan node whose execution result is already known.
 
     This is the universal plumbing trick of M1 — any existing node runs
@@ -122,7 +122,7 @@ class _Precomputed(PhysicalPlan):
         return self.schema  # type: ignore[return-value]
 
 
-def _with_inputs(node: PhysicalPlan, inputs: list[PhysicalPlan]) -> PhysicalPlan:
+def with_inputs(node: PhysicalPlan, inputs: list[PhysicalPlan]) -> PhysicalPlan:
     """Return a copy of ``node`` with its plan input(s) replaced."""
     if isinstance(node, (PhysicalHashJoin, PhysicalSortMergeJoin)):
         return dataclasses.replace(node, left=inputs[0], right=inputs[1])
@@ -161,7 +161,7 @@ class NodeSink(Sink):
     """A pipeline breaker, wrapping the node's existing execution logic.
 
     M1 form: collect each input pipeline's (single) morsel into its
-    slot, then run the node with _Precomputed inputs. M4/M5 replace
+    slot, then run the node with PrecomputedInput inputs. M4/M5 replace
     specific NodeSinks with truly parallel accumulate/merge sinks
     behind this same interface.
     """
@@ -179,7 +179,7 @@ class NodeSink(Sink):
         if self._result is None:
             children = self.node.children()
             inputs: list[PhysicalPlan] = [
-                _Precomputed(
+                PrecomputedInput(
                     arrays=m.arrays,  # type: ignore[union-attr]
                     schema=child.output_schema,
                     index_names=m.index_names,  # type: ignore[union-attr]
@@ -188,7 +188,7 @@ class NodeSink(Sink):
                 )
                 for m, child in zip(self._slots, children, strict=True)
             ]
-            bound = _with_inputs(self.node, inputs)
+            bound = with_inputs(self.node, inputs)
             self._result = bound.execute(context)
         return self._result
 
@@ -308,7 +308,7 @@ class PipelineExecutor:
             # Pipelines feeding a multi-input sink run in an isolated
             # sub-context, mirroring how join/concat executed each side
             # in a clone before; their metadata is captured on the
-            # morsel and replayed by _Precomputed inside the node's own
+            # morsel and replayed by PrecomputedInput inside the node's own
             # per-side clones, so the node's existing metadata-merge
             # logic (join: left wins; concat: first wins) is unchanged.
             isolated = isinstance(pipeline.sink, NodeSink) and pipeline.sink.n_slots > 1
@@ -320,13 +320,26 @@ class PipelineExecutor:
                 assert pipeline.source_sink is not None
                 arrays = pipeline.source_sink.finalize(ctx)
 
-            for op in pipeline.operators:
-                child = op.children()[0]
-                bound = _with_inputs(
-                    op,
-                    [_Precomputed(arrays=arrays, schema=child.output_schema)],
-                )
-                arrays = bound.execute(ctx)
+            # M3: stateless pipelines over in-memory sources run their
+            # operator chain morsel-parallel (engine/parallel.py); the
+            # sequential single-morsel path remains the universal default.
+            from pandas.lazy.engine.parallel import (
+                MIN_PARALLEL_ROWS,
+                pipeline_is_morsel_parallel,
+                run_morsel_parallel,
+            )
+
+            n_rows = len(next(iter(arrays.values()))) if arrays else 0
+            if n_rows >= MIN_PARALLEL_ROWS and pipeline_is_morsel_parallel(pipeline):
+                arrays = run_morsel_parallel(pipeline, arrays, ctx, n_rows)
+            else:
+                for op in pipeline.operators:
+                    child = op.children()[0]
+                    bound = with_inputs(
+                        op,
+                        [PrecomputedInput(arrays=arrays, schema=child.output_schema)],
+                    )
+                    arrays = bound.execute(ctx)
 
             morsel = Morsel(arrays)
             if isolated:
