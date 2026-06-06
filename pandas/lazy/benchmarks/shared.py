@@ -648,7 +648,7 @@ def compare_to_baseline(
     current: dict[str, float],
     baseline: dict[str, float],
     threshold_pct: float = 10.0,
-    min_gate_ms: float = 1.0,
+    min_gate_ms: float = 2.0,
 ) -> tuple[bool, list[dict[str, Any]]]:
     """
     Compare current results to baseline and detect regressions.
@@ -661,10 +661,13 @@ def compare_to_baseline(
         Baseline benchmark results (metric_name -> value_ms)
     threshold_pct : float, default 10.0
         Regression threshold as percentage (fail if slower by more than this)
-    min_gate_ms : float, default 1.0
+    min_gate_ms : float, default 2.0
         Metrics where both baseline and current are below this are
-        reported but never fail the gate: sub-millisecond timings have
-        unbounded relative noise (a 0.03 ms wiggle is a 50% "regression").
+        reported but never fail the gate: small timings have unbounded
+        relative noise (a 0.03 ms wiggle is a 50% "regression"). The
+        floor was raised from 1.0 after 0.9-1.7 ms eager metrics
+        flapped 25-35% on consecutive clean-HEAD control runs even on
+        a quiet machine (June 2026).
 
     Returns
     -------

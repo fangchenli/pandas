@@ -105,45 +105,53 @@ def _op_is_morsel_safe(op) -> bool:
     return False
 
 
-def _expr_compute_score(ir) -> int:
-    """Rough kernel-work weight of an expression (Call nodes)."""
+# Kernel classes that are compute-bound per byte and therefore gain
+# from thread parallelism. Measured (June 2026, quiet Apple Silicon,
+# 2M-8M rows): string chains win 1.32-1.43x at EVERY scale, while
+# numeric elementwise chains lose ~0.5x at EVERY scale - a single
+# thread already saturates memory bandwidth for arithmetic, and the
+# same saturation explains the bare filter+select residual (0.87x)
+# that M3 part 2's plumbing investigation could not. The gate is
+# therefore kernel-CLASS, not op count: parallelize only chains that
+# contain at least one compute-bound kernel. Extend this tuple as new
+# kernel classes are measured (regex, date parsing are candidates).
+_COMPUTE_BOUND_PREFIXES = ("str_",)
+
+
+def _expr_has_compute_bound(ir) -> bool:
     from pandas.lazy.ir import (
         Alias,
         Call,
     )
 
     if isinstance(ir, Alias):
-        return _expr_compute_score(ir.arg)
+        return _expr_has_compute_bound(ir.arg)
     if isinstance(ir, Call):
-        own = 3 if ir.function.startswith("str_") else 1
-        return own + sum(_expr_compute_score(a) for a in ir.args)
-    return 0
+        if ir.function.startswith(_COMPUTE_BOUND_PREFIXES):
+            return True
+        return any(_expr_has_compute_bound(a) for a in ir.args)
+    return False
 
 
-def _chain_compute_score(pipeline: Pipeline) -> int:
-    score = 0
+def _chain_has_compute_bound(pipeline: Pipeline) -> bool:
     for op in pipeline.operators:
         if isinstance(op, PhysicalFilter):
-            score += _expr_compute_score(op.predicate._ir)
+            if _expr_has_compute_bound(op.predicate._ir):
+                return True
         elif isinstance(op, PhysicalProject):
-            score += sum(_expr_compute_score(e._ir) for e in op.exprs)
+            if any(_expr_has_compute_bound(e._ir) for e in op.exprs):
+                return True
         elif isinstance(op, PhysicalFusedPipeline):
             for fop in op.operations:
-                if fop.op_type == "filter":
-                    score += _expr_compute_score(fop.predicate._ir)
-                elif fop.op_type == "project":
-                    score += sum(_expr_compute_score(e._ir) for e in fop.exprs)
-    return score
-
-
-# Minimum kernel-work weight for morsel parallelism to pay. Measured
-# (June 2026, 10M rows, Apple Silicon): a bare filter+select (score 1)
-# runs 0.89x parallel - per-morsel operator plumbing plus the output
-# merge eat the bandwidth-bound gain - while a string+arithmetic chain
-# (score ~7) runs 1.35x. Reducing the per-morsel plumbing (a compiled
-# chain applier instead of per-morsel node rebinding) is the tracked
-# next step; until then, parallelism applies only where it wins.
-MIN_COMPUTE_SCORE = 3
+                if fop.op_type == "filter" and _expr_has_compute_bound(
+                    fop.predicate._ir
+                ):
+                    return True
+                if fop.op_type == "project" and any(
+                    _expr_has_compute_bound(e._ir) for e in fop.exprs
+                ):
+                    return True
+    return False
 
 
 def pipeline_is_morsel_parallel(pipeline: Pipeline) -> bool:
@@ -151,8 +159,9 @@ def pipeline_is_morsel_parallel(pipeline: Pipeline) -> bool:
 
     Requires: an in-memory source (PhysicalScan or an upstream sink's
     materialized output — file scans become natural morsel sources in
-    M6), every operator provably row-wise, and enough kernel work per
-    row for parallelism to beat its own overhead (MIN_COMPUTE_SCORE).
+    M6), every operator provably row-wise, and at least one
+    compute-bound kernel in the chain (bandwidth-bound chains are
+    saturated by a single thread; see _COMPUTE_BOUND_PREFIXES).
     """
     if not pipeline.operators:
         return False
@@ -162,7 +171,7 @@ def pipeline_is_morsel_parallel(pipeline: Pipeline) -> bool:
         return False
     if not all(_op_is_morsel_safe(op) for op in pipeline.operators):
         return False
-    return _chain_compute_score(pipeline) >= MIN_COMPUTE_SCORE
+    return _chain_has_compute_bound(pipeline)
 
 
 def compile_chain(pipeline: Pipeline):
