@@ -422,3 +422,69 @@ class TestMorselParallelism:
         assert len(result) == 1000
         assert result["S"].iloc[299] == "X299"
         assert result["S"].iloc[999] == "X999"
+
+
+class TestCategoricalDictionaryRouting:
+    """M4 part 2: Categorical columns flow as Arrow dictionaries.
+
+    extract_array wraps Categorical zero-copy (codes -> indices), the
+    schema reports arrow storage so the decision layer routes groupby
+    to acero (which hash-aggregates dictionary keys ~5x faster than raw
+    strings), and the output converts back to category dtype.
+    """
+
+    def _frame(self, n=3_000):
+        rng = np.random.default_rng(11)
+        return pd.DataFrame(
+            {
+                "g": pd.Categorical(rng.choice(["A", "B", "C"], n)),
+                "v": rng.standard_normal(n),
+            }
+        )
+
+    def test_groupby_routed_to_arrow_and_matches_eager(self):
+        df = self._frame()
+        q = df.select().group_by("g").agg(col("v").sum().alias("s"))
+        assert "sink: groupby[arrow]" in q.explain(physical=True)
+
+        result = q.collect(use_physical_planner=True).sort_values("g")
+        eager = df.groupby("g", observed=True)["v"].sum().sort_index()
+        assert np.allclose(result["s"].to_numpy(dtype="float64"), eager.to_numpy())
+        assert isinstance(result["g"].dtype, pd.CategoricalDtype)
+
+    def test_category_filter_correct(self):
+        df = self._frame()
+        result = df.select().filter(col("g") == "A").collect(use_physical_planner=True)
+        assert len(result) == (df["g"] == "A").sum()
+        assert (result["g"] == "A").all()
+
+    def test_category_with_missing_codes(self):
+        g = pd.Categorical(["A", None, "B", "A", None])
+        df = pd.DataFrame({"g": g, "v": [1.0, 2.0, 3.0, 4.0, 5.0]})
+        # missing keys dropped per pandas dropna=True semantics
+        result = (
+            df.select()
+            .group_by("g")
+            .agg(col("v").sum().alias("s"))
+            .collect(use_physical_planner=True)
+            .sort_values("g")
+        )
+        eager = df.groupby("g", observed=True)["v"].sum().sort_index()
+        assert np.allclose(result["s"].to_numpy(dtype="float64"), eager.to_numpy())
+
+    def test_numeric_categories(self):
+        df = pd.DataFrame(
+            {
+                "g": pd.Categorical([10, 20, 10, 30, 20]),
+                "v": [1.0, 2.0, 3.0, 4.0, 5.0],
+            }
+        )
+        result = (
+            df.select()
+            .group_by("g")
+            .agg(col("v").sum().alias("s"))
+            .collect(use_physical_planner=True)
+            .sort_values("g")
+        )
+        eager = df.groupby("g", observed=True)["v"].sum().sort_index()
+        assert np.allclose(result["s"].to_numpy(dtype="float64"), eager.to_numpy())

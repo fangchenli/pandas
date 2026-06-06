@@ -76,6 +76,27 @@ class LazyDtype:
                 return cls("string", None, pa.large_string(), has_nulls)
             return cls("string", None, None, has_nulls)
 
+        # Categorical -> Arrow dictionary. extract_array wraps Categorical
+        # zero-copy as a pa.DictionaryArray, and acero hash-aggregates
+        # dictionary keys ~5x faster than raw strings; the schema must
+        # report arrow storage so the decision layer routes accordingly
+        # (with the old object/numpy mapping, a 10M category groupby ran
+        # 313 ms through the NumPy kernel's object path vs ~20 ms here).
+        if isinstance(dtype, pd.CategoricalDtype):
+            import pyarrow as pa
+
+            cat_dtype = dtype.categories.dtype
+            if cat_dtype == np.dtype("object") or str(cat_dtype) in ("str", "string"):
+                return cls(
+                    "string", None, pa.dictionary(pa.int32(), pa.large_string()), True
+                )
+            return cls(
+                "numeric",
+                np.dtype(cat_dtype),
+                pa.dictionary(pa.int32(), pa.from_numpy_dtype(cat_dtype)),
+                True,
+            )
+
         # Handle nullable extension dtypes (Int64, Float64, boolean, etc.)
         # These must be checked before the standard is_*_dtype checks because
         # is_integer_dtype(Int64Dtype()) returns True but np.dtype() fails on it
