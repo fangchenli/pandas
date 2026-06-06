@@ -29,11 +29,6 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from pandas.lazy.engine.pipeline import (
-    Pipeline,
-    PrecomputedInput,
-    with_inputs,
-)
 from pandas.lazy.physical import (
     ExecutionContext,
     PhysicalConvert,
@@ -45,6 +40,7 @@ from pandas.lazy.physical import (
 
 if TYPE_CHECKING:
     from pandas.lazy.backends.types import ArrayDict
+    from pandas.lazy.engine.pipeline import Pipeline
 
 # Tunables (canonical range per Leis et al. / DuckDB; see ENGINE_DESIGN.md)
 MORSEL_SIZE = 131_072
@@ -169,6 +165,40 @@ def pipeline_is_morsel_parallel(pipeline: Pipeline) -> bool:
     return _chain_compute_score(pipeline) >= MIN_COMPUTE_SCORE
 
 
+def compile_chain(pipeline: Pipeline):
+    """Compile the operator chain into lean per-morsel appliers, once.
+
+    Each applier is the node's existing arrays-level core method
+    (``_filter_batch`` / ``_project_batch`` / ``_execute_fused`` — the
+    same code ``execute()`` delegates to), bound once per pipeline.
+    This removes the per-morsel ``dataclasses.replace`` + ``execute()``
+    wrapper that M3's gate measured as the dominant serial fraction,
+    with zero semantic divergence: it is literally the same logic.
+    """
+    appliers = []
+    for op in pipeline.operators:
+        if isinstance(op, PhysicalFusedPipeline):
+            appliers.append(op._execute_fused)
+        elif isinstance(op, PhysicalProject):
+            appliers.append(op._project_batch)
+        elif isinstance(op, PhysicalFilter):
+            appliers.append(op._filter_batch)
+        elif isinstance(op, PhysicalConvert):
+
+            def convert(arrays, ctx, _op=op):
+                from pandas.lazy.backends.convert import ensure_backend
+
+                return {
+                    name: ensure_backend(arr, _op.target_backend)
+                    for name, arr in arrays.items()
+                }
+
+            appliers.append(convert)
+        else:  # pragma: no cover - classifier admits only the above
+            raise TypeError(f"non-morsel operator: {type(op).__name__}")
+    return appliers
+
+
 def _slice_arrays(arrays: ArrayDict, start: int, end: int) -> ArrayDict:
     return {name: arr[start:end] for name, arr in arrays.items()}
 
@@ -226,15 +256,8 @@ def run_morsel_parallel(
     claim_lock = threading.Lock()
     errors: list[BaseException] = []
 
-    def apply_chain(morsel_arrays: ArrayDict, ctx: ExecutionContext) -> ArrayDict:
-        out = morsel_arrays
-        for op in pipeline.operators:
-            child = op.children()[0]
-            bound = with_inputs(
-                op, [PrecomputedInput(arrays=out, schema=child.output_schema)]
-            )
-            out = bound.execute(ctx)
-        return out
+    # Compile the chain once; workers reuse the bound appliers.
+    appliers = compile_chain(pipeline)
 
     def worker() -> None:
         ctx = context.clone_for_subplan()
@@ -246,7 +269,10 @@ def run_morsel_parallel(
             start = i * MORSEL_SIZE
             end = min(start + MORSEL_SIZE, n_rows)
             try:
-                results[i] = apply_chain(_slice_arrays(arrays, start, end), ctx)
+                out = _slice_arrays(arrays, start, end)
+                for apply_op in appliers:
+                    out = apply_op(out, ctx)
+                results[i] = out
             except BaseException as exc:  # propagate to caller
                 errors.append(exc)
                 return
