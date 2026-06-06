@@ -204,6 +204,8 @@ class Pipeline:
     operators: list[PhysicalPlan]
     sink: Sink
     sink_slot: int
+    # Set by the decision layer (engine/decisions.py)
+    decisions: object | None = None
 
     def describe(self) -> str:
         if self.source_node is not None:
@@ -216,7 +218,10 @@ class Pipeline:
         dst = type(self.sink).__name__
         if isinstance(self.sink, NodeSink):
             dst = f"{type(self.sink.node).__name__}Sink"
-        return f"P{self.pid}: {src} -> [{ops}] -> {dst}[slot {self.sink_slot}]"
+        text = f"P{self.pid}: {src} -> [{ops}] -> {dst}[slot {self.sink_slot}]"
+        if self.decisions is not None:
+            text += f"\n      {self.decisions.describe()}"  # type: ignore[attr-defined]
+        return text
 
 
 @dataclass
@@ -336,10 +341,14 @@ class PipelineExecutor:
 
 def execute_as_pipelines(plan: PhysicalPlan, context: ExecutionContext) -> ArrayDict:
     """Compile a physical plan to a pipeline graph and execute it."""
-    graph = PipelineCompiler().compile(plan)
+    from pandas.lazy.engine.decisions import annotate_decisions
+
+    graph = annotate_decisions(PipelineCompiler().compile(plan))
     return PipelineExecutor().execute(graph, context)
 
 
 def render_pipelines(plan: PhysicalPlan) -> str:
     """Render the pipeline graph for explain(physical=True)."""
-    return PipelineCompiler().compile(plan).describe()
+    from pandas.lazy.engine.decisions import annotate_decisions
+
+    return annotate_decisions(PipelineCompiler().compile(plan)).describe()

@@ -191,3 +191,89 @@ class TestPipelineExecutorEquivalence:
             physical["s"].to_numpy(dtype="float64"),
             eager["s"].to_numpy(dtype="float64"),
         )
+
+
+class TestDecisionLayer:
+    """M2: plan-time decisions annotated on the pipeline graph."""
+
+    def test_groupby_backend_planned_from_schema(self):
+        # The original routing-bug shape: leading NumPy column, Arrow
+        # string key. The decision layer must plan arrow from the
+        # schema alone - before any data is touched.
+        df = pd.DataFrame(
+            {
+                "id": np.arange(100),  # leading numpy column
+                "g": pd.array(["a", "b"] * 50),  # arrow string key
+                "v": np.arange(100, dtype="float64"),
+            }
+        )
+        ldf = df.select().group_by("g").agg(col("v").sum().alias("s"))
+
+        from pandas.lazy.engine.decisions import annotate_decisions
+        from pandas.lazy.physical import PhysicalHashAggregate as Agg
+
+        graph = annotate_decisions(compile_graph(ldf))
+        agg_sinks = [
+            p.sink
+            for p in graph.pipelines
+            if isinstance(p.sink, NodeSink) and isinstance(p.sink.node, Agg)
+        ]
+        assert len(agg_sinks) == 1
+        assert agg_sinks[0].node.planned_backend == "arrow"
+
+    def test_numeric_only_groupby_planned_numpy(self):
+        df = pd.DataFrame(
+            {
+                "g": np.array([1, 2] * 50),
+                "v": np.arange(100, dtype="float64"),
+                "s": pd.array(["x"] * 100),  # irrelevant arrow payload
+            }
+        )
+        ldf = df.select().group_by("g").agg(col("v").sum().alias("t"))
+
+        from pandas.lazy.engine.decisions import annotate_decisions
+        from pandas.lazy.physical import PhysicalHashAggregate as Agg
+
+        graph = annotate_decisions(compile_graph(ldf))
+        agg = next(
+            p.sink.node
+            for p in graph.pipelines
+            if isinstance(p.sink, NodeSink) and isinstance(p.sink.node, Agg)
+        )
+        # irrelevant arrow payload must not flip the decision... but note
+        # projection pruning may have dropped 's' already; either way the
+        # relevant columns (g, v) are numpy
+        assert agg.planned_backend == "numpy"
+
+    def test_explain_shows_decisions(self):
+        df = pd.DataFrame({"g": pd.array(["a", "b"]), "v": [1.0, 2.0]})
+        text = (
+            df.select()
+            .group_by("g")
+            .agg(col("v").sum().alias("s"))
+            .explain(physical=True)
+        )
+        assert "sink: groupby[arrow]" in text
+        assert "backends=" in text
+
+    def test_planned_decision_matches_runtime_result(self):
+        # The planned and runtime rules must agree on results
+        rng = np.random.default_rng(5)
+        df = pd.DataFrame(
+            {
+                "id": np.arange(1000),
+                "g": pd.array(rng.choice(["x", "y", "z"], 1000)),
+                "v": rng.standard_normal(1000),
+            }
+        )
+        ldf = df.select().group_by("g").agg(col("v").sum().alias("s"))
+        physical = (
+            ldf.collect(use_physical_planner=True)
+            .sort_values("g")
+            .reset_index(drop=True)
+        )
+        eager = ldf.collect().sort_values("g").reset_index(drop=True)
+        assert np.allclose(
+            physical["s"].to_numpy(dtype="float64"),
+            eager["s"].to_numpy(dtype="float64"),
+        )

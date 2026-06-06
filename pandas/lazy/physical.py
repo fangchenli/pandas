@@ -1809,6 +1809,10 @@ class PhysicalHashAggregate(PhysicalPlan):
     group_by: tuple[Expr, ...]
     agg_exprs: tuple[Expr, ...]
     schema: Schema
+    # Set by the engine's decision layer (engine/decisions.py) at plan
+    # time from the input schema's per-column storage backends; when
+    # None, the runtime relevant-columns logic below decides.
+    planned_backend: str | None = None
 
     def execute(self, context: ExecutionContext) -> ArrayDict:
         from pandas.lazy.backends.convert import (
@@ -1865,28 +1869,36 @@ class PhysicalHashAggregate(PhysicalPlan):
 
         input_arrays = self.input.execute(context)
 
-        # Determine backend from the columns this aggregation actually
-        # uses: the group keys and the aggregation value columns. Unrelated
-        # payload columns must not influence the choice (a previous version
-        # fell back to the backend of the *first* input column, which sent
-        # Arrow-string-keyed groupbys down the NumPy path - factorizing the
-        # key through object arrays, ~5x slower than Arrow's table groupby).
-        # Arrow is preferred when any relevant column is Arrow-backed; string
-        # group keys are exactly where Arrow's hash aggregation wins most.
-        value_cols = {col for _, col, _ in agg_specs}
-        relevant_cols = value_cols.union(group_cols or ())
-        relevant_backends = {
-            get_array_backend(input_arrays[col])
-            for col in relevant_cols
-            if col in input_arrays
-        }
-        if "arrow" in relevant_backends:
-            backend = "arrow"
-        elif relevant_backends:
-            backend = "numpy"
+        # Backend choice. The decision layer (engine/decisions.py) plans
+        # this from the input schema when possible; otherwise fall back
+        # to inspecting the materialized arrays at runtime.
+        #
+        # Either way the rule is the same: decide from the columns this
+        # aggregation actually uses - the group keys and the aggregation
+        # value columns. Unrelated payload columns must not influence
+        # the choice (a previous version fell back to the backend of the
+        # *first* input column, which sent Arrow-string-keyed groupbys
+        # down the NumPy path - factorizing the key through object
+        # arrays, ~5x slower than Arrow's table groupby). Arrow is
+        # preferred when any relevant column is Arrow-backed; string
+        # group keys are exactly where Arrow's hash aggregation wins.
+        if self.planned_backend is not None:
+            backend = self.planned_backend
         else:
-            first_col = next(iter(input_arrays.values()))
-            backend = get_array_backend(first_col)
+            value_cols = {col for _, col, _ in agg_specs}
+            relevant_cols = value_cols.union(group_cols or ())
+            relevant_backends = {
+                get_array_backend(input_arrays[col])
+                for col in relevant_cols
+                if col in input_arrays
+            }
+            if "arrow" in relevant_backends:
+                backend = "arrow"
+            elif relevant_backends:
+                backend = "numpy"
+            else:
+                first_col = next(iter(input_arrays.values()))
+                backend = get_array_backend(first_col)
 
         if not group_cols:
             # Global aggregation - no grouping keys
