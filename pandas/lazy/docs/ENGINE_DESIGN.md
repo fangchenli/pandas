@@ -316,7 +316,7 @@ explain() output stays truthful.
 
 | # | Milestone | Contents | Target (vs Polars, mixed data) |
 |---|---|---|---|
-| M1 | Pipeline compiler | Formalize Pipeline/Sink abstractions; compile every plan to a pipeline graph; single-morsel execution (whole input = one morsel) makes this a pure refactor with identical behavior. FusedPipeline, streaming agg, external sort absorb into it | no perf change; structure only |
+| M1 ✅ | Pipeline compiler (**landed June 2026**) | `pandas/lazy/engine/`: Morsel/Pipeline/Sink/PipelineCompiler/PipelineExecutor; every `collect(use_physical_planner=True)` compiles to and executes through an explicit pipeline graph; nodes run their own `execute()` via the `_Precomputed` input adapter, so behavior is byte-identical; multi-input metadata isolation mirrors join/concat's per-side context clones; `explain(physical=True)` renders the graph | gates: 1,540 tests green, all 4 benchmark baselines pass unchanged |
 | M2 | Decision layer | Per-column backend planning + explicit Convert ops; thresholds → cost model; delete per-operator backend checks | no regressions; explain shows conversions |
 | M3 | Morsel parallelism for stateless pipelines | Scheduler + worker pool; filter/project/limit pipelines run morsel-parallel with ordered merge; **GIL validation gate** | filter_project 0.22x → ≥0.5x |
 | M4 | Parallel sinks: aggregate + sort | partial-agg merge; sorted-run k-way merge | aggregation 0.53x → ≥0.8x; sort 0.27x → ≥0.5x |

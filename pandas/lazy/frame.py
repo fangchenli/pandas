@@ -1404,6 +1404,12 @@ class LazyDataFrame:
 
         format_node(physical_plan)
 
+        # Pipeline graph: how this plan actually executes (ENGINE_DESIGN.md)
+        from pandas.lazy.engine import render_pipelines
+
+        lines.append("")
+        lines.append(render_pipelines(physical_plan))
+
         lines.append("")
         lines.append("=" * 60)
         return "\n".join(lines)

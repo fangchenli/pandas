@@ -5521,8 +5521,13 @@ def execute_physical_plan(
         _spill_config=spill_config,
     )
 
-    # Execute and get ArrayDict
-    arrays = plan.execute(context)
+    # Execute through the pipeline engine (docs/ENGINE_DESIGN.md, M1):
+    # the plan compiles to an explicit pipeline graph; every node still
+    # runs its own execute(), so behavior is identical to the previous
+    # direct recursion.
+    from pandas.lazy.engine import execute_as_pipelines
+
+    arrays = execute_as_pipelines(plan, context)
 
     # Convert ArrayDict back to DataFrame with proper index
     # Reconstruct index if preserve_index=True OR user explicitly called set_index()
