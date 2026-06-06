@@ -5,25 +5,26 @@ in [ARCHITECTURE.md](ARCHITECTURE.md), [PLANNING.md](PLANNING.md), and
 [OPTIMIZER.md](OPTIMIZER.md); dated performance reports live in
 `../benchmarks/`.
 
-## Competitive Standing (vs Polars, June 2026 — corrected methodology)
+## Competitive Standing (vs Polars, June 2026 — physical engine)
 
-From `../benchmarks/LAZY_VS_POLARS_BENCHMARK.md` (1M–10M rows, Apple
-Silicon), measured on **both** execution paths after discovering that the
-January report had measured only the eager path. Speedup > 1.0 = lazy
-pandas faster:
+From `../benchmarks/LAZY_VS_POLARS_BENCHMARK.md` (1M–10M rows, mixed-dtype
+data, Apple Silicon). Speedup > 1.0 = lazy pandas faster. The January
+report had measured the eager path by mistake; all numbers below are the
+physical engine after the June conversion/routing fix cycle:
 
-| Category | Physical engine | Eager path | Notes |
-|----------|----------------|------------|-------|
-| string | 0.27x | up to **2.6x** | eager `str.lower` beats Polars; physical loses it to pass-through conversion |
-| parquet_scan | 0.27x (0.65x best) | — | physical-only path |
-| sort | 0.20x | ~0.17x | numeric-only sorts (bench_sort) beat eager pandas 1.2–2x; this data has string payload columns |
-| aggregation | 0.08x | 0.06–0.39x | |
-| join | 0.06x | **0.56–0.70x** | eager rides pandas 3.1 merge improvements; physical pays conversion |
-| filter_project | 0.11x → ~0.2x+ | 0.07–0.25x | fused pipeline now prunes columns before applying deferred filter masks (filter+select @10M: 652→46 ms) |
-| limit | ~0x | ~0x | `head(N)` is Polars' best case (µs) vs our ms — see below |
+| Category | Avg | Best | Movement this cycle |
+|----------|-----|------|---------------------|
+| string | **1.10x** | 2.43x (`str.lower`) | 0.27x → win (pass-through output fix) |
+| aggregation | 0.53x | **2.11x** (multi-agg) | 0.07x → partial win (groupby routing fix) |
+| join | 0.31x | 0.39x | 0.06x → competitive (Cython indexers + native gathers) |
+| parquet_scan | 0.30x | 0.74x | ~flat |
+| sort | 0.27x | 0.34x | 0.17x → (parallel argsort, Arrow multi-key) |
+| filter_project | 0.22x | 0.39x | 0.03x worst case → 0.39x (fused-mask pruning) |
+| limit | 0.03x | — | ~0x → ~200 µs absolute (trivial-slice fast path) |
 
-The physical-vs-eager gap on this benchmark is dominated by a single
-cause, isolated and measured: see item 1 below.
+Common thread of the cycle: kernels were never the bottleneck — data
+movement between them was. Every fix removed conversions or routing
+mistakes on columns no operation touched.
 
 ## High-Impact Opportunities
 

@@ -18,9 +18,12 @@ with a single integration point (`DataFrame.select()`) and everything else
 isolated under a new `pandas.lazy` module.
 
 The prototype is complete enough to evaluate the design: ~30k lines of
-implementation, ~1,500 tests (including an eager↔physical equivalence suite),
-and an honest benchmark story (some 2–10x wins over eager pandas; still well
-behind Polars in several categories — see [Status](#status-and-performance)).
+implementation, ~1,500 tests (including an eager↔physical equivalence
+suite), and an honest benchmark story — 2–10x wins over eager pandas on
+pipelines, ahead of Polars in two categories (string transforms,
+multi-aggregation groupbys) and within 0.2–0.5x elsewhere, with the
+remaining gaps measured and attributed
+(see [Status](#status-and-performance)).
 
 **This document is a request for direction, not a merge request.** See
 [Positioning and open questions](#positioning-and-open-questions) — in
@@ -202,29 +205,38 @@ What works today (each backed by tests):
 | Out-of-core | `SpillConfig` — Arrow IPC spill files, external sort, grace hash join |
 | File scans | Parquet (predicate incl. row-group stats + projection pushdown), CSV; glob + fsspec URLs |
 | Index contract | Default RangeIndex / `preserve_index=True`, identical between engines |
-| Tests | 1,505 in `pandas/tests/lazy`, incl. eager↔physical equivalence suite (12 query shapes × index modes) and NaN-semantics regression coverage |
+| Tests | 1,531 in `pandas/tests/lazy`, incl. eager↔physical equivalence suite (12 query shapes × index modes) and NaN-semantics regression coverage |
 
 Honest numbers (Apple Silicon; details in
 [`../benchmarks/`](../benchmarks/README.md)):
 
 - **vs eager pandas**: chained filters 1.5–2×, filter+`head(N)` 2–10×
-  (10×+ on multi-file globs), Arrow string pipelines 2–10×, plus
-  streaming/spill enabling workloads eager pandas cannot run. Single simple
-  operations are 2–5× *slower* (planning overhead) — lazy is for pipelines.
-- **vs Polars** (June 2026, both execution paths measured after a
-  methodology fix — the earlier report had measured only the eager path):
-  behind almost everywhere. Best categories: eager-path `str.lower` ≈2.6×
-  *faster* than Polars and eager-path joins at 0.56–0.70×; physical-engine
-  numbers on mixed-dtype data are currently dominated by a single isolated
-  cost (pass-through string columns are Arrow-converted on output even
-  when untouched — 55 ms vs 379 ms on an otherwise identical query), which
-  is the top engine priority. `head()` remains Polars' best case and our
-  worst. [ROADMAP.md](ROADMAP.md) itemizes the causes and the dual-path
-  numbers.
+  (10×+ on multi-file globs), Arrow string pipelines 2–10×, parallel sorts
+  1.2–2× on numeric data, plus streaming/spill enabling workloads eager
+  pandas cannot run. `head()` on in-memory data is ~200 µs at any size
+  (trivial-plan fast path). Small single operations still favor eager
+  (planning overhead) — lazy is for pipelines.
+- **vs Polars** (June 2026, physical engine, mixed-dtype data; measured
+  after a methodology fix — pre-June reports had measured the eager path):
+  **wins in two categories** — string transforms (1.1× avg, `str.lower`
+  2.4×) and multi-aggregation groupbys (up to 2.1×) — and is within
+  0.2–0.5× elsewhere: aggregation 0.53× avg, joins 0.31×, parquet scans
+  0.30×, sort 0.27×, filter+project 0.22×. `head()` remains Polars'
+  best case (µs vs our ~200 µs of plan construction).
 
-The prototype's claim is not "faster than Polars" — it is that the
-architecture is sound, results are value-compatible with eager pandas, and
-the optimizer wins are real, with a clear path on the remaining gaps.
+These numbers moved sharply in one development cycle (joins 0.06×→0.31×,
+aggregation 0.07×→0.53×, strings 0.27×→1.1×, filter+select 0.03×→0.39×)
+for a reason worth stating to reviewers: **the kernels were never the
+bottleneck — the data movement between them was**. Every gain came from
+eliminating conversions or routing mistakes on columns no operation
+touched (full audit trail in [ROADMAP.md](ROADMAP.md)), and one fix
+reused pandas' own Cython join indexers — evidence that pandas-as-substrate
+is a performance strategy, not just a compatibility one.
+
+The prototype's claim is not "faster than Polars across the board" — it is
+that the architecture is sound, results are value-compatible with eager
+pandas, the optimizer wins are real, and the remaining gaps are measured
+with named causes rather than open-ended.
 
 ## Semantics: what is kept and what deviates
 
