@@ -41,8 +41,14 @@ cause, isolated and measured: see item 1 below.
    eager `pd.merge` — row order and NaN-key semantics match by
    construction) and gathers payload columns in their native backend.
    10M×1M inner join: ~13,000 ms → **846 ms** (eager merge: 636 ms;
-   Polars: ~712 ms). **Remaining: groupby input-side conversions**
-   (~0.08x of Polars, unmoved) — same playbook.
+   Polars: ~712 ms). *Groupby fixed too*: a routing bug chose the
+   backend from the *first* input column, sending Arrow-string-keyed
+   groupbys down the NumPy path (object factorize). The choice now
+   considers only group keys + aggregation columns. 10M wide-frame
+   groupby-sum: 290 ms → **58 ms**; multi-agg 975 ms → **67 ms**
+   (Polars: 116 ms — first aggregation win). Output dtype consistency
+   improved as a side effect: string columns always come out as
+   pandas' default str dtype on every output path.
 
 2. **`head()`/limit fast path.** Polars answers `head(10)` on in-memory data
    in ~10µs; we spend milliseconds planning and copying. Needs a trivial-plan

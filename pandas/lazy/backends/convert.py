@@ -506,8 +506,15 @@ def arrays_to_dataframe(
         if use_arrow_dtype:
             # Zero-copy conversion using Arrow-backed dtypes
             # This is ~18x faster than converting to NumPy-backed dtypes
-            # (0.14ms vs 2.55ms for 800K rows)
-            df = table.to_pandas(types_mapper=pd.ArrowDtype)
+            # (0.14ms vs 2.55ms for 800K rows). String columns map to
+            # pandas' default Arrow-backed str dtype rather than
+            # ArrowDtype so output dtypes match the eager path.
+            def _types_mapper(pa_type):
+                if pa.types.is_string(pa_type) or pa.types.is_large_string(pa_type):
+                    return pd.StringDtype("pyarrow", na_value=np.nan)
+                return pd.ArrowDtype(pa_type)
+
+            df = table.to_pandas(types_mapper=_types_mapper)
         else:
             # Traditional conversion - copies data to NumPy arrays
             df = table.to_pandas()

@@ -1854,17 +1854,25 @@ class PhysicalHashAggregate(PhysicalPlan):
 
         input_arrays = self.input.execute(context)
 
-        # Determine backend from input arrays
-        # Prefer Arrow if any of the aggregation value columns are Arrow-backed,
-        # since Arrow's table groupby is generally more efficient
+        # Determine backend from the columns this aggregation actually
+        # uses: the group keys and the aggregation value columns. Unrelated
+        # payload columns must not influence the choice (a previous version
+        # fell back to the backend of the *first* input column, which sent
+        # Arrow-string-keyed groupbys down the NumPy path - factorizing the
+        # key through object arrays, ~5x slower than Arrow's table groupby).
+        # Arrow is preferred when any relevant column is Arrow-backed; string
+        # group keys are exactly where Arrow's hash aggregation wins most.
         value_cols = {col for _, col, _ in agg_specs}
-        has_arrow_values = any(
-            get_array_backend(input_arrays.get(col)) == "arrow"
-            for col in value_cols
+        relevant_cols = value_cols.union(group_cols or ())
+        relevant_backends = {
+            get_array_backend(input_arrays[col])
+            for col in relevant_cols
             if col in input_arrays
-        )
-        if has_arrow_values:
+        }
+        if "arrow" in relevant_backends:
             backend = "arrow"
+        elif relevant_backends:
+            backend = "numpy"
         else:
             first_col = next(iter(input_arrays.values()))
             backend = get_array_backend(first_col)

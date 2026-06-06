@@ -928,3 +928,43 @@ class TestParallelExecutionPaths:
         )
         assert str(result["text"].dtype) == "string"
         assert result["id"].dtype.kind in ("i", "u")
+
+    def test_groupby_backend_chosen_from_relevant_columns(self, monkeypatch):
+        # Regression: the groupby backend was chosen from the *first* input
+        # column, so a wide frame with leading NumPy columns sent
+        # Arrow-string-keyed groupbys down the NumPy path (object-array
+        # factorize, ~5x slower). The decision must consider only the
+        # group keys and aggregation value columns.
+        from pandas.lazy.physical import PhysicalHashAggregate
+
+        calls = []
+        original = PhysicalHashAggregate._execute_arrow_table_groupby
+
+        def spy(self, *args, **kwargs):
+            calls.append(True)
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(PhysicalHashAggregate, "_execute_arrow_table_groupby", spy)
+
+        rng = np.random.default_rng(0)
+        n = 2_000
+        df = pd.DataFrame(
+            {
+                "id": np.arange(n),  # leading NumPy column
+                "value1": rng.standard_normal(n),
+                "group": pd.array(rng.choice(["A", "B", "C"], n)),  # Arrow key
+            }
+        )
+        result = (
+            df.select()
+            .group_by("group")
+            .agg(col("value1").sum().alias("total"))
+            .collect(use_physical_planner=True)
+        )
+
+        assert calls, "Arrow-keyed groupby did not take the Arrow path"
+        expected = df.groupby("group")["value1"].sum().sort_index()
+        got = result.sort_values("group")["total"].to_numpy(dtype="float64")
+        # Approximate: Arrow's multi-threaded sum accumulates in a
+        # different order than pandas' sequential sum
+        assert np.allclose(got, expected.to_numpy())
