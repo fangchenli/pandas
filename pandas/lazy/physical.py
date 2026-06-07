@@ -986,8 +986,15 @@ class PhysicalParquetScan(PhysicalPlan):
             for col_name in batch.schema.names:
                 arrays[col_name] = batch.column(col_name)
 
-            # Generate index column for this batch
-            arrays[INDEX_COL_NAME] = pa.array(range(row_offset, row_offset + batch_len))
+            # Generate index column for this batch. np.arange, not a
+            # Python range: pa.array(range(...)) iterates one Python int
+            # per row - it dominated full-scan time (104 ms for a
+            # 2.9M-row file whose raw threaded read costs 9 ms).
+            import numpy as np
+
+            arrays[INDEX_COL_NAME] = pa.array(
+                np.arange(row_offset, row_offset + batch_len, dtype=np.int64)
+            )
             context.index_is_multi = False
             context.index_names = [None]
 
