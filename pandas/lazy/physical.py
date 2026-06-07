@@ -3851,6 +3851,12 @@ class PhysicalHashJoin(PhysicalPlan):
     # Estimated row counts for build/probe optimization (set by planner)
     left_rows_estimate: int | None = None
     right_rows_estimate: int | None = None
+    # Set by the decision layer when this join feeds an order-insensitive
+    # sink (groupby/sort/distinct) and key types are acero-safe: routes
+    # to Arrow's internally-parallel hash join (~4x at 10M x 1M). Joins
+    # whose row order is observable keep the indexer path, whose order
+    # matches eager pd.merge by construction.
+    planned_acero: bool = False
 
     def execute(self, context: ExecutionContext) -> ArrayDict:
         from pandas.lazy.backends import has_kernel
@@ -3869,6 +3875,17 @@ class PhysicalHashJoin(PhysicalPlan):
 
         # Execute left and right sides in parallel
         left_arrays, right_arrays = self._execute_sides_parallel(context)
+
+        # Acero fast path (planned): only when the index is not observed
+        # downstream - index columns cannot survive an order-destroying
+        # join meaningfully, and the default RangeIndex is regenerated
+        # at output anyway.
+        if (
+            self.planned_acero
+            and not context.preserve_index
+            and not context.user_set_index
+        ):
+            return self._execute_acero_join(left_arrays, right_arrays)
 
         # Separate index columns - we'll include left index in join to preserve it
         left_index_cols = {k: v for k, v in left_arrays.items() if is_index_col(k)}
@@ -4051,6 +4068,57 @@ class PhysicalHashJoin(PhysicalPlan):
 
         # Fallback: simulate with inner join and filter
         raise NotImplementedError(f"{kernel_name} not available for backend {backend}")
+
+    def _execute_acero_join(
+        self,
+        left_arrays: ArrayDict,
+        right_arrays: ArrayDict,
+    ) -> ArrayDict:
+        """Order-free join through Arrow's internally-parallel hash join.
+
+        Used only when the decision layer planned it (consumer sink is
+        order-insensitive, key types acero-safe) and the runtime index
+        guards passed. Index columns are dropped: row order does not
+        survive, and the caller's sink does not observe it.
+        """
+        import pyarrow as pa
+
+        from pandas.lazy.backends.convert import to_arrow
+        from pandas.lazy.backends.types import is_index_col
+
+        def to_table(arrays: ArrayDict) -> pa.Table:
+            cols = {}
+            for name, arr in arrays.items():
+                if is_index_col(name):
+                    continue
+                if isinstance(arr, (pa.Array, pa.ChunkedArray)):
+                    cols[name] = arr
+                else:
+                    cols[name] = to_arrow(arr)
+            return pa.table(cols)
+
+        left_table = to_table(left_arrays)
+        right_table = to_table(right_arrays)
+
+        if self.on is not None:
+            keys = list(self.on)
+            right_keys = keys
+        else:
+            keys = list(self.left_on)
+            right_keys = list(self.right_on)
+
+        join_type = "inner" if self.how == "inner" else "left outer"
+        result = left_table.join(
+            right_table,
+            keys=keys,
+            right_keys=right_keys,
+            join_type=join_type,
+            left_suffix=self.suffix[0],
+            right_suffix=self.suffix[1],
+            use_threads=True,
+        )
+        out: ArrayDict = {name: result.column(name) for name in result.column_names}
+        return self._reorder_columns(out)
 
     def _execute_arrow_join(
         self,

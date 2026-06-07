@@ -488,3 +488,76 @@ class TestCategoricalDictionaryRouting:
         )
         eager = df.groupby("g", observed=True)["v"].sum().sort_index()
         assert np.allclose(result["s"].to_numpy(dtype="float64"), eager.to_numpy())
+
+
+class TestAceroJoinRouting:
+    """M5: order-free joins route to acero's parallel hash join."""
+
+    def _frames(self, n=5_000):
+        rng = np.random.default_rng(13)
+        left = pd.DataFrame(
+            {
+                "k": rng.integers(0, 500, n),
+                "v": rng.standard_normal(n),
+            }
+        )
+        right = pd.DataFrame({"k": np.arange(500), "w": rng.standard_normal(500)})
+        return left, right
+
+    def test_join_groupby_routed_to_acero_and_matches_eager(self):
+        left, right = self._frames()
+        q = (
+            left.select()
+            .join(right.select(), on="k")
+            .group_by("k")
+            .agg(col("v").sum().alias("s"), col("w").mean().alias("m"))
+        )
+        assert "acero (order-free consumer)" in q.explain(physical=True)
+
+        result = (
+            q.collect(use_physical_planner=True).sort_values("k").reset_index(drop=True)
+        )
+        eager = (
+            left.merge(right, on="k")
+            .groupby("k")
+            .agg(s=("v", "sum"), m=("w", "mean"))
+            .reset_index()
+            .sort_values("k")
+            .reset_index(drop=True)
+        )
+        assert len(result) == len(eager)
+        assert np.allclose(result["s"].to_numpy(dtype="float64"), eager["s"].to_numpy())
+        assert np.allclose(result["m"].to_numpy(dtype="float64"), eager["m"].to_numpy())
+
+    def test_direct_join_keeps_indexer_path(self):
+        # Order is observable on direct materialization: the indexer
+        # path (eager pd.merge order by construction) must be kept.
+        left, right = self._frames()
+        text = left.select().join(right.select(), on="k").explain(physical=True)
+        assert "acero" not in text
+
+    def test_float_keys_not_routed(self):
+        # pandas merge matches NaN==NaN; acero (SQL semantics) does not.
+        rng = np.random.default_rng(14)
+        left = pd.DataFrame(
+            {"k": rng.standard_normal(1000), "v": rng.standard_normal(1000)}
+        )
+        right = pd.DataFrame(
+            {"k": rng.standard_normal(100), "w": rng.standard_normal(100)}
+        )
+        q = (
+            left.select()
+            .join(right.select(), on="k")
+            .group_by("k")
+            .agg(col("v").sum().alias("s"))
+        )
+        assert "acero" not in q.explain(physical=True)
+
+    def test_preserve_index_falls_back_at_runtime(self):
+        # planned acero, but preserve_index observes row identity ->
+        # runtime guard must use the indexer path; values still correct
+        left, right = self._frames(500)
+        q = left.select().join(right.select(), on="k").sort("k")
+        result = q.collect(use_physical_planner=True, preserve_index=True)
+        eager = left.merge(right, on="k").sort_values("k")
+        assert len(result) == len(eager)

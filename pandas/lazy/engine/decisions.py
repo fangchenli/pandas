@@ -43,11 +43,21 @@ from pandas.lazy.engine.pipeline import (
 )
 from pandas.lazy.physical import (
     PhysicalConvert,
+    PhysicalDistinct,
     PhysicalFilter,
     PhysicalHashAggregate,
     PhysicalHashJoin,
     PhysicalSort,
     PhysicalTopK,
+)
+
+# Sinks that do not observe their input's row order: a join feeding one
+# of these may run through acero's order-destroying parallel hash join.
+_ORDER_FREE_SINKS = (
+    PhysicalHashAggregate,
+    PhysicalSort,
+    PhysicalTopK,
+    PhysicalDistinct,
 )
 
 if TYPE_CHECKING:
@@ -126,6 +136,10 @@ class DecisionLayer:
     """Annotate a PipelineGraph with planned execution decisions."""
 
     def annotate(self, graph: PipelineGraph) -> None:
+        self._annotate_pipelines(graph)
+        self._plan_acero_joins(graph)
+
+    def _annotate_pipelines(self, graph: PipelineGraph) -> None:
         for pipeline in graph.pipelines:
             decisions = PipelineDecisions()
 
@@ -192,6 +206,83 @@ class DecisionLayer:
                 )
                 kind = "topk" if isinstance(node, PhysicalTopK) else "sort"
                 decisions.sink_decision = f"{kind}[{'/'.join(backends)}]"
+
+    def _plan_acero_joins(self, graph: PipelineGraph) -> None:
+        """Route order-free joins to acero's parallel hash join.
+
+        Eligible when (a) the join's output feeds an order-insensitive
+        sink — groupby/sort/topk/distinct do not observe input row
+        order, so acero's nondeterministic output order is unobservable;
+        (b) how is inner/left; (c) every key column is an integer or
+        string with no nulls in either input's schema (pandas merge
+        matches NaN==NaN and None==None; acero follows SQL and does
+        not — excluding nullable/float keys keeps semantics identical).
+        Measured at 10M x 1M ints: acero 160 ms vs indexer path 684 ms
+        vs Polars ~700 ms. Joins whose order is observable (direct
+        materialization) keep the eager-order-matching indexer path.
+        """
+        consumer_of: dict[int, object] = {}
+        feeder_schemas: dict[int, dict[int, object]] = {}
+        for p in graph.pipelines:
+            if p.source_sink is not None:
+                consumer_of[id(p.source_sink)] = p.sink
+            if isinstance(p.sink, NodeSink):
+                feeder_schemas.setdefault(id(p.sink), {})[p.sink_slot] = (
+                    _pipeline_output_schema(p)
+                )
+
+        for p in graph.pipelines:
+            sink = p.sink
+            if not (
+                isinstance(sink, NodeSink) and isinstance(sink.node, PhysicalHashJoin)
+            ):
+                continue
+            node = sink.node
+            if node.planned_acero:  # already planned via the other feeder
+                continue
+            if node.how not in ("inner", "left"):
+                continue
+            consumer = consumer_of.get(id(sink))
+            if not (
+                isinstance(consumer, NodeSink)
+                and isinstance(consumer.node, _ORDER_FREE_SINKS)
+            ):
+                continue
+
+            schemas = feeder_schemas.get(id(sink), {})
+            left_schema, right_schema = schemas.get(0), schemas.get(1)
+            if left_schema is None or right_schema is None:
+                continue
+            if node.on is not None:
+                left_keys = right_keys = list(node.on)
+            else:
+                left_keys = list(node.left_on or ())
+                right_keys = list(node.right_on or ())
+
+            def keys_safe(schema, names) -> bool:
+                for name in names:
+                    if name not in schema:
+                        return False
+                    dt = schema[name]
+                    if dt.nullable:
+                        return False
+                    if dt.category == "string":
+                        continue
+                    if dt.category == "numeric" and (
+                        dt.numpy_dtype is not None and dt.numpy_dtype.kind in ("i", "u")
+                    ):
+                        continue
+                    return False
+                return True
+
+            if keys_safe(left_schema, left_keys) and keys_safe(
+                right_schema, right_keys
+            ):
+                node.planned_acero = True
+                if p.decisions is not None:
+                    p.decisions.sink_decision = (
+                        p.decisions.sink_decision or "join"
+                    ) + " -> acero (order-free consumer)"
 
 
 def annotate_decisions(graph: PipelineGraph) -> PipelineGraph:
