@@ -42,11 +42,17 @@ if TYPE_CHECKING:
     from pandas.lazy.backends.types import ArrayDict
     from pandas.lazy.engine.pipeline import Pipeline
 
-# Tunables live in the cost model (pandas/lazy/cost.py, M2); imported
-# under the same names so tests can monkeypatch this module's globals.
-from pandas.lazy.cost import (
-    MAX_WORKERS,
-)
+# Tunables live in the cost model (pandas/lazy/cost.py, M2). Bound by
+# ASSIGNMENT, not import-as-name: ruff's unused-import autofix silently
+# stripped re-exported names here once (MIN_PARALLEL_ROWS is consumed
+# by pipeline.py, invisible to this module's linting), breaking every
+# physical collect. Assignments are strip-proof, tests can still
+# monkeypatch this module's globals, and identity with cost.* holds.
+from pandas.lazy import cost as _cost
+
+MORSEL_SIZE = _cost.MORSEL_SIZE
+MIN_PARALLEL_ROWS = _cost.MIN_PARALLEL_ROWS
+MAX_WORKERS = _cost.MAX_WORKERS
 
 # IR functions that are order-dependent: applying them per morsel or
 # feeding them rows in a different order changes results. Shared with
