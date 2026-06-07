@@ -1,9 +1,28 @@
 # Logical and Physical Planning
 
-> **Note**: this documents the *current* planner. The approved target
-> architecture (morsel-driven pipeline engine) and the evolutionary
-> migration plan live in [ENGINE_DESIGN.md](ENGINE_DESIGN.md); sections
-> here will be updated as milestones land.
+> **Note (engine era, June 2026)**: the morsel-driven pipeline engine of
+> [ENGINE_DESIGN.md](ENGINE_DESIGN.md) is now the execution model — all
+> six milestones are landed or measurement-gated. This document covers
+> logical planning and the physical *node* layer, which remain accurate;
+> execution flow on top of them changed as follows:
+>
+> - Every `collect(use_physical_planner=True)` compiles the physical
+>   tree into an explicit **pipeline graph** (`pandas/lazy/engine/`)
+>   and executes through it; nodes still run their own `execute()`
+>   (M1). `explain(physical=True)` renders the graph.
+> - A **decision layer** (`engine/decisions.py`) annotates the graph at
+>   plan time — per-column backends, groupby/filter backend choices,
+>   join build sides, and acero join routing with order-freeness
+>   propagation (M2/M5). Engine decision constants live in the cost
+>   model, `pandas/lazy/cost.py`.
+> - Stateless compute-bound chains over in-memory sources run
+>   **morsel-parallel** (`engine/parallel.py`, M3, measurement-gated).
+> - File-scan-sourced pipelines execute through the nodes' native
+>   `execute_batches` streaming, with `head()` limits pushed into
+>   `ParquetSource` and a direct small-limit path (M6).
+>
+> The "Plan-time vs run-time decisions" section below predates the
+> decision layer; where it conflicts, the decision layer is current.
 
 How a lazy query becomes an executable plan: construction of the logical
 plan, and the physical planner that turns the optimized logical plan into

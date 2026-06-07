@@ -36,7 +36,7 @@ print(ldf.explain(physical=True))    # physical plan with pipeline boundaries
 | [examples.py](examples.py) | Runnable end-to-end tour (`python pandas/lazy/docs/examples.py`) |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | System design: expression IR, logical/physical plans, array-based execution, backends, joins, streaming, spilling |
 | [PLANNING.md](PLANNING.md) | Logical plan construction and the physical planner: node mapping, materialization boundaries, operator fusion, plan-time vs run-time decisions |
-| [ENGINE_DESIGN.md](ENGINE_DESIGN.md) | **The target architecture**: morsel-driven pipeline engine — principles, scheduler, parallel sinks, GIL analysis, evolutionary milestones |
+| [ENGINE_DESIGN.md](ENGINE_DESIGN.md) | **The engine** (all milestones landed/gated, June 2026): morsel-driven pipeline architecture — principles, decision layer, parallel sinks, measured gates and the disproven-hypothesis trail |
 | [OPTIMIZER.md](OPTIMIZER.md) | Query optimizer: passes, ordering rationale, safety rules, engine selection |
 | [KERNELS.md](KERNELS.md) | Kernel reference: which operations run on which backend (Arrow/NumPy/Bottleneck) and how they perform |
 | [THRESHOLDS.md](THRESHOLDS.md) | Cost-based decision thresholds: configuration, calibration, adaptive tuning |
@@ -58,6 +58,9 @@ pandas/lazy/
 ├── eval.py           # Pandas-based evaluator (fallback path)
 ├── scan.py           # Lazy file scanning (Parquet, CSV)
 ├── physical.py       # Physical planner and operators
+├── cost.py           # Engine cost model: decision constants + provenance
+├── engine/           # Pipeline engine: graph compiler, executor,
+│                     # decision layer, morsel parallelism (ENGINE_DESIGN.md)
 ├── optimize/         # Query optimizer (passes, engine selection, config)
 ├── backends/         # Kernel registry, router, Arrow/NumPy kernels,
 │                     # memory pools, NumExpr fusion, spilling

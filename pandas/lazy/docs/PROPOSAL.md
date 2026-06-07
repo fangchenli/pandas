@@ -18,11 +18,11 @@ with a single integration point (`DataFrame.select()`) and everything else
 isolated under a new `pandas.lazy` module.
 
 The prototype is complete enough to evaluate the design: ~30k lines of
-implementation, ~1,500 tests (including an eager↔physical equivalence
+implementation, ~1,575 tests (including an eager↔physical equivalence
 suite), and an honest benchmark story — 2–10x wins over eager pandas on
-pipelines, ahead of Polars in two categories (string transforms,
-multi-aggregation groupbys) and within 0.2–0.5x elsewhere, with the
-remaining gaps measured and attributed
+pipelines, ahead of Polars in three categories (string transforms 2.1×,
+aggregation 1.2×, glob scans 1.6×) and within 0.2–0.9x elsewhere, with
+the remaining gaps measured and attributed
 (see [Status](#status-and-performance)).
 
 **This document is a request for direction, not a merge request.** See
@@ -218,12 +218,15 @@ Honest numbers (Apple Silicon; details in
   (planning overhead) — lazy is for pipelines.
 - **vs Polars** (June 2026, physical engine, mixed-dtype data; measured
   after a methodology fix — pre-June reports had measured the eager path):
-  **wins across the string category** (2.18× avg — `str.lower` 5.25×,
-  `contains` 1.72×) and on multi-aggregation groupbys (1.19×), and is
-  within 0.2–0.6× elsewhere: sort 0.42×, the join→groupby composite
-  0.58×, joins (order-preserving) 0.29×, parquet scans 0.26×,
-  filter+project 0.21×. `head()` remains Polars' best case (µs vs our
-  ~300 µs of plan construction).
+  **wins three categories**: strings (2.07× avg — `str.lower` 4.38×,
+  `contains` 1.71×), aggregation (1.17× avg — multi-agg 3.47×,
+  string-key groupby-sum 1.02× at 10M via the dictionary-encoding
+  cache, warm from the second query), and glob `head()` (1.55×).
+  Parquet scans average 0.86×; elsewhere 0.2–0.6×: join→groupby
+  composite 0.58×, sort 0.39–0.47×, joins (order-preserving — the
+  documented price of eager `pd.merge` row-order semantics) 0.22×,
+  filter+project 0.23×. In-memory `head()` remains Polars' best case
+  (µs vs our ~300 µs of plan construction).
 
 These numbers are the product of two distinct development phases, both
 fully documented:

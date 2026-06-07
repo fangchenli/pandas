@@ -1,98 +1,72 @@
 # Lazy Pandas Roadmap
 
 Open work, known gaps, and design questions. Implemented work is documented
-in [ARCHITECTURE.md](ARCHITECTURE.md), [PLANNING.md](PLANNING.md), and
-[OPTIMIZER.md](OPTIMIZER.md); dated performance reports live in
+in [ARCHITECTURE.md](ARCHITECTURE.md), [PLANNING.md](PLANNING.md),
+[OPTIMIZER.md](OPTIMIZER.md), and — for the execution engine —
+[ENGINE_DESIGN.md](ENGINE_DESIGN.md), whose six milestones are all landed
+or measurement-gated as of June 2026. Dated performance reports live in
 `../benchmarks/`.
 
-## Competitive Standing (vs Polars, June 2026 — physical engine)
+## Competitive Standing (vs Polars, June 2026 — engine era)
 
 From `../benchmarks/LAZY_VS_POLARS_BENCHMARK.md` (1M–10M rows, mixed-dtype
-data, Apple Silicon). Speedup > 1.0 = lazy pandas faster. The January
-report had measured the eager path by mistake; all numbers below are the
-physical engine after the June conversion/routing fix cycle:
+data, Apple Silicon; physical engine). Speedup > 1.0 = lazy pandas faster.
+Two development phases produced these numbers: the conversion fix cycle
+(June 6), then the designed engine (M1–M6, June 6–7):
 
-| Category | Avg | Best | Movement this cycle |
-|----------|-----|------|---------------------|
-| string | **1.10x** | 2.43x (`str.lower`) | 0.27x → win (pass-through output fix) |
-| aggregation | 0.53x | **2.11x** (multi-agg) | 0.07x → partial win (groupby routing fix) |
-| join | 0.31x | 0.39x | 0.06x → competitive (Cython indexers + native gathers) |
-| parquet_scan | 0.30x | 0.74x | ~flat |
-| sort | 0.27x | 0.34x | 0.17x → (parallel argsort, Arrow multi-key) |
-| filter_project | 0.22x | 0.39x | 0.03x worst case → 0.39x (fused-mask pruning) |
-| limit | 0.03x | — | ~0x → ~200 µs absolute (trivial-slice fast path) |
+| Category | Standing | Driver |
+|----------|----------|--------|
+| string | **2.07x avg — wins** (`str.lower` 4.38x, `contains` 1.71x) | pass-through fix + compute-bound morsel parallelism |
+| aggregation | **1.17x avg — wins** (multi-agg 3.47x, groupby-sum 1.02x @10M) | groupby routing + dictionary-encoding cache (warm from 2nd query) |
+| parquet scan | 0.86x avg — glob `head()` **wins 1.55x** (6.7 ms vs 10.3) | limit pushdown into scans + direct ParquetFile path + vectorized index |
+| join→groupby composite | 0.58x | acero routing for order-free joins |
+| sort | 0.42x | k-way segment merge (3.6x kernel) |
+| category-key groupby | 0.43x vs Polars-categorical | zero-copy dictionary flow (was 313 ms, now 21) |
+| full-scan select+filter | ~0.37x (21 ms) | vectorized index column (was 104 ms) |
+| filter_project | 0.21x | bandwidth-bound; single thread saturates (measured) |
+| join (order-preserving) | 0.29x | the price of eager `pd.merge` row-order semantics — a documented choice |
+| limit (in-memory) | ~300 µs absolute | plan-construction floor |
 
-Common thread of the cycle: kernels were never the bottleneck — data
-movement between them was. Every fix removed conversions or routing
-mistakes on columns no operation touched.
+Themes, each measured: kernels were never the bottleneck (the fix cycle);
+parallelism belongs in internally-parallel C++ kernels routed by plan-time
+decisions, with Python threads only for compute-bound kernels (the engine);
+and representation — dictionary keys, vectorized index columns — is worth
+more than threading on bandwidth-bound paths.
 
-## High-Impact Opportunities
+## Open Opportunities (ranked)
 
-1. **Stop converting pass-through columns.** *Output side fixed*: the
-   final DataFrame assembly was round-tripping untouched Arrow columns
-   through object arrays (379 ms → 51 ms for `with_columns` at 10M with
-   one string column; physical `str.lower` went from a 0.39x loss to a
-   2.4x win over Polars; up to -70% on physical pipeline baselines).
-   Output now wraps Arrow columns zero-copy and leaves NumPy columns
-   alone — locked by `test_passthrough_arrow_column_not_copied`.
-   *Join side fixed too*: the NumPy join np.asarray'd every column
-   (Arrow strings → object) and used a pure-NumPy indexer ~6x slower
-   than pandas' Cython hash join. The kernel now computes indexers via
-   `pandas.core.reshape.merge.get_join_indexers` (the same machinery as
-   eager `pd.merge` — row order and NaN-key semantics match by
-   construction) and gathers payload columns in their native backend.
-   10M×1M inner join: ~13,000 ms → **846 ms** (eager merge: 636 ms;
-   Polars: ~712 ms). *Groupby fixed too*: a routing bug chose the
-   backend from the *first* input column, sending Arrow-string-keyed
-   groupbys down the NumPy path (object factorize). The choice now
-   considers only group keys + aggregation columns. 10M wide-frame
-   groupby-sum: 290 ms → **58 ms**; multi-agg 975 ms → **67 ms**
-   (Polars: 116 ms — first aggregation win). Output dtype consistency
-   improved as a side effect: string columns always come out as
-   pandas' default str dtype on every output path.
-
-2. ~~**`head()`/limit fast path.**~~ **Done**: `collect()` short-circuits
-   `Limit` over pure column selections of an in-memory source, slicing
-   directly (CoW makes the views safe). 9,000–14,000 µs → **~200 µs** at
-   any size. The fix also removed an O(n) `isna` scan per column from
-   `Schema.from_dataframe` — plan construction is now O(1) per column,
-   which benefits *every* lazy query, not just head. Remaining gap to
-   Polars' ~10 µs is plan-construction overhead (see item 3).
-
-3. **Planning-overhead fast paths.** Single filter/select queries pay
-   60–80% of their lazy overhead in the optimizer. Heuristics worth
-   implementing (from `bench_planning_phases.py`):
-
-   | Condition | Skip | Savings |
-   |-----------|------|---------|
-   | Single filter/select | entire optimizer | 60–80% of overhead |
-   | No repeated expressions | CSE pass | 10–20% |
-   | Flat query (no nesting) | PredicatePushdown | 5–10% |
-   | No limits | LimitPushdown, SortLimitToTopK | ~5% |
-   | < 10K rows | lazy path entirely (use eager) | all of it |
-
-4. **Sort performance.** 0.2x of Polars; needs parallel sort and/or Arrow
-   sort improvements; multi-key sort is the worst case.
-
-5. **Join performance.** 0.15x of Polars despite build/probe + parallel
-   sides; profile hash table build (a swisstable-style hash table is one
-   candidate) and output materialization.
-
-6. **Cardinality estimation.** Row estimates exist for sources and
-   size-preserving nodes but stop at filters (`estimate_row_count()`
-   returns None — no selectivity model). Simple selectivity estimates
-   (histogram/sample/default-10%) would make engine selection and
-   join-side choice cost-based instead of threshold-based.
+1. **JAX/XLA kernel backend** (the breakthrough candidate — see
+   ENGINE_DESIGN.md "Future backends"). Fused codegen is the only
+   identified lever against the measured memory-bandwidth ceiling that
+   caps bandwidth-bound chains at ~1x for *any* thread-based approach;
+   GPU morsels are the speculative extension. The prerequisites (pipeline
+   objects, per-column backend planning, conversion costing) all exist.
+2. **Acero raw-string hash gap.** acero groups raw `large_string` keys at
+   67 ms/10M vs Polars' 18; the dictionary cache solves repeated queries
+   but first-query and one-shot workloads still pay. Upstream Arrow work
+   or a pre-hashing trick are the options.
+3. **Order-relaxed collect mode.** `collect(order="relaxed")` would widen
+   acero join routing to *every* join (not just order-free consumers) —
+   Polars-style semantics as a user opt-in, arbitrated by the existing
+   decision-layer machinery.
+4. **Planning-overhead fast paths.** Single-op queries pay 60–80% of lazy
+   overhead in the optimizer (`bench_planning_phases.py`); skip passes by
+   plan shape. The ~300 µs limit floor is this item.
+5. **Cardinality estimation.** Row estimates stop at filters (no
+   selectivity model); estimates feed the decision layer's join build-side
+   and parallelism-degree choices, so better estimates compound.
+6. **Free-threaded partition joins.** pandas' Cython hash join holds the
+   GIL (measured: threaded partition-pairs 461→535 ms at 2→8 threads vs
+   430 serial). On free-threaded Python the M5-spec'd partitioned join
+   becomes buildable; the engine architecture needs no changes to exploit
+   it.
 
 ## Known Semantic Issues (bugs, not design choices)
 
-- ~~**NaN vs null in aggregation**~~ **Fixed**: Arrow kernels mask NaN→null
-  before aggregating (`mask_nan_to_null`), NumPy kernels drop NaN values and
-  negative factorize codes, and rows with missing group keys are dropped
-  (pandas `dropna=True`). Locked by `TestNaNAggregationSemantics`.
-- **Output dtype instability**: the physical engine returns Arrow-backed
-  dtypes on some paths (large filters) and NumPy dtypes on others
-  (small data, groupby outputs). Pick one contract and enforce it.
+- **Output dtype instability**: shrunk but not settled — string columns
+  now come out as pandas' default str dtype on every output path, but
+  numeric outputs may be Arrow-backed on some paths and NumPy on others.
+  Pick one contract and enforce it.
 - **Duplicate column labels** crash with `AttributeError` instead of a
   clear "unsupported" error at plan construction.
 - **`shift` is unimplemented in the eager evaluator** while `lag` works in
@@ -102,25 +76,31 @@ mistakes on columns no operation touched.
 
 - **JSON scanning** — `scan.py` accepts `format="json"` but raises
   `NotImplementedError`.
+- **CSV limit pushdown** — Parquet scans got `ParquetSource.limit` +
+  the direct small-limit path; CSV scans have neither.
 - **Partition-aware execution** — parallel processing of pre-partitioned
   (e.g. hive-partitioned Parquet) data.
 - **Adaptive thresholds maturation** — the EMA-based tuner
-  (`optimize/adaptive.py`) is experimental and off by default; needs
-  evaluation under mixed workloads before enabling.
+  (`optimize/adaptive.py`) is experimental and off by default; the cost
+  model (`pandas/lazy/cost.py`) is now the natural calibration target.
 - **Nullable dtype preservation** — physical execution can widen nullable
-  ints through NumPy kernels; track original dtypes in the execution context
-  and restore on output.
+  ints through NumPy kernels; track original dtypes in the execution
+  context and restore on output.
 - **RangeIndex preservation** — `preserve_index=True` materializes a
   RangeIndex as int64 values; could carry the range representation through
   the plan instead.
+- **Compute-bound kernel classes** — morsel parallelism currently
+  recognizes `str_*` only; regex and date parsing are unmeasured
+  candidates (`cost.py` / `engine/parallel.py`).
 
 ## Where Lazy Already Wins (keep protected by benchmarks)
 
 | Scenario | Typical speedup vs eager | Mechanism |
 |----------|--------------------------|-----------|
 | Sequential filters | 1.5–2x | filter fusion |
-| filter + `head(N)` | 2–10x (10x+ on multi-file) | streaming early termination |
-| Arrow string pipelines | 2–10x | Arrow kernels |
+| filter + `head(N)` | 2–10x (10x+ on multi-file) | streaming early termination + scan limit pushdown |
+| Arrow string pipelines | 2–10x | Arrow kernels + morsel parallelism |
+| Repeated string-key groupbys | ~3x from 3rd query | dictionary-encoding cache |
 | Multi-step pipelines | 1.2–1.5x | reduced materialization |
 | Larger-than-memory | n/a (enables) | streaming + spill |
 
