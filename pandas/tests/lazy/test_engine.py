@@ -612,6 +612,16 @@ class TestScanStreamingThroughPipelines:
         )
         assert list(result["a"]) == list(range(4990, 5000))
 
+
+class TestOrderFreenessPropagation:
+    """Acero routing propagates through order-transparent streaming ops."""
+
+    def _frames(self, n=5_000):
+        rng = np.random.default_rng(13)
+        left = pd.DataFrame({"k": rng.integers(0, 500, n), "v": rng.standard_normal(n)})
+        right = pd.DataFrame({"k": np.arange(500), "w": rng.standard_normal(500)})
+        return left, right
+
     def test_order_freeness_propagates_through_filter(self):
         # join -> filter -> groupby: the filter is order-transparent, so
         # the join's output order is still unobservable -> acero routes
