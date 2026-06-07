@@ -611,3 +611,66 @@ class TestScanStreamingThroughPipelines:
             .collect(use_physical_planner=True)
         )
         assert list(result["a"]) == list(range(4990, 5000))
+
+    def test_order_freeness_propagates_through_filter(self):
+        # join -> filter -> groupby: the filter is order-transparent, so
+        # the join's output order is still unobservable -> acero routes
+        left, right = self._frames()
+        q = (
+            left.select()
+            .join(right.select(), on="k")
+            .filter(col("v") > 0)
+            .group_by("k")
+            .agg(col("v").sum().alias("s"))
+        )
+        assert "acero" in q.explain(physical=True)
+        result = (
+            q.collect(use_physical_planner=True).sort_values("k").reset_index(drop=True)
+        )
+        eager = (
+            left.merge(right, on="k")
+            .query("v > 0")
+            .groupby("k")["v"]
+            .sum()
+            .reset_index(name="s")
+            .sort_values("k")
+            .reset_index(drop=True)
+        )
+        assert len(result) == len(eager)
+        assert np.allclose(result["s"].to_numpy(dtype="float64"), eager["s"].to_numpy())
+
+    def test_limit_blocks_order_freeness(self):
+        left, right = self._frames()
+        q = (
+            left.select()
+            .join(right.select(), on="k")
+            .head(100)
+            .group_by("k")
+            .agg(col("v").sum().alias("s"))
+        )
+        assert "acero" not in q.explain(physical=True)
+
+    def test_order_dependent_expr_blocks_order_freeness(self):
+        left, right = self._frames()
+        q = (
+            left.select()
+            .join(right.select(), on="k")
+            .with_columns(col("v").cum_sum().alias("c"))
+            .group_by("k")
+            .agg(col("c").max().alias("m"))
+        )
+        assert "acero" not in q.explain(physical=True)
+
+    def test_order_freeness_recurses_through_joins(self):
+        # join -> join -> groupby: both joins route
+        rng = np.random.default_rng(15)
+        left, right = self._frames()
+        third = pd.DataFrame({"k": np.arange(500), "z": rng.standard_normal(500)})
+        q = (
+            left.select()
+            .join(right.select(), on="k")
+            .join(third.select(), on="k")
+            .group_by("k")
+            .agg(col("v").sum().alias("s"))
+        )
+        assert q.explain(physical=True).count("acero") == 2

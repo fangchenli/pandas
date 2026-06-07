@@ -42,6 +42,7 @@ from pandas.lazy.engine.pipeline import (
     PipelineGraph,
 )
 from pandas.lazy.physical import (
+    PhysicalConcat,
     PhysicalConvert,
     PhysicalDistinct,
     PhysicalFilter,
@@ -94,6 +95,59 @@ def _pipeline_output_schema(pipeline: Pipeline) -> Schema | None:
     if isinstance(pipeline.source_sink, NodeSink):
         return pipeline.source_sink.node.output_schema
     return None
+
+
+def _expr_is_order_transparent(ir) -> bool:
+    """True if evaluating this expression cannot observe row order."""
+    from pandas.lazy.engine.parallel import ORDER_SENSITIVE_FUNCTIONS
+    from pandas.lazy.ir import (
+        Alias,
+        Call,
+    )
+
+    if isinstance(ir, Alias):
+        return _expr_is_order_transparent(ir.arg)
+    if isinstance(ir, Call):
+        if ir.function in ORDER_SENSITIVE_FUNCTIONS:
+            return False
+        return all(_expr_is_order_transparent(a) for a in ir.args)
+    return True
+
+
+def _op_is_order_transparent(op) -> bool:
+    """True if this streaming operator neither observes nor depends on
+    its input's row order (limits observe it; window/cumulative
+    expressions depend on it; plain filters/projects/converts do not)."""
+    from pandas.lazy.physical import (
+        PhysicalFusedPipeline,
+        PhysicalLimit,
+        PhysicalMaterialize,
+    )
+
+    if isinstance(op, (PhysicalConvert, PhysicalMaterialize)):
+        return True
+    if isinstance(op, PhysicalLimit):
+        return False
+    if isinstance(op, PhysicalFilter):
+        return _expr_is_order_transparent(op.predicate._ir)
+    if isinstance(op, PhysicalFusedPipeline):
+        for fop in op.operations:
+            if fop.op_type == "limit":
+                return False
+            if fop.op_type == "filter" and not _expr_is_order_transparent(
+                fop.predicate._ir
+            ):
+                return False
+            if fop.op_type == "project" and not all(
+                _expr_is_order_transparent(e._ir) for e in fop.exprs
+            ):
+                return False
+        return True
+    from pandas.lazy.physical import PhysicalProject
+
+    if isinstance(op, PhysicalProject):
+        return all(_expr_is_order_transparent(e._ir) for e in op.exprs)
+    return False  # unknown operator: assume it observes order
 
 
 def _plan_groupby_backend(node: PhysicalHashAggregate, input_schema: Schema) -> str:
@@ -221,15 +275,39 @@ class DecisionLayer:
         vs Polars ~700 ms. Joins whose order is observable (direct
         materialization) keep the eager-order-matching indexer path.
         """
-        consumer_of: dict[int, object] = {}
+        # Pipeline whose source is a given sink (downstream walk), and
+        # feeder schemas per sink slot.
+        consumer_pipeline: dict[int, Pipeline] = {}
         feeder_schemas: dict[int, dict[int, object]] = {}
         for p in graph.pipelines:
             if p.source_sink is not None:
-                consumer_of[id(p.source_sink)] = p.sink
+                consumer_pipeline[id(p.source_sink)] = p
             if isinstance(p.sink, NodeSink):
                 feeder_schemas.setdefault(id(p.sink), {})[p.sink_slot] = (
                     _pipeline_output_schema(p)
                 )
+
+        def output_order_unobservable(sink: NodeSink) -> bool:
+            """Walk downstream: is this sink's output row order observable?
+
+            True when every operator between here and an order-free
+            terminal sink is order-transparent (filters/projects/
+            converts whose expressions contain no order-dependent
+            function), recursing through downstream joins and concats
+            whose own output order is likewise unobservable.
+            """
+            p = consumer_pipeline.get(id(sink))
+            if p is None:
+                return False  # feeds the collect output: order observable
+            if not all(_op_is_order_transparent(op) for op in p.operators):
+                return False
+            nxt = p.sink
+            if isinstance(nxt, NodeSink):
+                if isinstance(nxt.node, _ORDER_FREE_SINKS):
+                    return True
+                if isinstance(nxt.node, (PhysicalHashJoin, PhysicalConcat)):
+                    return output_order_unobservable(nxt)
+            return False
 
         for p in graph.pipelines:
             sink = p.sink
@@ -242,11 +320,7 @@ class DecisionLayer:
                 continue
             if node.how not in ("inner", "left"):
                 continue
-            consumer = consumer_of.get(id(sink))
-            if not (
-                isinstance(consumer, NodeSink)
-                and isinstance(consumer.node, _ORDER_FREE_SINKS)
-            ):
+            if not output_order_unobservable(sink):
                 continue
 
             schemas = feeder_schemas.get(id(sink), {})

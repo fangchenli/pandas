@@ -47,9 +47,10 @@ MORSEL_SIZE = 131_072
 MIN_PARALLEL_ROWS = 2 * MORSEL_SIZE
 MAX_WORKERS = 8
 
-# IR functions that are order- or whole-input-dependent: applying them
-# per morsel would change results.
-_NON_MORSEL_FUNCTIONS = frozenset(
+# IR functions that are order-dependent: applying them per morsel or
+# feeding them rows in a different order changes results. Shared with
+# the decision layer's order-freeness propagation for acero routing.
+ORDER_SENSITIVE_FUNCTIONS = frozenset(
     {
         "shift",
         "lag",
@@ -75,7 +76,7 @@ def _expr_is_morsel_safe(ir) -> bool:
     if isinstance(ir, Alias):
         return _expr_is_morsel_safe(ir.arg)
     if isinstance(ir, Call):
-        if ir.is_aggregate or ir.function in _NON_MORSEL_FUNCTIONS:
+        if ir.is_aggregate or ir.function in ORDER_SENSITIVE_FUNCTIONS:
             return False
         return all(_expr_is_morsel_safe(arg) for arg in ir.args)
     # FieldRef, Literal, and other leaf nodes are row-wise
