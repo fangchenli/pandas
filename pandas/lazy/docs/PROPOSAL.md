@@ -218,19 +218,37 @@ Honest numbers (Apple Silicon; details in
   (planning overhead) — lazy is for pipelines.
 - **vs Polars** (June 2026, physical engine, mixed-dtype data; measured
   after a methodology fix — pre-June reports had measured the eager path):
-  **wins in two categories** — string transforms (1.1× avg, `str.lower`
-  2.4×) and multi-aggregation groupbys (up to 2.1×) — and is within
-  0.2–0.5× elsewhere: aggregation 0.53× avg, joins 0.31×, parquet scans
-  0.30×, sort 0.27×, filter+project 0.22×. `head()` remains Polars'
-  best case (µs vs our ~200 µs of plan construction).
+  **wins across the string category** (2.18× avg — `str.lower` 5.25×,
+  `contains` 1.72×) and on multi-aggregation groupbys (1.19×), and is
+  within 0.2–0.6× elsewhere: sort 0.42×, the join→groupby composite
+  0.58×, joins (order-preserving) 0.29×, parquet scans 0.26×,
+  filter+project 0.21×. `head()` remains Polars' best case (µs vs our
+  ~300 µs of plan construction).
 
-These numbers moved sharply in one development cycle (joins 0.06×→0.31×,
-aggregation 0.07×→0.53×, strings 0.27×→1.1×, filter+select 0.03×→0.39×)
-for a reason worth stating to reviewers: **the kernels were never the
-bottleneck — the data movement between them was**. Every gain came from
-eliminating conversions or routing mistakes on columns no operation
-touched (full audit trail in [ROADMAP.md](ROADMAP.md)), and one fix
-reused pandas' own Cython join indexers — evidence that pandas-as-substrate
+These numbers are the product of two distinct development phases, both
+fully documented:
+
+1. **The conversion fix cycle** (joins 0.06×→0.31×, aggregation
+   0.07×→0.53×, strings 0.27×→1.1×): the kernels were never the
+   bottleneck — the data movement between them was. Every gain came
+   from eliminating conversions or routing mistakes on columns no
+   operation touched.
+2. **The designed engine** ([ENGINE_DESIGN.md](ENGINE_DESIGN.md), six
+   milestones, each gated on the full suite and benchmark baselines):
+   plans compile to explicit pipeline graphs; a decision layer owns
+   backend/algorithm routing visible in `explain()`; parallelism is
+   measurement-gated — morsel threads only where kernels are
+   compute-bound (string ops: hence the `contains` flip to a win),
+   k-way merge sorts (3.6× on the kernel), and order-free joins routed
+   to acero's parallel hash join when the plan proves row order
+   unobservable. Three of six milestones were *rewritten by
+   measurement before code* — the design doc records the disproven
+   hypotheses alongside the wins.
+
+The strategy that emerged, stated plainly for reviewers:
+**route work to internally-parallel C++ kernels (Arrow, pandas' own
+Cython) via plan-time decisions; reserve Python-side threading for
+compute-bound kernels where it measurably wins**. pandas-as-substrate
 is a performance strategy, not just a compatibility one.
 
 The prototype's claim is not "faster than Polars across the board" — it is
