@@ -156,6 +156,14 @@ lazy_arrow_majority_fraction_doc = """
     Valid values: floats between 0.0 and 1.0
 """
 
+lazy_morsel_size_doc = """
+: int or None
+    Row count per morsel for the lazy engine's parallel pipeline
+    execution. None (default) uses the engine's calibrated default
+    (131,072 rows; see pandas/lazy/cost.py). The optimum is
+    hardware-dependent; performance is flat above ~10K rows.
+"""
+
 lazy_adaptive_thresholds_doc = """
 : bool
     Enable adaptive threshold tuning based on runtime statistics.
@@ -264,6 +272,11 @@ with cf.config_prefix("compute.lazy"):
         lazy_arrow_majority_fraction_doc,
         validator=is_float,
         cb=_lazy_threshold_cb,
+    )
+    cf.register_option(
+        "morsel_size",
+        None,
+        lazy_morsel_size_doc,
     )
     cf.register_option(
         "adaptive_thresholds",

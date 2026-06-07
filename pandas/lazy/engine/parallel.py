@@ -42,10 +42,11 @@ if TYPE_CHECKING:
     from pandas.lazy.backends.types import ArrayDict
     from pandas.lazy.engine.pipeline import Pipeline
 
-# Tunables (canonical range per Leis et al. / DuckDB; see ENGINE_DESIGN.md)
-MORSEL_SIZE = 131_072
-MIN_PARALLEL_ROWS = 2 * MORSEL_SIZE
-MAX_WORKERS = 8
+# Tunables live in the cost model (pandas/lazy/cost.py, M2); imported
+# under the same names so tests can monkeypatch this module's globals.
+from pandas.lazy.cost import (
+    MAX_WORKERS,
+)
 
 # IR functions that are order-dependent: applying them per morsel or
 # feeding them rows in a different order changes results. Shared with
@@ -260,7 +261,10 @@ def run_morsel_parallel(
     its morsel in a cloned context. Results land in a slot array and
     merge in sequence order.
     """
-    n_morsels = (n_rows + MORSEL_SIZE - 1) // MORSEL_SIZE
+    from pandas.lazy.cost import get_morsel_size
+
+    morsel_size = get_morsel_size()
+    n_morsels = (n_rows + morsel_size - 1) // morsel_size
     results: list[ArrayDict | None] = [None] * n_morsels
     claim = itertools.count()
     claim_lock = threading.Lock()
@@ -276,8 +280,8 @@ def run_morsel_parallel(
                 i = next(claim)
             if i >= n_morsels:
                 return
-            start = i * MORSEL_SIZE
-            end = min(start + MORSEL_SIZE, n_rows)
+            start = i * morsel_size
+            end = min(start + morsel_size, n_rows)
             try:
                 out = _slice_arrays(arrays, start, end)
                 for apply_op in appliers:

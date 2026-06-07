@@ -1,5 +1,14 @@
 # Lazy Pandas: Threshold Catalog for Cost-Based Optimization
 
+> **M2 note**: the cost model has one home now. Option-backed runtime
+> thresholds (`compute.lazy.*`) are defined in
+> `pandas/lazy/optimize/config.py` (registered in
+> `pandas/core/config_init.py`); engine decision constants — morsel
+> size, parallel-kernel minimums, key-encoding thresholds — live in
+> **`pandas/lazy/cost.py`** with their measured provenance, and the
+> scattered modules import from there. Calibration tunes that module,
+> not per-file constants. `compute.lazy.morsel_size` is the newest key.
+
 This document catalogs all threshold points in the lazy pandas execution engine
 that are used for cost-based optimization decisions.
 

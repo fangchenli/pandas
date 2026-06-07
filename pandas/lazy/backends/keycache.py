@@ -26,7 +26,8 @@ from collections import OrderedDict
 import pyarrow as pa
 import pyarrow.compute as pc
 
-MIN_ENCODE_ROWS = 1_000_000
+from pandas.lazy.cost import MIN_ENCODE_ROWS
+
 MAX_ENTRIES = 32
 
 # Identity is keyed on BUFFER ADDRESSES, not Python object identity:

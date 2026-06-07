@@ -2769,11 +2769,13 @@ class PhysicalHashAggregate(PhysicalPlan):
 # Minimum rows before per-column gather is parallelized. Both np.take and
 # pc.take release the GIL, so a thread pool over columns scales (~2.5x for
 # 4 columns at 10M rows).
-PARALLEL_TAKE_MIN_ROWS = 500_000
+from pandas.lazy.cost import (
+    ARROW_MULTIKEY_SORT_MIN_ROWS,
+    PARALLEL_TAKE_MIN_ROWS,
+)
 
 # Minimum rows before multi-key sort routes through Arrow's table-level
 # sort_indices (multi-threaded; ~1.65x over np.lexsort at 10M rows).
-ARROW_MULTIKEY_SORT_MIN_ROWS = 1_000_000
 
 
 def _take_all_columns(input_arrays: ArrayDict, indices) -> ArrayDict:

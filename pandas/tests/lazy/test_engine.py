@@ -749,3 +749,29 @@ class TestScanLimitPushdown:
             .collect(use_physical_planner=True)
         )
         assert list(result["a"]) == list(range(100, 150))
+
+
+class TestCostModel:
+    """M2: one home for engine decision constants (pandas/lazy/cost.py)."""
+
+    def test_morsel_size_option(self):
+        from pandas.lazy.cost import get_morsel_size
+
+        assert get_morsel_size() == 131_072  # default (option None)
+        pd.set_option("compute.lazy.morsel_size", 65_536)
+        try:
+            assert get_morsel_size() == 65_536
+        finally:
+            pd.set_option("compute.lazy.morsel_size", None)
+        assert get_morsel_size() == 131_072
+
+    def test_scattered_constants_come_from_cost(self):
+        from pandas.lazy import cost
+        from pandas.lazy.backends import keycache
+        from pandas.lazy.backends.numpy import core
+        from pandas.lazy.engine import parallel
+
+        assert parallel.MORSEL_SIZE is cost.MORSEL_SIZE
+        assert parallel.MAX_WORKERS is cost.MAX_WORKERS
+        assert core.PARALLEL_SORT_MIN_ROWS is cost.PARALLEL_SORT_MIN_ROWS
+        assert keycache.MIN_ENCODE_ROWS is cost.MIN_ENCODE_ROWS

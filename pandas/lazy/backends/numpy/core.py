@@ -395,7 +395,7 @@ def numpy_str_strip(arr: np.ndarray) -> np.ndarray:
 # Minimum rows before chunked parallel argsort pays for its merge overhead.
 # Measured crossover vs serial stable argsort: floats win from ~200K rows,
 # ints break even around 500K and win above.
-PARALLEL_SORT_MIN_ROWS = 500_000
+from pandas.lazy.cost import PARALLEL_SORT_MIN_ROWS
 
 
 def _parallel_argsort(arr: np.ndarray) -> np.ndarray:
