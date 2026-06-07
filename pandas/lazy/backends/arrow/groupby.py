@@ -158,6 +158,23 @@ def arrow_group_by(
         table, group_keys, [input_col for _, input_col, _ in aggregations]
     )
 
+    # Large string keys: substitute the cached dictionary encoding when
+    # the keycache policy says it pays (acero hash-aggregates dictionary
+    # keys ~5x faster than raw strings; the encode is amortized across
+    # repeated queries on the same immutable source array). Encoded keys
+    # are decoded back after aggregation so output dtypes are unchanged.
+    from pandas.lazy.backends.keycache import maybe_dictionary_encode
+
+    encoded_keys: list[str] = []
+    for key_name in group_keys:
+        col = table.column(key_name)
+        encoded = maybe_dictionary_encode(col)
+        if encoded is not col:
+            table = table.set_column(
+                table.schema.get_field_index(key_name), key_name, encoded
+            )
+            encoded_keys.append(key_name)
+
     # Build aggregation specs for pyarrow
     agg_specs = []
     for output_name, input_col, agg_func in aggregations:
@@ -187,6 +204,14 @@ def arrow_group_by(
     # Rename columns if needed
     if list(result.column_names) != new_names:
         result = result.rename_columns(new_names)
+
+    # Decode keys we dictionary-encoded: string in, string out. The
+    # result has at most one row per group, so this cast is trivial.
+    for key_name in encoded_keys:
+        idx = result.schema.get_field_index(key_name)
+        col = result.column(key_name)
+        if pa.types.is_dictionary(col.type):
+            result = result.set_column(idx, key_name, col.cast(col.type.value_type))
 
     return result
 

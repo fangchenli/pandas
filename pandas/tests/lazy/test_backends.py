@@ -2271,3 +2271,91 @@ class TestArrowStringConcatenation:
 
         expected_combined = ["NORTH_a", "SOUTH_b"]
         assert result["combined"].tolist() == expected_combined
+
+
+class TestKeyEncodingCache:
+    """Dictionary-encoding cache for string aggregation keys: encode on
+    second occurrence of the same immutable source buffers, serve the
+    cached dictionary thereafter, decode result keys so output dtype is
+    unchanged."""
+
+    def _query(self, df):
+        from pandas.lazy import col
+
+        return df.select().group_by("g").agg(col("v").sum().alias("s"))
+
+    def test_lifecycle_and_correctness(self):
+        import numpy as np
+
+        from pandas.lazy.backends import keycache
+
+        keycache.clear_cache()
+        # shrink the threshold so test-sized data exercises the cache
+        orig = keycache.MIN_ENCODE_ROWS
+        keycache.MIN_ENCODE_ROWS = 100
+        try:
+            rng = np.random.default_rng(21)
+            df = pd.DataFrame(
+                {
+                    "g": rng.choice(["a", "b", "c"], 5_000),
+                    "v": rng.standard_normal(5_000),
+                }
+            )
+            q = self._query(df)
+            r1 = q.collect(use_physical_planner=True)
+            assert keycache.cache_stats() == {"encoded": 0, "candidates": 1}
+            r2 = q.collect(use_physical_planner=True)
+            assert keycache.cache_stats() == {"encoded": 1, "candidates": 0}
+            r3 = q.collect(use_physical_planner=True)
+
+            eager = df.groupby("g")["v"].sum().sort_index()
+            for r in (r1, r2, r3):
+                assert str(r["g"].dtype) in ("string", "str")  # decoded back
+                got = r.sort_values("g")["s"].to_numpy(dtype="float64")
+                assert np.allclose(got, eager.to_numpy())
+        finally:
+            keycache.MIN_ENCODE_ROWS = orig
+            keycache.clear_cache()
+
+    def test_different_sources_do_not_collide(self):
+        import numpy as np
+
+        from pandas.lazy.backends import keycache
+
+        keycache.clear_cache()
+        orig = keycache.MIN_ENCODE_ROWS
+        keycache.MIN_ENCODE_ROWS = 100
+        try:
+            rng = np.random.default_rng(22)
+            df1 = pd.DataFrame(
+                {"g": rng.choice(["x", "y"], 1_000), "v": rng.standard_normal(1_000)}
+            )
+            df2 = pd.DataFrame(
+                {"g": rng.choice(["p", "q"], 1_000), "v": rng.standard_normal(1_000)}
+            )
+            for df in (df1, df2):
+                q = self._query(df)
+                q.collect(use_physical_planner=True)
+                q.collect(use_physical_planner=True)
+            # both sources independently encoded, results correct
+            assert keycache.cache_stats()["encoded"] == 2
+            r2 = self._query(df2).collect(use_physical_planner=True)
+            assert set(r2["g"]) == {"p", "q"}
+        finally:
+            keycache.MIN_ENCODE_ROWS = orig
+            keycache.clear_cache()
+
+    def test_below_threshold_never_encodes(self):
+        import numpy as np
+
+        from pandas.lazy.backends import keycache
+
+        keycache.clear_cache()
+        rng = np.random.default_rng(23)
+        df = pd.DataFrame(
+            {"g": rng.choice(["x", "y"], 1_000), "v": rng.standard_normal(1_000)}
+        )
+        q = self._query(df)
+        q.collect(use_physical_planner=True)
+        q.collect(use_physical_planner=True)
+        assert keycache.cache_stats() == {"encoded": 0, "candidates": 0}
