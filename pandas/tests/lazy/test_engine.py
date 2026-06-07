@@ -561,3 +561,53 @@ class TestAceroJoinRouting:
         result = q.collect(use_physical_planner=True, preserve_index=True)
         eager = left.merge(right, on="k").sort_values("k")
         assert len(result) == len(eager)
+
+
+class TestScanStreamingThroughPipelines:
+    """M6: file-scan-sourced pipelines execute via the nodes' native
+    execute_batches protocol - scan batches are the natural morsels and
+    embedded limits terminate the read early. M1's original executor
+    materialized scans fully before applying limits (a multi-file glob
+    head(1000) read every file: 2,788 ms vs 137 ms)."""
+
+    def test_scan_head_never_fully_materializes(self, tmp_path, monkeypatch):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from pandas.lazy import scan
+        from pandas.lazy.physical import PhysicalParquetScan
+
+        for i in range(3):
+            table = pa.table({"a": list(range(i * 1000, (i + 1) * 1000))})
+            pq.write_table(table, tmp_path / f"part_{i}.parquet")
+
+        def boom(self, context):
+            raise AssertionError(
+                "PhysicalParquetScan.execute() called for a limit query - "
+                "the streaming path must be used"
+            )
+
+        monkeypatch.setattr(PhysicalParquetScan, "execute", boom)
+
+        result = (
+            scan(str(tmp_path / "part_*.parquet"))
+            .head(10)
+            .collect(use_physical_planner=True)
+        )
+        assert len(result) == 10
+
+    def test_scan_filter_values_match(self, tmp_path):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from pandas.lazy import scan
+
+        table = pa.table({"a": list(range(5000)), "b": [1.5] * 5000})
+        pq.write_table(table, tmp_path / "f.parquet", row_group_size=1000)
+
+        result = (
+            scan(str(tmp_path / "f.parquet"))
+            .filter(col("a") >= 4990)
+            .collect(use_physical_planner=True)
+        )
+        assert list(result["a"]) == list(range(4990, 5000))

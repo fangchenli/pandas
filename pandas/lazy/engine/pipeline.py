@@ -314,32 +314,57 @@ class PipelineExecutor:
             isolated = isinstance(pipeline.sink, NodeSink) and pipeline.sink.n_slots > 1
             ctx = context.clone_for_subplan() if isolated else context
 
-            if pipeline.source_node is not None:
-                arrays = pipeline.source_node.execute(ctx)
-            else:
-                assert pipeline.source_sink is not None
-                arrays = pipeline.source_sink.finalize(ctx)
-
-            # M3: stateless pipelines over in-memory sources run their
-            # operator chain morsel-parallel (engine/parallel.py); the
-            # sequential single-morsel path remains the universal default.
-            from pandas.lazy.engine.parallel import (
-                MIN_PARALLEL_ROWS,
-                pipeline_is_morsel_parallel,
-                run_morsel_parallel,
-            )
-
-            n_rows = len(next(iter(arrays.values()))) if arrays else 0
-            if n_rows >= MIN_PARALLEL_ROWS and pipeline_is_morsel_parallel(pipeline):
-                arrays = run_morsel_parallel(pipeline, arrays, ctx, n_rows)
-            else:
+            # M6 / streaming restoration: file-scan-sourced pipelines run
+            # through the nodes' native execute_batches protocol — the
+            # scan's batches are the natural morsels, and embedded limits
+            # terminate the read early (a head(1000) over a multi-file
+            # glob must not read every file). Materializing the scan via
+            # execute() before applying the chain — M1's original shape —
+            # read 4 files completely for 1000 rows (2,788 ms vs 137 ms).
+            if pipeline.source_node is not None and isinstance(
+                pipeline.source_node, (PhysicalParquetScan, PhysicalCSVScan)
+            ):
+                node: PhysicalPlan = pipeline.source_node
                 for op in pipeline.operators:
-                    child = op.children()[0]
-                    bound = with_inputs(
-                        op,
-                        [PrecomputedInput(arrays=arrays, schema=child.output_schema)],
-                    )
-                    arrays = bound.execute(ctx)
+                    node = with_inputs(op, [node])
+                batches = list(node.execute_batches(ctx))
+                from pandas.lazy.engine.parallel import concat_morsel_results
+
+                arrays = concat_morsel_results(batches) if batches else {}
+            else:
+                if pipeline.source_node is not None:
+                    arrays = pipeline.source_node.execute(ctx)
+                else:
+                    assert pipeline.source_sink is not None
+                    arrays = pipeline.source_sink.finalize(ctx)
+
+                # M3: stateless pipelines over in-memory sources run their
+                # operator chain morsel-parallel (engine/parallel.py); the
+                # sequential single-morsel path remains the universal
+                # default.
+                from pandas.lazy.engine.parallel import (
+                    MIN_PARALLEL_ROWS,
+                    pipeline_is_morsel_parallel,
+                    run_morsel_parallel,
+                )
+
+                n_rows = len(next(iter(arrays.values()))) if arrays else 0
+                if n_rows >= MIN_PARALLEL_ROWS and pipeline_is_morsel_parallel(
+                    pipeline
+                ):
+                    arrays = run_morsel_parallel(pipeline, arrays, ctx, n_rows)
+                else:
+                    for op in pipeline.operators:
+                        child = op.children()[0]
+                        bound = with_inputs(
+                            op,
+                            [
+                                PrecomputedInput(
+                                    arrays=arrays, schema=child.output_schema
+                                )
+                            ],
+                        )
+                        arrays = bound.execute(ctx)
 
             morsel = Morsel(arrays)
             if isolated:
