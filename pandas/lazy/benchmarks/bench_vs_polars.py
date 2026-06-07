@@ -810,7 +810,107 @@ def run_benchmarks() -> list[BenchmarkResult]:
         )
     all_results.extend(results)
 
+    # Engine-era cases (June 2026): category-key aggregation (Arrow
+    # dictionary routing) and the join->groupby composite (decision
+    # layer routes the order-free join to acero).
+    print(f"\n{'=' * 70}")
+    print("ENGINE PIPELINE BENCHMARKS")
+    print("=" * 70)
+    for n_rows in [1_000_000, 10_000_000]:
+        results = benchmark_engine_pipelines(n_rows)
+        for r in results:
+            print_result(r)
+        all_results.extend(results)
+
     return all_results
+
+
+def benchmark_engine_pipelines(n_rows: int) -> list[BenchmarkResult]:
+    """Composite patterns exercising the pipeline engine's routing."""
+    rng = np.random.default_rng(123)
+    results = []
+
+    # Category-key groupby: Categorical flows as Arrow dictionary
+    pdf = pd.DataFrame(
+        {
+            "g": pd.Categorical(rng.choice(["A", "B", "C", "D", "E"], n_rows)),
+            "v": rng.standard_normal(n_rows),
+        }
+    )
+    pldf = pl.from_pandas(pdf)
+
+    def lp_cat_groupby():
+        return (
+            pdf.select()
+            .group_by("g")
+            .agg(col("v").sum().alias("s"))
+            .collect(use_physical_planner=True)
+        )
+
+    def pl_cat_groupby():
+        return pldf.lazy().group_by("g").agg(pl.col("v").sum().alias("s")).collect()
+
+    lp_time = benchmark_operation(lp_cat_groupby)
+    pl_time = benchmark_operation(pl_cat_groupby)
+    results.append(
+        BenchmarkResult(
+            category="engine_pipeline",
+            operation="groupby(category-dtype key).sum",
+            data_rows=n_rows,
+            lazy_pandas_ms=lp_time,
+            polars_ms=pl_time,
+            speedup=pl_time / lp_time if lp_time > 0 else 0,
+        )
+    )
+
+    # join -> groupby: the order-free join routes to acero
+    n_right = max(n_rows // 10, 1)
+    left = pd.DataFrame(
+        {
+            "k": rng.integers(0, max(n_rows // 20, 1), n_rows),
+            "v": rng.standard_normal(n_rows),
+        }
+    )
+    right = pd.DataFrame(
+        {
+            "k": rng.integers(0, max(n_rows // 20, 1), n_right),
+            "w": rng.standard_normal(n_right),
+        }
+    )
+    pl_left, pl_right = pl.from_pandas(left), pl.from_pandas(right)
+
+    def lp_join_groupby():
+        return (
+            left.select()
+            .join(right.select(), on="k")
+            .group_by("k")
+            .agg(col("v").sum().alias("s"), col("w").mean().alias("m"))
+            .collect(use_physical_planner=True)
+        )
+
+    def pl_join_groupby():
+        return (
+            pl_left.lazy()
+            .join(pl_right.lazy(), on="k")
+            .group_by("k")
+            .agg(pl.col("v").sum().alias("s"), pl.col("w").mean().alias("m"))
+            .collect()
+        )
+
+    lp_time = benchmark_operation(lp_join_groupby)
+    pl_time = benchmark_operation(pl_join_groupby)
+    results.append(
+        BenchmarkResult(
+            category="engine_pipeline",
+            operation="join -> groupby",
+            data_rows=n_rows,
+            lazy_pandas_ms=lp_time,
+            polars_ms=pl_time,
+            speedup=pl_time / lp_time if lp_time > 0 else 0,
+        )
+    )
+
+    return results
 
 
 def generate_report(results: list[BenchmarkResult]) -> str:
