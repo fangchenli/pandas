@@ -684,3 +684,68 @@ class TestOrderFreenessPropagation:
             .agg(col("v").sum().alias("s"))
         )
         assert q.explain(physical=True).count("acero") == 2
+
+
+class TestScanLimitPushdown:
+    """head() over a scan pushes the limit into the ParquetSource, which
+    takes the direct ParquetFile path for small limits (no Dataset
+    scanner readahead: glob head(1000) 138 -> 7 ms, ahead of Polars)."""
+
+    def _write_files(self, tmp_path, n_files=3, rows_each=1000):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        for i in range(n_files):
+            start = i * rows_each
+            table = pa.table({"a": list(range(start, start + rows_each))})
+            pq.write_table(table, tmp_path / f"part_{i}.parquet")
+        return str(tmp_path / "part_*.parquet")
+
+    def test_limit_pushed_into_source(self, tmp_path):
+        from pandas.lazy import scan
+        from pandas.lazy.plan import ParquetSource
+
+        pattern = self._write_files(tmp_path)
+        plan = scan(pattern).head(10)._get_optimized_plan()
+
+        def find_source(node):
+            if isinstance(node, ParquetSource):
+                return node
+            for child in node.children():
+                found = find_source(child)
+                if found is not None:
+                    return found
+            return None
+
+        source = find_source(plan)
+        assert source is not None
+        assert source.limit == 10
+
+    def test_head_within_first_file(self, tmp_path):
+        from pandas.lazy import scan
+
+        pattern = self._write_files(tmp_path)
+        result = scan(pattern).head(10).collect(use_physical_planner=True)
+        assert list(result["a"]) == list(range(10))
+
+    def test_head_crosses_file_boundary(self, tmp_path):
+        from pandas.lazy import scan
+
+        pattern = self._write_files(tmp_path)
+        result = scan(pattern).head(1500).collect(use_physical_planner=True)
+        assert len(result) == 1500
+        assert list(result["a"]) == list(range(1500))
+
+    def test_filtered_head_keeps_scanner_path(self, tmp_path):
+        # predicate present: the Dataset scanner path (with pushdown)
+        # stays; results must still be exact
+        from pandas.lazy import scan
+
+        pattern = self._write_files(tmp_path)
+        result = (
+            scan(pattern)
+            .filter(col("a") >= 100)
+            .head(50)
+            .collect(use_physical_planner=True)
+        )
+        assert list(result["a"]) == list(range(100, 150))

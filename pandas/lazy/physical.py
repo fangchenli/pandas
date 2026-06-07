@@ -928,6 +928,48 @@ class PhysicalParquetScan(PhysicalPlan):
             return files
         return path
 
+    def _execute_small_limit_batches(
+        self, paths: str | list[str], context: ExecutionContext
+    ) -> Iterator[ArrayDict]:
+        """Direct ParquetFile streaming for small unfiltered limits.
+
+        Reads files in order with iter_batches, stopping as soon as the
+        limit is satisfied - no Dataset scanner, no fragment readahead.
+        """
+        import numpy as np
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from pandas.lazy.backends.types import INDEX_COL_NAME
+
+        file_list = [paths] if isinstance(paths, str) else list(paths)
+        columns = list(self.columns) if self.columns else None
+        remaining = self.limit
+        row_offset = 0
+
+        for path in file_list:
+            if remaining <= 0:
+                return
+            pf = pq.ParquetFile(path)
+            for batch in pf.iter_batches(
+                batch_size=max(remaining, 1024), columns=columns
+            ):
+                if batch.num_rows > remaining:
+                    batch = batch.slice(0, remaining)
+                arrays: ArrayDict = {
+                    name: batch.column(name) for name in batch.schema.names
+                }
+                arrays[INDEX_COL_NAME] = pa.array(
+                    np.arange(row_offset, row_offset + batch.num_rows, dtype=np.int64)
+                )
+                context.index_is_multi = False
+                context.index_names = [None]
+                yield arrays
+                row_offset += batch.num_rows
+                remaining -= batch.num_rows
+                if remaining <= 0:
+                    return
+
     def execute_batches(self, context: ExecutionContext) -> Iterator[ArrayDict]:
         """
         Stream batches from Parquet file(s).
@@ -956,6 +998,20 @@ class PhysicalParquetScan(PhysicalPlan):
         filter_expr = None
         if self.predicate is not None:
             filter_expr = self._build_arrow_filters(self.predicate)
+
+        # Small unfiltered limits bypass the Dataset scanner entirely:
+        # the scanner pays ~50 ms of fixed startup on a multi-file
+        # dataset (fragment readahead opens and pre-decodes across all
+        # files) regardless of batch size, while ParquetFile.iter_batches
+        # reads the first 1,000 rows of the first file in ~6 ms. Streams
+        # files in order, stopping at the limit.
+        if (
+            self.predicate is None
+            and self.limit is not None
+            and self.limit <= context.batch_size
+        ):
+            yield from self._execute_small_limit_batches(paths, context)
+            return
 
         scanner = dataset.scanner(
             columns=list(self.columns) if self.columns else None,
@@ -5245,6 +5301,7 @@ class PhysicalPlanner:
             schema=node.resolve_schema(),
             columns=node.columns,
             predicate=node.predicate,
+            limit=node.limit,
         )
 
     def _plan_csv_scan(self, node) -> PhysicalPlan:

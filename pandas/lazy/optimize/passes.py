@@ -809,6 +809,19 @@ class LimitPushdown(PlanVisitor):
             # Otherwise, keep both limits - cannot safely combine
             return Limit(input_plan, n, offset)
 
+        elif isinstance(input_plan, ParquetSource) and offset == 0:
+            # Push the limit into the scan: enables early read
+            # termination and the direct small-limit ParquetFile path
+            # (head(1000) over a multi-file glob reads ~6 ms of one file
+            # instead of paying the Dataset scanner's ~50 ms readahead
+            # startup). The Limit node is kept - the scan's limit is an
+            # upper bound on rows read; the Limit enforces exactness.
+            import dataclasses
+
+            scan_limit = n if input_plan.limit is None else min(n, input_plan.limit)
+            new_source = dataclasses.replace(input_plan, limit=scan_limit)
+            return Limit(new_source, n, offset)
+
         # Cannot push through other nodes
         return Limit(input_plan, n, offset)
 

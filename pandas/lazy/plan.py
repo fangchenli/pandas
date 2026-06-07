@@ -131,6 +131,10 @@ class ParquetSource(LogicalPlan):
     path: str
     columns: tuple[str, ...] | None = None
     predicate: Expr | None = None
+    # Row limit pushed into the scan (head over scan). Enables early
+    # read termination and the direct small-limit ParquetFile path.
+    # Set by the LimitPushdown optimization pass.
+    limit: int | None = None
 
     # Cached schema from Parquet metadata
     _parquet_schema: Schema | None = None
