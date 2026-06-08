@@ -420,6 +420,7 @@ def arrays_to_dataframe(
     index_is_multi: bool = False,
     preserve_index: bool = False,
     use_arrow_dtype: bool = True,
+    schema=None,
 ):
     """
     Convert ArrayDict back to pandas DataFrame with proper index.
@@ -450,11 +451,40 @@ def arrays_to_dataframe(
         If True and all columns are Arrow-backed, use Arrow-backed pandas
         dtypes (pd.ArrowDtype) for near-zero-copy conversion. This is much
         faster (~15-18x) but returns columns with Arrow dtypes instead of NumPy.
+    schema : Schema or None, default None
+        When provided (user-facing output paths only), the **output dtype
+        contract** is enforced per column so the physical engine returns the
+        same dtypes the eager path would. Internal round-trips (join's
+        pd.merge bridge, spill) pass ``None`` and keep the legacy
+        representation. See the contract notes below.
 
     Returns
     -------
     DataFrame
         The reconstructed DataFrame with proper index.
+
+    Output Dtype Contract (``schema`` provided)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    The physical engine is an optimization of the eager engine and must
+    return matching dtypes regardless of which kernels (NumPy or Arrow) ran
+    internally:
+
+    - **numeric/boolean** → NumPy dtype (e.g. ``int64``, ``float64``); float
+      nulls stay ``np.nan`` (not nullable ``Float64``), and integer columns
+      that acquire nulls widen to ``float64`` — exactly as eager pandas does.
+      A column whose schema declares genuine Arrow storage (``arrow_type``
+      set, e.g. ``pd.ArrowDtype`` inputs) is preserved as an
+      ``ArrowExtensionArray`` instead.
+    - **string** → pandas' default ``str`` dtype (zero-copy reinterpret of
+      the Arrow string buffers; explicit ``string`` inputs are normalized to
+      ``str`` — a deliberate, documented simplification).
+    - **categorical** (Arrow dictionary) → ``Categorical``.
+
+    Known limitation: pandas *masked* nullable dtypes (``Int64``/``Float64``)
+    are indistinguishable from their NumPy counterparts once a join/aggregate
+    has marked the schema nullable, so they come out NumPy-backed (tracked
+    under "Nullable dtype preservation" in ROADMAP.md). Genuine
+    ``pd.ArrowDtype`` columns are preserved.
 
     Notes
     -----
@@ -514,16 +544,27 @@ def arrays_to_dataframe(
     #
     # The extension-array wraps below are zero-copy and never enter
     # pyarrow's pandas_compat.
-    def to_pandas_array(arr):
-        """Convert array to pandas-compatible format with proper null handling."""
+    def _arrow_to_str(chunked):
+        """Arrow string chunked array -> pandas default ``str`` dtype.
+
+        Zero-copy: stays in Arrow storage, only the na_value semantics
+        change (na_value=NaN is the default ``str``; ArrowStringArray's
+        default is ``string`` with na_value=pd.NA).
+        """
+        from pandas.core.arrays.string_arrow import ArrowStringArray
+
+        try:
+            return ArrowStringArray(chunked).astype(pd.StringDtype(na_value=np.nan))
+        except (TypeError, ValueError):
+            return chunked.to_pandas().astype("str")
+
+    def to_pandas_array_legacy(arr):
+        """Legacy representation for internal round-trips (schema=None)."""
         if isinstance(arr, (pa.Array, pa.ChunkedArray)):
             if not use_arrow_dtype:
                 return arr.to_pandas()
             chunked = pa.chunked_array([arr]) if isinstance(arr, pa.Array) else arr
             if pa.types.is_dictionary(chunked.type):
-                # Dictionary -> Categorical (mirror of the zero-copy
-                # input wrap): category dtype in, category dtype out,
-                # matching the eager path.
                 combined = chunked.combine_chunks()
                 return pd.Categorical.from_codes(
                     np.asarray(combined.indices.fill_null(-1)),
@@ -532,29 +573,77 @@ def arrays_to_dataframe(
             if pa.types.is_string(chunked.type) or pa.types.is_large_string(
                 chunked.type
             ):
-                # Match pandas' default Arrow-backed str dtype
-                # (zero-copy wrap of the existing buffers)
                 try:
-                    from pandas.core.arrays.string_arrow import (
-                        ArrowStringArray,
-                    )
+                    from pandas.core.arrays.string_arrow import ArrowStringArray
 
                     return ArrowStringArray(chunked)
                 except (TypeError, ValueError):
                     pass
             return pd.arrays.ArrowExtensionArray(chunked)
 
-        # For numpy arrays, convert float arrays with NaN to nullable dtypes
-        # This ensures we use pd.NA instead of np.nan
         if isinstance(arr, np.ndarray) and arr.dtype.kind == "f":
-            # Check if array has any NaN values
             mask = np.isnan(arr)
             if mask.any():
-                # Convert to nullable dtype with pd.NA
                 return pd.array(arr, dtype=pd.Float64Dtype())
         return arr
 
-    pandas_data = {name: to_pandas_array(arr) for name, arr in data_cols.items()}
+    def to_pandas_array_contract(arr, dt):
+        """Enforce the output dtype contract for a user-facing column."""
+        if isinstance(arr, (pa.Array, pa.ChunkedArray)):
+            chunked = pa.chunked_array([arr]) if isinstance(arr, pa.Array) else arr
+            atype = chunked.type
+            if pa.types.is_dictionary(atype):
+                combined = chunked.combine_chunks()
+                return pd.Categorical.from_codes(
+                    np.asarray(combined.indices.fill_null(-1)),
+                    categories=combined.dictionary.to_pylist(),
+                )
+            if pa.types.is_string(atype) or pa.types.is_large_string(atype):
+                return _arrow_to_str(chunked)
+            # Genuine Arrow/extension input column: preserve zero-copy.
+            if dt is not None and dt.arrow_type is not None:
+                return pd.arrays.ArrowExtensionArray(chunked)
+            # Otherwise the Arrow backing is an internal kernel artifact
+            # (acero groupby/join); return the NumPy dtype eager would.
+            # Int columns with nulls widen to float64 (eager semantics);
+            # to_numpy(zero_copy_only=False) does exactly that.
+            np_arr = chunked.to_numpy(zero_copy_only=False)
+            if (
+                dt is not None
+                and dt.numpy_dtype is not None
+                and chunked.null_count == 0
+                and np_arr.dtype != dt.numpy_dtype
+            ):
+                try:
+                    np_arr = np_arr.astype(dt.numpy_dtype, copy=False)
+                except (TypeError, ValueError):
+                    pass
+            return np_arr
+
+        # NumPy / object arrays.
+        if dt is not None and dt.is_string():
+            if not (isinstance(arr, np.ndarray) and arr.dtype.kind == "U"):
+                try:
+                    return pd.array(arr, dtype="str")
+                except (TypeError, ValueError):
+                    pass
+        # NumPy numeric/bool/float pass through unchanged: float nulls stay
+        # np.nan (matching eager), no nullable-Float64 promotion. Masked
+        # nullable dtypes (Int64/Float64) are not restored here - see the
+        # contract notes and ROADMAP "Nullable dtype preservation".
+        return arr
+
+    if schema is not None:
+        pandas_data = {
+            name: to_pandas_array_contract(
+                arr, schema[name] if name in schema else None
+            )
+            for name, arr in data_cols.items()
+        }
+    else:
+        pandas_data = {
+            name: to_pandas_array_legacy(arr) for name, arr in data_cols.items()
+        }
     df = pd.DataFrame(pandas_data)
 
     # Index reconstruction

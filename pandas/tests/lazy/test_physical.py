@@ -291,11 +291,14 @@ class TestPhysicalPlanExecution:
         physical = planner.plan(lf._plan)
         result = execute_physical_plan(physical)
 
+        # Output dtype contract: a NumPy int column that acquires nulls via
+        # the left join widens to NumPy float64 (np.nan), matching eager
+        # pd.merge - not nullable Float64 (see convert.arrays_to_dataframe).
         expected = pd.DataFrame(
             {
                 "a": [1, 2, 3],
                 "b": [4, 5, 6],
-                "c": pd.array([7.0, 8.0, pd.NA], dtype=pd.Float64Dtype()),
+                "c": np.array([7.0, 8.0, np.nan]),
             }
         )
         tm.assert_frame_equal(result, expected)
@@ -926,7 +929,10 @@ class TestParallelExecutionPaths:
         result = (
             lt.select().join(rt.select(), on="id").collect(use_physical_planner=True)
         )
-        assert str(result["text"].dtype) == "string"
+        # Output dtype contract normalizes all string columns to the default
+        # ``str`` dtype; the point here is the payload stays an Arrow-backed
+        # string type, never round-tripped through an object array.
+        assert str(result["text"].dtype) == "str"
         assert result["id"].dtype.kind in ("i", "u")
 
     def test_groupby_backend_chosen_from_relevant_columns(self, monkeypatch):
@@ -1007,3 +1013,88 @@ class TestParallelExecutionPaths:
         eager = ldf.collect()
         physical = ldf.collect(use_physical_planner=True)
         tm.assert_frame_equal(eager, physical, check_dtype=False)
+
+
+class TestOutputDtypeContract:
+    """The physical engine returns the same dtypes the eager path would.
+
+    NumPy-backed numeric/bool, default ``str`` for strings, and genuine
+    ``pd.ArrowDtype`` columns preserved. Internal Arrow kernels (acero
+    groupby/join) must not leak Arrow dtypes onto NumPy-sourced columns.
+    See convert.arrays_to_dataframe.
+    """
+
+    def _frame(self):
+        # NumPy numerics + plain-string columns: the common case where the
+        # physical output dtype must match eager exactly.
+        return pd.DataFrame(
+            {
+                "i": np.arange(6, dtype="int64"),
+                "f": np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+                "g": ["x", "y", "x", "y", "x", "y"],
+                "v": np.array([10.0, 20.0, 30.0, 40.0, 50.0, 60.0]),
+            }
+        )
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda d: d.select(),
+            lambda d: d.select().filter(col("i") > 1),
+            lambda d: d.select().sort("f", descending=True),
+            lambda d: d.select().with_columns((col("i") * 2).alias("i2")),
+            lambda d: d.select().group_by("g").agg(col("v").sum().alias("s")),
+            lambda d: d.select().filter(col("i") >= 0).head(3),
+        ],
+    )
+    def test_physical_dtypes_match_eager(self, build):
+        ldf = build(self._frame())
+        eager = ldf.collect()
+        physical = ldf.collect(use_physical_planner=True)
+        assert {c: str(physical[c].dtype) for c in physical.columns} == {
+            c: str(eager[c].dtype) for c in eager.columns
+        }
+
+    def test_groupby_numeric_is_numpy_not_arrow(self):
+        # Regression: acero groupby returned double[pyarrow] for a NumPy
+        # float source column.
+        df = pd.DataFrame({"g": ["a", "b", "a", "b"], "v": [1.0, 2.0, 3.0, 4.0]})
+        out = df.select().group_by("g").agg(col("v").sum().alias("s"))
+        res = out.collect(use_physical_planner=True)
+        assert str(res["s"].dtype) == "float64"
+
+    def test_float_nulls_stay_numpy_nan(self):
+        # NumPy float with NaN must not be promoted to nullable Float64.
+        df = pd.DataFrame({"f": np.array([1.0, np.nan, 3.0])})
+        res = df.select().filter(col("f") >= 0).collect(use_physical_planner=True)
+        assert str(res["f"].dtype) == "float64"
+
+    def test_strings_normalized_to_default_str(self):
+        # Both plain-list and explicit ``string`` inputs come out ``str``.
+        df = pd.DataFrame({"p": ["a", "b", "c"], "s": pd.array(["d", "e", "f"])})
+        res = df.select().collect(use_physical_planner=True)
+        assert str(res["p"].dtype) == "str"
+        assert str(res["s"].dtype) == "str"
+
+    def test_left_join_widened_int_is_numpy_float(self):
+        # A NumPy int column gaining nulls via left join widens to NumPy
+        # float64 (np.nan), matching eager pd.merge.
+        left = pd.DataFrame({"k": [1, 2, 3], "lv": [1, 2, 3]})
+        right = pd.DataFrame({"k": [1, 2], "rv": [10, 20]})
+        res = (
+            left.select()
+            .join(right.select(), on="k", how="left")
+            .collect(use_physical_planner=True)
+        )
+        assert str(res["rv"].dtype) == "float64"
+        eager = left.merge(right, on="k", how="left")
+        assert str(eager["rv"].dtype) == "float64"
+
+    def test_genuine_arrow_dtype_preserved(self):
+        # pd.ArrowDtype inputs are detectable (schema arrow_type set) and
+        # preserved through the engine, matching eager passthrough.
+        import pyarrow as pa
+
+        df = pd.DataFrame({"x": pd.array([1, 2, 3], dtype=pd.ArrowDtype(pa.int64()))})
+        res = df.select().filter(col("x") > 0).collect(use_physical_planner=True)
+        assert isinstance(res["x"].dtype, pd.ArrowDtype)

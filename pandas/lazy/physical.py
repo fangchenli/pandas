@@ -5702,4 +5702,5 @@ def execute_physical_plan(
         index_names=context.index_names,
         index_is_multi=context.index_is_multi,
         preserve_index=should_reconstruct_index,
+        schema=plan.output_schema,
     )

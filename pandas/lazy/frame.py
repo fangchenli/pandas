@@ -1195,12 +1195,14 @@ class LazyDataFrame:
         )
 
         # Stream batches
+        output_schema = physical_plan.output_schema
         for batch in physical_plan.execute_batches(context):
             yield arrays_to_dataframe(
                 batch,
                 index_names=context.index_names,
                 index_is_multi=context.index_is_multi,
                 preserve_index=preserve_index,
+                schema=output_schema,
             )
 
     def explain(

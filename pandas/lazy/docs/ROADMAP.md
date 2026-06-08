@@ -59,10 +59,15 @@ more than threading on bandwidth-bound paths.
 
 ## Known Semantic Issues (bugs, not design choices)
 
-- **Output dtype instability**: shrunk but not settled — string columns
-  now come out as pandas' default str dtype on every output path, but
-  numeric outputs may be Arrow-backed on some paths and NumPy on others.
-  Pick one contract and enforce it.
+- **Output dtype instability**: ~~settled~~ — a schema-driven output
+  contract (`convert.arrays_to_dataframe`, June 2026) makes the physical
+  engine return the dtypes eager would, regardless of which kernels ran:
+  numeric/bool → NumPy (int widens to float64 on nulls, like eager),
+  strings → default `str`, genuine `pd.ArrowDtype` preserved, Categorical
+  preserved. No more `double[pyarrow]` leaking from acero groupby/join.
+  Enforced on every user-facing path; gated by the `schema` arg so internal
+  join/spill round-trips are untouched. Residual: masked nullable dtypes
+  (see below).
 - **Duplicate column labels** crash with `AttributeError` instead of a
   clear "unsupported" error at plan construction.
 - **`shift` is unimplemented in the eager evaluator** while `lag` works in
@@ -79,9 +84,12 @@ more than threading on bandwidth-bound paths.
 - **Adaptive thresholds maturation** — the EMA-based tuner
   (`optimize/adaptive.py`) is experimental and off by default; the cost
   model (`pandas/lazy/cost.py`) is now the natural calibration target.
-- **Nullable dtype preservation** — physical execution can widen nullable
-  ints through NumPy kernels; track original dtypes in the execution
-  context and restore on output.
+- **Nullable dtype preservation** — the output dtype contract preserves
+  genuine `pd.ArrowDtype` columns but *not* pandas masked nullable dtypes
+  (`Int64`/`Float64`): once a join/aggregate marks the schema nullable, a
+  masked-nullable source is indistinguishable from its NumPy counterpart,
+  so it comes out NumPy-backed. Fixing this needs the schema to track
+  "originated as a masked extension dtype" through joins/aggregates.
 - **RangeIndex preservation** — `preserve_index=True` materializes a
   RangeIndex as int64 values; could carry the range representation through
   the plan instead.
