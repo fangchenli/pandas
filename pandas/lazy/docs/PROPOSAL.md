@@ -25,10 +25,15 @@ aggregation 1.2×, glob scans 1.6×) and within 0.2–0.9x elsewhere, with
 the remaining gaps measured and attributed
 (see [Status](#status-and-performance)).
 
+pandas 3.0 already introduced deferred column expressions (`pd.col`,
+returning `pandas.api.typing.Expression`); this project supplies the
+optimizing, out-of-core **execution layer** those expressions imply —
+continuing pandas's own trajectory rather than competing beside it.
+
 **This document is a request for direction, not a merge request.** See
 [Positioning and open questions](#positioning-and-open-questions) — in
 particular the positioning question, which the author considers the real
-one.
+one, and the [relationship to `pd.col`](#3-relationship-to-pdcol-pandas-30).
 
 ## Motivation
 
@@ -372,10 +377,43 @@ evaluation modes and return type). Alternatives to weigh:
   execution pays off on I/O-rooted pipelines
 
 The expression API itself (`col`/`lit`/`when` + chained verbs) has been
-less controversial; whether pandas would prefer `query`/`eval`-style string
-expressions remains open.
+less controversial — and pandas 3.0 has since settled part of it: see the
+next section.
 
-### 3. Namespace and process — positions, not questions
+### 3. Relationship to `pd.col` (pandas 3.0)
+
+pandas 3.0 introduced **deferred column expressions** into core: `pd.col`
+returns a `pandas.api.typing.Expression`, usable anywhere a
+`lambda df: df[...]` is accepted (`assign`, `loc`, `mask`). This matters
+for two reasons.
+
+**It validates the direction.** The largest open risk over this prototype
+was whether pandas would accept deferred execution at all; core has now
+shipped the user-facing primitive and exposed it as public API. This work
+is no longer proposing a new concept — it supplies the **optimizing,
+out-of-core execution layer** that the deferred-expression primitive
+implies but core deliberately left out.
+
+**The representations differ, and that is the design conversation.** Core's
+`Expression` is *closure-based*: each operation wraps a
+`Callable[[DataFrame], Any]`, evaluated by running it against one
+DataFrame. It is intentionally opaque — there is no plan to optimize, no
+cross-operation view, no laziness or spill. Lazy pandas' `Expr` is
+*structured IR* that the optimizer rewrites and the planner compiles. The
+surface syntax is nearly identical (`col("x") > 5`); the substance is a
+lambda you can only run vs. an AST you can analyze.
+
+Convergence — not two parallel `col`s — is the goal. Options span core
+growing an inspectable expression form, the lazy layer recognizing and
+translating core `Expression`s, or a shared IR underneath both. This is a
+collaboration surface with maintainers, and it reframes the entry-point
+question above: the natural framing is *the engine behind pandas's own
+expression API*, which is more pandas-native (and less "Polars in pandas")
+than any bespoke entry point. Whether the lazy layer should ship its own
+`col` at all, given `pd.col` exists, is itself an open question for the
+PDEP.
+
+### 4. Namespace and process — positions, not questions
 
 - **Namespace**: `pandas.lazy`, not `pandas.api.lazy`.
 - **Process**: if this moves forward in any form, it will be a PDEP. This
@@ -383,7 +421,7 @@ expressions remains open.
   because concrete code makes a better discussion anchor than an abstract
   proposal.
 
-### 4. How could something this size land?
+### 5. How could something this size land?
 
 Merging piece-by-piece is not realistic: the IR, logical plan, optimizer,
 and physical engine were designed together, and the early pieces are not
