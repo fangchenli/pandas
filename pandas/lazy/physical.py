@@ -5697,10 +5697,24 @@ def execute_physical_plan(
     # Convert ArrayDict back to DataFrame with proper index
     # Reconstruct index if preserve_index=True OR user explicitly called set_index()
     should_reconstruct_index = preserve_index or context.user_set_index
+    # Pipeline breakers materialize every output column from a fresh
+    # take/aggregate, so the result can be assembled without the
+    # block-consolidation copy (no column aliases user data).
+    materialized_output = isinstance(
+        plan,
+        (
+            PhysicalSort,
+            PhysicalHashAggregate,
+            PhysicalDistinct,
+            PhysicalTopK,
+            PhysicalHashJoin,
+        ),
+    )
     return arrays_to_dataframe(
         arrays,
         index_names=context.index_names,
         index_is_multi=context.index_is_multi,
         preserve_index=should_reconstruct_index,
         schema=plan.output_schema,
+        materialized_output=materialized_output,
     )

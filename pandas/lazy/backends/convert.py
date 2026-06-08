@@ -421,6 +421,7 @@ def arrays_to_dataframe(
     preserve_index: bool = False,
     use_arrow_dtype: bool = True,
     schema=None,
+    materialized_output: bool = False,
 ):
     """
     Convert ArrayDict back to pandas DataFrame with proper index.
@@ -457,6 +458,13 @@ def arrays_to_dataframe(
         same dtypes the eager path would. Internal round-trips (join's
         pd.merge bridge, spill) pass ``None`` and keep the legacy
         representation. See the contract notes below.
+    materialized_output : bool, default False
+        If True, the caller guarantees every column array is freshly
+        materialized by the engine (no view aliases user data), so the
+        DataFrame is built with ``copy=False`` to skip block consolidation.
+        Set only for pipeline-breaker roots (sort/groupby/join/distinct/
+        topk). Leave False for projections, which may pass input columns
+        through as views.
 
     Returns
     -------
@@ -644,7 +652,16 @@ def arrays_to_dataframe(
         pandas_data = {
             name: to_pandas_array_legacy(arr) for name, arr in data_cols.items()
         }
-    df = pd.DataFrame(pandas_data)
+    # copy=False skips block consolidation (pandas otherwise stacks same-dtype
+    # columns into one 2D block, copying ~N*ncols*8 bytes - measured at 12-20 ms
+    # for a few float64 columns at 10M rows, more than the kernels that produced
+    # them). Only safe when every column is engine-owned: a passthrough column
+    # (e.g. with_columns keeping an input column) is a *view* of user data, and
+    # the consolidation copy is what otherwise keeps a returned frame from
+    # aliasing it. ``materialized_output`` is set by the caller only for
+    # pipeline breakers (sort/groupby/join/distinct/topk) whose every output
+    # column comes from a fresh take/aggregate.
+    df = pd.DataFrame(pandas_data, copy=not materialized_output)
 
     # Index reconstruction
     # Reconstruct index if preserve_index=True AND index columns exist

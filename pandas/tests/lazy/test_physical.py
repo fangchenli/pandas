@@ -1098,3 +1098,57 @@ class TestOutputDtypeContract:
         df = pd.DataFrame({"x": pd.array([1, 2, 3], dtype=pd.ArrowDtype(pa.int64()))})
         res = df.select().filter(col("x") > 0).collect(use_physical_planner=True)
         assert isinstance(res["x"].dtype, pd.ArrowDtype)
+
+
+class TestCollectDoesNotAliasSource:
+    """A collected result must never share buffers with the source frame.
+
+    Pipeline breakers assemble output with copy=False (every column is a
+    fresh take/aggregate); projections keep the consolidating copy because
+    a passthrough column is a view of source data. Both must be isolated.
+    """
+
+    def _src(self):
+        return pd.DataFrame(
+            {
+                "a": np.arange(10, dtype="float64"),
+                "b": np.arange(10, 20, dtype="float64"),
+                "g": np.array([0, 1] * 5),
+            }
+        )
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda d: d.select().sort("a", descending=True),
+            lambda d: d.select().distinct(),
+            lambda d: d.select().sort("a").head(3),
+            lambda d: d.select().filter(col("a") >= 0),
+            # passthrough projection: 'a' would be a view of the source -
+            # the consolidating copy must isolate it.
+            lambda d: d.select().with_columns((col("a") + col("b")).alias("s")),
+            lambda d: d.select("a", "b"),
+        ],
+    )
+    def test_mutating_result_leaves_source_unchanged(self, build):
+        src = self._src()
+        res = build(src).collect(use_physical_planner=True)
+        before = src["a"].to_numpy().copy()
+        if "a" in res.columns:
+            res.iloc[:, res.columns.get_loc("a")] = -999.0
+        tm.assert_numpy_array_equal(src["a"].to_numpy(), before)
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda d: d.select().sort("a", descending=True),
+            lambda d: d.select().group_by("g").agg(col("a").sum().alias("a")),
+            lambda d: d.select().with_columns((col("a") * 2).alias("a2")),
+        ],
+    )
+    def test_mutating_source_leaves_result_unchanged(self, build):
+        src = self._src()
+        res = build(src).collect(use_physical_planner=True)
+        snapshot = res.copy(deep=True)
+        src.iloc[:, src.columns.get_loc("a")] = 123.0
+        tm.assert_frame_equal(res, snapshot)
