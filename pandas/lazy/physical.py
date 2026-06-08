@@ -270,6 +270,13 @@ class ExecutionContext:
     # When True, index is always reconstructed regardless of preserve_index
     user_set_index: bool = False
 
+    # Relaxed output ordering (collect(order="relaxed")). When True, the
+    # final result's row order is unspecified, which lets the decision
+    # layer route order-preserving joins to acero's parallel hash join.
+    # Intermediate order-dependent values (shift/cum_*) are still computed
+    # over a well-defined order; only the terminal output order is relaxed.
+    order_relaxed: bool = False
+
     # Parallelism configuration
     # Number of workers for parallel execution (None = auto based on CPU count)
     n_workers: int | None = None
@@ -311,6 +318,7 @@ class ExecutionContext:
             preferred_backend=self.preferred_backend,
             strict=self.strict,
             preserve_index=self.preserve_index,
+            order_relaxed=self.order_relaxed,
             n_workers=self.n_workers,
             parallel_threshold=self.parallel_threshold,
             batch_size=self.batch_size,
@@ -5635,6 +5643,7 @@ def execute_physical_plan(
     preferred_backend: Literal["auto", "arrow", "numpy"] = "auto",
     strict: bool = False,
     preserve_index: bool = False,
+    order_relaxed: bool = False,
     spill_config: SpillConfig | None = None,
 ) -> DataFrame:
     """
@@ -5650,6 +5659,9 @@ def execute_physical_plan(
         If True, fail on backend fallbacks.
     preserve_index : bool, default False
         If True, preserve the original DataFrame index.
+    order_relaxed : bool, default False
+        If True, the final output row order is unspecified, which lets
+        order-preserving joins route to acero's parallel hash join.
     spill_config : SpillConfig or None, default None
         Configuration for disk spilling under memory pressure.
         When enabled, intermediate results can be spilled to disk.
@@ -5670,6 +5682,7 @@ def execute_physical_plan(
         strict=strict,
         adaptive_thresholds=adaptive_enabled,
         preserve_index=preserve_index,
+        order_relaxed=order_relaxed,
         _spill_config=spill_config,
     )
 

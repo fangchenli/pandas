@@ -696,6 +696,7 @@ class LazyDataFrame:
         streaming: bool = False,
         batch_size: int = 65536,
         preserve_index: bool = False,
+        order: Literal["stable", "relaxed"] = "stable",
         spill_config: SpillConfig | None = None,
     ) -> DataFrame | Iterator[DataFrame]:
         """
@@ -736,6 +737,15 @@ class LazyDataFrame:
             source data. If False (default), return DataFrame with
             RangeIndex. The default matches Polars-style behavior where
             lazy execution returns positional indexes.
+        order : {"stable", "relaxed"}, default "stable"
+            Output row-order contract. ``"stable"`` (default) matches the
+            eager pandas row order exactly. ``"relaxed"`` leaves the final
+            row order unspecified, which lets order-preserving inner/left
+            joins route to acero's parallel hash join (substantially faster
+            on large keyed joins). Intermediate order-dependent values
+            (``shift``/``cum_*``) are still computed over a well-defined
+            order — only the terminal output order is relaxed. Requires
+            use_physical_planner=True; ignored when preserve_index=True.
         spill_config : SpillConfig or None, default None
             Configuration for disk spilling when memory pressure is detected.
             When enabled, intermediate results from memory-intensive operations
@@ -797,6 +807,11 @@ class LazyDataFrame:
         if spill_config is not None and not use_physical_planner:
             raise ValueError("spill_config requires use_physical_planner=True")
 
+        if order not in ("stable", "relaxed"):
+            raise ValueError(f"order must be 'stable' or 'relaxed', got {order!r}")
+        if order == "relaxed" and not use_physical_planner:
+            raise ValueError('order="relaxed" requires use_physical_planner=True')
+
         if streaming:
             if not use_physical_planner:
                 raise ValueError("streaming=True requires use_physical_planner=True")
@@ -824,6 +839,7 @@ class LazyDataFrame:
                 strict=strict,
                 engine=engine,
                 preserve_index=preserve_index,
+                order_relaxed=order == "relaxed",
                 spill_config=spill_config,
             )
         else:
@@ -1061,6 +1077,7 @@ class LazyDataFrame:
         strict: bool = False,
         engine: Literal["auto", "arrow", "numpy"] = "auto",
         preserve_index: bool = False,
+        order_relaxed: bool = False,
         spill_config: SpillConfig | None = None,
     ) -> DataFrame:
         """
@@ -1080,6 +1097,9 @@ class LazyDataFrame:
             Preferred execution backend.
         preserve_index : bool, default False
             If True, preserve the original DataFrame index.
+        order_relaxed : bool, default False
+            If True, leave the final output row order unspecified so
+            order-preserving joins can route to acero (see ``collect``).
         spill_config : SpillConfig or None, default None
             Configuration for disk spilling under memory pressure.
 
@@ -1106,6 +1126,7 @@ class LazyDataFrame:
             preferred_backend=engine,
             strict=strict,
             preserve_index=preserve_index,
+            order_relaxed=order_relaxed,
             spill_config=spill_config,
         )
 

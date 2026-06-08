@@ -189,9 +189,9 @@ def _plan_groupby_backend(node: PhysicalHashAggregate, input_schema: Schema) -> 
 class DecisionLayer:
     """Annotate a PipelineGraph with planned execution decisions."""
 
-    def annotate(self, graph: PipelineGraph) -> None:
+    def annotate(self, graph: PipelineGraph, order_relaxed: bool = False) -> None:
         self._annotate_pipelines(graph)
-        self._plan_acero_joins(graph)
+        self._plan_acero_joins(graph, order_relaxed=order_relaxed)
 
     def _annotate_pipelines(self, graph: PipelineGraph) -> None:
         for pipeline in graph.pipelines:
@@ -261,7 +261,9 @@ class DecisionLayer:
                 kind = "topk" if isinstance(node, PhysicalTopK) else "sort"
                 decisions.sink_decision = f"{kind}[{'/'.join(backends)}]"
 
-    def _plan_acero_joins(self, graph: PipelineGraph) -> None:
+    def _plan_acero_joins(
+        self, graph: PipelineGraph, order_relaxed: bool = False
+    ) -> None:
         """Route order-free joins to acero's parallel hash join.
 
         Eligible when (a) the join's output feeds an order-insensitive
@@ -274,6 +276,13 @@ class DecisionLayer:
         Measured at 10M x 1M ints: acero 160 ms vs indexer path 684 ms
         vs Polars ~700 ms. Joins whose order is observable (direct
         materialization) keep the eager-order-matching indexer path.
+
+        When ``order_relaxed`` (collect(order="relaxed")), condition (a)
+        widens: a join feeding the *terminal collect output* also counts
+        as order-unobservable, since the user has opted out of the eager
+        row-order contract for the final result. Intermediate
+        order-dependent operators (shift/cum_*) still block routing —
+        relaxed mode relaxes the output order, not computed values.
         """
         # Pipeline whose source is a given sink (downstream walk), and
         # feeder schemas per sink slot.
@@ -287,18 +296,20 @@ class DecisionLayer:
                     _pipeline_output_schema(p)
                 )
 
-        def output_order_unobservable(sink: NodeSink) -> bool:
+        def output_order_unobservable(sink: NodeSink, relaxed: bool) -> bool:
             """Walk downstream: is this sink's output row order observable?
 
             True when every operator between here and an order-free
             terminal sink is order-transparent (filters/projects/
             converts whose expressions contain no order-dependent
             function), recursing through downstream joins and concats
-            whose own output order is likewise unobservable.
+            whose own output order is likewise unobservable. When
+            ``relaxed``, reaching the terminal collect output also
+            counts as unobservable.
             """
             p = consumer_pipeline.get(id(sink))
             if p is None:
-                return False  # feeds the collect output: order observable
+                return False  # no consumer pipeline (defensive): observable
             if not all(_op_is_order_transparent(op) for op in p.operators):
                 return False
             nxt = p.sink
@@ -306,8 +317,12 @@ class DecisionLayer:
                 if isinstance(nxt.node, _ORDER_FREE_SINKS):
                     return True
                 if isinstance(nxt.node, (PhysicalHashJoin, PhysicalConcat)):
-                    return output_order_unobservable(nxt)
-            return False
+                    return output_order_unobservable(nxt, relaxed)
+                return False  # some other order-observing breaker
+            # nxt is the terminal collect output. Under the eager
+            # row-order contract this order is observable; collect(
+            # order="relaxed") opts out, so the join may go to acero.
+            return relaxed
 
         for p in graph.pipelines:
             sink = p.sink
@@ -320,7 +335,13 @@ class DecisionLayer:
                 continue
             if node.how not in ("inner", "left"):
                 continue
-            if not output_order_unobservable(sink):
+            # Unobservable without relaxing → an order-free downstream
+            # consumer (always safe). Only-when-relaxed → the terminal
+            # output, gated on collect(order="relaxed").
+            strict_unobservable = output_order_unobservable(sink, relaxed=False)
+            if not strict_unobservable and not (
+                order_relaxed and output_order_unobservable(sink, relaxed=True)
+            ):
                 continue
 
             schemas = feeder_schemas.get(id(sink), {})
@@ -354,12 +375,19 @@ class DecisionLayer:
             ):
                 node.planned_acero = True
                 if p.decisions is not None:
+                    reason = (
+                        "order-free consumer"
+                        if strict_unobservable
+                        else "order-relaxed"
+                    )
                     p.decisions.sink_decision = (
                         p.decisions.sink_decision or "join"
-                    ) + " -> acero (order-free consumer)"
+                    ) + f" -> acero ({reason})"
 
 
-def annotate_decisions(graph: PipelineGraph) -> PipelineGraph:
+def annotate_decisions(
+    graph: PipelineGraph, order_relaxed: bool = False
+) -> PipelineGraph:
     """Run the decision layer over a compiled graph (idempotent)."""
-    DecisionLayer().annotate(graph)
+    DecisionLayer().annotate(graph, order_relaxed=order_relaxed)
     return graph

@@ -24,7 +24,7 @@ Two development phases produced these numbers: the conversion fix cycle
 | category-key groupby | 0.43x vs Polars-categorical | zero-copy dictionary flow (was 313 ms, now 21) |
 | full-scan select+filter | ~0.37x (21 ms) | vectorized index column (was 104 ms) |
 | filter_project | 0.21x | bandwidth-bound; single thread saturates (measured) |
-| join (order-preserving) | 0.29x | the price of eager `pd.merge` row-order semantics — a documented choice |
+| join (order-preserving) | 0.42x default; **0.89x with `order="relaxed"`** | eager `pd.merge` row order by default; `collect(order="relaxed")` routes to acero (measured 10M×1M inner: 298→142 ms, 2.1x; left: 232→71 ms, 3.2x) |
 | limit (in-memory) | ~300 µs absolute | plan-construction floor |
 
 Themes, each measured: kernels were never the bottleneck (the fix cycle);
@@ -45,17 +45,13 @@ more than threading on bandwidth-bound paths.
    67 ms/10M vs Polars' 18; the dictionary cache solves repeated queries
    but first-query and one-shot workloads still pay. Upstream Arrow work
    or a pre-hashing trick are the options.
-3. **Order-relaxed collect mode.** `collect(order="relaxed")` would widen
-   acero join routing to *every* join (not just order-free consumers) —
-   Polars-style semantics as a user opt-in, arbitrated by the existing
-   decision-layer machinery.
-4. **Planning-overhead fast paths.** Single-op queries pay 60–80% of lazy
+3. **Planning-overhead fast paths.** Single-op queries pay 60–80% of lazy
    overhead in the optimizer (`bench_planning_phases.py`); skip passes by
    plan shape. The ~300 µs limit floor is this item.
-5. **Cardinality estimation.** Row estimates stop at filters (no
+4. **Cardinality estimation.** Row estimates stop at filters (no
    selectivity model); estimates feed the decision layer's join build-side
    and parallelism-degree choices, so better estimates compound.
-6. **Free-threaded partition joins.** pandas' Cython hash join holds the
+5. **Free-threaded partition joins.** pandas' Cython hash join holds the
    GIL (measured: threaded partition-pairs 461→535 ms at 2→8 threads vs
    430 serial). On free-threaded Python the M5-spec'd partitioned join
    becomes buildable; the engine architecture needs no changes to exploit

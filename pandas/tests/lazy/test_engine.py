@@ -8,6 +8,7 @@ what becomes a sink, and graph ordering.
 """
 
 import numpy as np
+import pytest
 
 import pandas as pd
 import pandas._testing as tm
@@ -684,6 +685,135 @@ class TestOrderFreenessPropagation:
             .agg(col("v").sum().alias("s"))
         )
         assert q.explain(physical=True).count("acero") == 2
+
+
+class TestOrderRelaxedCollect:
+    """collect(order="relaxed") widens acero routing to terminal joins."""
+
+    def _frames(self, n=5_000):
+        rng = np.random.default_rng(21)
+        left = pd.DataFrame({"k": rng.integers(0, 500, n), "v": rng.standard_normal(n)})
+        right = pd.DataFrame({"k": np.arange(500), "w": rng.standard_normal(500)})
+        return left, right
+
+    @staticmethod
+    def _join_acero_flags(q, order_relaxed):
+        """planned_acero for each join sink under the given order mode."""
+        from pandas.lazy.engine.decisions import annotate_decisions
+        from pandas.lazy.engine.pipeline import (
+            NodeSink,
+            PipelineCompiler,
+        )
+        from pandas.lazy.physical import (
+            PhysicalHashJoin,
+            PhysicalPlanner,
+        )
+
+        plan = q._get_optimized_plan()
+        pplan = PhysicalPlanner(preferred_backend="auto").plan(plan)
+        graph = annotate_decisions(
+            PipelineCompiler().compile(pplan), order_relaxed=order_relaxed
+        )
+        return [
+            p.sink.node.planned_acero
+            for p in graph.pipelines
+            if isinstance(p.sink, NodeSink)
+            and isinstance(p.sink.node, PhysicalHashJoin)
+        ]
+
+    def test_direct_join_routes_only_when_relaxed(self):
+        left, right = self._frames()
+        q = left.select().join(right.select(), on="k", how="inner")
+        # stable: terminal output order observable -> indexer path
+        assert all(f is False for f in self._join_acero_flags(q, False))
+        # relaxed: output order unspecified -> acero
+        assert any(f for f in self._join_acero_flags(q, True))
+
+    def test_relaxed_result_matches_eager_as_set(self):
+        left, right = self._frames()
+        q = left.select().join(right.select(), on="k", how="inner")
+        ref = left.merge(right, on="k", how="inner")
+        relaxed = q.collect(use_physical_planner=True, order="relaxed")
+        stable = q.collect(use_physical_planner=True)
+        assert relaxed.shape == ref.shape
+
+        def canon(df):
+            return df.sort_values(list(df.columns)).reset_index(drop=True)
+
+        tm.assert_frame_equal(canon(relaxed), canon(ref), check_dtype=False)
+        # stable still matches eager ROW ORDER exactly
+        tm.assert_frame_equal(
+            stable.reset_index(drop=True),
+            ref.reset_index(drop=True),
+            check_dtype=False,
+        )
+
+    def test_relaxed_label_in_decision(self):
+        from pandas.lazy.engine.decisions import annotate_decisions
+        from pandas.lazy.engine.pipeline import PipelineCompiler
+        from pandas.lazy.physical import PhysicalPlanner
+
+        left, right = self._frames()
+        q = left.select().join(right.select(), on="k", how="inner")
+        pplan = PhysicalPlanner(preferred_backend="auto").plan(q._get_optimized_plan())
+        graph = annotate_decisions(
+            PipelineCompiler().compile(pplan), order_relaxed=True
+        )
+        assert "acero (order-relaxed)" in graph.describe()
+
+    def test_order_sensitive_intermediate_blocks_relaxed(self):
+        # join -> cum_sum -> collect: reordering the join would change the
+        # cumulative values, not just output order. Relaxed must NOT route.
+        left, right = self._frames()
+        q = (
+            left.select()
+            .join(right.select(), on="k", how="inner")
+            .with_columns(col("v").cum_sum().alias("c"))
+        )
+        assert all(f is False for f in self._join_acero_flags(q, True))
+
+    def test_relaxed_filter_passthrough_routes(self):
+        # join -> filter -> collect: filter is order-transparent, so relaxed
+        # output-order relaxation reaches the join.
+        left, right = self._frames()
+        q = left.select().join(right.select(), on="k", how="inner").filter(col("v") > 0)
+        assert all(f is False for f in self._join_acero_flags(q, False))
+        assert any(f for f in self._join_acero_flags(q, True))
+
+    def test_order_free_consumer_unaffected_by_mode(self):
+        # join -> groupby routes in BOTH modes (order-free consumer); the
+        # decision does not depend on the relaxed flag.
+        left, right = self._frames()
+        q = (
+            left.select()
+            .join(right.select(), on="k", how="inner")
+            .group_by("k")
+            .agg(col("v").sum().alias("s"))
+        )
+        assert any(f for f in self._join_acero_flags(q, False))
+        assert any(f for f in self._join_acero_flags(q, True))
+
+    def test_relaxed_with_preserve_index_falls_back(self):
+        # preserve_index observes row identity: the runtime guard keeps the
+        # indexer path even though the join is planned_acero. Result must
+        # still equal the eager merge (index preserved).
+        left, right = self._frames()
+        q = left.select().join(right.select(), on="k", how="inner")
+        out = q.collect(use_physical_planner=True, order="relaxed", preserve_index=True)
+        ref = left.merge(right, on="k", how="inner")
+        assert len(out) == len(ref)
+
+    def test_relaxed_requires_physical_planner(self):
+        left, right = self._frames()
+        q = left.select().join(right.select(), on="k", how="inner")
+        with pytest.raises(ValueError, match="requires use_physical_planner"):
+            q.collect(order="relaxed")
+
+    def test_invalid_order_value_raises(self):
+        left, right = self._frames()
+        q = left.select().join(right.select(), on="k", how="inner")
+        with pytest.raises(ValueError, match="order must be"):
+            q.collect(use_physical_planner=True, order="nonsense")
 
 
 class TestScanLimitPushdown:

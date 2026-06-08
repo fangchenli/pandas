@@ -381,7 +381,9 @@ def execute_as_pipelines(plan: PhysicalPlan, context: ExecutionContext) -> Array
     """Compile a physical plan to a pipeline graph and execute it."""
     from pandas.lazy.engine.decisions import annotate_decisions
 
-    graph = annotate_decisions(PipelineCompiler().compile(plan))
+    graph = annotate_decisions(
+        PipelineCompiler().compile(plan), order_relaxed=context.order_relaxed
+    )
     return PipelineExecutor().execute(graph, context)
 
 
