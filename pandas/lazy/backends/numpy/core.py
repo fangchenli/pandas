@@ -466,14 +466,65 @@ def _parallel_argsort(arr: np.ndarray) -> np.ndarray:
     return np.concatenate(segments)
 
 
+_SIGN64 = np.uint64(0x8000000000000000)
+
+
+def _radix_argsort(arr: np.ndarray) -> np.ndarray | None:
+    """Stable ascending argsort via the Cython LSD radix kernel.
+
+    Builds order-preserving ``uint64`` keys (vectorized) and defers the
+    radix passes to ``pandas._libs.lazy_radix``. Order-preservation:
+
+    - unsigned ints widen to ``uint64`` unchanged;
+    - signed ints widen to ``int64`` and flip the sign bit;
+    - floats widen to ``float64``; a set sign bit (negative) flips all
+      bits, an unset one flips just the sign bit, giving a monotonic
+      ``uint64`` image of IEEE-754 order. NaN never reaches here — the
+      caller (`numpy_sort_indices`) replaces it with +/-inf first.
+
+    Returns ``None`` for dtypes the kernel does not cover, so the caller
+    falls back to the NumPy k-way merge.
+    """
+    kind = arr.dtype.kind
+    if kind == "f":
+        u = np.ascontiguousarray(arr, dtype=np.float64).view(np.uint64)
+        # -0.0's bit pattern is exactly the sign bit (_SIGN64). It equals
+        # +0.0, so it must not sort before it; excluding it from the
+        # negative branch maps its key onto +0.0's, keeping the tie stable.
+        neg = ((u >> np.uint64(63)) != 0) & (u != _SIGN64)
+        keys = np.where(neg, ~u, u | _SIGN64).astype(np.uint64, copy=False)
+    elif kind == "i":
+        u = np.ascontiguousarray(arr, dtype=np.int64).view(np.uint64)
+        keys = u ^ _SIGN64
+    elif kind == "u":
+        keys = np.ascontiguousarray(arr, dtype=np.uint64)
+    else:
+        return None
+
+    from pandas._libs.lazy_radix import radix_argsort_u64
+
+    return radix_argsort_u64(keys)
+
+
 def _argsort(arr: np.ndarray) -> np.ndarray:
-    """Stable argsort, parallelized for large numeric arrays.
+    """Stable argsort, accelerated for large numeric arrays.
 
     Stability is part of the lazy sort contract: it is the only tie
     order on which the eager evaluator, the NumPy engine, and the Arrow
     engine (whose sorts are stable) can all agree.
+
+    Large integer/unsigned/float arrays go through the Cython LSD radix
+    argsort (`_radix_argsort`, ~1.5x over the k-way merge at 10M); the
+    parallel k-way merge is the fallback if the kernel is unavailable or
+    raises, and ``np.argsort`` handles small or non-numeric arrays.
     """
     if len(arr) >= PARALLEL_SORT_MIN_ROWS and arr.dtype.kind in ("i", "u", "f"):
+        try:
+            result = _radix_argsort(arr)
+        except Exception:
+            result = None
+        if result is not None:
+            return result
         return _parallel_argsort(arr)
     return np.argsort(arr, kind="stable")
 

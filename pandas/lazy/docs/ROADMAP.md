@@ -20,7 +20,7 @@ Two development phases produced these numbers: the conversion fix cycle
 | aggregation | **1.17x avg — wins** (multi-agg 3.47x, groupby-sum 1.02x @10M) | groupby routing + dictionary-encoding cache (warm from 2nd query) |
 | parquet scan | 0.86x avg — glob `head()` **wins 1.55x** (6.7 ms vs 10.3) | limit pushdown into scans + direct ParquetFile path + vectorized index |
 | join→groupby composite | 0.58x | acero routing for order-free joins |
-| sort | 0.42x | k-way segment merge (3.6x kernel); see sort decomposition below |
+| sort | 0.42x → improving | Cython radix argsort (~215 ms, Polars-parity) + breaker copy-free output; gather is the remaining lever — see decomposition below |
 | category-key groupby | 0.43x vs Polars-categorical | zero-copy dictionary flow (was 313 ms, now 21) |
 | full-scan select+filter | ~0.37x (21 ms) | vectorized index column (was 104 ms) |
 | filter_project | 0.21x | gather-bound (string `take`) + pandas' mutation-safety copy, not bandwidth — see decomposition below |
@@ -38,16 +38,14 @@ more than threading on bandwidth-bound paths.
 A profiling pass decomposed both remaining real-operation losers. The
 labels "algorithmic" and "bandwidth-bound" were only half right:
 
-- **Sort** (10M, mixed dtype) splits ~evenly: argsort **411 ms** (our
-  k-way merge — already 3.6x over `np.argsort`; Polars `arg_sort` 205 ms,
-  so 2x off) + gather **459 ms** (dominated by Arrow string `take` at
-  **271 ms/column** — dictionary-array `take` is 6.4x faster at 44 ms but
-  decoding back to `str` for output eats most of it) + output assembly
-  ~104 ms. Both kernels need *native* code to reach Polars: a parallel
-  radix argsort (the bit-flip-to-uint64 trick is 209 ms just for the
-  transform in NumPy, and NumPy's stable argsort is not radix-tuned), and
-  a faster string gather (Arrow string-view / "German strings", whose
-  `take` kernel is not yet in pyarrow 23).
+- **Sort** (10M, mixed dtype) splits ~evenly: argsort ~~411 ms~~ **now
+  ~215 ms** via the Cython radix kernel (opportunity #2, landed — matches
+  Polars' `arg_sort`) + gather **459 ms** (dominated by Arrow string
+  `take` at **271 ms/column** — dictionary-array `take` is 6.4x faster at
+  44 ms but decoding back to `str` for output eats most of it) + output
+  assembly ~104 ms (now copy-free on breakers). The gather is the
+  remaining lever and needs a faster string `take` (Arrow string-view /
+  "German strings", whose `take` kernel is not yet in pyarrow 23).
 - **filter_project** is **gather-bound, not bandwidth-bound**: `filter`'s
   cost is the same string `take`; `with_columns(a+b)` is 38 ms vs 9 ms of
   actual compute, and the 12 ms overhead is the **block-consolidation
@@ -72,11 +70,15 @@ investment for these categories.
    caps bandwidth-bound chains at ~1x for *any* thread-based approach;
    GPU morsels are the speculative extension. The prerequisites (pipeline
    objects, per-column backend planning, conversion costing) all exist.
-2. **Native parallel radix argsort.** Sort's argsort half is 411 ms vs
-   Polars' 205 (2x); the k-way merge has no pure-NumPy headroom left (the
-   bit-flip radix path is 209 ms just to transform). A Cython LSD radix
-   argsort over sign-flipped int/uint/float keys is the lever. Co-dominant
-   with the gather item below; together they own the sort category.
+2. **Parallelize the radix argsort.** ~~Native radix argsort~~ — landed: a
+   Cython LSD radix kernel (`pandas/_libs/lazy_radix.pyx`, 16-bit digits,
+   key/index pairs moved together) replaced the k-way merge for large
+   numeric single-key sorts, ~215 ms vs 320-410 ms, matching Polars'
+   `arg_sort` (~205 ms). Keys are built vectorized in NumPy (sign/float
+   bit transforms, -0.0 normalized). *Still serial* — the histogram and
+   scatter can be parallelized (per-chunk local histograms + partitioned
+   scatter) for a further win; multi-key sorts still use the Arrow lexsort
+   path and are untouched.
 3. **Faster string gather.** Arrow `large_string` `take` is 271 ms/10M
    column — the bottleneck for both sort gather and `filter`. Dictionary
    `take` is 6.4x faster (44 ms) but decoding back to `str` for output

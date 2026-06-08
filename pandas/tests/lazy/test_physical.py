@@ -685,6 +685,37 @@ class TestParallelExecutionPaths:
             expected = np.argsort(arr, kind="stable")
             tm.assert_numpy_array_equal(result, expected)
 
+    def test_radix_argsort_matches_numpy_stable_across_dtypes(self):
+        # The Cython LSD radix kernel (pandas._libs.lazy_radix) must return
+        # the EXACT np.argsort(kind="stable") permutation for every numeric
+        # dtype, including the IEEE edge cases (-0.0 == +0.0 ties, +/-inf).
+        from pandas.lazy.backends.numpy.core import _radix_argsort
+
+        rng = np.random.default_rng(7)
+        arrays = [
+            rng.standard_normal(20_000),
+            rng.integers(-(10**9), 10**9, 20_000).astype(np.int64),
+            (-rng.integers(0, 10**9, 20_000)).astype(np.int64),
+            rng.integers(0, 10**12, 20_000).astype(np.uint64),
+            rng.integers(-5, 5, 20_000).astype(np.int32),  # heavy ties
+            np.arange(20_000, dtype=np.float64)[::-1].copy(),
+            rng.choice([0.0, -0.0, 1.0, -1.0, np.inf, -np.inf], 20_000).astype(
+                np.float64
+            ),
+            np.array([], dtype=np.float64),
+            np.array([3.0]),
+        ]
+        for arr in arrays:
+            result = _radix_argsort(arr)
+            expected = np.argsort(arr, kind="stable")
+            tm.assert_numpy_array_equal(result, expected)
+
+    def test_radix_argsort_returns_none_for_unsupported_dtype(self):
+        # Non-numeric kinds fall back to the k-way merge / np.argsort.
+        from pandas.lazy.backends.numpy.core import _radix_argsort
+
+        assert _radix_argsort(np.array(["b", "a", "c"], dtype=object)) is None
+
     def test_sort_kernel_uses_parallel_path(self, monkeypatch):
         import pandas.lazy.backends.numpy.core as np_core
 
