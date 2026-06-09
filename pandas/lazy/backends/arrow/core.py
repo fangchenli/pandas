@@ -116,14 +116,21 @@ def arrow_str_slice(
 
 @register_kernel("is_null", "arrow")
 def arrow_is_null(arr: PyArrowArray) -> PyArrowArray:
-    """Check for null values."""
-    return pc.is_null(arr)
+    """Check for null values.
+
+    pandas treats NaN as null (``pd.isna(np.nan)`` is True), but Arrow's
+    ``pc.is_null`` distinguishes NaN from null by default. A float NaN — e.g.
+    the way an unmatched integer key surfaces after a left join — would be
+    missed without ``nan_is_null=True``, breaking the left-join + ``is_null``
+    anti-join idiom whenever the frame is Arrow-backed.
+    """
+    return pc.is_null(arr, nan_is_null=True)
 
 
 @register_kernel("is_not_null", "arrow")
 def arrow_is_not_null(arr: PyArrowArray) -> PyArrowArray:
-    """Check for non-null values."""
-    return pc.is_valid(arr)
+    """Check for non-null values (NaN counts as null, matching pandas)."""
+    return pc.invert(pc.is_null(arr, nan_is_null=True))
 
 
 @register_kernel("fill_null", "arrow")

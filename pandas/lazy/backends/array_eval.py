@@ -610,6 +610,12 @@ class ArrayEvaluator:
         if kwargs:
             return None
 
+        # is_null / is_not_null need nan_is_null=True to match pandas (where a
+        # float NaN is null); the bare cached pc.is_null does not, so route them
+        # to the registered kernels (arrow/core.py) which set that option.
+        if func in ("is_null", "is_not_null"):
+            return None
+
         fn = get_arrow_function(func)
         if fn is None:
             return None

@@ -271,3 +271,38 @@ class TestNullCastTypeInference:
         node = Call("coalesce", (FieldRef("a"), FieldRef("b")))
         dtype = infer_expr_dtype(node, schema)
         assert dtype.category == "string"
+
+
+class TestIsNullNaNSemantics:
+    """is_null / is_not_null must treat float NaN as null (pandas semantics).
+
+    Regression: an unmatched integer key surfaces as a float NaN after a left
+    join. On the Arrow backend (a frame with string columns), both the cached
+    fast path and the kernel called bare pc.is_null, which by default does NOT
+    treat NaN as null — so the left-join + is_null anti-join idiom silently
+    returned nothing (TPC-H Q22).
+    """
+
+    @pytest.mark.parametrize("use_physical", [True, False])
+    def test_is_null_catches_nan_after_left_join(self, use_physical):
+        # string column forces the Arrow backend, where the bug lived
+        left = pd.DataFrame({"k": [1, 2, 3, 4], "s": ["a", "b", "c", "d"]})
+        right = pd.DataFrame({"ok": [2, 4], "rv": [9.0, 9.0]})
+        joined = left.select().join(
+            right.select(), left_on="k", right_on="ok", how="left"
+        )
+
+        anti = joined.filter(col("ok").is_null()).collect(
+            use_physical_planner=use_physical
+        )
+        assert sorted(anti["k"].tolist()) == [1, 3]
+
+        matched = joined.filter(col("ok").is_not_null()).collect(
+            use_physical_planner=use_physical
+        )
+        assert sorted(matched["k"].tolist()) == [2, 4]
+
+    def test_is_null_on_plain_nan_column(self):
+        df = pd.DataFrame({"x": [1.0, np.nan, 3.0], "s": ["a", "b", "c"]})
+        out = df.select().filter(col("x").is_null()).collect(use_physical_planner=True)
+        assert out["s"].tolist() == ["b"]
