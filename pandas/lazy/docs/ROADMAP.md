@@ -36,32 +36,46 @@ semantics, not by missing optimizations — see "Blocked on upstream" below.
 
 The forward list — open items only. Landed work is recorded further down.
 
-1. **JAX/XLA kernel backend** — the breakthrough candidate (see
-   ENGINE_DESIGN.md "Future backends"). Fused codegen is the only identified
-   lever against the memory-bandwidth ceiling that caps bandwidth-bound
-   chains at ~1x for *any* thread-based approach; GPU morsels are the
-   speculative extension. Prerequisites (pipeline objects, per-column
-   backend planning, conversion costing) all exist.
-2. **String-key multi-column sort.** The radix lexsort (landed) covers
+1. **String-key multi-column sort.** The radix lexsort (landed) covers
    all-numeric multi-key sorts; a multi-key sort that includes a string
    column still falls back to Arrow's table `sort_indices`. A dictionary-
    encoded key (int32 codes feeding the radix lexsort) would extend the win
    there, bounded by the same `large_string` gather wall (Blocked, below).
-3. **Acero raw-string hash gap.** acero groups raw `large_string` keys at
+2. **Acero raw-string hash gap.** acero groups raw `large_string` keys at
    67 ms/10M vs Polars' 18; the dictionary cache solves repeated queries
    but first-query and one-shot workloads still pay. Upstream Arrow work or
    a pre-hashing trick are the options.
-4. **Cardinality estimation.** Row estimates stop at filters (no selectivity
+3. **Cardinality estimation.** Row estimates stop at filters (no selectivity
    model); estimates feed the decision layer's join build-side and
    parallelism-degree choices, so better estimates compound.
-5. **Planning-overhead fast paths.** Single-op queries pay 60–80% of lazy
+4. **Planning-overhead fast paths.** Single-op queries pay 60–80% of lazy
    overhead in the optimizer (`bench_planning_phases.py`); skip passes by
    plan shape. The ~300 µs limit floor is this item. (Low leverage:
    sub-millisecond, invisible on real data.)
-6. **Free-threaded partition joins.** pandas' Cython hash join holds the GIL
+5. **Free-threaded partition joins.** pandas' Cython hash join holds the GIL
    (measured: threaded partition-pairs 461→535 ms at 2→8 threads vs 430
    serial). On free-threaded Python the M5-spec'd partitioned join becomes
    buildable; the engine architecture needs no changes to exploit it.
+
+### Considered and set aside (with measurements)
+
+- **JAX/XLA kernel backend** — *declined June 2026 on measured grounds*, was
+  the former "breakthrough candidate." Two findings sink it:
+  1. **The CPU fusion lever is already pulled by NumExpr.** The engine
+     already routes fuseable arithmetic chains (≥100K elems) through
+     `numexpr_fusion.py`; measured 1.4x (`a+b`, bandwidth-bound) to 5.6x
+     (`sqrt(exp(a)+sin(b)*cos(c))`, compute-bound) over naive NumPy. JAX-CPU
+     (XLA) would compete with NumExpr, not naive NumPy — both fuse and
+     multithread, so the marginal gain doesn't justify a heavy dependency.
+  2. **GPU can't beat a bandwidth ceiling by adding a bandwidth-bound
+     transfer.** A 10M-row chain moves ~240–480 MB; a discrete-GPU
+     host→device→host round-trip (~15–30 ms over PCIe) already exceeds what
+     NumExpr does the *whole* op in (9–16 ms). GPU only pays off when data
+     is device-*resident* across many ops (the cuDF model), not converted
+     per-chain. The narrow exception — transcendental-heavy numeric chains
+     (ML preprocessing) — argues for a device-resident sub-pipeline, a
+     different execution model, not a kernel backend. Revisit only for a
+     workload that is both compute-bound *and* chains many such ops.
 
 ### Smaller items
 
