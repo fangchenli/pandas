@@ -32,6 +32,19 @@ analytical pipelines (TPC-H).** Two TPC-H probes also surfaced real engine bugs,
 now fixed — a datetime-filter comparison (~150x on our own prior path) and a CSE
 expression-conflation correctness bug.
 
+**Where the pipeline gap actually is (measured on Q5, not assumed):** profiling
+puts ~89% of Q5 in the joins and ~52% in `pd.merge`'s key factorization — *not*
+in pandas↔Arrow conversions (which don't appear) and *not* in a slow per-join
+kernel (a single TPC-H join is `pd.merge` 68ms ≈ acero 67ms ≈ Polars 53ms, only
+~1.3x). The 9x chain gap is Polars' **cost-based join execution**: it reorders
+the join tree and pipelines without materializing intermediates. This is not a
+cheap win, and **naive join reordering backfires** — hand-reordering Q5 to apply
+the `region='ASIA'` restriction first made it *25x slower* (5.5s vs 0.22s),
+because the early joins then land on low-cardinality `nationkey` and explode the
+supplier×customer intermediate. Closing the gap needs a real cost-based join
+reorderer (cardinality-driven) plus pipelined joins — mature-optimizer work,
+tracked as a large item, not attempted blindly.
+
 | Category | Standing | Driver |
 |----------|----------|--------|
 | string | **2.14x avg — wins** (`str.lower` 5.30x, `contains` up to 1.55x) | pass-through fix + compute-bound morsel parallelism |
