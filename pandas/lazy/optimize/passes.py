@@ -17,8 +17,9 @@ All passes use PlanVisitor base class to reduce boilerplate.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import numpy as np
 
+from pandas.lazy.expr import Expr
 from pandas.lazy.ir import (
     Alias,
     Call,
@@ -43,6 +44,7 @@ from pandas.lazy.plan import (
     Aggregate,
     Concat,
     CSVSource,
+    DataFrameSource,
     Distinct,
     Filter,
     Join,
@@ -53,10 +55,7 @@ from pandas.lazy.plan import (
     Sort,
     TopK,
 )
-
-if TYPE_CHECKING:
-    from pandas.lazy.expr import Expr
-
+from pandas.lazy.types import infer_expr_dtype
 
 # =============================================================================
 # ConstantFolding Pass
@@ -117,7 +116,6 @@ class ConstantFolding(PlanVisitor):
 
     def _fold_expr(self, expr: Expr) -> Expr:
         """Fold constants in an expression."""
-        from pandas.lazy.expr import Expr
 
         new_ir = self._fold_ir(expr._ir)
         if new_ir is not expr._ir:
@@ -172,7 +170,6 @@ class ConstantFolding(PlanVisitor):
 
     def _cast_literal(self, value, target_dtype):
         """Cast a literal value to a target dtype."""
-        import numpy as np
 
         if hasattr(target_dtype, "numpy_dtype"):
             target_dtype = target_dtype.numpy_dtype
@@ -307,7 +304,6 @@ class FilterFusion(PlanVisitor):
         # Check if input is also a Filter
         if isinstance(new_input, Filter):
             # Combine predicates with AND
-            from pandas.lazy.expr import Expr
 
             combined_predicate = Expr(
                 Call(
@@ -356,7 +352,6 @@ class PredicatePushdown(PlanVisitor):
         - A new plan with filter pushed down
         - Filter(input_plan, predicate) if cannot push
         """
-        from pandas.lazy.expr import Expr
 
         pred_cols = get_referenced_columns(predicate)
 
@@ -541,7 +536,6 @@ class ProjectionPruning(PlanVisitor):
 
     def _prune(self, plan: LogicalPlan, needed: set[str]) -> LogicalPlan:
         """Recursively prune the plan."""
-        from pandas.lazy.plan import DataFrameSource
 
         if isinstance(plan, DataFrameSource):
             # Can't prune source in logical plan
@@ -957,7 +951,6 @@ class CommonSubexpressionElimination(PlanVisitor):
 
         This ensures __cse_* columns are internal and never leak to output.
         """
-        from pandas.lazy.expr import Expr
 
         # Build a map of IR node fingerprints to their occurrences
         ir_to_exprs: dict[str, list[tuple[int, Expr, IRNode]]] = {}
@@ -1188,7 +1181,6 @@ class AggregatePushdown(PlanVisitor):
         agg_exprs: tuple[Expr, ...],
     ) -> LogicalPlan | None:
         """Try to push an Aggregate through a Project."""
-        from pandas.lazy.expr import Expr
 
         lineage = build_project_lineage(project)
 
@@ -1352,7 +1344,6 @@ class ExpressionSimplification(PlanVisitor):
 
     def _simplify_expr(self, expr: Expr) -> Expr:
         """Simplify an expression."""
-        from pandas.lazy.expr import Expr
 
         new_ir = self._simplify_ir(expr._ir)
         if new_ir is not expr._ir:
@@ -1590,9 +1581,6 @@ class ExpressionSimplification(PlanVisitor):
         - String types (comparison semantics may vary)
         - Object types (unknown behavior)
         """
-        import numpy as np
-
-        from pandas.lazy.types import infer_expr_dtype
 
         # Need schema context to determine dtype
         if self._current_schema is None:

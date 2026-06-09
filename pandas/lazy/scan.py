@@ -7,9 +7,14 @@ without immediately loading data into memory.
 
 from __future__ import annotations
 
+import os
 from typing import Literal
 
 from pandas.lazy.frame import LazyDataFrame
+from pandas.lazy.plan import (
+    CSVSource,
+    ParquetSource,
+)
 
 
 def scan(
@@ -105,9 +110,6 @@ def scan(
     LazyDataFrame.select : Select columns.
     """
     # Infer format from path if not specified
-    if format is None:
-        import os
-
     path = os.fspath(path)
     format = _infer_format(path)
 
@@ -156,8 +158,6 @@ def _infer_format(path: str) -> Literal["parquet", "csv", "json"] | None:
 
 def _scan_parquet(path: str) -> LazyDataFrame:
     """Create a lazy query from Parquet file(s)."""
-    from pandas.lazy.plan import ParquetSource
-
     source = ParquetSource(path=path)
     schema = source.resolve_schema()
     return LazyDataFrame(source, schema)
@@ -171,8 +171,6 @@ def _scan_csv(
     n_rows: int | None = None,
 ) -> LazyDataFrame:
     """Create a lazy query from CSV file(s)."""
-    from pandas.lazy.plan import CSVSource
-
     source = CSVSource(
         path=path,
         sep=sep,
