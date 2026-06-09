@@ -44,8 +44,9 @@ labels "algorithmic" and "bandwidth-bound" were only half right:
   `take` at **271 ms/column** — dictionary-array `take` is 6.4x faster at
   44 ms but decoding back to `str` for output eats most of it) + output
   assembly ~104 ms (now copy-free on breakers). The gather is the
-  remaining lever and needs a faster string `take` (Arrow string-view /
-  "German strings", whose `take` kernel is not yet in pyarrow 23).
+  remaining cost but is a **memory-bandwidth wall** on the `large_string`
+  layout (opportunity #3, investigated) — the real fix is Arrow string-view,
+  which is upstream-blocked. The argsort half is now done.
 - **filter_project** is **gather-bound, not bandwidth-bound**: `filter`'s
   cost is the same string `take`; `with_columns(a+b)` is 38 ms vs 9 ms of
   actual compute, and the 12 ms overhead is the **block-consolidation
@@ -79,11 +80,30 @@ investment for these categories.
    scatter can be parallelized (per-chunk local histograms + partitioned
    scatter) for a further win; multi-key sorts still use the Arrow lexsort
    path and are untouched.
-3. **Faster string gather.** Arrow `large_string` `take` is 271 ms/10M
-   column — the bottleneck for both sort gather and `filter`. Dictionary
-   `take` is 6.4x faster (44 ms) but decoding back to `str` for output
-   eats it on one-shot queries. Arrow string-view ("German strings") gather
-   is the real fix, pending its `take` kernel in pyarrow (absent in 23.0).
+3. **Faster string gather — blocked on Arrow string-view (investigated
+   June 2026).** Arrow `large_string` `take` is ~271-375 ms/10M column, the
+   bottleneck for both sort gather and `filter`; Polars gathers the same
+   data in ~92 ms (4x). A full measurement pass found this is a
+   **memory-bandwidth wall on the large_string layout**, not a missing
+   parallelization:
+   - A custom parallel gather (validated in numba) scales only 3.3x from
+     1→8 threads (568→173 ms) and tapers after 4 — bandwidth-bound. It
+     beats pyarrow single-threaded (271 ms) only when cores are spare;
+     `_take_all_columns` already overlaps multiple string columns across
+     cores, so a per-column parallel kernel oversubscribes and does not
+     cleanly win the multi-string-column case.
+   - No free pyarrow threading: chunked input (313 ms) and `Table.take`
+     (350 ms) are not faster than a single `take` (284 ms).
+   - Dictionary `take` is 2.8x faster (101 ms, already-encoded) because it
+     gathers int32 codes + decodes from a cache-resident small dictionary,
+     but a one-shot encode is 107 ms (net ~1.4x) and the output must decode
+     back to `str`. Already-`Categorical`/cached columns get this for free
+     today via the keycache; plain `large_string` columns do not.
+   - **Polars wins by moving less data**, via string-view ("German
+     strings": 16-byte inline views, no offset indirection or variable
+     byte copy). That is the only way past the bandwidth bound, and
+     pyarrow 23 has no `array_take` kernel for `string_view`. This is the
+     real fix and it is upstream-blocked.
 4. **Acero raw-string hash gap.** acero groups raw `large_string` keys at
    67 ms/10M vs Polars' 18; the dictionary cache solves repeated queries
    but first-query and one-shot workloads still pay. Upstream Arrow work
