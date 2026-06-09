@@ -752,6 +752,62 @@ class TestParallelExecutionPaths:
         # stable sort of the keys themselves
         tm.assert_numpy_array_equal(out, np.argsort(keys, kind="stable"))
 
+    @pytest.mark.parametrize(
+        "descending",
+        [(False, False), (True, False), (False, True), (True, True)],
+    )
+    def test_radix_lexsort_matches_numpy_lexsort(self, descending):
+        # The radix lexsort must equal the eager lexicographic order. NumPy's
+        # lexsort is all-ascending, so build the reference with negated keys
+        # for descending columns (heavy ties exercise the stable composition).
+        from pandas.lazy.backends.numpy.core import radix_lexsort
+
+        rng = np.random.default_rng(5)
+        g = rng.integers(0, 20, 40_000).astype(np.int64)  # primary, many ties
+        v = rng.integers(0, 100, 40_000).astype(np.int64)  # secondary
+        keys = [g, v]
+        got = radix_lexsort(keys, descending)
+        ref_g = -g if descending[0] else g
+        ref_v = -v if descending[1] else v
+        expected = np.lexsort((ref_v, ref_g))  # primary last in np.lexsort
+        # Compare the realized key order (permutations can differ only where
+        # both keys tie, and there the rows are identical).
+        tm.assert_numpy_array_equal(g[got], g[expected])
+        tm.assert_numpy_array_equal(v[got], v[expected])
+
+    def test_multikey_sort_uses_radix_lexsort_path(self, monkeypatch):
+        # At/above the multikey threshold with all-numeric keys, the physical
+        # sort must match eager exactly (ascending + descending + a float key
+        # with NaN, which the per-key NaN handling places last).
+        from pandas.lazy import physical
+
+        monkeypatch.setattr(physical, "ARROW_MULTIKEY_SORT_MIN_ROWS", 1_000)
+        rng = np.random.default_rng(6)
+        n = 5_000
+        df = pd.DataFrame(
+            {
+                "g": rng.integers(0, 30, n).astype("int64"),
+                "f": np.where(rng.random(n) < 0.1, np.nan, rng.standard_normal(n)),
+                "u": rng.integers(0, 5, n).astype("uint32"),
+            }
+        )
+        for keys, desc in [
+            (["g", "f"], [False, False]),
+            (["g", "f"], [True, False]),
+            (["u", "g", "f"], [False, True, False]),
+        ]:
+            eager = df.select().sort(*keys, descending=desc).collect()
+            physical_res = (
+                df.select()
+                .sort(*keys, descending=desc)
+                .collect(use_physical_planner=True)
+            )
+            tm.assert_frame_equal(
+                eager.reset_index(drop=True),
+                physical_res.reset_index(drop=True),
+                check_dtype=False,
+            )
+
     def test_sort_kernel_uses_parallel_path(self, monkeypatch):
         import pandas.lazy.backends.numpy.core as np_core
 

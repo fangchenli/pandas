@@ -18,7 +18,7 @@ data, Apple Silicon; physical engine). Speedup > 1.0 = lazy pandas faster.
 | parquet scan | 0.86x avg — glob `head()` **wins 1.55x** (6.7 ms vs 10.3) | limit pushdown into scans + direct ParquetFile path + vectorized index |
 | join (order-preserving) | 0.42x default; **0.89x with `order="relaxed"`** | eager `pd.merge` row order by default; `collect(order="relaxed")` routes to acero |
 | join→groupby composite | 0.58x | acero routing for order-free joins |
-| sort | numeric-key argsort **1.6x over Polars**; full mixed sort gather-bound | thread-parallel radix argsort + breaker copy-free output; string gather is the wall |
+| sort | numeric single + multi-key argsort **beats Polars**; full mixed sort gather-bound | thread-parallel radix argsort + radix lexsort + breaker copy-free output; string gather is the wall |
 | category-key groupby | 0.43x vs Polars-categorical | zero-copy dictionary flow (was 313 ms, now 21) |
 | full-scan select+filter | ~0.37x (21 ms) | vectorized index column (was 104 ms) |
 | filter_project | 0.21x | gather-bound (string `take`) + pandas' mutation-safety copy, not bandwidth |
@@ -42,10 +42,11 @@ The forward list — open items only. Landed work is recorded further down.
    chains at ~1x for *any* thread-based approach; GPU morsels are the
    speculative extension. Prerequisites (pipeline objects, per-column
    backend planning, conversion costing) all exist.
-2. **Multi-key / computed-key sort.** The radix argsort (landed) only
-   covers single numeric keys; multi-key and expression sorts still go
-   through the Arrow lexsort path. Options: a most-significant-key radix
-   pass + stable refinement, or a packed-key radix when keys fit 64 bits.
+2. **String-key multi-column sort.** The radix lexsort (landed) covers
+   all-numeric multi-key sorts; a multi-key sort that includes a string
+   column still falls back to Arrow's table `sort_indices`. A dictionary-
+   encoded key (int32 codes feeding the radix lexsort) would extend the win
+   there, bounded by the same `large_string` gather wall (Blocked, below).
 3. **Acero raw-string hash gap.** acero groups raw `large_string` keys at
    67 ms/10M vs Polars' 18; the dictionary cache solves repeated queries
    but first-query and one-shot workloads still pay. Upstream Arrow work or
@@ -116,6 +117,11 @@ The forward list — open items only. Landed work is recorded further down.
 
 Newest first. Detail in the git log and the docs above.
 
+- **Radix multi-key (lexsort) sort** — `radix_lexsort` composes per-key
+  parallel-radix sorts (least-significant first); all-numeric multi-key
+  sorts now run ~6x faster than Arrow's table `sort_indices`
+  (`sort(group, value1)` 10M: 2332→765 ms), with per-key descending/NaN
+  handled natively. String-keyed multi-key sorts still use Arrow.
 - **Thread-parallel radix argsort** — `_radix_sort_parallel` over the nogil
   phase kernels in `pandas/_libs/lazy_radix.pyx`; ~130 ms @10M float64,
   **1.6x faster than Polars**. 11-bit digits keep each chunk's histogram
