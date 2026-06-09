@@ -38,6 +38,7 @@ import numpy as np
 import pandas as pd
 from pandas.lazy import (
     col,
+    lit,
     when,
 )
 
@@ -395,13 +396,85 @@ def pl_q12(t):
     )
 
 
+# --- Q4: Order Priority Checking (semi-join via distinct + inner join) ------
+def lp_q4(t):
+    lo, hi = pd.Timestamp("1993-07-01"), pd.Timestamp("1993-10-01")
+    matching = (
+        _lp(t["lineitem"])
+        .filter(col("l_commitdate") < col("l_receiptdate"))
+        .select(col("l_orderkey"))
+        .distinct()
+    )
+    return (
+        _lp(t["orders"])
+        .filter((col("o_orderdate") >= lo) & (col("o_orderdate") < hi))
+        .join(matching, left_on="o_orderkey", right_on="l_orderkey")
+        .group_by("o_orderpriority")
+        .agg(col("o_orderkey").count().alias("order_count"))
+        .sort("o_orderpriority")
+    )
+
+
+def pl_q4(t):
+    lo, hi = pd.Timestamp("1993-07-01"), pd.Timestamp("1993-10-01")
+    matching = (
+        t["lineitem"]
+        .lazy()
+        .filter(pl.col("l_commitdate") < pl.col("l_receiptdate"))
+        .select("l_orderkey")
+    )
+    return (
+        t["orders"]
+        .lazy()
+        .filter((pl.col("o_orderdate") >= lo) & (pl.col("o_orderdate") < hi))
+        .join(matching, left_on="o_orderkey", right_on="l_orderkey", how="semi")
+        .group_by("o_orderpriority")
+        .agg(pl.len().alias("order_count"))
+        .sort("o_orderpriority")
+        .collect()
+    )
+
+
+# --- Q14: Promotion Effect (global ratio of conditional sums) --------------
+def lp_q14(t):
+    lo, hi = pd.Timestamp("1995-09-01"), pd.Timestamp("1995-10-01")
+    li = _lp(t["lineitem"]).filter((col("l_shipdate") >= lo) & (col("l_shipdate") < hi))
+    disc = col("l_extendedprice") * (1 - col("l_discount"))
+    promo = when(col("p_type").str.startswith("PROMO")).then(disc).otherwise(0.0)
+    return (
+        li.join(_lp(t["part"]), left_on="l_partkey", right_on="p_partkey")
+        .with_columns(lit(1).alias("__g"))
+        .group_by("__g")
+        .agg((100.0 * promo.sum() / disc.sum()).alias("promo_revenue"))
+        .select(col("promo_revenue"))
+    )
+
+
+def pl_q14(t):
+    lo, hi = pd.Timestamp("1995-09-01"), pd.Timestamp("1995-10-01")
+    li = (
+        t["lineitem"]
+        .lazy()
+        .filter((pl.col("l_shipdate") >= lo) & (pl.col("l_shipdate") < hi))
+    )
+    disc = pl.col("l_extendedprice") * (1 - pl.col("l_discount"))
+    promo = pl.when(pl.col("p_type").str.starts_with("PROMO")).then(disc).otherwise(0.0)
+    return (
+        li.join(t["part"].lazy(), left_on="l_partkey", right_on="p_partkey")
+        .select((100.0 * promo.sum() / disc.sum()).alias("promo_revenue"))
+        .collect()
+    )
+
+
 QUERIES = {
     1: (lp_q1, pl_q1),
     3: (lp_q3, pl_q3),
+    4: (lp_q4, pl_q4),
     5: (lp_q5, pl_q5),
     6: (lp_q6, pl_q6),
     10: (lp_q10, pl_q10),
     12: (lp_q12, pl_q12),
+    14: (lp_q14, pl_q14),
 }
 
 
