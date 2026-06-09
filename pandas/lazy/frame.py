@@ -17,14 +17,38 @@ if TYPE_CHECKING:
 
     from pandas import DataFrame
     from pandas.lazy.backends.spill import SpillConfig
-    from pandas.lazy.expr import Expr
-    from pandas.lazy.plan import (
-        Aggregate,
-        Limit,
-        LogicalPlan,
-        Sort,
-    )
     from pandas.lazy.types import Schema
+
+
+from pandas.lazy.expr import (
+    Expr,
+    col,
+    extract_output_name,
+    lit,
+    normalize_exprs,
+)
+from pandas.lazy.ir import (
+    Alias,
+    Call,
+    FieldRef,
+)
+from pandas.lazy.plan import (
+    Aggregate,
+    Concat,
+    Convert,
+    DataFrameSource,
+    Distinct,
+    Filter,
+    Join,
+    Limit,
+    LogicalPlan,
+    ParquetSource,
+    Project,
+    ResetIndex,
+    SetIndex,
+    Sort,
+    TopK,
+)
 
 
 class LazyDataFrame:
@@ -105,10 +129,6 @@ class LazyDataFrame:
         LazyDataFrame
             A new lazy query object.
         """
-        from pandas.lazy.plan import (
-            DataFrameSource,
-            Project,
-        )
 
         source = DataFrameSource(df)
         plan = Project(source, exprs)
@@ -162,8 +182,6 @@ class LazyDataFrame:
         >>> ldf.select("a", "b")
         >>> ldf.select(col("a"), col("b"))
         """
-        from pandas.lazy.expr import normalize_exprs
-        from pandas.lazy.plan import Project
 
         if not exprs:
             raise ValueError("select() requires at least one expression")
@@ -191,8 +209,6 @@ class LazyDataFrame:
         >>> from pandas.lazy import col
         >>> ldf.filter(col("a") > 0)
         """
-        from pandas.lazy.expr import Expr
-        from pandas.lazy.plan import Filter
 
         if not isinstance(predicate, Expr):
             raise TypeError(
@@ -226,12 +242,6 @@ class LazyDataFrame:
         ...     (col("a") > 0).alias("is_positive"),
         ... )
         """
-        from pandas.lazy.expr import (
-            Expr,
-            col,
-            extract_output_name,
-        )
-        from pandas.lazy.plan import Project
 
         if not exprs:
             raise ValueError("with_columns() requires at least one expression")
@@ -298,8 +308,6 @@ class LazyDataFrame:
         --------
         LazyDataFrame.with_columns : Add computed columns.
         """
-        from pandas.lazy.expr import Expr
-        from pandas.lazy.ir import Call
 
         # Create row_index expression
         row_index_ir = Call("row_index", (), {"offset": offset})
@@ -346,7 +354,6 @@ class LazyDataFrame:
         --------
         LazyDataFrame.reset_index : Reset index to default RangeIndex.
         """
-        from pandas.lazy.plan import SetIndex
 
         if isinstance(keys, str):
             keys = [keys]
@@ -394,7 +401,6 @@ class LazyDataFrame:
         --------
         LazyDataFrame.set_index : Set column(s) as index.
         """
-        from pandas.lazy.plan import ResetIndex
 
         new_plan = ResetIndex(input=self._plan, drop=drop)
         return LazyDataFrame(new_plan, new_plan.resolve_schema())
@@ -422,7 +428,6 @@ class LazyDataFrame:
         ...     col("y").max().alias("max_y"),
         ... )
         """
-        from pandas.lazy.expr import normalize_exprs
 
         if not by:
             raise ValueError("group_by() requires at least one column")
@@ -458,8 +463,6 @@ class LazyDataFrame:
         >>> ldf.sort("a", "b", descending=[True, False])
         >>> ldf.sort(col("a") + col("b"))
         """
-        from pandas.lazy.expr import normalize_exprs
-        from pandas.lazy.plan import Sort
 
         if not by:
             raise ValueError("sort() requires at least one column")
@@ -499,7 +502,6 @@ class LazyDataFrame:
         >>> ldf.head()
         >>> ldf.head(10)
         """
-        from pandas.lazy.plan import Limit
 
         if n < 0:
             raise ValueError(f"n must be non-negative, got {n}")
@@ -529,7 +531,6 @@ class LazyDataFrame:
         >>> ldf.tail()
         >>> ldf.tail(10)
         """
-        from pandas.lazy.plan import Limit
 
         if n < 0:
             raise ValueError(f"n must be non-negative, got {n}")
@@ -581,7 +582,6 @@ class LazyDataFrame:
         >>> ldf.distinct()  # All columns
         >>> ldf.distinct("a", "b")  # Only consider columns a and b
         """
-        from pandas.lazy.plan import Distinct
 
         subset_tuple = subset if subset else None
         new_plan = Distinct(self._plan, subset_tuple)
@@ -600,8 +600,6 @@ class LazyDataFrame:
         --------
         >>> ldf.rename({"a": "x", "b": "y"})
         """
-        from pandas.lazy.expr import col
-        from pandas.lazy.plan import Project
 
         unknown = set(mapping) - set(self._schema.names)
         if unknown:
@@ -627,8 +625,6 @@ class LazyDataFrame:
         --------
         >>> ldf.drop("a", "b")
         """
-        from pandas.lazy.expr import col
-        from pandas.lazy.plan import Project
 
         drop_set = set(columns)
         unknown = drop_set - set(self._schema.names)
@@ -650,8 +646,6 @@ class LazyDataFrame:
         >>> ldf.drop_nulls()  # any null
         >>> ldf.drop_nulls("a", "b")  # null in a or b
         """
-        from pandas.lazy.expr import col
-        from pandas.lazy.plan import Filter
 
         cols = list(subset) if subset else self._schema.names
         unknown = set(cols) - set(self._schema.names)
@@ -677,8 +671,6 @@ class LazyDataFrame:
         --------
         >>> ldf.fill_null(0)
         """
-        from pandas.lazy.expr import col
-        from pandas.lazy.plan import Project
 
         exprs = tuple(
             col(name).fill_null(value).alias(name) for name in self._schema.names
@@ -699,8 +691,6 @@ class LazyDataFrame:
         --------
         >>> ldf.cast({"a": "float64", "b": "int32"})
         """
-        from pandas.lazy.expr import col
-        from pandas.lazy.plan import Project
 
         unknown = set(dtypes) - set(self._schema.names)
         if unknown:
@@ -724,8 +714,6 @@ class LazyDataFrame:
         return func(self, *args, **kwargs)
 
     def _frame_agg(self, method: str, numeric_only: bool) -> LazyDataFrame:
-        from pandas.lazy.expr import col
-        from pandas.lazy.plan import Aggregate
 
         names = [
             name
@@ -794,10 +782,6 @@ class LazyDataFrame:
         --------
         >>> ldf.unpivot(on=["q1", "q2"], index=["id"])
         """
-        from pandas.lazy.expr import (
-            col,
-            lit,
-        )
 
         names = self._schema.names
         index_cols = list(index) if index else []
@@ -865,19 +849,12 @@ class LazyDataFrame:
         >>> ldf1.join(ldf2, on="id", how="left")
         """
         from pandas import DataFrame
-        from pandas.lazy.plan import (
-            DataFrameSource,
-            Join,
-        )
 
         # Convert DataFrame to LazyDataFrame if needed
         if isinstance(other, DataFrame):
-            from pandas.lazy.expr import col
-
             # Create a simple projection that selects all columns
             other_exprs = tuple(col(c) for c in other.columns)
             other_source = DataFrameSource(other)
-            from pandas.lazy.plan import Project
 
             other_plan = Project(other_source, other_exprs)
             other_schema = other_plan.resolve_schema()
@@ -1092,15 +1069,6 @@ class LazyDataFrame:
         normal execution paths run. Safe under Copy-on-Write: returned
         slices share buffers with the source and copy lazily on mutation.
         """
-        from pandas.lazy.ir import (
-            Alias,
-            FieldRef,
-        )
-        from pandas.lazy.plan import (
-            DataFrameSource,
-            Limit,
-            Project,
-        )
 
         plan = self._plan
         if not isinstance(plan, Limit):
@@ -1171,22 +1139,6 @@ class LazyDataFrame:
             Series,
         )
         from pandas.lazy.eval import Evaluator
-        from pandas.lazy.expr import extract_output_name
-        from pandas.lazy.plan import (
-            Aggregate,
-            Concat,
-            Convert,
-            DataFrameSource,
-            Distinct,
-            Filter,
-            Join,
-            Limit,
-            Project,
-            ResetIndex,
-            SetIndex,
-            Sort,
-            TopK,
-        )
 
         # Apply optimization if requested
         plan = self._get_optimized_plan() if optimize else self._plan
@@ -1702,8 +1654,6 @@ class LazyDataFrame:
         >>> print(stats)  # Shows min/max for each column per row group
         """
 
-        from pandas.lazy.plan import ParquetSource
-
         # Find the source node
         source = self._find_source_node(self._plan)
         if source is None or not isinstance(source, ParquetSource):
@@ -1713,7 +1663,6 @@ class LazyDataFrame:
 
     def _find_source_node(self, plan: LogicalPlan):
         """Recursively find the source node in the plan tree."""
-        from pandas.lazy.plan import ParquetSource
 
         if isinstance(plan, ParquetSource):
             return plan
@@ -1844,8 +1793,6 @@ class LazyGroupBy:
         ...     col("value").mean().alias("average"),
         ... )
         """
-        from pandas.lazy.expr import Expr
-        from pandas.lazy.plan import Aggregate
 
         if not exprs:
             raise ValueError("agg() requires at least one expression")
@@ -1861,7 +1808,6 @@ class LazyGroupBy:
         return LazyDataFrame(new_plan, new_plan.resolve_schema())
 
     def __repr__(self) -> str:
-        from pandas.lazy.expr import extract_output_name
 
         try:
             group_names = [extract_output_name(e) for e in self._group_by]
@@ -1892,12 +1838,6 @@ def _evaluate_aggregate(
     """
     from pandas import DataFrame as PdDataFrame
     from pandas.lazy.eval import Evaluator
-    from pandas.lazy.expr import extract_output_name
-    from pandas.lazy.ir import (
-        Alias,
-        Call,
-        FieldRef,
-    )
 
     # Get group-by column names
     group_names = [extract_output_name(e) for e in plan.group_by]
@@ -2011,7 +1951,6 @@ def _evaluate_sort(df: DataFrame, plan: Sort) -> DataFrame:
         The sorted result.
     """
     from pandas.lazy.eval import Evaluator
-    from pandas.lazy.ir import FieldRef
 
     # For simple column references, use column names directly
     # For complex expressions, evaluate them first
@@ -2114,7 +2053,6 @@ def _evaluate_topk(df: DataFrame, plan) -> DataFrame:
         The top K rows by sort criteria.
     """
     from pandas.lazy.eval import Evaluator
-    from pandas.lazy.ir import FieldRef
 
     # For simple column references, use column names directly
     # For complex expressions, evaluate them first
@@ -2288,7 +2226,6 @@ def concat(dfs: list[LazyDataFrame] | tuple[LazyDataFrame, ...]) -> LazyDataFram
     >>> combined = concat([lf1, lf2])
     >>> result = combined.filter(col("value") > 100).collect()
     """
-    from pandas.lazy.plan import Concat as ConcatPlan
 
     if not dfs:
         raise ValueError("concat requires at least one LazyDataFrame")
@@ -2297,7 +2234,7 @@ def concat(dfs: list[LazyDataFrame] | tuple[LazyDataFrame, ...]) -> LazyDataFram
         raise TypeError("All inputs to concat must be LazyDataFrame instances")
 
     plans = tuple(df._plan for df in dfs)
-    concat_plan = ConcatPlan(plans)
+    concat_plan = Concat(plans)
     # Use schema from first input (all should be compatible)
     schema = concat_plan.resolve_schema()
     return LazyDataFrame(concat_plan, schema)
