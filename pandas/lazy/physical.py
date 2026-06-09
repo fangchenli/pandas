@@ -3865,16 +3865,33 @@ class PhysicalHashJoin(PhysicalPlan):
 
     def execute(self, context: ExecutionContext) -> ArrayDict:
 
-        # Check if we should use Grace hash join (spill-enabled out-of-core join)
-        if context.spill_enabled and self.how in ("inner", "left", "right"):
-            # Grace hash join only supports equi-joins
-            if self.on is not None or (
-                self.left_on is not None and self.right_on is not None
-            ):
-                return self._execute_grace_hash_join(context)
-
-        # Execute left and right sides in parallel
+        # Execute left and right sides in parallel. Every join path needs both
+        # sides materialized (a hash join needs the full build side; this
+        # engine does not stream join inputs), so we do it once up front and
+        # then choose the join strategy from the actual materialized sizes.
         left_arrays, right_arrays = self._execute_sides_parallel(context)
+
+        equi = self.on is not None or (
+            self.left_on is not None and self.right_on is not None
+        )
+
+        # Out-of-core: spill to a Grace hash join, but only when the
+        # materialized inputs actually exceed the operator memory budget.
+        # Size-triggered (not merely spill-enabled), so turning spilling on no
+        # longer pessimizes small joins - those fall through to the fast
+        # in-memory pd.merge below; only genuinely large joins partition/spill.
+        if (
+            context.spill_enabled
+            and context.spill_manager is not None
+            and self.how in ("inner", "left", "right")
+            and equi
+        ):
+            budget = context._spill_config.operator_budget_mb * 1024 * 1024
+            in_memory_bytes = get_arrays_bytes(left_arrays) + get_arrays_bytes(
+                right_arrays
+            )
+            if in_memory_bytes > budget:
+                return self._execute_grace_hash_join(context, left_arrays, right_arrays)
 
         # pd.merge fast path. pd.merge IS the eager-pandas semantics this join
         # promises to match - so it is row-order- and null-correct by
@@ -3887,7 +3904,7 @@ class PhysicalHashJoin(PhysicalPlan):
         # keep the indexer path below, which carries the left index.
         if (
             self.how in ("inner", "left", "right", "outer")
-            and (self.on is not None or (self.left_on and self.right_on))
+            and equi
             and not context.preserve_index
             and not context.user_set_index
         ):
@@ -4284,7 +4301,12 @@ class PhysicalHashJoin(PhysicalPlan):
 
         return result
 
-    def _execute_grace_hash_join(self, context: ExecutionContext) -> ArrayDict:
+    def _execute_grace_hash_join(
+        self,
+        context: ExecutionContext,
+        left_arrays: ArrayDict | None = None,
+        right_arrays: ArrayDict | None = None,
+    ) -> ArrayDict:
         """
         Execute join using Grace hash join for larger-than-memory data.
 
@@ -4298,15 +4320,16 @@ class PhysicalHashJoin(PhysicalPlan):
         to sort-merge join which has more predictable I/O patterns.
         """
 
+        # Sides are normally materialized by the caller (execute) and passed
+        # in so the size-based spill decision can be made; materialize here
+        # only when called directly without them.
+        if left_arrays is None or right_arrays is None:
+            left_arrays, right_arrays = self._execute_sides_parallel(context)
+
         spill_manager = context.spill_manager
         if spill_manager is None:
             # Fallback to regular in-memory join
-            left_arrays, right_arrays = self._execute_sides_parallel(context)
             return self._execute_dataframe_join(left_arrays, right_arrays, context)
-
-        # Execute both sides to get full data
-        # For truly out-of-core, we'd want streaming here too
-        left_arrays, right_arrays = self._execute_sides_parallel(context)
 
         # Separate index columns
         left_index_cols = {k: v for k, v in left_arrays.items() if is_index_col(k)}
@@ -4342,6 +4365,7 @@ class PhysicalHashJoin(PhysicalPlan):
             spill_manager=spill_manager,
             num_partitions=num_partitions,
             name="join",
+            suffix=self.suffix,
         )
 
         # Partition both sides

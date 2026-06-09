@@ -1150,15 +1150,18 @@ class GraceHashJoiner:
         num_partitions: int = 64,
         name: str = "grace_join",
         max_partition_skew_ratio: float = 10.0,
+        suffix: tuple[str, str] = ("_x", "_y"),
     ):
         self.spill_manager = spill_manager
         self.num_partitions = num_partitions
         self.name = name
         self.max_partition_skew_ratio = max_partition_skew_ratio
+        self.suffix = suffix
 
         self._left_partitioned = False
         self._right_partitioned = False
         self._join_keys: list[str] = []
+        self._right_join_keys: list[str] = []
 
         # Statistics for pathological detection
         self._left_partition_sizes: list[int] = []
@@ -1189,6 +1192,7 @@ class GraceHashJoiner:
         self, arrays: ArrayDict, join_keys: list[str]
     ) -> list[SpillFile]:
         """Partition and spill right side."""
+        self._right_join_keys = join_keys
         files = self.spill_manager.spill_partitioned(
             f"{self.name}_right", arrays, join_keys[0], self.num_partitions
         )
@@ -1323,18 +1327,31 @@ class GraceHashJoiner:
     def _join_partition(
         self, left: ArrayDict, right: ArrayDict, how: str
     ) -> ArrayDict | None:
-        """Join a single partition pair in memory."""
-        # This is a simplified implementation
-        # Production would use hash join kernel
+        """Join a single partition pair in memory via pd.merge.
 
+        pd.merge is the eager-pandas semantics and the fastest in-memory join
+        path (see PhysicalHashJoin._execute_pandas_merge); using it per
+        partition keeps the out-of-core join consistent with the in-memory
+        one. Honours distinct left/right key names and the output suffixes.
+        """
         from pandas.lazy.backends.convert import arrays_to_dataframe
 
-        # Convert to DataFrames for join
         left_df = arrays_to_dataframe(left)
         right_df = arrays_to_dataframe(right)
 
-        # Perform join
-        result_df = left_df.merge(right_df, on=self._join_keys, how=how)
+        right_keys = self._right_join_keys or self._join_keys
+        if right_keys == self._join_keys:
+            result_df = left_df.merge(
+                right_df, on=self._join_keys, how=how, suffixes=self.suffix
+            )
+        else:
+            result_df = left_df.merge(
+                right_df,
+                left_on=self._join_keys,
+                right_on=right_keys,
+                how=how,
+                suffixes=self.suffix,
+            )
 
         if len(result_df) == 0:
             return None

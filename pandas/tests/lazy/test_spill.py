@@ -682,6 +682,54 @@ class TestPhysicalHashJoinWithSpill:
         assert len(result) == 3
         assert set(result["key"]) == {1, 2, 3}
 
+    def test_grace_join_is_size_triggered(self, monkeypatch):
+        """Grace hash join engages by size, not merely by spill being enabled.
+
+        With spill enabled and a normal budget, a join that fits stays on the
+        fast in-memory pd.merge path; only when the materialized inputs exceed
+        the operator budget does it partition/spill.
+        """
+        import warnings
+
+        import numpy as np
+
+        import pandas as pd
+        from pandas.lazy.backends.spill import SpillConfig
+        from pandas.lazy.physical import PhysicalHashJoin
+
+        left = pd.DataFrame(
+            {"key": np.arange(1_000_000) % 5000, "lv": np.arange(1_000_000)}
+        )
+        right = pd.DataFrame({"key": np.arange(5000), "rv": np.arange(5000) * 10})
+
+        calls = {"grace": 0}
+        original = PhysicalHashJoin._execute_grace_hash_join
+
+        def spy(self, context, left_arrays=None, right_arrays=None):
+            calls["grace"] += 1
+            return original(self, context, left_arrays, right_arrays)
+
+        monkeypatch.setattr(PhysicalHashJoin, "_execute_grace_hash_join", spy)
+
+        def run(budget_mb):
+            calls["grace"] = 0
+            config = SpillConfig(enabled=True, operator_budget_mb=budget_mb)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                result = (
+                    left.select()
+                    .join(right.select(), on="key", how="inner")
+                    .collect(use_physical_planner=True, spill_config=config)
+                )
+            return len(result), calls["grace"]
+
+        fits_rows, fits_grace = run(512)  # comfortably fits the budget
+        spill_rows, spill_grace = run(1)  # 1 MB budget < ~16 MB inputs
+
+        assert fits_grace == 0  # in-memory pd.merge, no spill
+        assert spill_grace == 1  # size exceeded -> grace
+        assert fits_rows == spill_rows  # identical result either way
+
 
 class TestForcedSpillingBehavior:
     """
