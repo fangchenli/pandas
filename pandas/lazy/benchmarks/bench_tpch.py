@@ -30,7 +30,10 @@ import time
 import numpy as np
 
 import pandas as pd
-from pandas.lazy import col
+from pandas.lazy import (
+    col,
+    when,
+)
 
 try:
     import polars as pl
@@ -278,11 +281,125 @@ def pl_q10(t):
     )
 
 
+# --- Q5: Local Supplier Volume (6-table join) ------------------------------
+def lp_q5(t):
+    lo, hi = pd.Timestamp("1994-01-01"), pd.Timestamp("1995-01-01")
+    o = _lp(t["orders"]).filter((col("o_orderdate") >= lo) & (col("o_orderdate") < hi))
+    region = _lp(t["region"]).filter(col("r_name") == "ASIA")
+    return (
+        _lp(t["customer"])
+        .join(o, left_on="c_custkey", right_on="o_custkey")
+        .join(_lp(t["lineitem"]), left_on="o_orderkey", right_on="l_orderkey")
+        .join(_lp(t["supplier"]), left_on="l_suppkey", right_on="s_suppkey")
+        .filter(col("c_nationkey") == col("s_nationkey"))
+        .join(_lp(t["nation"]), left_on="s_nationkey", right_on="n_nationkey")
+        .join(region, left_on="n_regionkey", right_on="r_regionkey")
+        .group_by("n_name")
+        .agg((col("l_extendedprice") * (1 - col("l_discount"))).sum().alias("revenue"))
+        .sort("revenue", descending=True)
+    )
+
+
+def pl_q5(t):
+    lo, hi = pd.Timestamp("1994-01-01"), pd.Timestamp("1995-01-01")
+    o = (
+        pl.from_pandas(t["orders"])
+        .lazy()
+        .filter((pl.col("o_orderdate") >= lo) & (pl.col("o_orderdate") < hi))
+    )
+    region = pl.from_pandas(t["region"]).lazy().filter(pl.col("r_name") == "ASIA")
+    return (
+        pl.from_pandas(t["customer"])
+        .lazy()
+        .join(o, left_on="c_custkey", right_on="o_custkey")
+        .join(
+            pl.from_pandas(t["lineitem"]).lazy(),
+            left_on="o_orderkey",
+            right_on="l_orderkey",
+        )
+        .join(
+            pl.from_pandas(t["supplier"]).lazy(),
+            left_on="l_suppkey",
+            right_on="s_suppkey",
+        )
+        .filter(pl.col("c_nationkey") == pl.col("s_nationkey"))
+        .join(
+            pl.from_pandas(t["nation"]).lazy(),
+            left_on="s_nationkey",
+            right_on="n_nationkey",
+        )
+        .join(region, left_on="n_regionkey", right_on="r_regionkey")
+        .group_by("n_name")
+        .agg(
+            (pl.col("l_extendedprice") * (1 - pl.col("l_discount")))
+            .sum()
+            .alias("revenue")
+        )
+        .sort("revenue", descending=True)
+        .collect()
+    )
+
+
+# --- Q12: Shipping Modes (conditional aggregation) -------------------------
+def lp_q12(t):
+    lo, hi = pd.Timestamp("1994-01-01"), pd.Timestamp("1995-01-01")
+    li = _lp(t["lineitem"]).filter(
+        col("l_shipmode").isin(["MAIL", "SHIP"])
+        & (col("l_commitdate") < col("l_receiptdate"))
+        & (col("l_shipdate") < col("l_commitdate"))
+        & (col("l_receiptdate") >= lo)
+        & (col("l_receiptdate") < hi)
+    )
+    is_high = col("o_orderpriority").isin(["1-URGENT", "2-HIGH"])
+    high = when(is_high).then(1).otherwise(0)
+    low = when(is_high).then(0).otherwise(1)
+    return (
+        _lp(t["orders"])
+        .join(li, left_on="o_orderkey", right_on="l_orderkey")
+        .group_by("l_shipmode")
+        .agg(
+            high.sum().alias("high_line_count"),
+            low.sum().alias("low_line_count"),
+        )
+        .sort("l_shipmode")
+    )
+
+
+def pl_q12(t):
+    lo, hi = pd.Timestamp("1994-01-01"), pd.Timestamp("1995-01-01")
+    li = (
+        pl.from_pandas(t["lineitem"])
+        .lazy()
+        .filter(
+            pl.col("l_shipmode").is_in(["MAIL", "SHIP"])
+            & (pl.col("l_commitdate") < pl.col("l_receiptdate"))
+            & (pl.col("l_shipdate") < pl.col("l_commitdate"))
+            & (pl.col("l_receiptdate") >= lo)
+            & (pl.col("l_receiptdate") < hi)
+        )
+    )
+    is_high = pl.col("o_orderpriority").is_in(["1-URGENT", "2-HIGH"])
+    return (
+        pl.from_pandas(t["orders"])
+        .lazy()
+        .join(li, left_on="o_orderkey", right_on="l_orderkey")
+        .group_by("l_shipmode")
+        .agg(
+            pl.when(is_high).then(1).otherwise(0).sum().alias("high_line_count"),
+            pl.when(is_high).then(0).otherwise(1).sum().alias("low_line_count"),
+        )
+        .sort("l_shipmode")
+        .collect()
+    )
+
+
 QUERIES = {
     1: (lp_q1, pl_q1),
     3: (lp_q3, pl_q3),
+    5: (lp_q5, pl_q5),
     6: (lp_q6, pl_q6),
     10: (lp_q10, pl_q10),
+    12: (lp_q12, pl_q12),
 }
 
 
