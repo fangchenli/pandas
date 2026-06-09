@@ -45,9 +45,13 @@ The forward list — open items only. Landed work is recorded further down.
    67 ms/10M vs Polars' 18; the dictionary cache solves repeated queries
    but first-query and one-shot workloads still pay. Upstream Arrow work or
    a pre-hashing trick are the options.
-3. **Cardinality estimation.** Row estimates stop at filters (no selectivity
-   model); estimates feed the decision layer's join build-side and
-   parallelism-degree choices, so better estimates compound.
+3. **Cardinality estimation — statistics-driven refinement.** The
+   constant-selectivity model (System R) is landed (`optimize/cardinality.py`):
+   filters now size by predicate (equality 0.1, range 0.33, AND/OR/NOT
+   compose) instead of a flat 0.3, which already flips join build-side
+   choices to the correct side. Next: real column statistics — `1/NDV` for
+   equality, Parquet min/max for ranges, and a histogram for skew — so the
+   estimates predict counts rather than just rank plans.
 4. **Planning-overhead fast paths.** Single-op queries pay 60–80% of lazy
    overhead in the optimizer (`bench_planning_phases.py`); skip passes by
    plan shape. The ~300 µs limit floor is this item. (Low leverage:
@@ -131,6 +135,11 @@ The forward list — open items only. Landed work is recorded further down.
 
 Newest first. Detail in the git log and the docs above.
 
+- **Predicate-aware cardinality (System R selectivity)** — `Filter` /
+  pushed-down Parquet predicates size by operator (equality 0.1, range 0.33,
+  AND/OR/NOT compose) instead of a flat 0.3; flips join build-side selection
+  to the actually-smaller filtered side. Statistics-driven refinement (NDV,
+  histograms) is the remaining Planned Work item.
 - **Radix multi-key (lexsort) sort** — `radix_lexsort` composes per-key
   parallel-radix sorts (least-significant first); all-numeric multi-key
   sorts now run ~6x faster than Arrow's table `sort_indices`

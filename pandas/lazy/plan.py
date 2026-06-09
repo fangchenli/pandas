@@ -214,10 +214,13 @@ class ParquetSource(LogicalPlan):
             pf = pq.ParquetFile(path)
             row_count = pf.metadata.num_rows
 
-            # Apply selectivity estimate if predicate is present
-            # Use a conservative estimate of 30% selectivity for unknown predicates
+            # Apply predicate-aware selectivity to the pushed-down filter
+            # (System R constant model; see optimize/cardinality.py).
             if self.predicate is not None:
-                row_count = int(row_count * 0.3)
+                from pandas.lazy.optimize.cardinality import estimate_selectivity
+
+                sel = estimate_selectivity(self.predicate._ir)
+                row_count = max(1, int(row_count * sel))
 
             return row_count
         except Exception:
@@ -487,12 +490,17 @@ class Filter(LogicalPlan):
         return [self.input]
 
     def _estimate_row_count_impl(self) -> int | None:
-        # Use a default selectivity estimate of 30% for unknown predicates
-        # This is a conservative estimate that works reasonably well in practice
+        # Predicate-aware selectivity (System R constant model): an equality
+        # is far more selective than a range, and AND/OR compose. This feeds
+        # join build-side selection downstream, so a filtered side is sized
+        # by its predicate rather than a flat 30%.
         input_count = self.input.estimate_row_count()
         if input_count is None:
             return None
-        return max(1, int(input_count * 0.3))
+        from pandas.lazy.optimize.cardinality import estimate_selectivity
+
+        sel = estimate_selectivity(self.predicate._ir)
+        return max(1, int(input_count * sel))
 
     def __repr__(self) -> str:
         return f"Filter({self.predicate!r})"
