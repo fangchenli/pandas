@@ -2,6 +2,8 @@
 Tests for pandas.lazy.plan module - Logical plan nodes.
 """
 
+import pytest
+
 import pandas as pd
 from pandas.lazy.expr import col
 from pandas.lazy.plan import (
@@ -201,16 +203,24 @@ class TestCardinalityEstimation:
         # NOT complements.
         assert estimate_selectivity((~(col("a") > 0))._ir) == 1.0 - SEL_RANGE
 
-    def test_filter_estimate_is_predicate_aware(self):
+    def test_filter_estimate_uses_column_statistics(self):
+        import numpy as np
+
         n = 1_000_000
-        df = pd.DataFrame({"a": range(n), "b": range(n)})
+        # 'a' has NDV=50 (equality keeps ~1/50); 'b' is unique on [0, n).
+        df = pd.DataFrame({"a": np.arange(n) % 50, "b": np.arange(n)})
+
+        # Equality sized by 1/NDV (~20_000), not the flat 0.1 -> 100_000.
         eq = df.select().filter(col("a") == 5)._plan.estimate_row_count()
-        rng = df.select().filter(col("a") > 0)._plan.estimate_row_count()
-        # Equality is far more selective than a range; both differ from the
-        # old flat 0.3 (== was 300_000 for any predicate).
-        assert eq == 100_000
-        assert rng == 333_333
-        assert eq < rng
+        assert 15_000 <= eq <= 25_000
+
+        # Range sized by min/max interpolation: b > n//2 keeps ~half.
+        rng = df.select().filter(col("b") > n // 2)._plan.estimate_row_count()
+        assert 0.4 * n <= rng <= 0.6 * n
+
+        # Equality on the unique column matches ~1 row (1/NDV ~ 1/n).
+        eq_unique = df.select().filter(col("b") == 5)._plan.estimate_row_count()
+        assert eq_unique <= 2
 
     def test_filter_estimate_none_poison_preserved(self):
         # A source with no estimate still yields None through the filter.
@@ -226,7 +236,7 @@ class TestCardinalityEstimation:
         # sanity: an unfiltered source reports its full length
         assert isinstance(DataFrameSource(df).estimate_row_count(), int)
 
-    def test_build_side_picks_smaller_filtered_side(self):
+    def test_build_side_uses_ndv_to_flip_from_constant_model(self):
         import numpy as np
 
         from pandas.lazy.engine.decisions import annotate_decisions
@@ -239,12 +249,15 @@ class TestCardinalityEstimation:
             PhysicalPlanner,
         )
 
-        # left 1M filtered by equality (~100K) joined to unfiltered 200K right.
-        # The flat-0.3 estimate sized left at 300K and would build 'right';
-        # predicate-aware sizing builds 'left' (the actually-smaller side).
-        big = pd.DataFrame({"k": np.arange(1_000_000), "v": np.arange(1_000_000)})
-        small = pd.DataFrame({"k": np.arange(200_000), "w": np.arange(200_000)})
-        q = big.select().filter(col("k") == 5).join(small.select(), on="k")
+        # left 1M filtered by equality on an NDV=2 column -> keeps ~500K.
+        # The constant model would size it at 0.1 -> 100K and build 'left';
+        # NDV-aware sizing (~500K) correctly sees right (400K) as smaller and
+        # builds 'right'. This is the stats refinement flipping the decision.
+        big = pd.DataFrame(
+            {"k": np.arange(1_000_000), "flag": np.arange(1_000_000) % 2}
+        )
+        small = pd.DataFrame({"k": np.arange(400_000), "w": np.arange(400_000)})
+        q = big.select().filter(col("flag") == 1).join(small.select(), on="k")
 
         graph = annotate_decisions(
             PipelineCompiler().compile(PhysicalPlanner().plan(q._get_optimized_plan()))
@@ -257,5 +270,62 @@ class TestCardinalityEstimation:
             and p.decisions
             and p.decisions.sink_decision
         )
-        assert "build=left" in decision
-        assert "100000x200000" in decision
+        assert "build=right" in decision
+        assert "500000x400000" in decision
+
+    def test_compute_column_stats_ndv_and_range(self):
+        import numpy as np
+
+        from pandas.lazy.optimize.cardinality import compute_column_stats
+
+        n = 500_000
+        # Low cardinality: sampled NDV is exact.
+        low = compute_column_stats(pd.Series(np.arange(n) % 7))
+        assert low.ndv == 7
+        assert low.row_count == n
+        assert low.min_val == 0.0 and low.max_val == 6.0
+        # High cardinality: NDV is extrapolated and flagged approximate.
+        high = compute_column_stats(pd.Series(np.arange(n)))
+        assert high.approximate
+        assert high.ndv > n // 2  # near-unique
+
+    def test_stats_selectivity_equality_and_range(self):
+        import numpy as np
+
+        from pandas.lazy.optimize.cardinality import (
+            compute_column_stats,
+            estimate_selectivity,
+        )
+
+        df = pd.DataFrame(
+            {"g": np.arange(100_000) % 4, "r": np.arange(100_000, dtype="float64")}
+        )
+        lookup = {c: compute_column_stats(df[c]) for c in df.columns}.get
+
+        # equality -> 1/NDV
+        assert estimate_selectivity((col("g") == 1)._ir, lookup) == pytest.approx(
+            0.25, abs=0.01
+        )
+        # range -> min/max interpolation (r < 25% of the span)
+        cut = 25_000
+        assert estimate_selectivity((col("r") < cut)._ir, lookup) == pytest.approx(
+            0.25, abs=0.01
+        )
+        # literal-on-left flips the operator
+        assert estimate_selectivity((cut < col("r"))._ir, lookup) == pytest.approx(
+            0.75, abs=0.01
+        )
+
+    def test_grouped_aggregate_estimate_uses_ndv(self):
+        import numpy as np
+
+        n = 500_000
+        df = pd.DataFrame({"g": np.arange(n) % 80, "v": np.arange(n)})
+        est = (
+            df.select()
+            .group_by("g")
+            .agg(col("v").sum().alias("s"))
+            ._plan.estimate_row_count()
+        )
+        # One row per distinct group: ~80, not the sqrt heuristic (~7000).
+        assert 70 <= est <= 90

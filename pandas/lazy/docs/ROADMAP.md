@@ -40,13 +40,13 @@ The forward list — open items only. Landed work is recorded further down.
    67 ms/10M vs Polars' 18; the dictionary cache solves repeated queries
    but first-query and one-shot workloads still pay. Upstream Arrow work or
    a pre-hashing trick are the options.
-2. **Cardinality estimation — statistics-driven refinement.** The
-   constant-selectivity model (System R) is landed (`optimize/cardinality.py`):
-   filters now size by predicate (equality 0.1, range 0.33, AND/OR/NOT
-   compose) instead of a flat 0.3, which already flips join build-side
-   choices to the correct side. Next: real column statistics — `1/NDV` for
-   equality, Parquet min/max for ranges, and a histogram for skew — so the
-   estimates predict counts rather than just rank plans.
+2. **Cardinality — Parquet statistics & histograms.** In-memory column
+   statistics are landed (sampled NDV + exact min/max; equality `1/NDV`,
+   range min/max interpolation, group-count from the key's NDV). Remaining:
+   read Parquet row-group statistics (min/max/null/distinct — free in the
+   file metadata) so scans get the same refinement without sampling, and a
+   per-column histogram for skewed distributions (uniform interpolation
+   over-/under-estimates on skew).
 3. **Planning-overhead fast paths.** Single-op queries pay 60–80% of lazy
    overhead in the optimizer (`bench_planning_phases.py`); skip passes by
    plan shape. The ~300 µs limit floor is this item. (Low leverage:
@@ -130,6 +130,12 @@ The forward list — open items only. Landed work is recorded further down.
 
 Newest first. Detail in the git log and the docs above.
 
+- **Cardinality column statistics** — sampled NDV (random sample, exact for
+  low cardinality, extrapolated for high) + exact min/max, computed lazily
+  and cached on `DataFrameSource`, propagated through pass-through ops.
+  Equality sizes by `1/NDV`, ranges by min/max interpolation, grouped-agg
+  row count by the key's NDV (was a sqrt heuristic). Costs nothing for
+  join-free queries (only computed when a join/agg estimate is requested).
 - **String-key multi-column sort** — a string sort key is factorized
   (`sort=True`) into order-preserving float codes (nulls as NaN), so the
   radix lexsort handles it with per-key descending and nulls-last for free;

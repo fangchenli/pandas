@@ -79,6 +79,21 @@ class LogicalPlan:
         # Default: unknown
         return None
 
+    def column_statistics(self, name: str):
+        """Best-effort `ColumnStats` for a source column, or None.
+
+        Sources compute statistics (sampled for in-memory frames, metadata for
+        Parquet); row-preserving operators that pass a column through unchanged
+        delegate to their input, so a `Filter`'s selectivity estimate can size
+        a predicate by the underlying column's real distribution. Operators
+        that transform or aggregate a column return None for it. Used only by
+        the cardinality model, which always has a constant fallback.
+        """
+        children = self.children()
+        if len(children) == 1:
+            return children[0].column_statistics(name)
+        return None
+
 
 @dataclass
 class DataFrameSource(LogicalPlan):
@@ -88,6 +103,7 @@ class DataFrameSource(LogicalPlan):
 
     def __post_init__(self) -> None:
         self._cached_schema = None
+        self._stats_cache: dict[str, object] = {}
 
     def _resolve_schema_impl(self) -> Schema:
         from pandas.lazy.types import Schema
@@ -99,6 +115,15 @@ class DataFrameSource(LogicalPlan):
 
     def _estimate_row_count_impl(self) -> int | None:
         return len(self.df)
+
+    def column_statistics(self, name: str):
+        if name not in self.df.columns:
+            return None
+        if name not in self._stats_cache:
+            from pandas.lazy.optimize.cardinality import compute_column_stats
+
+            self._stats_cache[name] = compute_column_stats(self.df[name])
+        return self._stats_cache[name]
 
     def __repr__(self) -> str:
         cols = list(self.df.columns)
@@ -463,6 +488,31 @@ class Project(LogicalPlan):
         # Projection doesn't change row count
         return self.input.estimate_row_count()
 
+    def column_statistics(self, name: str):
+        # A column reaches the output unchanged only if it is projected by a
+        # plain column reference; computed columns have an unknown
+        # distribution. Delegate pass-throughs to the input.
+        from pandas.lazy.expr import extract_output_name
+        from pandas.lazy.ir import (
+            Alias,
+            FieldRef,
+        )
+
+        for expr in self.exprs:
+            try:
+                out_name = extract_output_name(expr)
+            except ValueError:
+                continue
+            if out_name != name:
+                continue
+            ir = expr._ir
+            if isinstance(ir, Alias):
+                ir = ir.arg
+            if isinstance(ir, FieldRef):
+                return self.input.column_statistics(ir.name)
+            return None  # computed column: distribution unknown
+        return None
+
     def __repr__(self) -> str:
         from pandas.lazy.expr import extract_output_name
 
@@ -490,16 +540,18 @@ class Filter(LogicalPlan):
         return [self.input]
 
     def _estimate_row_count_impl(self) -> int | None:
-        # Predicate-aware selectivity (System R constant model): an equality
-        # is far more selective than a range, and AND/OR compose. This feeds
-        # join build-side selection downstream, so a filtered side is sized
-        # by its predicate rather than a flat 30%.
+        # Predicate-aware selectivity: equality is sized by 1/NDV, ranges by
+        # min/max interpolation (from the underlying column's statistics when
+        # available), AND/OR/NOT compose, with System R constants as the
+        # fallback. Feeds join build-side selection downstream, so a filtered
+        # side is sized by its predicate and the column's real distribution
+        # rather than a flat 30%.
         input_count = self.input.estimate_row_count()
         if input_count is None:
             return None
         from pandas.lazy.optimize.cardinality import estimate_selectivity
 
-        sel = estimate_selectivity(self.predicate._ir)
+        sel = estimate_selectivity(self.predicate._ir, self.input.column_statistics)
         return max(1, int(input_count * sel))
 
     def __repr__(self) -> str:
@@ -548,17 +600,36 @@ class Aggregate(LogicalPlan):
         if len(self.group_by) == 0:
             return 1
 
-        # For grouped aggregation, estimate based on number of groups
-        # Heuristic: assume cardinality reduces by sqrt(n)
         input_count = self.input.estimate_row_count()
         if input_count is None:
             return None
 
-        # Conservative estimate: at most input_count groups,
-        # but typically much fewer (use sqrt as heuristic)
+        # The result has one row per distinct group key. With a single
+        # column group-by we can use that column's NDV directly instead of
+        # the sqrt heuristic.
+        if len(self.group_by) == 1:
+            from pandas.lazy.ir import (
+                Alias,
+                FieldRef,
+            )
+
+            ir = self.group_by[0]._ir
+            if isinstance(ir, Alias):
+                ir = ir.arg
+            if isinstance(ir, FieldRef):
+                st = self.input.column_statistics(ir.name)
+                if st is not None and st.ndv:
+                    return max(1, min(input_count, st.ndv))
+
+        # Fallback heuristic: cardinality reduces by ~sqrt(n).
         import math
 
         return max(1, min(input_count, int(math.sqrt(input_count) * 10)))
+
+    def column_statistics(self, name: str):
+        # Output columns are group keys and aggregates whose distributions
+        # differ from the input; do not propagate stats.
+        return None
 
     def __repr__(self) -> str:
         from pandas.lazy.expr import extract_output_name
