@@ -20,17 +20,20 @@ pandas faster.
 **TPC-H is the other side of the story — and the honest one for *pipelines*.**
 The TPC-H/PDS-H harness (`../benchmarks/bench_tpch.py`, every query validated
 exact against DuckDB's `PRAGMA tpch(n)`) stress-tests full analytical pipelines
-(multi-table joins + filters + group-by + sort). **Polars wins every
-implemented query, 0.14–0.67x at SF-1.** The single-op H2O wins do *not* extend
-to multi-op pipelines: our engine pays a pandas↔Arrow conversion at each
-operator boundary, while Polars stays in one native columnar representation end
-to end, so the conversions compound across a deep pipeline. (Measured fairly —
-each engine on its native input, query only; an earlier revision timed Polars'
-`from_pandas` per run and so inflated our ratios into apparent wins. Corrected.)
-So: **competitive-to-winning on single operations (H2O); behind on full
-analytical pipelines (TPC-H).** Two TPC-H probes also surfaced real engine bugs,
-now fixed — a datetime-filter comparison (~150x on our own prior path) and a CSE
-expression-conflation correctness bug.
+(multi-table joins + filters + group-by + sort). **All 22 queries are
+implemented and validate exact against DuckDB; Polars wins every one,
+0.06–0.67x at SF-1.** The single-op H2O wins do *not* extend to multi-op
+pipelines: our engine pays a pandas↔Arrow conversion at each operator boundary,
+while Polars stays in one native columnar representation end to end, so the
+conversions compound across a deep pipeline. (Measured fairly — each engine on
+its native input, query only; an earlier revision timed Polars' `from_pandas`
+per run and so inflated our ratios into apparent wins. Corrected.) So:
+**competitive-to-winning on single operations (H2O); behind on full analytical
+pipelines (TPC-H).** Building out the 22 queries also surfaced **three real
+engine bugs, now fixed**: a datetime-filter comparison (~150x on our own prior
+path), a CSE expression-conflation correctness bug, and `is_null`/`is_not_null`
+missing float NaN on the Arrow backend (which silently broke the left-join
+anti-join idiom).
 
 **Where the pipeline gap actually is (measured on Q5, not assumed):** profiling
 puts ~89% of Q5 in the joins and ~52% in `pd.merge`'s key factorization — *not*

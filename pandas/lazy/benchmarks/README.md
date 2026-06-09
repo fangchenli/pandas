@@ -13,9 +13,9 @@ Dated result reports in this directory:
 **Honest standing vs Polars (read this first):** lazy pandas is
 competitive-to-winning on **single operations** (H2O group-by/join) but
 **behind on full analytical pipelines** — the TPC-H harness (`bench_tpch.py`,
-validated against DuckDB) shows Polars winning every query (0.14–0.67x at
-SF-1), because our engine pays a pandas↔Arrow conversion at each operator
-boundary where Polars stays native end to end. **Fairness rule for every
+all 22 queries validated against DuckDB) shows Polars winning every query
+(0.06–0.67x at SF-1), because our engine pays a pandas↔Arrow conversion at each
+operator boundary where Polars stays native end to end. **Fairness rule for every
 vs-Polars benchmark here: convert the Polars frames once, up front — never
 inside the timed loop.** Timing `pl.from_pandas(...)` per run charges Polars a
 conversion (~75% of a TPC-H query at SF-1) that the native lazy path never
