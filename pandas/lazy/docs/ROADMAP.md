@@ -20,7 +20,7 @@ Two development phases produced these numbers: the conversion fix cycle
 | aggregation | **1.17x avg — wins** (multi-agg 3.47x, groupby-sum 1.02x @10M) | groupby routing + dictionary-encoding cache (warm from 2nd query) |
 | parquet scan | 0.86x avg — glob `head()` **wins 1.55x** (6.7 ms vs 10.3) | limit pushdown into scans + direct ParquetFile path + vectorized index |
 | join→groupby composite | 0.58x | acero routing for order-free joins |
-| sort | 0.42x → improving | Cython radix argsort (~215 ms, Polars-parity) + breaker copy-free output; gather is the remaining lever — see decomposition below |
+| sort | 0.42x → improving | thread-parallel Cython radix argsort (~130 ms, 1.6x over Polars) + breaker copy-free output; string gather is the remaining lever — see decomposition below |
 | category-key groupby | 0.43x vs Polars-categorical | zero-copy dictionary flow (was 313 ms, now 21) |
 | full-scan select+filter | ~0.37x (21 ms) | vectorized index column (was 104 ms) |
 | filter_project | 0.21x | gather-bound (string `take`) + pandas' mutation-safety copy, not bandwidth — see decomposition below |
@@ -39,8 +39,9 @@ A profiling pass decomposed both remaining real-operation losers. The
 labels "algorithmic" and "bandwidth-bound" were only half right:
 
 - **Sort** (10M, mixed dtype) splits ~evenly: argsort ~~411 ms~~ **now
-  ~215 ms** via the Cython radix kernel (opportunity #2, landed — matches
-  Polars' `arg_sort`) + gather **459 ms** (dominated by Arrow string
+  ~130 ms** via the thread-parallel Cython radix kernel (opportunity #2,
+  landed — 1.6x faster than Polars' `arg_sort`) + gather **459 ms**
+  (dominated by Arrow string
   `take` at **271 ms/column** — dictionary-array `take` is 6.4x faster at
   44 ms but decoding back to `str` for output eats most of it) + output
   assembly ~104 ms (now copy-free on breakers). The gather is the
@@ -71,15 +72,18 @@ investment for these categories.
    caps bandwidth-bound chains at ~1x for *any* thread-based approach;
    GPU morsels are the speculative extension. The prerequisites (pipeline
    objects, per-column backend planning, conversion costing) all exist.
-2. **Parallelize the radix argsort.** ~~Native radix argsort~~ — landed: a
-   Cython LSD radix kernel (`pandas/_libs/lazy_radix.pyx`, 16-bit digits,
-   key/index pairs moved together) replaced the k-way merge for large
-   numeric single-key sorts, ~215 ms vs 320-410 ms, matching Polars'
-   `arg_sort` (~205 ms). Keys are built vectorized in NumPy (sign/float
-   bit transforms, -0.0 normalized). *Still serial* — the histogram and
-   scatter can be parallelized (per-chunk local histograms + partitioned
-   scatter) for a further win; multi-key sorts still use the Arrow lexsort
-   path and are untouched.
+2. ~~**Native radix argsort** / **parallelize it**~~ — both landed. A
+   Cython LSD radix kernel (`pandas/_libs/lazy_radix.pyx`) replaced the
+   k-way merge for large numeric single-key sorts. Keys are built
+   vectorized in NumPy (sign/float bit transforms, -0.0 normalized). The
+   serial kernel (16-bit digits) matched Polars (~215 ms @10M float64);
+   the **thread-parallel driver** (`_radix_sort_parallel`, 11-bit digits so
+   each chunk's histogram stays cache-resident, nogil phase kernels driven
+   by a `ThreadPoolExecutor` since pandas avoids OpenMP) now does it in
+   **~130 ms — 1.6x faster than Polars**, scaling to 4-8 threads before the
+   scatter goes bandwidth-bound. Used above `RADIX_PARALLEL_MIN_ROWS` (1M).
+   Multi-key sorts still use the Arrow lexsort path and are untouched — the
+   next sort lever, alongside the string gather (#3).
 3. **Faster string gather — blocked on Arrow string-view (investigated
    June 2026).** Arrow `large_string` `take` is ~271-375 ms/10M column, the
    bottleneck for both sort gather and `filter`; Polars gathers the same

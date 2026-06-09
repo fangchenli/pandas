@@ -716,6 +716,42 @@ class TestParallelExecutionPaths:
 
         assert _radix_argsort(np.array(["b", "a", "c"], dtype=object)) is None
 
+    def test_parallel_radix_matches_serial_and_numpy(self, monkeypatch):
+        # The thread-parallel radix (per-chunk histogram + partitioned
+        # scatter) must produce the exact same stable permutation as the
+        # serial kernel and np.argsort, across dtypes and IEEE edge cases.
+        from pandas.lazy.backends.numpy import core
+
+        # Force the parallel path on modest sizes.
+        monkeypatch.setattr(core, "RADIX_PARALLEL_MIN_ROWS", 1_000)
+        rng = np.random.default_rng(99)
+        arrays = [
+            rng.standard_normal(50_000),
+            rng.integers(-(10**15), 10**15, 50_000).astype(np.int64),
+            rng.integers(0, 10**15, 50_000).astype(np.uint64),
+            rng.integers(-3, 3, 50_000).astype(np.int64),  # heavy ties
+            rng.choice([0.0, -0.0, np.inf, -np.inf, 1.0, -1.0], 50_000).astype(
+                np.float64
+            ),
+        ]
+        for arr in arrays:
+            assert len(arr) >= core.RADIX_PARALLEL_MIN_ROWS
+            tm.assert_numpy_array_equal(
+                core._radix_argsort(arr), np.argsort(arr, kind="stable")
+            )
+
+    def test_parallel_radix_does_not_mutate_keys(self):
+        # The driver copies the keys before scattering; the order-preserving
+        # key array a caller might reuse must be left intact.
+        from pandas.lazy.backends.numpy.core import _radix_sort_parallel
+
+        keys = np.array([5, 1, 9, 1, 7, 3, 3, 8], dtype=np.uint64)
+        snapshot = keys.copy()
+        out = _radix_sort_parallel(keys, n_threads=4)
+        tm.assert_numpy_array_equal(keys, snapshot)
+        # stable sort of the keys themselves
+        tm.assert_numpy_array_equal(out, np.argsort(keys, kind="stable"))
+
     def test_sort_kernel_uses_parallel_path(self, monkeypatch):
         import pandas.lazy.backends.numpy.core as np_core
 

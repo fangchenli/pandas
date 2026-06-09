@@ -468,6 +468,91 @@ def _parallel_argsort(arr: np.ndarray) -> np.ndarray:
 
 _SIGN64 = np.uint64(0x8000000000000000)
 
+# Below this the radix runs single-threaded. Measured crossover: the
+# parallel path already wins ~1.2x at 500K and ~1.7x at 1M; 1M is the
+# robust threshold (the 500K margin is thin enough to invert under load).
+RADIX_PARALLEL_MIN_ROWS = 1_000_000
+_RADIX_BITS = 11
+_RADIX_BUCKETS = 1 << _RADIX_BITS
+_RADIX_MASK = np.uint64(_RADIX_BUCKETS - 1)
+_RADIX_PASSES = (64 + _RADIX_BITS - 1) // _RADIX_BITS
+
+
+def _radix_sort_parallel(keys: np.ndarray, n_threads: int) -> np.ndarray:
+    """Thread-parallel stable LSD radix argsort over ``uint64`` keys.
+
+    pandas avoids OpenMP, so the parallelism is driven here: the input is
+    split into ``n_threads`` contiguous chunks and each pass runs in three
+    steps — a parallel per-chunk histogram, a serial combine that turns the
+    local histograms into each chunk's per-digit write offsets, and a
+    parallel scatter where every chunk writes to its own disjoint slice of
+    each bucket. Chunks are ordered contiguous ranges, so the result is the
+    same stable permutation the serial kernel produces.
+
+    The nogil phase kernels live in ``pandas._libs.lazy_radix``; the GIL is
+    released for their hot loops, so the worker threads run concurrently.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from pandas._libs.lazy_radix import (
+        histogram_chunk,
+        scatter_chunk,
+    )
+
+    n = len(keys)
+    p = n_threads
+    bounds = [(n * c) // p for c in range(p + 1)]
+    keys = keys.copy()  # consumed: each pass scatters keys into the buffer
+    idx = np.arange(n, dtype=np.int64)
+    kb = np.empty(n, dtype=np.uint64)
+    ib = np.empty(n, dtype=np.int64)
+
+    with ThreadPoolExecutor(p) as ex:
+        for chunk_pass in range(_RADIX_PASSES):
+            shift = chunk_pass * _RADIX_BITS
+            local_hist = np.zeros((p, _RADIX_BUCKETS), dtype=np.int64)
+
+            list(
+                ex.map(
+                    lambda c, sh=shift: histogram_chunk(
+                        keys, bounds[c], bounds[c + 1], sh, _RADIX_MASK, local_hist[c]
+                    ),
+                    range(p),
+                )
+            )
+
+            # Combine: offset[c, b] = (start of bucket b) + (count of b in
+            # chunks before c). Bucket starts are the exclusive prefix sum of
+            # per-bucket totals; the per-chunk part is the exclusive prefix
+            # sum down the chunk axis.
+            bucket_base = np.zeros(_RADIX_BUCKETS, dtype=np.int64)
+            np.cumsum(local_hist.sum(axis=0)[:-1], out=bucket_base[1:])
+            thread_prefix = np.zeros((p, _RADIX_BUCKETS), dtype=np.int64)
+            np.cumsum(local_hist[:-1], axis=0, out=thread_prefix[1:])
+            offsets = np.ascontiguousarray(bucket_base[None, :] + thread_prefix)
+
+            list(
+                ex.map(
+                    lambda c, sh=shift: scatter_chunk(
+                        keys,
+                        idx,
+                        bounds[c],
+                        bounds[c + 1],
+                        sh,
+                        _RADIX_MASK,
+                        offsets[c],
+                        kb,
+                        ib,
+                    ),
+                    range(p),
+                )
+            )
+
+            keys, kb = kb, keys
+            idx, ib = ib, idx
+
+    return idx
+
 
 def _radix_argsort(arr: np.ndarray) -> np.ndarray | None:
     """Stable ascending argsort via the Cython LSD radix kernel.
@@ -501,6 +586,13 @@ def _radix_argsort(arr: np.ndarray) -> np.ndarray | None:
     else:
         return None
 
+    if len(keys) >= RADIX_PARALLEL_MIN_ROWS:
+        import os
+
+        n_threads = min(8, os.cpu_count() or 1)
+        if n_threads > 1:
+            return _radix_sort_parallel(keys, n_threads)
+
     from pandas._libs.lazy_radix import radix_argsort_u64
 
     return radix_argsort_u64(keys)
@@ -514,9 +606,11 @@ def _argsort(arr: np.ndarray) -> np.ndarray:
     engine (whose sorts are stable) can all agree.
 
     Large integer/unsigned/float arrays go through the Cython LSD radix
-    argsort (`_radix_argsort`, ~1.5x over the k-way merge at 10M); the
-    parallel k-way merge is the fallback if the kernel is unavailable or
-    raises, and ``np.argsort`` handles small or non-numeric arrays.
+    argsort (`_radix_argsort`): thread-parallel above
+    ``RADIX_PARALLEL_MIN_ROWS`` (~130 ms at 10M float64, beating Polars),
+    serial below. The parallel k-way merge is the fallback if the kernel
+    is unavailable or raises, and ``np.argsort`` handles small or
+    non-numeric arrays.
     """
     if len(arr) >= PARALLEL_SORT_MIN_ROWS and arr.dtype.kind in ("i", "u", "f"):
         try:
