@@ -326,6 +326,31 @@ explain() output stays truthful.
 M1–M2 are structural (1–2 sessions each at this codebase's pace);
 M3 is the go/no-go gate; M4–M6 are independent once M3 holds.
 
+### Post-milestone work (continued June 2026)
+
+The six milestones above are the historical engine build-out. Work continued
+past them — see ROADMAP.md "Recently Landed" for the current list. The
+headline additions, each measured and tested:
+
+- **Sort kernels.** A Cython thread-parallel LSD radix argsort
+  (`pandas/_libs/lazy_radix.pyx`) replaced the M4 k-way merge for numeric
+  single-key sorts (~130 ms/10M float64, faster than Polars' `arg_sort`); a
+  radix lexsort extends it to multi-key sorts, and factorized order-preserving
+  codes bring string keys onto the same path (`sort(group[str], value1)`
+  0.46→0.88x of Polars).
+- **`collect(order="relaxed")`.** Opts out of eager row order so the M5 acero
+  routing widens to terminal inner/left joins (10M×1M inner 298→142 ms, 2.1x;
+  0.42→0.89x of Polars), with order-dependent intermediate ops still blocked.
+- **Output dtype contract.** Schema-driven, returns eager-matching dtypes
+  (no more `double[pyarrow]` leaking from acero); breaker outputs assemble
+  copy-free.
+- **Cardinality estimation** (`optimize/cardinality.py`). Predicate-aware
+  selectivity from sampled NDV/min-max, Parquet footer metadata, and
+  equi-depth histograms — flips join build sides correctly.
+- **Free-threading validated.** On a 3.14t build the engine keeps the GIL
+  off; the partitioned join scales 2.67x (but acero is still faster — the M5
+  pivot stands). See `benchmarks/spike_freethreaded_join.py`.
+
 ## Relationship to existing documents
 
 - [PLANNING.md](PLANNING.md) describes the **current** planner; it gains

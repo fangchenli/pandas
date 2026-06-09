@@ -72,7 +72,7 @@ Every node implements three things (`plan.py`):
 |---|---|
 | `resolve_schema()` | Output `Schema`; computed once and cached per node (`_cached_schema`) since physical planning re-reads schemas repeatedly |
 | `children()` | Tree traversal for the optimizer and planners |
-| `estimate_row_count()` | Best-effort cardinality: sources report lengths, Parquet uses file metadata, `Limit` caps, `Concat` sums; `Filter` returns `None` (unknown selectivity) and `None` poisons upward |
+| `estimate_row_count()` | Best-effort cardinality: sources report lengths, Parquet uses file metadata, `Limit` caps, `Concat` sums; `Filter` applies predicate-aware selectivity (`optimize/cardinality.py` — `1/NDV`, histogram/min-max ranges, null fractions; System R constants as fallback), grouped aggregates use the group key's NDV. `None` still poisons upward when a source is unknown |
 
 Row estimates exist purely to inform physical decisions (join build-side
 selection); they are never required for correctness.
@@ -199,5 +199,9 @@ threshold config, index metadata (`index_names`, `user_set_index`,
   is on the roadmap.)
 - Hash join materializes **both** sides; streaming the probe side is a known
   future optimization.
-- Row estimates stop at filters (no selectivity model) — see
-  [ROADMAP.md](ROADMAP.md) on cardinality estimation.
+- Row estimates flow through filters via the cardinality model
+  (`optimize/cardinality.py`); the statistics it uses (sampled NDV/min-max for
+  in-memory frames, Parquet footer metadata, equi-depth histograms) are
+  computed lazily and only when a join/aggregate requests an estimate, so
+  join-free queries pay nothing. The remaining gap is a histogram for *scans*
+  (Parquet has no quantile metadata) — see [ROADMAP.md](ROADMAP.md).

@@ -95,7 +95,7 @@ Design decisions:
 | Mixed formats | Allowed — some columns Arrow, some NumPy in the same ArrayDict |
 | Index handling | Stored as `__index__` column (`__index_0__`, `__index_1__`, ... for MultiIndex); names kept in `ExecutionContext` |
 | DataFrame construction | Once, at the end of `collect()` |
-| Output dtypes | Arrow-backed (`pd.ArrowDtype`) by default — `table.to_pandas(types_mapper=pd.ArrowDtype)` is near zero-copy (~15x faster than materializing NumPy arrays) because `ArrowExtensionArray` wraps the existing Arrow buffers |
+| Output dtypes | A schema-driven contract (`convert.arrays_to_dataframe`) returns the dtypes the eager path would, regardless of which kernels ran: numeric/bool → NumPy, strings → default `str` (zero-copy Arrow-buffer reinterpret), genuine `pd.ArrowDtype` and Categorical preserved. Pipeline-breaker outputs assemble `copy=False` (no consolidation copy); projections keep the copy that isolates passthrough views |
 
 ### ChunkedArray Strategy
 
@@ -199,11 +199,15 @@ small data never pays pool overhead.
   (configurable) evaluate in a `ThreadPoolExecutor`, one `ArrayEvaluator` per
   thread.
 - **Parallel join sides** — independent subplans of a join run concurrently.
-- **Parallel sort** (`backends/numpy/core.py:_parallel_argsort`) — large
-  numeric argsorts run as chunked concurrent sorts merged with a vectorized
-  `searchsorted` pairwise merge (~1.5x at 10M rows). Large multi-key sorts
-  route through Arrow's multi-threaded table `sort_indices` instead of
-  `np.lexsort` (~1.65x), with a lexsort fallback for unsupported key types.
+- **Sort** — large numeric single-key sorts use a Cython **thread-parallel
+  LSD radix argsort** (`pandas/_libs/lazy_radix.pyx`; keys built vectorized in
+  NumPy, ~130 ms at 10M float64, faster than Polars' `arg_sort`). Multi-key
+  sorts use a **radix lexsort** (stable per-key radix composed
+  least-significant-first); string keys are factorized into order-preserving
+  codes first, so they ride the same path. Non-numeric/unsupported keys fall
+  back to Arrow's table `sort_indices`, then `np.lexsort`. The NumPy k-way
+  merge (`_parallel_argsort`) remains the fallback when the radix kernel is
+  unavailable.
   **Lazy sorts are stable by contract** (ties keep their original relative
   order): it is the only tie order the eager evaluator, NumPy engine, and
   Arrow engine (whose sorts are inherently stable) can all agree on, and
