@@ -12,6 +12,12 @@ extension: ``CALL dbgen(sf=...)`` generates the tables, ``PRAGMA tpch(n)`` is
 the authoritative result for query n. Each lazy-pandas query is validated
 against that reference, then timed against Polars.
 
+Fairness: each engine is timed on its **native** input doing **only the
+query** - lazy pandas on the pandas tables, Polars on Polars tables converted
+once up front (not inside the timed loop). Timing Polars' ``from_pandas`` per
+run would charge it a pandas->Arrow conversion (~75% of a query's time at
+SF-1) that the already-native lazy-pandas path does not pay.
+
 Queries are hand-translated from the TPC-H SQL into the lazy DataFrame API
 (reference: pola.rs/polars-benchmark). Implemented queries are registered in
 ``QUERIES``; the suite grows incrementally.
@@ -119,7 +125,7 @@ def lp_q1(t):
 
 def pl_q1(t):
     cutoff = pd.Timestamp("1998-12-01") - pd.Timedelta(days=90)
-    li = pl.from_pandas(t["lineitem"]).lazy()
+    li = t["lineitem"].lazy()
     return (
         li.filter(pl.col("l_shipdate") <= cutoff)
         .group_by("l_returnflag", "l_linestatus")
@@ -164,7 +170,7 @@ def lp_q6(t):
 
 
 def pl_q6(t):
-    li = pl.from_pandas(t["lineitem"]).lazy()
+    li = t["lineitem"].lazy()
     return (
         li.filter(
             (pl.col("l_shipdate") >= pd.Timestamp("1994-01-01"))
@@ -197,13 +203,9 @@ def lp_q3(t):
 
 def pl_q3(t):
     cut = pd.Timestamp("1995-03-15")
-    c = (
-        pl.from_pandas(t["customer"])
-        .lazy()
-        .filter(pl.col("c_mktsegment") == "BUILDING")
-    )
-    o = pl.from_pandas(t["orders"]).lazy().filter(pl.col("o_orderdate") < cut)
-    li = pl.from_pandas(t["lineitem"]).lazy().filter(pl.col("l_shipdate") > cut)
+    c = t["customer"].lazy().filter(pl.col("c_mktsegment") == "BUILDING")
+    o = t["orders"].lazy().filter(pl.col("o_orderdate") < cut)
+    li = t["lineitem"].lazy().filter(pl.col("l_shipdate") > cut)
     return (
         c.join(o, left_on="c_custkey", right_on="o_custkey")
         .join(li, left_on="o_orderkey", right_on="l_orderkey")
@@ -249,14 +251,14 @@ def lp_q10(t):
 def pl_q10(t):
     lo = pd.Timestamp("1993-10-01")
     hi = pd.Timestamp("1994-01-01")
-    c = pl.from_pandas(t["customer"]).lazy()
+    c = t["customer"].lazy()
     o = (
-        pl.from_pandas(t["orders"])
+        t["orders"]
         .lazy()
         .filter((pl.col("o_orderdate") >= lo) & (pl.col("o_orderdate") < hi))
     )
-    li = pl.from_pandas(t["lineitem"]).lazy().filter(pl.col("l_returnflag") == "R")
-    n = pl.from_pandas(t["nation"]).lazy()
+    li = t["lineitem"].lazy().filter(pl.col("l_returnflag") == "R")
+    n = t["nation"].lazy()
     return (
         c.join(o, left_on="c_custkey", right_on="o_custkey")
         .join(li, left_on="o_orderkey", right_on="l_orderkey")
@@ -303,28 +305,28 @@ def lp_q5(t):
 def pl_q5(t):
     lo, hi = pd.Timestamp("1994-01-01"), pd.Timestamp("1995-01-01")
     o = (
-        pl.from_pandas(t["orders"])
+        t["orders"]
         .lazy()
         .filter((pl.col("o_orderdate") >= lo) & (pl.col("o_orderdate") < hi))
     )
-    region = pl.from_pandas(t["region"]).lazy().filter(pl.col("r_name") == "ASIA")
+    region = t["region"].lazy().filter(pl.col("r_name") == "ASIA")
     return (
-        pl.from_pandas(t["customer"])
+        t["customer"]
         .lazy()
         .join(o, left_on="c_custkey", right_on="o_custkey")
         .join(
-            pl.from_pandas(t["lineitem"]).lazy(),
+            t["lineitem"].lazy(),
             left_on="o_orderkey",
             right_on="l_orderkey",
         )
         .join(
-            pl.from_pandas(t["supplier"]).lazy(),
+            t["supplier"].lazy(),
             left_on="l_suppkey",
             right_on="s_suppkey",
         )
         .filter(pl.col("c_nationkey") == pl.col("s_nationkey"))
         .join(
-            pl.from_pandas(t["nation"]).lazy(),
+            t["nation"].lazy(),
             left_on="s_nationkey",
             right_on="n_nationkey",
         )
@@ -368,7 +370,7 @@ def lp_q12(t):
 def pl_q12(t):
     lo, hi = pd.Timestamp("1994-01-01"), pd.Timestamp("1995-01-01")
     li = (
-        pl.from_pandas(t["lineitem"])
+        t["lineitem"]
         .lazy()
         .filter(
             pl.col("l_shipmode").is_in(["MAIL", "SHIP"])
@@ -380,7 +382,7 @@ def pl_q12(t):
     )
     is_high = pl.col("o_orderpriority").is_in(["1-URGENT", "2-HIGH"])
     return (
-        pl.from_pandas(t["orders"])
+        t["orders"]
         .lazy()
         .join(li, left_on="o_orderkey", right_on="l_orderkey")
         .group_by("l_shipmode")
@@ -463,6 +465,16 @@ def main():
     t0 = time.perf_counter()
     con = make_duckdb(args.sf)
     tables = load_tables(con)
+    # Pre-convert the Polars tables ONCE, outside the timed query: each engine
+    # is timed on its native input doing only the query (lazy pandas on the
+    # pandas frames, Polars on Polars frames). Timing Polars' from_pandas per
+    # run would charge it a pandas->Arrow conversion the native lazy path never
+    # pays - not a fair engine comparison.
+    pl_tables = (
+        {name: pl.from_pandas(df) for name, df in tables.items()}
+        if HAS_POLARS
+        else None
+    )
     print(
         f"[generated SF-{args.sf} in {time.perf_counter() - t0:.1f}s; "
         f"lineitem={len(tables['lineitem']):,} rows]\n"
@@ -482,7 +494,7 @@ def main():
             lp_ms = time_query(
                 lambda t: lp_fn(t).collect(use_physical_planner=True), tables
             )
-            pl_ms = time_query(pl_fn, tables) if HAS_POLARS else float("nan")
+            pl_ms = time_query(pl_fn, pl_tables) if HAS_POLARS else float("nan")
             ratio = pl_ms / lp_ms if lp_ms else float("nan")
             flag = "OK" if ok else f"FAIL:{msg}"
             print(
