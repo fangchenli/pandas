@@ -808,6 +808,59 @@ class TestParallelExecutionPaths:
                 check_dtype=False,
             )
 
+    def test_multikey_sort_with_string_key_matches_eager(self, monkeypatch):
+        # A multi-key sort that includes a string key factorizes it into
+        # order-preserving codes and rides the radix lexsort; the result must
+        # match eager exactly, including null-bearing string keys (nulls last)
+        # and per-key descending.
+        from pandas.lazy import physical
+
+        monkeypatch.setattr(physical, "ARROW_MULTIKEY_SORT_MIN_ROWS", 1_000)
+        rng = np.random.default_rng(11)
+        n = 6_000
+        df = pd.DataFrame(
+            {
+                "s": rng.choice(["alpha", "beta", "gamma", "delta"], n),
+                "snull": np.where(
+                    rng.random(n) < 0.1, None, rng.choice(["x", "y", "z"], n)
+                ),
+                "v": rng.standard_normal(n),
+                "i": rng.integers(0, 50, n).astype("int64"),
+            }
+        )
+        for keys, desc in [
+            (["s", "v"], [False, False]),
+            (["s", "v"], [True, False]),
+            (["snull", "v"], [False, False]),
+            (["snull", "v"], [True, False]),
+            (["i", "s", "v"], [False, True, False]),
+        ]:
+            eager = df.select().sort(*keys, descending=desc).collect()
+            physical_res = (
+                df.select()
+                .sort(*keys, descending=desc)
+                .collect(use_physical_planner=True)
+            )
+            tm.assert_frame_equal(
+                eager.reset_index(drop=True),
+                physical_res.reset_index(drop=True),
+                check_dtype=False,
+            )
+
+    def test_keys_for_radix_lexsort_codes_strings_and_rejects_datetime(self):
+        from pandas.lazy.physical import _keys_for_radix_lexsort
+
+        # String key -> order-preserving float codes (alpha<beta<gamma).
+        keyed = _keys_for_radix_lexsort([np.array(["beta", "alpha", "gamma"])])
+        assert keyed is not None
+        tm.assert_numpy_array_equal(keyed[0], np.array([1.0, 0.0, 2.0]))
+        # null in a string key -> NaN (sorts last).
+        keyed = _keys_for_radix_lexsort([np.array(["b", None, "a"], dtype=object)])
+        assert keyed is not None and np.isnan(keyed[0][1])
+        # datetime key is not coded -> None (caller falls back to Arrow).
+        dt = np.array(["2020-01-01", "2019-01-01"], dtype="datetime64[ns]")
+        assert _keys_for_radix_lexsort([dt]) is None
+
     def test_sort_kernel_uses_parallel_path(self, monkeypatch):
         import pandas.lazy.backends.numpy.core as np_core
 

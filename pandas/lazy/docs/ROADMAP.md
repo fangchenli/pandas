@@ -18,7 +18,7 @@ data, Apple Silicon; physical engine). Speedup > 1.0 = lazy pandas faster.
 | parquet scan | 0.86x avg — glob `head()` **wins 1.55x** (6.7 ms vs 10.3) | limit pushdown into scans + direct ParquetFile path + vectorized index |
 | join (order-preserving) | 0.42x default; **0.89x with `order="relaxed"`** | eager `pd.merge` row order by default; `collect(order="relaxed")` routes to acero |
 | join→groupby composite | 0.58x | acero routing for order-free joins |
-| sort | numeric single + multi-key argsort **beats Polars**; full mixed sort gather-bound | thread-parallel radix argsort + radix lexsort + breaker copy-free output; string gather is the wall |
+| sort | numeric ~0.9x (argsort beats Polars); string-key multi-sort 0.46→0.88x; full mixed sort gather-bound | radix argsort + radix lexsort (numeric & factorized string keys) + breaker copy-free output; string payload gather is the wall |
 | category-key groupby | 0.43x vs Polars-categorical | zero-copy dictionary flow (was 313 ms, now 21) |
 | full-scan select+filter | ~0.37x (21 ms) | vectorized index column (was 104 ms) |
 | filter_project | 0.21x | gather-bound (string `take`) + pandas' mutation-safety copy, not bandwidth |
@@ -36,27 +36,22 @@ semantics, not by missing optimizations — see "Blocked on upstream" below.
 
 The forward list — open items only. Landed work is recorded further down.
 
-1. **String-key multi-column sort.** The radix lexsort (landed) covers
-   all-numeric multi-key sorts; a multi-key sort that includes a string
-   column still falls back to Arrow's table `sort_indices`. A dictionary-
-   encoded key (int32 codes feeding the radix lexsort) would extend the win
-   there, bounded by the same `large_string` gather wall (Blocked, below).
-2. **Acero raw-string hash gap.** acero groups raw `large_string` keys at
+1. **Acero raw-string hash gap.** acero groups raw `large_string` keys at
    67 ms/10M vs Polars' 18; the dictionary cache solves repeated queries
    but first-query and one-shot workloads still pay. Upstream Arrow work or
    a pre-hashing trick are the options.
-3. **Cardinality estimation — statistics-driven refinement.** The
+2. **Cardinality estimation — statistics-driven refinement.** The
    constant-selectivity model (System R) is landed (`optimize/cardinality.py`):
    filters now size by predicate (equality 0.1, range 0.33, AND/OR/NOT
    compose) instead of a flat 0.3, which already flips join build-side
    choices to the correct side. Next: real column statistics — `1/NDV` for
    equality, Parquet min/max for ranges, and a histogram for skew — so the
    estimates predict counts rather than just rank plans.
-4. **Planning-overhead fast paths.** Single-op queries pay 60–80% of lazy
+3. **Planning-overhead fast paths.** Single-op queries pay 60–80% of lazy
    overhead in the optimizer (`bench_planning_phases.py`); skip passes by
    plan shape. The ~300 µs limit floor is this item. (Low leverage:
    sub-millisecond, invisible on real data.)
-5. **Free-threaded partition joins.** pandas' Cython hash join holds the GIL
+4. **Free-threaded partition joins.** pandas' Cython hash join holds the GIL
    (measured: threaded partition-pairs 461→535 ms at 2→8 threads vs 430
    serial). On free-threaded Python the M5-spec'd partitioned join becomes
    buildable; the engine architecture needs no changes to exploit it.
@@ -135,6 +130,12 @@ The forward list — open items only. Landed work is recorded further down.
 
 Newest first. Detail in the git log and the docs above.
 
+- **String-key multi-column sort** — a string sort key is factorized
+  (`sort=True`) into order-preserving float codes (nulls as NaN), so the
+  radix lexsort handles it with per-key descending and nulls-last for free;
+  `sort(group[str], value1)` 10M went 3150→1643 ms (0.46→~0.88x of Polars),
+  ~3.7x faster than the Arrow string-key argsort. Non-numeric/non-string
+  keys (datetime) still fall back to Arrow.
 - **Predicate-aware cardinality (System R selectivity)** — `Filter` /
   pushed-down Parquet predicates size by operator (equality 0.1, range 0.33,
   AND/OR/NOT compose) instead of a flat 0.3; flips join build-side selection

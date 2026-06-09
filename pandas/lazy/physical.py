@@ -2826,6 +2826,44 @@ def _take_all_columns(input_arrays: ArrayDict, indices) -> ArrayDict:
     return dict(map(take_one, items))
 
 
+def _keys_for_radix_lexsort(sort_key_arrays) -> list | None:
+    """Code each sort key into a radix-sortable NumPy array, or None.
+
+    Numeric keys pass through. String/object keys are factorized with
+    ``sort=True`` into order-preserving integer codes, then cast to float64
+    with nulls as NaN — so the radix lexsort's float path handles
+    null-placement (nulls last) and per-key descending exactly, with no
+    special casing. Returns None if any key is a kind the coder does not
+    cover (datetime, etc.), so the caller falls back to Arrow's table sort.
+    """
+    import numpy as np
+
+    import pandas as pd
+
+    keys: list = []
+    for arr in sort_key_arrays:
+        np_arr = (
+            arr.to_numpy(zero_copy_only=False)
+            if hasattr(arr, "to_numpy")
+            else np.asarray(arr)
+        )
+        kind = np_arr.dtype.kind
+        if kind in ("i", "u", "f"):
+            keys.append(np_arr)
+        elif kind in ("O", "U", "S"):
+            try:
+                codes, _ = pd.factorize(np_arr, sort=True)
+            except (TypeError, ValueError):
+                return None  # unsortable/mixed object column
+            fcodes = codes.astype(np.float64)
+            if (codes == -1).any():
+                fcodes[codes == -1] = np.nan  # nulls -> sort last via NaN
+            keys.append(fcodes)
+        else:
+            return None  # datetime/bool/etc.: let Arrow handle it
+    return keys
+
+
 def _is_arrow_sortable(arr) -> bool:
     """Whether an array can be routed through Arrow's table sort."""
     import numpy as np
@@ -2928,27 +2966,18 @@ class PhysicalSort(PhysicalPlan):
 
         n_rows = len(sort_key_arrays[0]) if sort_key_arrays else 0
 
-        # All-numeric multi-key sort: a radix-based lexsort (stable per-key
-        # radix, composing permutations) is ~6x faster than Arrow's table
-        # sort_indices at 10M (382 ms vs 2200) and beats np.lexsort ~26x.
-        # Convert keys to NumPy once; if every key is numeric, take this path.
+        # Multi-key sort: a radix-based lexsort (stable per-key radix,
+        # composing permutations) is ~6x faster than Arrow's table
+        # sort_indices at 10M for numeric keys, and ~3.7x faster for string
+        # keys once they are factorized into order-preserving codes. Code
+        # each key into a radix-sortable NumPy array; if every key codes, take
+        # this path, else fall back to Arrow.
         if n_rows >= ARROW_MULTIKEY_SORT_MIN_ROWS:
-            np_keys: list = []
-            all_numeric = True
-            for arr in sort_key_arrays:
-                np_arr = (
-                    arr.to_numpy(zero_copy_only=False)
-                    if hasattr(arr, "to_numpy")
-                    else np.asarray(arr)
-                )
-                if np_arr.dtype.kind not in ("i", "u", "f"):
-                    all_numeric = False
-                    break
-                np_keys.append(np_arr)
-            if all_numeric:
+            radix_keys = _keys_for_radix_lexsort(sort_key_arrays)
+            if radix_keys is not None:
                 from pandas.lazy.backends.numpy.core import radix_lexsort
 
-                sort_indices = radix_lexsort(np_keys, self.descending)
+                sort_indices = radix_lexsort(radix_keys, self.descending)
                 return _take_all_columns(input_arrays, sort_indices)
 
         # Large multi-key sort: route through Arrow's table-level
