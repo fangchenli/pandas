@@ -19,11 +19,11 @@ pandas faster.
 
 | Category | Standing | Driver |
 |----------|----------|--------|
-| string | **2.07x avg — wins** (`str.lower` 4.38x, `contains` 1.71x) | pass-through fix + compute-bound morsel parallelism |
+| string | **1.66x avg — wins** (`str.lower` 4.52x, `contains` 1.19–1.55x) | pass-through fix + compute-bound morsel parallelism |
 | aggregation | **wins** (H2O group-by: 6/10 beat Polars, string-key sums up to ~7x, `corr` ~3x) | `groupby_prefers_arrow` routing (numeric + arrow-string → acero) + post-aggregation projection |
-| parquet scan | 0.86x avg — glob `head()` **wins 1.55x** (6.7 ms vs 10.3) | limit pushdown into scans + direct ParquetFile path + vectorized index |
-| join | **`pd.merge` path** — int-key joins ~parity (noisy); string-key (H2O q4) and left (q3) joins lag Polars' parallel hash join — see H2O_BENCHMARK.md | `pd.merge` is the in-memory equi-join path (eager-correct, fastest); acero/Grace fallbacks |
-| sort | numeric ~0.9x (argsort beats Polars); string-key multi-sort 0.46→0.88x; full mixed sort gather-bound | radix argsort + radix lexsort (numeric & factorized string keys) + breaker copy-free output; string payload gather is the wall |
+| parquet scan | 0.90x avg — glob `head()` **wins 1.6x** | limit pushdown into scans + direct ParquetFile path + vectorized index |
+| join | **`pd.merge` path** (eager-correct, fastest — 5x over acero on this shape). H2O 1:1-ish joins ~parity (noisy); the microbenchmark's *many-to-many* 100M-row-result join is 0.32x (result materialization, where Polars parallelizes); string-key/left joins lag — see H2O_BENCHMARK.md | `pd.merge` in-memory equi-join; acero/Grace fallbacks |
+| sort | numeric **wins at 10M** (`sort(num_a)` 1.08x); string-key multi-sort **1.28x**; smaller sorts and full mixed sort gather-bound (0.4–0.8x) | radix argsort + radix lexsort (numeric & factorized string keys) + breaker copy-free output; string payload gather is the wall |
 | category-key groupby | 0.43x vs Polars-categorical | zero-copy dictionary flow (was 313 ms, now 21) |
 | full-scan select+filter | ~0.37x (21 ms) | vectorized index column (was 104 ms) |
 | filter_project | 0.21x | gather-bound (string `take`) + pandas' mutation-safety copy, not bandwidth |
