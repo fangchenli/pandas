@@ -12,8 +12,21 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from pandas import DataFrame
-    from pandas.lazy.expr import Expr
-    from pandas.lazy.types import Schema
+
+
+from pandas.lazy.expr import (
+    Expr,
+    extract_output_name,
+)
+from pandas.lazy.ir import (
+    Alias,
+    FieldRef,
+)
+from pandas.lazy.types import (
+    LazyDtype,
+    Schema,
+    infer_expr_dtype,
+)
 
 
 class LogicalPlan:
@@ -106,7 +119,6 @@ class DataFrameSource(LogicalPlan):
         self._stats_cache: dict[str, object] = {}
 
     def _resolve_schema_impl(self) -> Schema:
-        from pandas.lazy.types import Schema
 
         return Schema.from_dataframe(self.df)
 
@@ -169,7 +181,6 @@ class ParquetSource(LogicalPlan):
         # Don't set _parquet_schema here - it will be resolved lazily
 
     def _resolve_schema_impl(self) -> Schema:
-        from pandas.lazy.types import Schema
 
         if self._parquet_schema is not None:
             schema = self._parquet_schema
@@ -187,11 +198,6 @@ class ParquetSource(LogicalPlan):
     def _read_parquet_schema(self) -> Schema:
         """Read schema from Parquet file metadata without reading data."""
         import pyarrow.parquet as pq
-
-        from pandas.lazy.types import (
-            LazyDtype,
-            Schema,
-        )
 
         # Handle glob patterns
         path = self.path
@@ -380,7 +386,6 @@ class CSVSource(LogicalPlan):
         # Don't set _csv_schema here - it will be resolved lazily
 
     def _resolve_schema_impl(self) -> Schema:
-        from pandas.lazy.types import Schema
 
         if self._csv_schema is not None:
             schema = self._csv_schema
@@ -399,11 +404,6 @@ class CSVSource(LogicalPlan):
         """Read schema from CSV file by scanning first rows."""
         import pyarrow as pa
         from pyarrow import csv
-
-        from pandas.lazy.types import (
-            LazyDtype,
-            Schema,
-        )
 
         # Handle glob patterns
         path = self.path
@@ -548,7 +548,6 @@ class Project(LogicalPlan):
         self._cached_schema = None
 
     def _resolve_schema_impl(self) -> Schema:
-        from pandas.lazy.types import Schema
 
         input_schema = self.input.resolve_schema()
         return Schema.from_exprs(self.exprs, input_schema)
@@ -564,11 +563,6 @@ class Project(LogicalPlan):
         # A column reaches the output unchanged only if it is projected by a
         # plain column reference; computed columns have an unknown
         # distribution. Delegate pass-throughs to the input.
-        from pandas.lazy.expr import extract_output_name
-        from pandas.lazy.ir import (
-            Alias,
-            FieldRef,
-        )
 
         for expr in self.exprs:
             try:
@@ -586,7 +580,6 @@ class Project(LogicalPlan):
         return None
 
     def __repr__(self) -> str:
-        from pandas.lazy.expr import extract_output_name
 
         try:
             names = [extract_output_name(e) for e in self.exprs]
@@ -642,12 +635,6 @@ class Aggregate(LogicalPlan):
         self._cached_schema = None
 
     def _resolve_schema_impl(self) -> Schema:
-        from pandas.lazy.expr import extract_output_name
-        from pandas.lazy.types import (
-            LazyDtype,
-            Schema,
-            infer_expr_dtype,
-        )
 
         input_schema = self.input.resolve_schema()
         columns: dict[str, LazyDtype] = {}
@@ -680,11 +667,6 @@ class Aggregate(LogicalPlan):
         # column group-by we can use that column's NDV directly instead of
         # the sqrt heuristic.
         if len(self.group_by) == 1:
-            from pandas.lazy.ir import (
-                Alias,
-                FieldRef,
-            )
-
             ir = self.group_by[0]._ir
             if isinstance(ir, Alias):
                 ir = ir.arg
@@ -704,7 +686,6 @@ class Aggregate(LogicalPlan):
         return None
 
     def __repr__(self) -> str:
-        from pandas.lazy.expr import extract_output_name
 
         try:
             group_names = [extract_output_name(e) for e in self.group_by]
@@ -737,7 +718,6 @@ class Sort(LogicalPlan):
         return self.input.estimate_row_count()
 
     def __repr__(self) -> str:
-        from pandas.lazy.expr import extract_output_name
 
         try:
             names = [extract_output_name(e) for e in self.by]
@@ -874,7 +854,6 @@ class TopK(LogicalPlan):
         return min(self.k, input_count)
 
     def __repr__(self) -> str:
-        from pandas.lazy.expr import extract_output_name
 
         try:
             names = [extract_output_name(e) for e in self.by]
@@ -901,10 +880,6 @@ class Join(LogicalPlan):
         self._cached_schema = None
 
     def _resolve_schema_impl(self) -> Schema:
-        from pandas.lazy.types import (
-            LazyDtype,
-            Schema,
-        )
 
         left_schema = self.left.resolve_schema()
         right_schema = self.right.resolve_schema()
@@ -1042,7 +1017,6 @@ class SetIndex(LogicalPlan):
         self._cached_schema = None
 
     def _resolve_schema_impl(self) -> Schema:
-        from pandas.lazy.types import Schema
 
         input_schema = self.input.resolve_schema()
 
@@ -1092,7 +1066,6 @@ class ResetIndex(LogicalPlan):
         self._cached_schema = None
 
     def _resolve_schema_impl(self) -> Schema:
-        from pandas.lazy.types import Schema
 
         input_schema = self.input.resolve_schema()
 

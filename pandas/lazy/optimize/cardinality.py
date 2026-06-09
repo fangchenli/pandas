@@ -28,6 +28,13 @@ from typing import (
 if TYPE_CHECKING:
     from pandas.lazy.ir import IRNode
 
+from pandas.lazy.ir import (
+    Alias,
+    Call,
+    FieldRef,
+    Literal,
+)
+
 # Constant selectivities (System R defaults).
 SEL_EQ = 0.1  # col == value
 SEL_NEQ = 0.9  # col != value
@@ -84,11 +91,6 @@ class ColumnStats:
 
 def _field_and_literal(ir) -> tuple[str, object, bool] | None:
     """For a binary comparison, return (column, literal, field_is_left)."""
-    from pandas.lazy.ir import (
-        FieldRef,
-        Literal,
-    )
-
     if len(ir.args) != 2:
         return None
     left, right = ir.args
@@ -150,11 +152,6 @@ def estimate_selectivity(ir: IRNode, stats: StatsLookup | None = None) -> float:
     ``1/NDV`` for equality, min/max interpolation for ranges, the null
     fraction for ``is_null`` — and fall back to System R constants otherwise.
     """
-    from pandas.lazy.ir import (
-        Alias,
-        Call,
-    )
-
     if isinstance(ir, Alias):
         return estimate_selectivity(ir.arg, stats)
     if not isinstance(ir, Call):
@@ -215,8 +212,6 @@ def estimate_selectivity(ir: IRNode, stats: StatsLookup | None = None) -> float:
         return SEL_RANGE
     if fn == "is_null":
         if stats is not None and len(ir.args) == 1:
-            from pandas.lazy.ir import FieldRef
-
             arg = ir.args[0]
             if isinstance(arg, FieldRef):
                 st = stats(arg.name)
