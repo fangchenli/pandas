@@ -1491,6 +1491,33 @@ class TestCommonSubexpressionElimination:
         assert list(result["times2"]) == [2, 4, 6]
         assert list(result["times3"]) == [3, 6, 9]
 
+    def test_cse_distinguishes_kwargs(self):
+        """Calls differing only in kwargs must not be merged.
+
+        Regression: case_when carries its branches (cases/otherwise) in kwargs
+        with empty positional args, so a fingerprint that ignored kwargs made
+        two different case_when expressions collide and CSE wrongly merged them
+        (both returning the first's value).
+        """
+        from pandas.lazy import when
+
+        df = pd.DataFrame({"p": ["hi", "lo", "hi", "lo"]})
+        cond = col("p") == "hi"
+        ldf = df.select(
+            when(cond).then(1).otherwise(0).alias("a"),
+            when(cond).then(0).otherwise(1).alias("b"),
+        )
+
+        cse = CommonSubexpressionElimination()
+        optimized = cse.optimize(ldf._plan)
+        # The two case_whens differ (only in kwargs) - must NOT be merged.
+        assert len(optimized.exprs) == 2
+
+        for engine in (True, False):
+            result = ldf.collect(use_physical_planner=engine)
+            assert list(result["a"]) == [1, 0, 1, 0]
+            assert list(result["b"]) == [0, 1, 0, 1]
+
     def test_cse_simple_field_refs_not_combined(self):
         """Simple FieldRefs should not be CSE'd (no benefit)."""
         df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})

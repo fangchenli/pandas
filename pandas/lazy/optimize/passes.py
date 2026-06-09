@@ -1061,11 +1061,31 @@ class CommonSubexpressionElimination(PlanVisitor):
             return f"Alias({self._fingerprint_ir(ir.arg)},{ir.name})"
         elif isinstance(ir, Call):
             args_fp = ",".join(self._fingerprint_ir(a) for a in ir.args)
-            return f"Call({ir.function},{args_fp})"
+            # kwargs must be part of the fingerprint: case_when carries its
+            # branches (cases/otherwise) entirely in kwargs with empty args, so
+            # ignoring kwargs makes two different case_when expressions collide
+            # and CSE wrongly merges them. is_aggregate likewise distinguishes
+            # e.g. sum(x) from x.
+            kwargs_fp = ",".join(
+                f"{k}={self._fingerprint_value(ir.kwargs[k])}"
+                for k in sorted(ir.kwargs)
+            )
+            return (
+                f"Call({ir.function},[{args_fp}],{{{kwargs_fp}}},agg={ir.is_aggregate})"
+            )
         elif isinstance(ir, Cast):
             return f"Cast({self._fingerprint_ir(ir.arg)},{ir.target_dtype})"
         else:
             return repr(ir)
+
+    def _fingerprint_value(self, value) -> str:
+        """Fingerprint a kwargs value, which may be an IR node, a (nested)
+        tuple/list of values, or a plain Python value."""
+        if isinstance(value, IRNode):
+            return self._fingerprint_ir(value)
+        if isinstance(value, (tuple, list)):
+            return "(" + ",".join(self._fingerprint_value(v) for v in value) + ")"
+        return repr(value)
 
 
 # =============================================================================
