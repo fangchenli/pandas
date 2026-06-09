@@ -673,48 +673,74 @@ def benchmark_head_limit(
 
 
 def benchmark_sort(pdf: pd.DataFrame, pldf: pl.DataFrame) -> list[BenchmarkResult]:
-    """Benchmark sort operations."""
+    """Benchmark sort operations.
+
+    Two regimes, deliberately: the mixed frame (string payload columns, plus a
+    string key for one multi-key case) is the realistic string-gather-bound
+    path; an all-numeric frame isolates the radix argsort and radix lexsort
+    kernels from that gather wall. Without the numeric cases the suite cannot
+    observe the numeric-sort work at all.
+    """
     results = []
     n_rows = len(pdf)
 
-    # Sort by single column
-    def lazy_pandas_sort():
-        return pdf.select().sort("value1").collect(use_physical_planner=True)
-
-    def polars_sort():
-        return pldf.lazy().sort("value1").collect()
-
-    lp_time = benchmark_operation(lazy_pandas_sort)
-    pl_time = benchmark_operation(polars_sort)
-    results.append(
-        BenchmarkResult(
-            category="sort",
-            operation="sort(value1)",
-            data_rows=n_rows,
-            lazy_pandas_ms=lp_time,
-            polars_ms=pl_time,
-            speedup=pl_time / lp_time if lp_time > 0 else 0,
+    def add(operation, lp_fn, pl_fn):
+        lp = benchmark_operation(lp_fn)
+        pl_ms = benchmark_operation(pl_fn)
+        results.append(
+            BenchmarkResult(
+                category="sort",
+                operation=operation,
+                data_rows=n_rows,
+                lazy_pandas_ms=lp,
+                polars_ms=pl_ms,
+                speedup=pl_ms / lp if lp > 0 else 0,
+            )
         )
+
+    # --- Mixed frame (string payload columns are gathered on every sort) ---
+    add(
+        "sort(value1)",
+        lambda: pdf.select().sort("value1").collect(use_physical_planner=True),
+        lambda: pldf.lazy().sort("value1").collect(),
+    )
+    # String primary key -> radix lexsort cannot apply, falls back to Arrow.
+    add(
+        "sort(group[str], value1)",
+        lambda: pdf.select().sort("group", "value1").collect(use_physical_planner=True),
+        lambda: pldf.lazy().sort("group", "value1").collect(),
+    )
+    # Numeric multi-key on the same mixed frame -> radix lexsort fires; string
+    # payload columns are still gathered, so this isolates the argsort win.
+    add(
+        "sort(int_val, value1)",
+        lambda: (
+            pdf.select().sort("int_val", "value1").collect(use_physical_planner=True)
+        ),
+        lambda: pldf.lazy().sort("int_val", "value1").collect(),
     )
 
-    # Sort by multiple columns
-    def lazy_pandas_sort_multi():
-        return pdf.select().sort("group", "value1").collect(use_physical_planner=True)
-
-    def polars_sort_multi():
-        return pldf.lazy().sort("group", "value1").collect()
-
-    lp_time = benchmark_operation(lazy_pandas_sort_multi)
-    pl_time = benchmark_operation(polars_sort_multi)
-    results.append(
-        BenchmarkResult(
-            category="sort",
-            operation="sort(group, value1)",
-            data_rows=n_rows,
-            lazy_pandas_ms=lp_time,
-            polars_ms=pl_time,
-            speedup=pl_time / lp_time if lp_time > 0 else 0,
-        )
+    # --- All-numeric frame (no string gather; pure radix kernel timing) ---
+    rng = np.random.default_rng(SEED + 1)
+    num = pd.DataFrame(
+        {
+            "key_int": rng.integers(0, 1000, n_rows).astype("int64"),
+            "num_a": rng.standard_normal(n_rows),
+            "num_b": rng.standard_normal(n_rows),
+        }
+    )
+    num_pl = pl.from_pandas(num)
+    add(
+        "sort(num_a) [numeric-only]",
+        lambda: num.select().sort("num_a").collect(use_physical_planner=True),
+        lambda: num_pl.lazy().sort("num_a").collect(),
+    )
+    add(
+        "sort(key_int, num_a) [numeric-only]",
+        lambda: (
+            num.select().sort("key_int", "num_a").collect(use_physical_planner=True)
+        ),
+        lambda: num_pl.lazy().sort("key_int", "num_a").collect(),
     )
 
     return results
