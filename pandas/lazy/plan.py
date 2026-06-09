@@ -239,17 +239,89 @@ class ParquetSource(LogicalPlan):
             pf = pq.ParquetFile(path)
             row_count = pf.metadata.num_rows
 
-            # Apply predicate-aware selectivity to the pushed-down filter
-            # (System R constant model; see optimize/cardinality.py).
+            # Apply predicate-aware selectivity to the pushed-down filter,
+            # refined by row-group statistics where available (min/max for
+            # ranges, null fraction for is_null); see optimize/cardinality.py.
             if self.predicate is not None:
                 from pandas.lazy.optimize.cardinality import estimate_selectivity
 
-                sel = estimate_selectivity(self.predicate._ir)
+                sel = estimate_selectivity(self.predicate._ir, self.column_statistics)
                 row_count = max(1, int(row_count * sel))
 
             return row_count
         except Exception:
             return None
+
+    def column_statistics(self, name: str):
+        """`ColumnStats` from Parquet row-group metadata, or None.
+
+        Min/max and null counts are aggregated across all row groups (and
+        files for a glob) straight from the footer — no data is read. Parquet
+        does not carry a reliable cross-group distinct count, so ``ndv`` stays
+        None and equality predicates fall back to the constant model.
+        """
+        cache = getattr(self, "_col_stats_cache", None)
+        if cache is None:
+            cache = self._read_column_statistics()
+            object.__setattr__(self, "_col_stats_cache", cache)
+        return cache.get(name)
+
+    def _read_column_statistics(self) -> dict:
+        import pyarrow.parquet as pq
+
+        from pandas.lazy.optimize.cardinality import ColumnStats
+
+        path = self.path
+        if "*" in path:
+            import glob
+
+            files = glob.glob(path)
+        else:
+            files = [path]
+        if not files:
+            return {}
+
+        # Per column: running min/max (numeric only), summed null_count, and
+        # flags for whether every chunk supplied each statistic.
+        acc: dict[str, dict] = {}
+        total_rows = 0
+        try:
+            for fp in files:
+                md = pq.ParquetFile(fp).metadata
+                total_rows += md.num_rows
+                for rg_i in range(md.num_row_groups):
+                    rg = md.row_group(rg_i)
+                    for j in range(md.num_columns):
+                        cc = rg.column(j)
+                        st = cc.statistics
+                        a = acc.setdefault(
+                            cc.path_in_schema,
+                            {"min": None, "max": None, "nulls": 0, "has_nulls": True},
+                        )
+                        if st is not None and st.has_min_max:
+                            lo, hi = st.min, st.max
+                            if isinstance(lo, (int, float)) and not isinstance(
+                                lo, bool
+                            ):
+                                a["min"] = lo if a["min"] is None else min(a["min"], lo)
+                                a["max"] = hi if a["max"] is None else max(a["max"], hi)
+                        if st is not None and st.has_null_count:
+                            a["nulls"] += st.null_count
+                        else:
+                            a["has_nulls"] = False
+        except Exception:
+            return {}
+
+        result: dict[str, ColumnStats] = {}
+        for nm, a in acc.items():
+            result[nm] = ColumnStats(
+                row_count=total_rows,
+                min_val=(float(a["min"]) if a["min"] is not None else None),
+                max_val=(float(a["max"]) if a["max"] is not None else None),
+                null_count=(a["nulls"] if a["has_nulls"] else None),
+                approximate=False,
+            )
+        return result
 
     def __repr__(self) -> str:
         parts = [f"path={self.path!r}"]

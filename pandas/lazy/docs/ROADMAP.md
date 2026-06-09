@@ -40,13 +40,14 @@ The forward list — open items only. Landed work is recorded further down.
    67 ms/10M vs Polars' 18; the dictionary cache solves repeated queries
    but first-query and one-shot workloads still pay. Upstream Arrow work or
    a pre-hashing trick are the options.
-2. **Cardinality — Parquet statistics & histograms.** In-memory column
-   statistics are landed (sampled NDV + exact min/max; equality `1/NDV`,
-   range min/max interpolation, group-count from the key's NDV). Remaining:
-   read Parquet row-group statistics (min/max/null/distinct — free in the
-   file metadata) so scans get the same refinement without sampling, and a
-   per-column histogram for skewed distributions (uniform interpolation
-   over-/under-estimates on skew).
+2. **Cardinality — histograms for skew.** In-memory column statistics
+   (sampled NDV + exact min/max) and Parquet row-group statistics (min/max +
+   null count from the footer, free) are both landed. Remaining: a per-column
+   equi-depth histogram so range selectivity tracks skewed distributions —
+   the current uniform min/max interpolation over-/under-estimates when data
+   clusters. (Parquet carries no cross-group distinct count, so equality on
+   scans still uses the constant; a sampled NDV during the first scan batch
+   could close that.)
 3. **Planning-overhead fast paths.** Single-op queries pay 60–80% of lazy
    overhead in the optimizer (`bench_planning_phases.py`); skip passes by
    plan shape. The ~300 µs limit floor is this item. (Low leverage:
@@ -136,6 +137,8 @@ Newest first. Detail in the git log and the docs above.
   Equality sizes by `1/NDV`, ranges by min/max interpolation, grouped-agg
   row count by the key's NDV (was a sqrt heuristic). Costs nothing for
   join-free queries (only computed when a join/agg estimate is requested).
+  `ParquetSource` gets the same from row-group footer metadata (min/max +
+  null count) with zero data read — range and is_null selectivity for scans.
 - **String-key multi-column sort** — a string sort key is factorized
   (`sort=True`) into order-preserving float codes (nulls as NaN), so the
   radix lexsort handles it with per-key descending and nulls-last for free;

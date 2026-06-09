@@ -329,3 +329,32 @@ class TestCardinalityEstimation:
         )
         # One row per distinct group: ~80, not the sqrt heuristic (~7000).
         assert 70 <= est <= 90
+
+    def test_parquet_statistics_refine_range_and_null(self, tmp_path):
+        import numpy as np
+
+        from pandas.lazy import scan
+
+        n = 500_000
+        path = str(tmp_path / "stats.parquet")
+        pd.DataFrame(
+            {
+                "r": np.arange(n, dtype="float64"),  # range [0, n)
+                "f": np.where(np.arange(n) % 5 == 0, np.nan, 1.0),  # 20% null
+            }
+        ).to_parquet(path)
+        lf = scan(path)
+
+        # Range sized from the metadata min/max (no data read).
+        rng = lf.filter(col("r") < n * 0.25)._plan.estimate_row_count()
+        assert 0.2 * n <= rng <= 0.3 * n
+        # is_null sized from the metadata null count.
+        nulls = lf.filter(col("f").is_null())._plan.estimate_row_count()
+        assert 0.15 * n <= nulls <= 0.25 * n
+
+        # Stats carry min/max and null_count but no NDV (Parquet has none).
+        from pandas.lazy.plan import ParquetSource
+
+        st = ParquetSource(path).column_statistics("r")
+        assert st.min_val == 0.0 and st.max_val == float(n - 1)
+        assert st.ndv is None
