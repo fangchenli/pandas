@@ -447,3 +447,81 @@ class TestAggregatePlanNode:
         source = DataFrameSource(df)
         agg = Aggregate(source, (), (col("a").sum().alias("s"),))
         assert agg.children() == [source]
+
+
+class TestPostAggregationProjection:
+    """Aggregation expressions that wrap arithmetic over aggregates.
+
+    These decompose into pre-project (computed aggregate inputs) -> aggregate
+    -> post-project, reusing existing nodes. Validated against eager pandas.
+    """
+
+    def _c(self, ldf):
+        return ldf.collect(use_physical_planner=True, order="relaxed")
+
+    def test_agg_arithmetic_over_aggregates(self):
+        df = pd.DataFrame(
+            {"g": [1, 1, 2, 2, 3], "v1": [5, 3, 8, 1, 9], "v2": [2, 7, 4, 6, 1]}
+        )
+        out = (
+            self._c(
+                df.select()
+                .group_by("g")
+                .agg((col("v1").max() - col("v2").min()).alias("rng"))
+            )
+            .sort_values("g")
+            .reset_index(drop=True)
+        )
+        expected = (
+            df.groupby("g")
+            .apply(lambda x: x["v1"].max() - x["v2"].min(), include_groups=False)
+            .reset_index(name="rng")
+        )
+        tm.assert_numpy_array_equal(out["rng"].to_numpy(), expected["rng"].to_numpy())
+
+    def test_mixed_simple_and_compound_agg(self):
+        df = pd.DataFrame({"g": [1, 1, 2], "v1": [4, 6, 8], "v2": [1, 2, 3]})
+        out = self._c(
+            df.select()
+            .group_by("g")
+            .agg(
+                col("v1").sum().alias("s"),
+                (col("v1").max() - col("v2").min()).alias("rng"),
+            )
+        )
+        assert set(out.columns) == {"g", "s", "rng"}
+        assert "__agg_0__" not in out.columns  # temp columns dropped
+
+    def test_aggregate_of_computed_expression(self):
+        # sum(v1 * v2) per group - aggregate over a computed input
+        df = pd.DataFrame({"g": [1, 1, 2], "v1": [2, 3, 4], "v2": [5, 6, 7]})
+        out = (
+            self._c(
+                df.select().group_by("g").agg((col("v1") * col("v2")).sum().alias("p"))
+            )
+            .sort_values("g")
+            .reset_index(drop=True)
+        )
+        expected = (df["v1"] * df["v2"]).groupby(df["g"]).sum().reset_index(name="p")
+        tm.assert_numpy_array_equal(out["p"].to_numpy(), expected["p"].to_numpy())
+
+    def test_grouped_corr_matches_eager(self):
+        rng = np.random.default_rng(0)
+        df = pd.DataFrame(
+            {
+                "g": rng.integers(0, 5, 500),
+                "x": rng.normal(0, 1, 500),
+                "y": rng.normal(0, 1, 500),
+            }
+        )
+        out = (
+            self._c(df.select().group_by("g").agg(col("x").corr(col("y")).alias("r")))
+            .sort_values("g")
+            .reset_index(drop=True)
+        )
+        expected = (
+            df.groupby("g")
+            .apply(lambda d: d["x"].corr(d["y"]), include_groups=False)
+            .reset_index(name="r")
+        )
+        assert np.allclose(out["r"].to_numpy(), expected["r"].to_numpy(), atol=1e-9)

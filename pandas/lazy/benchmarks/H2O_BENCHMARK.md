@@ -31,19 +31,29 @@ Faithful port of the [DuckDB Labs db-benchmark](https://github.com/duckdblabs/db
 | q3: sum(v1),mean(v3) by id3 (str, 100k grp) | 576 | 111 | 233 | **2.10** |
 | q4: mean(v1,v2,v3) by id4 (int, 100 grp) | 22 | 20 | 13 | 0.65 |
 | q5: sum(v1,v2,v3) by id6 (int, 100k grp) | 159 | 124 | 145 | **1.18** |
-| q6: median(v3),std(v3) by id4,id5 | — | unsupported | 167 | — |
-| q7: max(v1)-min(v2) by id3 | — | unsupported | 213 | — |
-| q8: top2 v3 by id6 | — | unsupported | 208 | — |
-| q9: corr(v1,v2)^2 by id2,id4 | — | unsupported | 271 | — |
+| q6: median(v3),std(v3) by id4,id5 | — | unsupported | 184 | — |
+| q7: max(v1)-min(v2) by id3 | 146 | 104 | 218 | **2.11** |
+| q8: top2 v3 by id6 | — | unsupported | 213 | — |
+| q9: corr(v1,v2)^2 by id2,id4 | 107 | 91 | 251 | **2.76** |
 | q10: sum(v3),count by id1..id6 (10M grp) | 1732 | 1913 | 1001 | 0.52 |
 
-**Group-by: lazy pandas wins or ties 4 of the 6 supported queries.** String
-keys (q1/q2/q3) are arrow-backed (`str` dtype in pandas 3.0) and route to
-acero — they beat Polars at steady state (q2 by 6.6x). q4/q5 (numeric) hit the
-acero path after the routing fix. The one genuine loss is **q10** (group by all
-six columns → ~10M near-unique groups, 0.52x). Note the `cold` column: the
-first Arrow-routed query pays a real one-time cost (q3 cold 576 ms vs hot
-111 ms) for acero init + building the key dictionary cache.
+**Group-by: lazy pandas wins 6 of the 8 supported queries.** String keys
+(q1/q2/q3) are arrow-backed (`str` dtype in pandas 3.0) and route to acero —
+they beat Polars at steady state (q2 by 6.6x). q4/q5 (numeric) hit the acero
+path after the routing fix. q7/q9 are now supported via post-aggregation
+projection (below) and also beat Polars. The one genuine loss is **q10**
+(group by all six columns → ~10M near-unique groups, 0.52x). Note the `cold`
+column: the first Arrow-routed query pays a real one-time cost (q3 cold 576 ms
+vs hot 111 ms) for acero init + building the key dictionary cache.
+
+> **Update (post-aggregation projection).** q7 (`max(v1)-min(v2)`) and q9
+> (`corr(v1,v2)²`) were unsupported. One capability closes both:
+> `group_by().agg()` decomposes an expression wrapping arithmetic over
+> aggregates (or aggregating a computed input like `sum(x*y)`) into
+> pre-project → aggregate → post-project; `corr` is composed from six sums.
+> Exact (validated vs eager/Polars) and **ahead of Polars** (q7 2.11x,
+> q9 2.76x). Remaining unsupported: q6 (exact grouped median) and q8
+> (grouped top-k + explode).
 
 ## Join (10M rows)
 
@@ -80,8 +90,9 @@ is exceptionally fast at ~60 ms).** Both survive warm-up, so they are genuine.
    q2 now wins, q5 near-parity. Remaining: string-key join (q4 0.25x) and
    left join (q3 0.34x).
 4. **q10** (group by 6 cols, ~10M groups) is the one slow group-by (0.52x).
-5. **Four queries unsupported** — grouped `median` (q6), aggregation
-   arithmetic (q7), grouped top-k + `explode` (q8), `corr` (q9).
+5. **q7 (agg arithmetic) and q9 (corr) — landed** via post-aggregation
+   projection; both beat Polars. Two queries remain unsupported: grouped
+   exact `median` (q6) and grouped top-k + `explode` (q8).
 
 ### Priority order for closing the gap
 
@@ -89,5 +100,7 @@ is exceptionally fast at ~60 ms).** Both survive warm-up, so they are genuine.
 2. ~~String-key group-by~~ — **already faster** (benchmark artifact corrected).
 3. ~~Joins~~ — **pd.merge path landed** (q2 →1.40x, q5 →0.88x). Remaining
    sub-targets: string-key join q4 (0.25x), left join q3 (0.34x).
-4. High-cardinality group-by q10 (~10M groups, 0.52x).
-5. Grouped `median` + aggregation arithmetic (q6, q7) — unlocks 2 queries.
+4. ~~Agg arithmetic (q7) + corr (q9)~~ — **done** (post-agg projection; both
+   beat Polars). Closed via one capability.
+5. High-cardinality group-by q10 (~10M groups, 0.52x) — hash pre-partition.
+6. Grouped exact `median` (q6, pandas fallback) and top-k+`explode` (q8).

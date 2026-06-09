@@ -30,6 +30,7 @@ from pandas.lazy.expr import (
 from pandas.lazy.ir import (
     Alias,
     Call,
+    Cast,
     FieldRef,
 )
 from pandas.lazy.plan import (
@@ -1744,6 +1745,67 @@ def _get_parquet_row_group_stats(path: str) -> DataFrame:
     return PdDataFrame(records)
 
 
+def _is_trivial_agg(ir) -> bool:
+    """True if ``ir`` is an aggregate over bare column refs (optionally aliased).
+
+    These need no rewrite - the Aggregate node handles them directly. Anything
+    else (arithmetic over aggregates, or an aggregate of a computed expression
+    such as ``sum(x * y)``) is decomposed into pre-projection / aggregate /
+    post-projection.
+    """
+    base = ir.arg if isinstance(ir, Alias) else ir
+    return (
+        isinstance(base, Call)
+        and base.is_aggregate
+        and all(isinstance(a, FieldRef) for a in base.args)
+    )
+
+
+def _expr_contains_aggregate(ir) -> bool:
+    """True if any aggregate call appears anywhere in the expression tree."""
+    if isinstance(ir, Call):
+        if ir.is_aggregate:
+            return True
+        return any(_expr_contains_aggregate(a) for a in ir.args)
+    if isinstance(ir, (Alias, Cast)):
+        return _expr_contains_aggregate(ir.arg)
+    return False
+
+
+def _extract_agg_leaves(ir, counter, leaves, pre):
+    """Replace each aggregate-call subtree with a FieldRef to a temp column.
+
+    Returns the rewritten (aggregate-free) expression. ``leaves`` collects
+    ``(temp_name, aggregate_call)`` pairs to compute in the inner Aggregate;
+    ``pre`` collects ``temp_name -> Expr`` for any aggregate whose argument is
+    a computed expression (e.g. ``sum(x * y)``), which must be materialized as
+    a column *before* aggregation.
+    """
+    if isinstance(ir, Call):
+        if ir.is_aggregate:
+            if ir.args and not isinstance(ir.args[0], FieldRef):
+                pre_name = f"__pre_{next(counter)}__"
+                pre[pre_name] = Expr(ir.args[0])
+                agg_call = Call(
+                    ir.function,
+                    (FieldRef(pre_name), *ir.args[1:]),
+                    ir.kwargs,
+                    True,
+                )
+            else:
+                agg_call = ir
+            out_name = f"__agg_{next(counter)}__"
+            leaves.append((out_name, agg_call))
+            return FieldRef(out_name)
+        new_args = tuple(_extract_agg_leaves(a, counter, leaves, pre) for a in ir.args)
+        return Call(ir.function, new_args, ir.kwargs, ir.is_aggregate)
+    if isinstance(ir, Cast):
+        return Cast(_extract_agg_leaves(ir.arg, counter, leaves, pre), ir.target_dtype)
+    if isinstance(ir, Alias):
+        return Alias(_extract_agg_leaves(ir.arg, counter, leaves, pre), ir.name)
+    return ir
+
+
 class LazyGroupBy:
     """
     Grouped LazyDataFrame for aggregation operations.
@@ -1804,7 +1866,47 @@ class LazyGroupBy:
                     f"Use col('name').sum().alias('result_name')."
                 )
 
-        new_plan = Aggregate(self._plan, self._group_by, exprs)
+        # Fast path: every expression is an aggregate over bare columns - the
+        # Aggregate node handles it directly.
+        if all(_is_trivial_agg(e._ir) for e in exprs):
+            new_plan = Aggregate(self._plan, self._group_by, exprs)
+            return LazyDataFrame(new_plan, new_plan.resolve_schema())
+
+        # Otherwise some expression applies arithmetic *over* aggregates
+        # (e.g. max(v1) - min(v2), or a composed correlation), or aggregates a
+        # computed expression (sum(x * y)). Decompose into the standard
+        # pre-project -> aggregate -> post-project pipeline, reusing existing
+        # nodes: materialize computed aggregate inputs, aggregate the leaves,
+        # then evaluate the surrounding expression on the grouped result.
+        from itertools import count
+
+        counter = count()
+        pre: dict[str, Expr] = {}
+        leaf_exprs: list[Expr] = []
+        post_exprs: list[Expr] = []
+        for e in exprs:
+            name = extract_output_name(e)
+            base = e._ir.arg if isinstance(e._ir, Alias) else e._ir
+            if not _expr_contains_aggregate(base):
+                raise ValueError(f"agg() expression {name!r} contains no aggregation")
+            leaves: list[tuple[str, Call]] = []
+            rewritten = _extract_agg_leaves(base, counter, leaves, pre)
+            for leaf_name, leaf_call in leaves:
+                leaf_exprs.append(Expr(Alias(leaf_call, leaf_name)))
+            post_exprs.append(Expr(Alias(rewritten, name)))
+
+        source = self._plan
+        if pre:
+            # Pass through every input column (group keys + aggregate inputs)
+            # and add the computed columns the leaf aggregates consume.
+            pre_exprs = tuple(col(c) for c in self._schema.names) + tuple(
+                Expr(Alias(expr._ir, pre_name)) for pre_name, expr in pre.items()
+            )
+            source = Project(self._plan, pre_exprs)
+
+        agg_node = Aggregate(source, self._group_by, tuple(leaf_exprs))
+        group_cols = tuple(col(extract_output_name(g)) for g in self._group_by)
+        new_plan = Project(agg_node, group_cols + tuple(post_exprs))
         return LazyDataFrame(new_plan, new_plan.resolve_schema())
 
     def __repr__(self) -> str:

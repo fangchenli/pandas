@@ -468,6 +468,27 @@ class Expr:
         """
         return Expr(Call("var", (self._node,), {"ddof": ddof}, is_aggregate=True))
 
+    def corr(self, other: Expr) -> Expr:
+        """
+        Pearson correlation coefficient between this expression and ``other``.
+
+        Composed from sums so it works inside ``group_by().agg(...)`` (and as
+        a global aggregate) without a dedicated kernel: the engine computes the
+        six leaf sums - n, Sx, Sy, Sxx, Syy, Sxy - and evaluates the closed
+        form ``(n*Sxy - Sx*Sy) / sqrt((n*Sxx - Sx^2)(n*Syy - Sy^2))`` as a
+        post-aggregation projection.
+
+        Examples
+        --------
+        >>> ldf.group_by("g").agg(col("x").corr(col("y")).alias("r"))
+        """
+        n = self.count()
+        sx, sy = self.sum(), other.sum()
+        sxx, syy, sxy = (self * self).sum(), (other * other).sum(), (self * other).sum()
+        numerator = n * sxy - sx * sy
+        denominator = ((n * sxx - sx * sx) * (n * syy - sy * sy)) ** 0.5
+        return numerator / denominator
+
     def first(self) -> Expr:
         """
         Get the first value.
