@@ -722,6 +722,13 @@ def radix_lexsort(keys: list[np.ndarray], descending: tuple[bool, ...]) -> np.nd
     rows / 2 numeric keys this is ~6x faster than Arrow's table
     ``sort_indices`` (382 ms vs 2200 ms) and beats NumPy's ``lexsort`` by
     ~26x. Caller guarantees every key is a numeric NumPy array.
+
+    The least-significant-key-first stable composition is the textbook
+    radix approach to multi-field keys (Knuth, TAOCP Vol. 3, §5.2.5) and is
+    exactly the contract of ``numpy.lexsort`` (last key primary, stable) —
+    https://numpy.org/doc/stable/reference/generated/numpy.lexsort.html —
+    which this matches while sourcing each per-key sort from the parallel
+    radix kernel instead of NumPy's timsort.
     """
     perm: np.ndarray | None = None
     for i in range(len(keys) - 1, -1, -1):

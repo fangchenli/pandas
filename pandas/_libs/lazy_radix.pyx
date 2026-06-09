@@ -12,6 +12,26 @@ cache-killer that makes a naive radix *arg*sort slower than a comparison sort;
 moving the keys is what makes radix win here. 16-bit digits (4 passes) over
 moved key/index pairs measured ~215 ms at 10M float64 vs the NumPy k-way
 merge's ~320-410 ms, matching Polars' arg_sort (~205 ms).
+
+These are classic algorithms, not novel work; the engineering here is the
+choice of variants and the adaptation to pandas' constraints (no OpenMP, the
+GIL, the exact ``np.argsort(kind="stable")`` contract). References:
+
+- LSD radix sort and least-significant-digit-first multi-key sorting:
+  Knuth, *The Art of Computer Programming*, Vol. 3, §5.2.5 (Sorting by
+  Distribution); Cormen, Leiserson, Rivest & Stein, *Introduction to
+  Algorithms*, §8.3 (Radix Sort).
+- Order-preserving ``uint64`` key transform for signed ints and IEEE-754
+  floats (always flip the sign bit; if it was set, flip all bits):
+  Michael Herf, "Radix Tricks" (2001), https://stereopsis.com/radix.html.
+- Out-of-place parallel radix via per-chunk histograms, a global
+  prefix-sum combine, and a partitioned scatter (the parallel structure
+  ``_radix_sort_parallel`` drives over these kernels): Satish, Harris &
+  Garland, "Designing Efficient Sorting Algorithms for Manycore GPUs",
+  IPDPS 2009, https://mgarland.org/files/papers/gpusort-ipdps09.pdf. The
+  in-place speculative-permutation variant (PARADIS, Cho et al., VLDB
+  2015, http://www.vldb.org/pvldb/vol8/p1518-cho.pdf) is *not* used here —
+  this kernel is out-of-place, which suits the argsort buffers.
 """
 
 cimport cython
