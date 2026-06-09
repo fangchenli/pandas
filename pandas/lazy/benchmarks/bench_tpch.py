@@ -819,6 +819,224 @@ def pl_q19(t):
     )
 
 
+# --- Q7: Volume Shipping (two nation joins + year + nation-pair OR) ---------
+def lp_q7(t):
+    lo, hi = pd.Timestamp("1995-01-01"), pd.Timestamp("1996-12-31")
+    n1 = _lp(t["nation"]).select(
+        col("n_nationkey").alias("supp_nk"), col("n_name").alias("supp_nation")
+    )
+    n2 = _lp(t["nation"]).select(
+        col("n_nationkey").alias("cust_nk"), col("n_name").alias("cust_nation")
+    )
+    li = _lp(t["lineitem"]).filter(
+        (col("l_shipdate") >= lo) & (col("l_shipdate") <= hi)
+    )
+    return (
+        _lp(t["supplier"])
+        .join(li, left_on="s_suppkey", right_on="l_suppkey")
+        .join(_lp(t["orders"]), left_on="l_orderkey", right_on="o_orderkey")
+        .join(_lp(t["customer"]), left_on="o_custkey", right_on="c_custkey")
+        .join(n1, left_on="s_nationkey", right_on="supp_nk")
+        .join(n2, left_on="c_nationkey", right_on="cust_nk")
+        .filter(
+            ((col("supp_nation") == "FRANCE") & (col("cust_nation") == "GERMANY"))
+            | ((col("supp_nation") == "GERMANY") & (col("cust_nation") == "FRANCE"))
+        )
+        .with_columns(
+            col("l_shipdate").dt.year.alias("l_year"),
+            (col("l_extendedprice") * (1 - col("l_discount"))).alias("volume"),
+        )
+        .group_by("supp_nation", "cust_nation", "l_year")
+        .agg(col("volume").sum().alias("revenue"))
+        .sort("supp_nation", "cust_nation", "l_year")
+    )
+
+
+def pl_q7(t):
+    lo, hi = pd.Timestamp("1995-01-01"), pd.Timestamp("1996-12-31")
+    n1 = (
+        t["nation"]
+        .lazy()
+        .select(
+            pl.col("n_nationkey").alias("supp_nk"),
+            pl.col("n_name").alias("supp_nation"),
+        )
+    )
+    n2 = (
+        t["nation"]
+        .lazy()
+        .select(
+            pl.col("n_nationkey").alias("cust_nk"),
+            pl.col("n_name").alias("cust_nation"),
+        )
+    )
+    li = (
+        t["lineitem"]
+        .lazy()
+        .filter((pl.col("l_shipdate") >= lo) & (pl.col("l_shipdate") <= hi))
+    )
+    return (
+        t["supplier"]
+        .lazy()
+        .join(li, left_on="s_suppkey", right_on="l_suppkey")
+        .join(t["orders"].lazy(), left_on="l_orderkey", right_on="o_orderkey")
+        .join(t["customer"].lazy(), left_on="o_custkey", right_on="c_custkey")
+        .join(n1, left_on="s_nationkey", right_on="supp_nk")
+        .join(n2, left_on="c_nationkey", right_on="cust_nk")
+        .filter(
+            ((pl.col("supp_nation") == "FRANCE") & (pl.col("cust_nation") == "GERMANY"))
+            | (
+                (pl.col("supp_nation") == "GERMANY")
+                & (pl.col("cust_nation") == "FRANCE")
+            )
+        )
+        .with_columns(
+            pl.col("l_shipdate").dt.year().alias("l_year"),
+            (pl.col("l_extendedprice") * (1 - pl.col("l_discount"))).alias("volume"),
+        )
+        .group_by("supp_nation", "cust_nation", "l_year")
+        .agg(pl.col("volume").sum().alias("revenue"))
+        .sort("supp_nation", "cust_nation", "l_year")
+        .collect()
+    )
+
+
+# --- Q8: National Market Share (8-table join + year + case-when ratio) ------
+def lp_q8(t):
+    lo, hi = pd.Timestamp("1995-01-01"), pd.Timestamp("1996-12-31")
+    region = _lp(t["region"]).filter(col("r_name") == "AMERICA")
+    n1 = _lp(t["nation"]).select(
+        col("n_nationkey").alias("n1_nk"), col("n_regionkey").alias("n1_rk")
+    )
+    n2 = _lp(t["nation"]).select(
+        col("n_nationkey").alias("n2_nk"), col("n_name").alias("s_nation")
+    )
+    p = _lp(t["part"]).filter(col("p_type") == "ECONOMY ANODIZED STEEL")
+    o = _lp(t["orders"]).filter((col("o_orderdate") >= lo) & (col("o_orderdate") <= hi))
+    vol = col("l_extendedprice") * (1 - col("l_discount"))
+    return (
+        _lp(t["lineitem"])
+        .join(p, left_on="l_partkey", right_on="p_partkey")
+        .join(_lp(t["supplier"]), left_on="l_suppkey", right_on="s_suppkey")
+        .join(o, left_on="l_orderkey", right_on="o_orderkey")
+        .join(_lp(t["customer"]), left_on="o_custkey", right_on="c_custkey")
+        .join(n1, left_on="c_nationkey", right_on="n1_nk")
+        .join(region, left_on="n1_rk", right_on="r_regionkey")
+        .join(n2, left_on="s_nationkey", right_on="n2_nk")
+        .with_columns(col("o_orderdate").dt.year.alias("o_year"))
+        .group_by("o_year")
+        .agg(
+            (
+                when(col("s_nation") == "BRAZIL").then(vol).otherwise(0.0).sum()
+                / vol.sum()
+            ).alias("mkt_share")
+        )
+        .sort("o_year")
+    )
+
+
+def pl_q8(t):
+    lo, hi = pd.Timestamp("1995-01-01"), pd.Timestamp("1996-12-31")
+    region = t["region"].lazy().filter(pl.col("r_name") == "AMERICA")
+    n1 = (
+        t["nation"]
+        .lazy()
+        .select(
+            pl.col("n_nationkey").alias("n1_nk"), pl.col("n_regionkey").alias("n1_rk")
+        )
+    )
+    n2 = (
+        t["nation"]
+        .lazy()
+        .select(
+            pl.col("n_nationkey").alias("n2_nk"), pl.col("n_name").alias("s_nation")
+        )
+    )
+    p = t["part"].lazy().filter(pl.col("p_type") == "ECONOMY ANODIZED STEEL")
+    o = (
+        t["orders"]
+        .lazy()
+        .filter((pl.col("o_orderdate") >= lo) & (pl.col("o_orderdate") <= hi))
+    )
+    vol = pl.col("l_extendedprice") * (1 - pl.col("l_discount"))
+    return (
+        t["lineitem"]
+        .lazy()
+        .join(p, left_on="l_partkey", right_on="p_partkey")
+        .join(t["supplier"].lazy(), left_on="l_suppkey", right_on="s_suppkey")
+        .join(o, left_on="l_orderkey", right_on="o_orderkey")
+        .join(t["customer"].lazy(), left_on="o_custkey", right_on="c_custkey")
+        .join(n1, left_on="c_nationkey", right_on="n1_nk")
+        .join(region, left_on="n1_rk", right_on="r_regionkey")
+        .join(n2, left_on="s_nationkey", right_on="n2_nk")
+        .with_columns(pl.col("o_orderdate").dt.year().alias("o_year"))
+        .group_by("o_year")
+        .agg(
+            (
+                pl.when(pl.col("s_nation") == "BRAZIL").then(vol).otherwise(0.0).sum()
+                / vol.sum()
+            ).alias("mkt_share")
+        )
+        .sort("o_year")
+        .collect()
+    )
+
+
+# --- Q9: Product Type Profit (6-table join, composite key, year) -----------
+def lp_q9(t):
+    p = _lp(t["part"]).filter(col("p_name").str.contains("green"))
+    amount = col("l_extendedprice") * (1 - col("l_discount")) - col(
+        "ps_supplycost"
+    ) * col("l_quantity")
+    return (
+        _lp(t["lineitem"])
+        .join(p, left_on="l_partkey", right_on="p_partkey")
+        .join(_lp(t["supplier"]), left_on="l_suppkey", right_on="s_suppkey")
+        .join(
+            _lp(t["partsupp"]),
+            left_on=["l_suppkey", "l_partkey"],
+            right_on=["ps_suppkey", "ps_partkey"],
+        )
+        .join(_lp(t["orders"]), left_on="l_orderkey", right_on="o_orderkey")
+        .join(_lp(t["nation"]), left_on="s_nationkey", right_on="n_nationkey")
+        .with_columns(
+            col("o_orderdate").dt.year.alias("o_year"),
+            col("n_name").alias("nation"),
+        )
+        .group_by("nation", "o_year")
+        .agg(amount.sum().alias("sum_profit"))
+        .sort("nation", "o_year", descending=[False, True])
+    )
+
+
+def pl_q9(t):
+    p = t["part"].lazy().filter(pl.col("p_name").str.contains("green"))
+    amount = pl.col("l_extendedprice") * (1 - pl.col("l_discount")) - pl.col(
+        "ps_supplycost"
+    ) * pl.col("l_quantity")
+    return (
+        t["lineitem"]
+        .lazy()
+        .join(p, left_on="l_partkey", right_on="p_partkey")
+        .join(t["supplier"].lazy(), left_on="l_suppkey", right_on="s_suppkey")
+        .join(
+            t["partsupp"].lazy(),
+            left_on=["l_suppkey", "l_partkey"],
+            right_on=["ps_suppkey", "ps_partkey"],
+        )
+        .join(t["orders"].lazy(), left_on="l_orderkey", right_on="o_orderkey")
+        .join(t["nation"].lazy(), left_on="s_nationkey", right_on="n_nationkey")
+        .with_columns(
+            pl.col("o_orderdate").dt.year().alias("o_year"),
+            pl.col("n_name").alias("nation"),
+        )
+        .group_by("nation", "o_year")
+        .agg(amount.sum().alias("sum_profit"))
+        .sort(["nation", "o_year"], descending=[False, True])
+        .collect()
+    )
+
+
 QUERIES = {
     1: (lp_q1, pl_q1),
     2: (lp_q2, pl_q2),
@@ -826,6 +1044,9 @@ QUERIES = {
     4: (lp_q4, pl_q4),
     5: (lp_q5, pl_q5),
     6: (lp_q6, pl_q6),
+    7: (lp_q7, pl_q7),
+    8: (lp_q8, pl_q8),
+    9: (lp_q9, pl_q9),
     10: (lp_q10, pl_q10),
     12: (lp_q12, pl_q12),
     13: (lp_q13, pl_q13),
