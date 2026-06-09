@@ -36,11 +36,7 @@ semantics, not by missing optimizations — see "Blocked on upstream" below.
 
 The forward list — open items only. Landed work is recorded further down.
 
-1. **Acero raw-string hash gap.** acero groups raw `large_string` keys at
-   67 ms/10M vs Polars' 18; the dictionary cache solves repeated queries
-   but first-query and one-shot workloads still pay. Upstream Arrow work or
-   a pre-hashing trick are the options.
-2. **Cardinality — histograms for skew.** In-memory column statistics
+1. **Cardinality — histograms for skew.** In-memory column statistics
    (sampled NDV + exact min/max) and Parquet row-group statistics (min/max +
    null count from the footer, free) are both landed. Remaining: a per-column
    equi-depth histogram so range selectivity tracks skewed distributions —
@@ -48,17 +44,28 @@ The forward list — open items only. Landed work is recorded further down.
    clusters. (Parquet carries no cross-group distinct count, so equality on
    scans still uses the constant; a sampled NDV during the first scan batch
    could close that.)
-3. **Planning-overhead fast paths.** Single-op queries pay 60–80% of lazy
+2. **Planning-overhead fast paths.** Single-op queries pay 60–80% of lazy
    overhead in the optimizer (`bench_planning_phases.py`); skip passes by
    plan shape. The ~300 µs limit floor is this item. (Low leverage:
    sub-millisecond, invisible on real data.)
-4. **Free-threaded partition joins.** pandas' Cython hash join holds the GIL
+3. **Free-threaded partition joins.** pandas' Cython hash join holds the GIL
    (measured: threaded partition-pairs 461→535 ms at 2→8 threads vs 430
    serial). On free-threaded Python the M5-spec'd partitioned join becomes
    buildable; the engine architecture needs no changes to exploit it.
 
 ### Considered and set aside (with measurements)
 
+- **Acero raw-string hash gap** — *the gap does not exist* (re-measured June
+  2026). acero groups raw `large_string` keys at **80 ms/10M — faster than
+  Polars' 118 ms** on the same raw strings. The ROADMAP's "Polars 18 ms" was
+  Polars' *categorical* path (7.5 ms here), not raw-string. Pre-encoding the
+  key costs more than it saves (dictionary_encode alone is 160 ms). The
+  residual **categorical** groupby gap (0.45x, `engine_pipeline`) decomposes
+  as the acero kernel on dictionary keys (~11 ms — already at Polars' pace)
+  plus ~4.5 ms of pandas-NaN-semantics detection on the value column (a
+  `skipna` correctness requirement, near-irreducible — `mask_nan_to_null`
+  already short-circuits the masking pass when no NaN is present). No clean
+  in-process win.
 - **JAX/XLA kernel backend** — *declined June 2026 on measured grounds*, was
   the former "breakthrough candidate." Two findings sink it:
   1. **The CPU fusion lever is already pulled by NumExpr.** The engine
