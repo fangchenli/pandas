@@ -91,6 +91,23 @@ competitive-standing table.
      different execution model, not a kernel backend. Revisit only for a
      workload that is both compute-bound *and* chains many such ops.
 
+### API gaps vs Polars LazyFrame
+
+The basic manipulation verbs are landed (`rename`, `drop`, `drop_nulls`,
+`fill_null`, `cast`, `pipe`, frame aggregations, `unpivot`/`melt`). Remaining,
+roughly by value:
+
+- **Time-series** — `join_asof` (as-of/nearest join), `group_by_dynamic`,
+  `rolling` (time-windowed aggregation). The biggest area; a project on its
+  own.
+- **Row ops** — `top_k`/`bottom_k`, `reverse`, `slice`, `gather`,
+  `gather_every` (mostly sort/limit reuse).
+- **Reshape** — `pivot` (output schema is *data-dependent*, so it needs
+  materialization — awkward in a lazy plan), `explode`/`unnest` (nested
+  dtypes).
+- **Niche** — `sql`, `merge_sorted`, `interpolate`, `update`, `set_sorted`,
+  `map_batches`.
+
 ### Smaller items
 
 - **Nullable dtype preservation** — the output contract preserves genuine
@@ -145,6 +162,11 @@ competitive-standing table.
 
 Newest first. Detail in the git log and the docs above.
 
+- **Core frame verbs** — `rename`, `drop`, `drop_nulls`, `fill_null`, `cast`,
+  `pipe`, frame aggregations (`sum`/`mean`/`min`/`max`/`std`/`var`/`median`/
+  `count` → one-row frame), and `unpivot`/`melt`, closing the most visible
+  Polars LazyFrame API gaps. Also fixed a global-aggregation backend bug
+  (NumPy column routed to an Arrow kernel in a mixed frame).
 - **Cardinality column statistics** — sampled NDV (random sample, exact for
   low cardinality, extrapolated for high) + exact min/max, computed lazily
   and cached on `DataFrameSource`, propagated through pass-through ops.
