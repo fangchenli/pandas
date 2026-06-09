@@ -49,16 +49,24 @@ first Arrow-routed query pays a real one-time cost (q3 cold 576 ms vs hot
 
 | query | LP cold (ms) | LP hot (ms) | PL hot (ms) | hotx |
 |---|---|---|---|---|
-| q1: inner join small on id1 | 441 | 402 | 231 | 0.58 |
-| q2: inner join medium on id2 | 434 | 894 | 285 | 0.32 |
-| q3: left join medium on id2 | 916 | 394 | 84 | 0.21 |
-| q4: inner join medium on id5 (str key) | 543 | 873 | 134 | 0.15 |
-| q5: inner join big on id3 (10M×10M) | 7245 | 5236 | 1026 | 0.20 |
+| q1: inner join small on id1 | 312 | 153 | 86 | 0.56 |
+| q2: inner join medium on id2 | 192 | 175 | 244 | **1.40** |
+| q3: left join medium on id2 | 206 | 178 | 60 | 0.34 |
+| q4: inner join medium on id5 (str key) | 912 | 857 | 217 | 0.25 |
+| q5: inner join big on id3 (10M×10M) | 710 | 733 | 646 | 0.88 |
 
-**Joins are the real remaining gap (0.15–0.58x)** — and unlike the group-by
-"gap", these survive warm-up, so they are genuine. Worst on the string-key
-join (q4) and the 10M×10M build (q5), where string payload columns
-(id4/id5) ride the gather and hit the Arrow `large_string` `take` wall.
+> **Update (pd.merge join path).** Joins previously ran the custom indexer hash
+> join or, under `order="relaxed"`, Arrow/acero. Both were slower than just
+> calling `pd.merge` — which *is* the eager-pandas semantics the join already
+> promises to match (so it is row-order- and null-correct by construction) and
+> avoids acero's Arrow↔pandas round-trip on payload columns. Routing in-memory
+> equi-joins (index not observed) to `pd.merge` moved the category from
+> 0.15–0.58x to **0.25–1.40x**: q2 **894→175 ms (0.32→1.40x, now ahead of
+> Polars)**, q5 (10M×10M) **5236→733 ms (0.20→0.88x)**, q3 394→178 ms.
+
+**Remaining join gaps are string-key (q4 0.25x — `pd.merge` on string keys is
+slower than its numeric hash join) and left-join (q3 0.34x — Polars' left join
+is exceptionally fast at ~60 ms).** Both survive warm-up, so they are genuine.
 
 ## Findings
 
@@ -68,8 +76,9 @@ join (q4) and the 10M×10M build (q5), where string payload columns
    acero init. No engine change was needed here — only the benchmark's timing.
 2. **Numeric-key group-by routing — landed.** q4/q5 reach the acero path
    (`groupby_prefers_arrow`); q4 was 0.06x before that fix.
-3. **Joins are the genuine gap (0.15–0.58x).** Worst: string-key join (q4
-   0.15x) and 10M×10M inner (q5 0.20x). The next real target.
+3. **Joins — much improved via the pd.merge path** (0.15–0.58x → 0.25–1.40x);
+   q2 now wins, q5 near-parity. Remaining: string-key join (q4 0.25x) and
+   left join (q3 0.34x).
 4. **q10** (group by 6 cols, ~10M groups) is the one slow group-by (0.52x).
 5. **Four queries unsupported** — grouped `median` (q6), aggregation
    arithmetic (q7), grouped top-k + `explode` (q8), `corr` (q9).
@@ -78,6 +87,7 @@ join (q4) and the 10M×10M build (q5), where string payload columns
 
 1. ~~Numeric-key group-by~~ — **done** (q4 0.06x→0.65x, q5 →1.18x).
 2. ~~String-key group-by~~ — **already faster** (benchmark artifact corrected).
-3. **Joins** — string-key (q4 0.15x), large-build (q5 0.20x), left (q3 0.21x).
+3. ~~Joins~~ — **pd.merge path landed** (q2 →1.40x, q5 →0.88x). Remaining
+   sub-targets: string-key join q4 (0.25x), left join q3 (0.34x).
 4. High-cardinality group-by q10 (~10M groups, 0.52x).
 5. Grouped `median` + aggregation arithmetic (q6, q7) — unlocks 2 queries.

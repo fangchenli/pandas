@@ -172,8 +172,14 @@ Newest first. Detail in the git log and the docs above.
   convention) then showed the apparent string-key group-by gap was a pure
   measurement artifact — string keys are `str`-dtype/arrow-backed and already
   beat Polars at steady state (q1 1.2x, q2 6.6x, q3 2.1x). Group-by is now
-  competitive-to-winning across the board; **joins are the genuine remaining
-  gap** (0.15–0.58x), worst on string-key and 10M×10M builds.
+  competitive-to-winning across the board.
+- **pd.merge join path** — the H2O joins (0.15–0.58x) ran a custom indexer
+  hash join or Arrow/acero, both slower than just calling `pd.merge` — which
+  *is* the eager semantics the join promises to match (row-order- and
+  null-correct by construction) and avoids acero's Arrow↔pandas round-trip on
+  payload columns. Routing in-memory equi-joins to `pd.merge` moved joins to
+  **0.25–1.40x**: q2 0.32→1.40x (ahead of Polars), q5 10M×10M 0.20→0.88x
+  (5236→733 ms). Remaining join gaps: string-key (q4 0.25x) and left (q3).
 - **Core frame verbs** — `rename`, `drop`, `drop_nulls`, `fill_null`, `cast`,
   `pipe`, frame aggregations (`sum`/`mean`/`min`/`max`/`std`/`var`/`median`/
   `count` → one-row frame), and `unpivot`/`melt`, closing the most visible
