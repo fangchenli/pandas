@@ -31,7 +31,7 @@ Faithful port of the [DuckDB Labs db-benchmark](https://github.com/duckdblabs/db
 | q3: sum(v1),mean(v3) by id3 (str, 100k grp) | 576 | 111 | 233 | **2.10** |
 | q4: mean(v1,v2,v3) by id4 (int, 100 grp) | 22 | 20 | 13 | 0.65 |
 | q5: sum(v1,v2,v3) by id6 (int, 100k grp) | 159 | 124 | 145 | **1.18** |
-| q6: median(v3),std(v3) by id4,id5 | — | unsupported | 184 | — |
+| q6: median(v3),std(v3) by id4,id5 | 807 | 534 | 171 | 0.32 |
 | q7: max(v1)-min(v2) by id3 | 146 | 104 | 218 | **2.11** |
 | q8: top2 v3 by id6 | — | unsupported | 213 | — |
 | q9: corr(v1,v2)^2 by id2,id4 | 107 | 91 | 251 | **2.76** |
@@ -91,8 +91,12 @@ is exceptionally fast at ~60 ms).** Both survive warm-up, so they are genuine.
    left join (q3 0.34x).
 4. **q10** (group by 6 cols, ~10M groups) is the one slow group-by (0.52x).
 5. **q7 (agg arithmetic) and q9 (corr) — landed** via post-aggregation
-   projection; both beat Polars. Two queries remain unsupported: grouped
-   exact `median` (q6) and grouped top-k + `explode` (q8).
+   projection; both beat Polars.
+6. **q6 (grouped median) — now supported** (exact, NumPy `groupby_median`
+   kernel via pandas). It's a *correctness* win, not a perf one: 0.32x —
+   exact grouped median resists parallelism (Polars sorts within groups; our
+   pandas fallback is exact but slower). Only **q8** (grouped top-k +
+   `explode`) remains unsupported.
 
 ### Priority order for closing the gap
 
@@ -102,5 +106,12 @@ is exceptionally fast at ~60 ms).** Both survive warm-up, so they are genuine.
    sub-targets: string-key join q4 (0.25x), left join q3 (0.34x).
 4. ~~Agg arithmetic (q7) + corr (q9)~~ — **done** (post-agg projection; both
    beat Polars). Closed via one capability.
-5. High-cardinality group-by q10 (~10M groups, 0.52x) — hash pre-partition.
-6. Grouped exact `median` (q6, pandas fallback) and top-k+`explode` (q8).
+5. ~~Grouped exact `median` (q6)~~ — **done** (NumPy kernel; exact, 0.32x —
+   correctness win, not perf).
+6. ~~String-key join (q4)~~ — **investigated, not a quick win.** Factorize/
+   categorical-encode approaches measured *slower* than `pd.merge` (they
+   re-hash the strings); the real fix is Arrow string-view storage (large,
+   structural). Left at `pd.merge` (0.25x).
+7. High-cardinality group-by q10 (~10M groups, 0.52x) — hash pre-partition
+   (the remaining tractable perf gap).
+8. Grouped top-k + `explode` (q8) — sort + within-group head-k.

@@ -224,6 +224,15 @@ def _numpy_groupby_aggregate(
         sum_sq_devs = np.bincount(codes, weights=sq_devs, minlength=n_groups)
         result = sum_sq_devs / (counts - ddof)
 
+    elif agg_func == "median":
+        # Exact per-group median. Arrow has no exact hash_median kernel (only
+        # approximate t-digest), so this NumPy path computes it via pandas'
+        # Cython grouped median; empty/all-NaN groups yield NaN.
+        import pandas as pd
+
+        medians = pd.Series(values).groupby(codes, sort=True).median()
+        result = medians.reindex(np.arange(n_groups)).to_numpy()
+
     elif agg_func == "prod":
         result = np.ones(n_groups, dtype=values.dtype)
         np.multiply.at(result, codes, values)
@@ -394,6 +403,21 @@ def numpy_groupby_var(
         (unique_keys, var_values)
     """
     return _numpy_groupby_aggregate(keys, values, "var", ddof=ddof)
+
+
+@register_kernel("groupby_median", "numpy")
+def numpy_groupby_median(
+    keys: np.ndarray, values: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Exact median of values grouped by keys.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        (unique_keys, median_values)
+    """
+    return _numpy_groupby_aggregate(keys, values, "median")
 
 
 @register_kernel("groupby_prod", "numpy")

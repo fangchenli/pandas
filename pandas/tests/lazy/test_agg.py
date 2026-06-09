@@ -525,3 +525,47 @@ class TestPostAggregationProjection:
             .reset_index(name="r")
         )
         assert np.allclose(out["r"].to_numpy(), expected["r"].to_numpy(), atol=1e-9)
+
+
+class TestGroupedMedian:
+    """Exact grouped median (NumPy backend; no Arrow hash_median kernel)."""
+
+    def _c(self, ldf):
+        return ldf.collect(use_physical_planner=True, order="relaxed")
+
+    def test_single_key_median(self):
+        rng = np.random.default_rng(0)
+        df = pd.DataFrame(
+            {"g": rng.integers(0, 6, 2000), "v": rng.uniform(0, 100, 2000)}
+        )
+        out = (
+            self._c(df.select().group_by("g").agg(col("v").median().alias("m")))
+            .sort_values("g")
+            .reset_index(drop=True)
+        )
+        expected = df.groupby("g")["v"].median()
+        assert np.allclose(out["m"].to_numpy(), expected.to_numpy(), atol=1e-9)
+
+    def test_multi_key_median_and_std(self):
+        rng = np.random.default_rng(1)
+        df = pd.DataFrame(
+            {
+                "a": rng.integers(0, 5, 3000),
+                "b": rng.integers(0, 5, 3000),
+                "v": rng.uniform(0, 100, 3000),
+            }
+        )
+        out = (
+            self._c(
+                df.select()
+                .group_by("a", "b")
+                .agg(col("v").median().alias("m"), col("v").std().alias("s"))
+            )
+            .sort_values(["a", "b"])
+            .reset_index(drop=True)
+        )
+        expected = (
+            df.groupby(["a", "b"]).agg(m=("v", "median"), s=("v", "std")).reset_index()
+        )
+        assert np.allclose(out["m"].to_numpy(), expected["m"].to_numpy(), atol=1e-9)
+        assert np.allclose(out["s"].to_numpy(), expected["s"].to_numpy(), atol=1e-9)
