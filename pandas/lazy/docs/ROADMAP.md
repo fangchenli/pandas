@@ -48,12 +48,21 @@ The forward list — open items only. Landed work is recorded further down.
    overhead in the optimizer (`bench_planning_phases.py`); skip passes by
    plan shape. The ~300 µs limit floor is this item. (Low leverage:
    sub-millisecond, invisible on real data.)
-3. **Free-threaded partition joins.** pandas' Cython hash join holds the GIL
-   (measured: threaded partition-pairs 461→535 ms at 2→8 threads vs 430
-   serial). On free-threaded Python the M5-spec'd partitioned join becomes
-   buildable; the engine architecture needs no changes to exploit it.
-
 ### Considered and set aside (with measurements)
+
+- **Free-threaded partition joins** — *mechanism validated, niche too narrow*
+  (tested June 2026 on a CPython 3.14t build; `spike_freethreaded_join.py`).
+  The hypothesis holds: with the GIL off, the partitioned hash join scales
+  1→8 threads (1332→487 ms, **2.67x** over a single `pd.merge`), where on 3.11
+  the same approach was *slower* than serial. numpy 2.4, pyarrow 24, and our
+  pandas all keep the GIL disabled on import — the engine is free-threading
+  ready. But **acero's internally-parallel C++ join is still faster** (337 vs
+  487 ms at 8M), and acero needs no free-threaded interpreter. So the
+  partitioned join only earns its keep for joins acero *cannot* do — nullable
+  or float keys (acero uses SQL null semantics, not pandas NaN==NaN) and index
+  preservation — under relaxed output order. Deferred until that niche matters
+  or free-threading is the common deployment. (Most lazy kernels already
+  release the GIL via numpy/arrow/nogil Cython, so they need no change.)
 
 - **Acero raw-string hash gap** — *the gap does not exist* (re-measured June
   2026). acero groups raw `large_string` keys at **80 ms/10M — faster than
