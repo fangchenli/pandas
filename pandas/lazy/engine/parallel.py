@@ -24,11 +24,19 @@ Python exactly; the ceilings are memory bandwidth and core asymmetry.
 from __future__ import annotations
 
 import itertools
+import os
 import threading
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pyarrow as pa
 
+from pandas.lazy.backends.convert import ensure_backend
+from pandas.lazy.cost import get_morsel_size
+from pandas.lazy.ir import (
+    Alias,
+    Call,
+)
 from pandas.lazy.physical import (
     ExecutionContext,
     PhysicalConvert,
@@ -75,10 +83,6 @@ ORDER_SENSITIVE_FUNCTIONS = frozenset(
 
 def _expr_is_morsel_safe(ir) -> bool:
     """True if an expression IR is row-wise (safe to apply per morsel)."""
-    from pandas.lazy.ir import (
-        Alias,
-        Call,
-    )
 
     if isinstance(ir, Alias):
         return _expr_is_morsel_safe(ir.arg)
@@ -127,10 +131,6 @@ _COMPUTE_BOUND_PREFIXES = ("str_",)
 
 
 def _expr_has_compute_bound(ir) -> bool:
-    from pandas.lazy.ir import (
-        Alias,
-        Call,
-    )
 
     if isinstance(ir, Alias):
         return _expr_has_compute_bound(ir.arg)
@@ -203,7 +203,6 @@ def compile_chain(pipeline: Pipeline):
         elif isinstance(op, PhysicalConvert):
 
             def convert(arrays, ctx, _op=op):
-                from pandas.lazy.backends.convert import ensure_backend
 
                 return {
                     name: ensure_backend(arr, _op.target_backend)
@@ -227,7 +226,6 @@ def _concat_column(parts: list):
     thresholds may route a small tail morsel differently), so normalize:
     if any part is Arrow, all parts merge as Arrow chunks.
     """
-    import pyarrow as pa
 
     if any(isinstance(p, (pa.Array, pa.ChunkedArray)) for p in parts):
         chunks = []
@@ -267,7 +265,6 @@ def run_morsel_parallel(
     its morsel in a cloned context. Results land in a slot array and
     merge in sequence order.
     """
-    from pandas.lazy.cost import get_morsel_size
 
     morsel_size = get_morsel_size()
     n_morsels = (n_rows + morsel_size - 1) // morsel_size
@@ -296,8 +293,6 @@ def run_morsel_parallel(
             except BaseException as exc:  # propagate to caller
                 errors.append(exc)
                 return
-
-    import os
 
     n_workers = min(MAX_WORKERS, os.cpu_count() or 1, n_morsels)
     threads = [threading.Thread(target=worker) for _ in range(n_workers)]
