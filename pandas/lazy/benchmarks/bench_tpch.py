@@ -466,8 +466,138 @@ def pl_q14(t):
     )
 
 
+# --- Q17: Small-Quantity-Order Revenue (correlated avg subquery) ------------
+# Correlated subquery l_quantity < 0.2*avg(l_quantity per part) is decorrelated
+# into a per-part aggregate joined back to the filtered lineitems.
+def lp_q17(t):
+    thresh = (
+        _lp(t["lineitem"])
+        .group_by("l_partkey")
+        .agg((0.2 * col("l_quantity").mean()).alias("thresh"))
+    )
+    p = _lp(t["part"]).filter(
+        (col("p_brand") == "Brand#23") & (col("p_container") == "MED BOX")
+    )
+    return (
+        _lp(t["lineitem"])
+        .join(p, left_on="l_partkey", right_on="p_partkey")
+        .join(thresh, on="l_partkey")
+        .filter(col("l_quantity") < col("thresh"))
+        .with_columns(lit(1).alias("__g"))
+        .group_by("__g")
+        .agg((col("l_extendedprice").sum() / 7.0).alias("avg_yearly"))
+        .select(col("avg_yearly"))
+    )
+
+
+def pl_q17(t):
+    thresh = (
+        t["lineitem"]
+        .lazy()
+        .group_by("l_partkey")
+        .agg((0.2 * pl.col("l_quantity").mean()).alias("thresh"))
+    )
+    p = (
+        t["part"]
+        .lazy()
+        .filter(
+            (pl.col("p_brand") == "Brand#23") & (pl.col("p_container") == "MED BOX")
+        )
+    )
+    return (
+        t["lineitem"]
+        .lazy()
+        .join(p, left_on="l_partkey", right_on="p_partkey")
+        .join(thresh, on="l_partkey")
+        .filter(pl.col("l_quantity") < pl.col("thresh"))
+        .select((pl.col("l_extendedprice").sum() / 7.0).alias("avg_yearly"))
+        .collect()
+    )
+
+
+# --- Q2: Minimum Cost Supplier (correlated min subquery) -------------------
+def lp_q2(t):
+    region = _lp(t["region"]).filter(col("r_name") == "EUROPE")
+    base = (
+        _lp(t["partsupp"])
+        .join(_lp(t["supplier"]), left_on="ps_suppkey", right_on="s_suppkey")
+        .join(_lp(t["nation"]), left_on="s_nationkey", right_on="n_nationkey")
+        .join(region, left_on="n_regionkey", right_on="r_regionkey")
+    )
+    min_cost = base.group_by("ps_partkey").agg(
+        col("ps_supplycost").min().alias("min_cost")
+    )
+    parts = _lp(t["part"]).filter(
+        (col("p_size") == 15) & col("p_type").str.endswith("BRASS")
+    )
+    return (
+        parts.join(base, left_on="p_partkey", right_on="ps_partkey")
+        .join(min_cost, left_on="p_partkey", right_on="ps_partkey")
+        .filter(col("ps_supplycost") == col("min_cost"))
+        .select(
+            col("s_acctbal"),
+            col("s_name"),
+            col("n_name"),
+            col("p_partkey"),
+            col("p_mfgr"),
+            col("s_address"),
+            col("s_phone"),
+            col("s_comment"),
+        )
+        .sort(
+            "s_acctbal",
+            "n_name",
+            "s_name",
+            "p_partkey",
+            descending=[True, False, False, False],
+        )
+        .limit(100)
+    )
+
+
+def pl_q2(t):
+    region = t["region"].lazy().filter(pl.col("r_name") == "EUROPE")
+    base = (
+        t["partsupp"]
+        .lazy()
+        .join(t["supplier"].lazy(), left_on="ps_suppkey", right_on="s_suppkey")
+        .join(t["nation"].lazy(), left_on="s_nationkey", right_on="n_nationkey")
+        .join(region, left_on="n_regionkey", right_on="r_regionkey")
+    )
+    min_cost = base.group_by("ps_partkey").agg(
+        pl.col("ps_supplycost").min().alias("min_cost")
+    )
+    parts = (
+        t["part"]
+        .lazy()
+        .filter((pl.col("p_size") == 15) & pl.col("p_type").str.ends_with("BRASS"))
+    )
+    return (
+        parts.join(base, left_on="p_partkey", right_on="ps_partkey")
+        .join(min_cost, left_on="p_partkey", right_on="ps_partkey")
+        .filter(pl.col("ps_supplycost") == pl.col("min_cost"))
+        .select(
+            "s_acctbal",
+            "s_name",
+            "n_name",
+            "p_partkey",
+            "p_mfgr",
+            "s_address",
+            "s_phone",
+            "s_comment",
+        )
+        .sort(
+            ["s_acctbal", "n_name", "s_name", "p_partkey"],
+            descending=[True, False, False, False],
+        )
+        .limit(100)
+        .collect()
+    )
+
+
 QUERIES = {
     1: (lp_q1, pl_q1),
+    2: (lp_q2, pl_q2),
     3: (lp_q3, pl_q3),
     4: (lp_q4, pl_q4),
     5: (lp_q5, pl_q5),
@@ -475,6 +605,7 @@ QUERIES = {
     10: (lp_q10, pl_q10),
     12: (lp_q12, pl_q12),
     14: (lp_q14, pl_q14),
+    17: (lp_q17, pl_q17),
 }
 
 
