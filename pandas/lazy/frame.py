@@ -587,6 +587,243 @@ class LazyDataFrame:
         new_plan = Distinct(self._plan, subset_tuple)
         return LazyDataFrame(new_plan, self._schema)
 
+    def rename(self, mapping: dict[str, str]) -> LazyDataFrame:
+        """
+        Rename columns.
+
+        Parameters
+        ----------
+        mapping : dict of str to str
+            Maps existing column names to new names.
+
+        Examples
+        --------
+        >>> ldf.rename({"a": "x", "b": "y"})
+        """
+        from pandas.lazy.expr import col
+        from pandas.lazy.plan import Project
+
+        unknown = set(mapping) - set(self._schema.names)
+        if unknown:
+            raise ValueError(f"rename: unknown columns {sorted(unknown)}")
+
+        exprs = tuple(
+            col(name).alias(mapping[name]) if name in mapping else col(name)
+            for name in self._schema.names
+        )
+        new_plan = Project(self._plan, exprs)
+        return LazyDataFrame(new_plan, new_plan.resolve_schema())
+
+    def drop(self, *columns: str) -> LazyDataFrame:
+        """
+        Drop one or more columns.
+
+        Parameters
+        ----------
+        *columns : str
+            Names of columns to remove.
+
+        Examples
+        --------
+        >>> ldf.drop("a", "b")
+        """
+        from pandas.lazy.expr import col
+        from pandas.lazy.plan import Project
+
+        drop_set = set(columns)
+        unknown = drop_set - set(self._schema.names)
+        if unknown:
+            raise ValueError(f"drop: unknown columns {sorted(unknown)}")
+        keep = [name for name in self._schema.names if name not in drop_set]
+        if not keep:
+            raise ValueError("drop: cannot drop all columns")
+
+        new_plan = Project(self._plan, tuple(col(name) for name in keep))
+        return LazyDataFrame(new_plan, new_plan.resolve_schema())
+
+    def drop_nulls(self, *subset: str) -> LazyDataFrame:
+        """
+        Drop rows containing nulls (in ``subset`` columns, or any column).
+
+        Examples
+        --------
+        >>> ldf.drop_nulls()  # any null
+        >>> ldf.drop_nulls("a", "b")  # null in a or b
+        """
+        from pandas.lazy.expr import col
+        from pandas.lazy.plan import Filter
+
+        cols = list(subset) if subset else self._schema.names
+        unknown = set(cols) - set(self._schema.names)
+        if unknown:
+            raise ValueError(f"drop_nulls: unknown columns {sorted(unknown)}")
+
+        predicate = None
+        for name in cols:
+            not_null = col(name).is_not_null()
+            predicate = not_null if predicate is None else (predicate & not_null)
+        if predicate is None:
+            return self
+        new_plan = Filter(self._plan, predicate)
+        return LazyDataFrame(new_plan, self._schema)
+
+    def fill_null(self, value) -> LazyDataFrame:
+        """
+        Fill null values in every column with ``value``.
+
+        For per-column control, use ``with_columns(col("x").fill_null(...))``.
+
+        Examples
+        --------
+        >>> ldf.fill_null(0)
+        """
+        from pandas.lazy.expr import col
+        from pandas.lazy.plan import Project
+
+        exprs = tuple(
+            col(name).fill_null(value).alias(name) for name in self._schema.names
+        )
+        new_plan = Project(self._plan, exprs)
+        return LazyDataFrame(new_plan, new_plan.resolve_schema())
+
+    def cast(self, dtypes: dict) -> LazyDataFrame:
+        """
+        Cast columns to new dtypes.
+
+        Parameters
+        ----------
+        dtypes : dict of str to dtype
+            Maps column names to target dtypes.
+
+        Examples
+        --------
+        >>> ldf.cast({"a": "float64", "b": "int32"})
+        """
+        from pandas.lazy.expr import col
+        from pandas.lazy.plan import Project
+
+        unknown = set(dtypes) - set(self._schema.names)
+        if unknown:
+            raise ValueError(f"cast: unknown columns {sorted(unknown)}")
+
+        exprs = tuple(
+            col(name).cast(dtypes[name]).alias(name) if name in dtypes else col(name)
+            for name in self._schema.names
+        )
+        new_plan = Project(self._plan, exprs)
+        return LazyDataFrame(new_plan, new_plan.resolve_schema())
+
+    def pipe(self, func, *args, **kwargs):
+        """
+        Apply ``func(self, *args, **kwargs)`` — functional chaining.
+
+        Examples
+        --------
+        >>> ldf.pipe(lambda df: df.filter(col("a") > 0))
+        """
+        return func(self, *args, **kwargs)
+
+    def _frame_agg(self, method: str, numeric_only: bool) -> LazyDataFrame:
+        from pandas.lazy.expr import col
+        from pandas.lazy.plan import Aggregate
+
+        names = [
+            name
+            for name in self._schema.names
+            if not numeric_only or self._schema[name].is_numeric()
+        ]
+        exprs = tuple(getattr(col(name), method)().alias(name) for name in names)
+        if not exprs:
+            raise ValueError(f"{method}() found no applicable columns")
+        new_plan = Aggregate(self._plan, (), exprs)
+        return LazyDataFrame(new_plan, new_plan.resolve_schema())
+
+    def sum(self) -> LazyDataFrame:
+        """Sum each numeric column, returning a single-row frame."""
+        return self._frame_agg("sum", numeric_only=True)
+
+    def mean(self) -> LazyDataFrame:
+        """Mean of each numeric column, returning a single-row frame."""
+        return self._frame_agg("mean", numeric_only=True)
+
+    def min(self) -> LazyDataFrame:
+        """Minimum of each column, returning a single-row frame."""
+        return self._frame_agg("min", numeric_only=False)
+
+    def max(self) -> LazyDataFrame:
+        """Maximum of each column, returning a single-row frame."""
+        return self._frame_agg("max", numeric_only=False)
+
+    def std(self) -> LazyDataFrame:
+        """Standard deviation of each numeric column (single-row frame)."""
+        return self._frame_agg("std", numeric_only=True)
+
+    def var(self) -> LazyDataFrame:
+        """Variance of each numeric column (single-row frame)."""
+        return self._frame_agg("var", numeric_only=True)
+
+    def median(self) -> LazyDataFrame:
+        """Median of each numeric column (single-row frame)."""
+        return self._frame_agg("median", numeric_only=True)
+
+    def count(self) -> LazyDataFrame:
+        """Count of non-null values in each column (single-row frame)."""
+        return self._frame_agg("count", numeric_only=False)
+
+    def unpivot(
+        self,
+        on: list[str] | None = None,
+        *,
+        index: list[str] | None = None,
+        variable_name: str = "variable",
+        value_name: str = "value",
+    ) -> LazyDataFrame:
+        """
+        Unpivot (melt) wide columns into long ``variable``/``value`` rows.
+
+        Parameters
+        ----------
+        on : list of str, optional
+            Columns to unpivot. Defaults to every column not in ``index``.
+        index : list of str, optional
+            Identifier columns to keep on each row.
+        variable_name, value_name : str
+            Output column names for the melted names and values.
+
+        Examples
+        --------
+        >>> ldf.unpivot(on=["q1", "q2"], index=["id"])
+        """
+        from pandas.lazy.expr import (
+            col,
+            lit,
+        )
+
+        names = self._schema.names
+        index_cols = list(index) if index else []
+        if on is not None:
+            on_cols = list(on)
+        else:
+            on_cols = [name for name in names if name not in set(index_cols)]
+        unknown = (set(index_cols) | set(on_cols)) - set(names)
+        if unknown:
+            raise ValueError(f"unpivot: unknown columns {sorted(unknown)}")
+        if not on_cols:
+            raise ValueError("unpivot: no columns to unpivot")
+
+        parts = [
+            self.select(
+                *[col(c) for c in index_cols],
+                lit(name).alias(variable_name),
+                col(name).alias(value_name),
+            )
+            for name in on_cols
+        ]
+        return concat(parts)
+
+    # Polars-compatible alias.
+    melt = unpivot
+
     def join(
         self,
         other: LazyDataFrame | DataFrame,

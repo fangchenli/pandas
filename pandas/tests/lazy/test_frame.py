@@ -771,3 +771,74 @@ class TestTrivialSliceFastPath:
         result = df.select().head(2).collect()
         result.loc[0, "a"] = 999
         assert df.loc[0, "a"] == 1
+
+
+class TestManipulationVerbs:
+    """Frame-level verbs added to close the Polars API gap."""
+
+    def _df(self):
+        return pd.DataFrame(
+            {"a": [1, 2, 3, None], "b": [4.0, 5.0, 6.0, 7.0], "s": ["x", "y", "z", "w"]}
+        )
+
+    def c(self, ldf):
+        return ldf.collect(use_physical_planner=True)
+
+    def test_rename(self):
+        out = self.c(self._df().select().rename({"a": "A", "s": "S"}))
+        assert list(out.columns) == ["A", "b", "S"]
+
+    def test_rename_unknown_raises(self):
+        with pytest.raises(ValueError, match="unknown columns"):
+            self._df().select().rename({"zzz": "x"})
+
+    def test_drop(self):
+        out = self.c(self._df().select().drop("s"))
+        assert list(out.columns) == ["a", "b"]
+
+    def test_drop_all_raises(self):
+        with pytest.raises(ValueError, match="cannot drop all"):
+            self._df().select().drop("a", "b", "s")
+
+    def test_drop_nulls_all_and_subset(self):
+        assert len(self.c(self._df().select().drop_nulls())) == 3
+        assert len(self.c(self._df().select().drop_nulls("b"))) == 4
+
+    def test_fill_null(self):
+        out = self.c(self._df().select(col("a")).fill_null(0))
+        assert out["a"].tolist() == [1.0, 2.0, 3.0, 0.0]
+
+    def test_cast(self):
+        out = self.c(self._df().select().cast({"a": "float64"}))
+        assert str(out["a"].dtype) == "float64"
+
+    def test_pipe(self):
+        out = self.c(self._df().select().pipe(lambda d: d.filter(col("b") > 4)))
+        assert len(out) == 3
+
+    def test_frame_aggregations_match_eager(self):
+        df = pd.DataFrame({"a": [1, 2, 3], "b": [4.0, 5.0, 6.0]})
+        for method in ("sum", "mean", "min", "max", "std", "var", "median", "count"):
+            out = self.c(getattr(df.select(), method)())
+            assert len(out) == 1
+            for c in ("a", "b"):
+                expected = getattr(df[c], method)()
+                assert out[c].iloc[0] == pytest.approx(expected)
+
+    def test_min_max_count_include_strings(self):
+        out = self.c(self._df().select().max())
+        assert out["s"].iloc[0] == "z"  # lexical max
+        assert self.c(self._df().select().count())["a"].iloc[0] == 3  # null excluded
+
+    def test_unpivot(self):
+        wide = pd.DataFrame({"id": [1, 2], "q1": [10, 20], "q2": [30, 40]})
+        out = (
+            self.c(wide.select().unpivot(on=["q1", "q2"], index=["id"]))
+            .sort_values(["id", "variable"])
+            .reset_index(drop=True)
+        )
+        assert list(out.columns) == ["id", "variable", "value"]
+        assert out.shape == (4, 3)
+        assert out["value"].tolist() == [10, 30, 20, 40]
+        # melt is an alias.
+        assert self._df().select().melt.__func__ is type(self._df().select()).unpivot

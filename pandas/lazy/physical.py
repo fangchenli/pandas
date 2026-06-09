@@ -2000,34 +2000,36 @@ class PhysicalHashAggregate(PhysicalPlan):
         import pyarrow as pa
 
         from pandas.lazy.backends import dispatch_kernel
+        from pandas.lazy.backends.convert import get_array_backend
 
         result: ArrayDict = {}
 
         for output_name, col_name, agg_func in agg_specs:
             arr = input_arrays[col_name]
+            # Backend must follow the column's actual array, not a single
+            # frame-wide choice: a mixed frame (NumPy numerics + Arrow strings)
+            # would otherwise route a NumPy column to an Arrow kernel (whose
+            # NaN-skip helper expects ``arr.type``).
+            arr_backend = get_array_backend(arr)
 
-            # Use kernel dispatch for aggregations
             kernel_name = agg_func  # e.g., "sum", "mean", "min", "max"
             try:
-                value = dispatch_kernel(kernel_name, backend, arr)
+                value = dispatch_kernel(kernel_name, arr_backend, arr)
                 # Scalar results - wrap in single-element array
                 if isinstance(value, (pa.Scalar,)):
                     value = value.as_py()
-                if backend == "arrow":
+                if arr_backend == "arrow":
                     result[output_name] = pa.array([value])
                 else:
                     result[output_name] = np.array([value])
             except NotImplementedError:
                 # Fallback for unsupported aggregations
-                if backend == "arrow":
+                if arr_backend == "arrow":
                     np_arr = arr.to_numpy(zero_copy_only=False)
                 else:
                     np_arr = arr
                 value = getattr(np, agg_func)(np_arr)
-                if backend == "arrow":
-                    result[output_name] = pa.array([value])
-                else:
-                    result[output_name] = np.array([value])
+                result[output_name] = np.array([value])
 
         return result
 
