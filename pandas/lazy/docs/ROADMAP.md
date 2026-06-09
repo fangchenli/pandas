@@ -168,8 +168,13 @@ roughly by value:
     the keycache; plain `large_string` does not.
   - **Polars wins by moving less data** via string-view ("German strings":
     16-byte inline views, no offset indirection or variable byte copy).
-    That's the only way past the bandwidth bound, and pyarrow 23 has no
-    `array_take` kernel for `string_view`. Revisit when pyarrow ships it.
+    That's the only way past the bandwidth bound, and **pyarrow 23 and 24
+    both lack** `string_view` support in `array_take`, `hash_aggregate`, and
+    `hash_join` (re-tested on 24.0.0 — identical failures). The achievable
+    bridge is dictionary-encoding low/medium-cardinality string columns
+    (`take` 28x faster on codes; group_by/join supported today) — scoped in
+    `docs/STRING_STORAGE_SCOPING.md`. Revisit string-view when the pyarrow
+    C++ compute kernels ship it.
 
 ## Recently Landed (June 2026 cycle)
 
