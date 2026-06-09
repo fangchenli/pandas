@@ -178,6 +178,15 @@ def groupby_queries():
             .agg((col("v1").max() - col("v2").min()).alias("range_v1_v2"))
         )
 
+    def lp8(d):
+        return (
+            _lp(d)
+            .select(col("id6"), col("v3"))
+            .sort("v3", descending=True)
+            .group_by("id6")
+            .head(2)
+        )
+
     def lp9(d):
         return (
             _lp(d)
@@ -271,7 +280,7 @@ def groupby_queries():
         ("q5: sum(v1,v2,v3) by id6", lp5, pl5),
         ("q6: median(v3),std(v3) by id4,id5", lp6, pl6),  # grouped median
         ("q7: max(v1)-min(v2) by id3", lp7, pl7),  # agg arithmetic
-        ("q8: top2 v3 by id6", None, pl8),  # grouped top-k + explode
+        ("q8: top2 v3 by id6", lp8, pl8),  # grouped top-k (sort + head)
         ("q9: corr(v1,v2)^2 by id2,id4", lp9, pl9),  # correlation
         ("q10: sum(v3),count by id1..id6", lp10, pl10),
     ]

@@ -102,6 +102,7 @@ from pandas.lazy.plan import (
     DataFrameSource,
     Distinct,
     Filter,
+    GroupByHead,
     Join,
     Limit,
     LogicalPlan,
@@ -3807,6 +3808,57 @@ class PhysicalDistinct(PhysicalPlan):
         return True
 
 
+@dataclass
+class PhysicalGroupByHead(PhysicalPlan):
+    """Keep the first ``n`` rows of each group (group-wise head).
+
+    With a preceding sort this yields top-k rows per group as plain rows. The
+    kept row positions come from pandas' ``groupby(...).head(n)`` over just the
+    key columns (preserving input order); all columns are then gathered by
+    those positions, so payload backends are preserved.
+    """
+
+    input: PhysicalPlan
+    group_keys: tuple[str, ...]
+    n: int
+    schema: Schema
+
+    def execute(self, context: ExecutionContext) -> ArrayDict:
+        from pandas import DataFrame
+
+        input_arrays = self.input.execute(context)
+        keys = list(self.group_keys)
+        key_data = {}
+        for name in keys:
+            arr = input_arrays[name]
+            key_data[name] = (
+                arr.to_numpy(zero_copy_only=False)
+                if hasattr(arr, "to_numpy")
+                else np.asarray(arr)
+            )
+        # head(n) over just the key columns gives the original positions of the
+        # first n rows of each group, in input order.
+        key_df = DataFrame(key_data, copy=False)
+        keep = key_df.groupby(keys, sort=False).head(self.n).index.to_numpy()
+
+        return {
+            name: dispatch_kernel("take", get_array_backend(arr), arr, keep)
+            for name, arr in input_arrays.items()
+        }
+
+    def children(self) -> list[PhysicalPlan]:
+        return [self.input]
+
+    @property
+    def output_schema(self) -> Schema:
+        return self.schema
+
+    @property
+    def is_pipeline_breaker(self) -> bool:
+        """Group-wise head needs all rows of each group present."""
+        return True
+
+
 # =============================================================================
 # Join Nodes
 # =============================================================================
@@ -5231,6 +5283,9 @@ class PhysicalPlanner:
         elif isinstance(logical_plan, Distinct):
             return self._plan_distinct(logical_plan)
 
+        elif isinstance(logical_plan, GroupByHead):
+            return self._plan_group_by_head(logical_plan)
+
         elif isinstance(logical_plan, Join):
             return self._plan_join(logical_plan)
 
@@ -5363,6 +5418,16 @@ class PhysicalPlanner:
         return PhysicalDistinct(
             input=self._materialize_for_breaker(node.input, "distinct"),
             subset=node.subset,
+            schema=node.resolve_schema(),
+        )
+
+    def _plan_group_by_head(self, node) -> PhysicalGroupByHead:
+        """Plan a GroupByHead (group-wise head; a pipeline breaker)."""
+        group_keys = tuple(extract_output_name(e) for e in node.group_by)
+        return PhysicalGroupByHead(
+            input=self._materialize_for_breaker(node.input, "group_by_head"),
+            group_keys=group_keys,
+            n=node.n,
             schema=node.resolve_schema(),
         )
 

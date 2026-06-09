@@ -84,6 +84,7 @@ class PlanVisitor(OptimizationPass):
             DataFrameSource,
             Distinct,
             Filter,
+            GroupByHead,
             Join,
             Limit,
             Project,
@@ -106,6 +107,8 @@ class PlanVisitor(OptimizationPass):
             return self.visit_limit(plan)
         elif isinstance(plan, Distinct):
             return self.visit_distinct(plan)
+        elif isinstance(plan, GroupByHead):
+            return self.visit_group_by_head(plan)
         elif isinstance(plan, Join):
             return self.visit_join(plan)
         elif isinstance(plan, TopK):
@@ -186,6 +189,15 @@ class PlanVisitor(OptimizationPass):
         new_input = self.visit(plan.input)
         if new_input is not plan.input:
             return Distinct(new_input, plan.subset)
+        return plan
+
+    def visit_group_by_head(self, plan) -> LogicalPlan:
+        """Visit a GroupByHead node. Default: recurse into input."""
+        from pandas.lazy.plan import GroupByHead
+
+        new_input = self.visit(plan.input)
+        if new_input is not plan.input:
+            return GroupByHead(new_input, plan.group_by, plan.n)
         return plan
 
     def visit_join(self, plan) -> LogicalPlan:

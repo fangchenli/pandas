@@ -569,3 +569,29 @@ class TestGroupedMedian:
         )
         assert np.allclose(out["m"].to_numpy(), expected["m"].to_numpy(), atol=1e-9)
         assert np.allclose(out["s"].to_numpy(), expected["s"].to_numpy(), atol=1e-9)
+
+
+class TestGroupByHead:
+    """Group-wise head, and its sort+head composition for top-k per group."""
+
+    def _c(self, ldf):
+        return ldf.collect(use_physical_planner=True, order="relaxed")
+
+    def test_head_per_group_preserves_input_order(self):
+        df = pd.DataFrame({"g": [1, 1, 1, 2, 2, 3], "v": [10, 20, 30, 40, 50, 60]})
+        out = self._c(df.select().group_by("g").head(2))
+        # first 2 rows of each group in input order
+        got = set(map(tuple, out[["g", "v"]].to_numpy()))
+        assert got == {(1, 10), (1, 20), (2, 40), (2, 50), (3, 60)}
+
+    def test_top_k_per_group_via_sort_then_head(self):
+        rng = np.random.default_rng(0)
+        df = pd.DataFrame(
+            {"g": rng.integers(0, 50, 5000), "v": rng.uniform(0, 100, 5000)}
+        )
+        out = self._c(df.select().sort("v", descending=True).group_by("g").head(2))
+        expected = df.sort_values("v", ascending=False).groupby("g", sort=False).head(2)
+        got = set(map(tuple, np.round(out[["g", "v"]].to_numpy(), 9)))
+        want = set(map(tuple, np.round(expected[["g", "v"]].to_numpy(), 9)))
+        assert got == want
+        assert len(out) == len(expected)

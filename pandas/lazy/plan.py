@@ -790,6 +790,36 @@ class Distinct(LogicalPlan):
 
 
 @dataclass
+class GroupByHead(LogicalPlan):
+    """Keep the first ``n`` rows of each group (group-wise head).
+
+    Combined with a preceding ``sort`` this expresses "top-k rows per group"
+    (e.g. the largest two values per key) as plain rows, without list columns
+    or an explode operator.
+    """
+
+    input: LogicalPlan
+    group_by: tuple[Expr, ...]
+    n: int
+
+    def __post_init__(self) -> None:
+        self._cached_schema = None
+
+    def _resolve_schema_impl(self) -> Schema:
+        return self.input.resolve_schema()
+
+    def children(self) -> list[LogicalPlan]:
+        return [self.input]
+
+    def _estimate_row_count_impl(self) -> int | None:
+        # At most n rows per group; bounded by the input row count.
+        return self.input.estimate_row_count()
+
+    def __repr__(self) -> str:
+        return f"GroupByHead(n={self.n})"
+
+
+@dataclass
 class Convert(LogicalPlan):
     """
     Explicit conversion between backends.

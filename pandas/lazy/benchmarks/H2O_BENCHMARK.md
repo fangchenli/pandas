@@ -33,7 +33,7 @@ Faithful port of the [DuckDB Labs db-benchmark](https://github.com/duckdblabs/db
 | q5: sum(v1,v2,v3) by id6 (int, 100k grp) | 159 | 124 | 145 | **1.18** |
 | q6: median(v3),std(v3) by id4,id5 | 807 | 534 | 171 | 0.32 |
 | q7: max(v1)-min(v2) by id3 | 146 | 104 | 218 | **2.11** |
-| q8: top2 v3 by id6 | — | unsupported | 213 | — |
+| q8: top2 v3 by id6 | 959 | 704 | 247 | 0.35 |
 | q9: corr(v1,v2)^2 by id2,id4 | 107 | 91 | 251 | **2.76** |
 | q10: sum(v3),count by id1..id6 (10M grp) | 1732 | 1913 | 1001 | 0.52 |
 
@@ -95,8 +95,10 @@ is exceptionally fast at ~60 ms).** Both survive warm-up, so they are genuine.
 6. **q6 (grouped median) — now supported** (exact, NumPy `groupby_median`
    kernel via pandas). It's a *correctness* win, not a perf one: 0.32x —
    exact grouped median resists parallelism (Polars sorts within groups; our
-   pandas fallback is exact but slower). Only **q8** (grouped top-k +
-   `explode`) remains unsupported.
+   pandas fallback is exact but slower).
+7. **q8 (top-k per group) — now supported** via `sort(desc) → group_by().head(k)`
+   (a `GroupByHead` node; no list columns or explode needed). 0.35x — the
+   full 10M-row sort dominates. **All 10 group-by queries are now supported.**
 
 ### Priority order for closing the gap
 
@@ -119,11 +121,13 @@ is exceptionally fast at ~60 ms).** Both survive warm-up, so they are genuine.
    4077 ms). The 0.66x residual vs Polars is its structural radix-partitioned
    contiguous-group-state aggregate engine, not reachable via Python-level
    partitioning. Left as-is.
-8. Grouped top-k + `explode` (q8) — sort + within-group head-k. The last
-   unsupported query; niche, larger effort.
+8. ~~Grouped top-k (q8)~~ — **done** via `sort → group_by().head(k)`
+   (`GroupByHead`). All 10 group-by queries now run.
 
-**Net: the H2O board is now closed to the point where the only remaining gaps
-are structural** — Arrow string-view storage (q3 left join, q4 string join)
-and Polars' aggregate-engine internals (q10) — plus one niche unsupported
-query (q8). No further quick wins remain without a major storage/representation
-change.
+**Net: every H2O query now runs; the board is closed.** All 10 group-by and
+all 5 join queries are supported and correct. The only remaining *performance*
+gaps are structural — Arrow string-view storage (q3 left join 0.34x, q4 string
+join 0.25x) and Polars' aggregate-engine internals (q10 0.56x, q6/q8 sort- and
+median-bound). No further quick wins remain without a major
+storage/representation change (string-view), which is a deliberate project of
+its own.

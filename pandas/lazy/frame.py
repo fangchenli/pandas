@@ -1909,6 +1909,21 @@ class LazyGroupBy:
         new_plan = Project(agg_node, group_cols + tuple(post_exprs))
         return LazyDataFrame(new_plan, new_plan.resolve_schema())
 
+    def head(self, n: int = 5) -> LazyDataFrame:
+        """
+        Keep the first ``n`` rows of each group, preserving input order.
+
+        Combined with a preceding ``sort`` this expresses "top-k rows per
+        group" without list columns or an explode step - e.g. the two largest
+        ``value`` rows per ``key``:
+
+        >>> ldf.sort("value", descending=True).group_by("key").head(2)
+        """
+        from pandas.lazy.plan import GroupByHead
+
+        new_plan = GroupByHead(self._plan, self._group_by, n)
+        return LazyDataFrame(new_plan, new_plan.resolve_schema())
+
     def __repr__(self) -> str:
 
         try:
