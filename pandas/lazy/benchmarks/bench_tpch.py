@@ -1037,6 +1037,307 @@ def pl_q9(t):
     )
 
 
+# --- Q11: Important Stock (HAVING vs global-fraction scalar, cross join) ----
+def lp_q11(t):
+    base = (
+        _lp(t["partsupp"])
+        .join(_lp(t["supplier"]), left_on="ps_suppkey", right_on="s_suppkey")
+        .join(
+            _lp(t["nation"]).filter(col("n_name") == "GERMANY"),
+            left_on="s_nationkey",
+            right_on="n_nationkey",
+        )
+        .with_columns((col("ps_supplycost") * col("ps_availqty")).alias("val"))
+    )
+    per_part = base.group_by("ps_partkey").agg(col("val").sum().alias("value"))
+    thresh = (
+        base.with_columns(lit(1).alias("__g"))
+        .group_by("__g")
+        .agg((col("val").sum() * 0.0001).alias("thresh"))
+        .select(col("thresh"))
+    )
+    return (
+        per_part.join(thresh, how="cross")
+        .filter(col("value") > col("thresh"))
+        .select(col("ps_partkey"), col("value"))
+        .sort("value", descending=True)
+    )
+
+
+def pl_q11(t):
+    base = (
+        t["partsupp"]
+        .lazy()
+        .join(t["supplier"].lazy(), left_on="ps_suppkey", right_on="s_suppkey")
+        .join(
+            t["nation"].lazy().filter(pl.col("n_name") == "GERMANY"),
+            left_on="s_nationkey",
+            right_on="n_nationkey",
+        )
+        .with_columns((pl.col("ps_supplycost") * pl.col("ps_availqty")).alias("val"))
+    )
+    per_part = base.group_by("ps_partkey").agg(pl.col("val").sum().alias("value"))
+    thresh = base.select((pl.col("val").sum() * 0.0001).alias("thresh"))
+    return (
+        per_part.join(thresh, how="cross")
+        .filter(pl.col("value") > pl.col("thresh"))
+        .select("ps_partkey", "value")
+        .sort("value", descending=True)
+        .collect()
+    )
+
+
+# --- Q15: Top Supplier (max-revenue scalar subquery, cross join) -----------
+def lp_q15(t):
+    lo, hi = pd.Timestamp("1996-01-01"), pd.Timestamp("1996-04-01")
+    rev = (
+        _lp(t["lineitem"])
+        .filter((col("l_shipdate") >= lo) & (col("l_shipdate") < hi))
+        .group_by("l_suppkey")
+        .agg(
+            (col("l_extendedprice") * (1 - col("l_discount")))
+            .sum()
+            .alias("total_revenue")
+        )
+    )
+    mx = (
+        rev.with_columns(lit(1).alias("__g"))
+        .group_by("__g")
+        .agg(col("total_revenue").max().alias("mx"))
+        .select(col("mx"))
+    )
+    return (
+        _lp(t["supplier"])
+        .join(rev, left_on="s_suppkey", right_on="l_suppkey")
+        .join(mx, how="cross")
+        .filter(col("total_revenue") == col("mx"))
+        .select(
+            col("s_suppkey"),
+            col("s_name"),
+            col("s_address"),
+            col("s_phone"),
+            col("total_revenue"),
+        )
+        .sort("s_suppkey")
+    )
+
+
+def pl_q15(t):
+    lo, hi = pd.Timestamp("1996-01-01"), pd.Timestamp("1996-04-01")
+    rev = (
+        t["lineitem"]
+        .lazy()
+        .filter((pl.col("l_shipdate") >= lo) & (pl.col("l_shipdate") < hi))
+        .group_by("l_suppkey")
+        .agg(
+            (pl.col("l_extendedprice") * (1 - pl.col("l_discount")))
+            .sum()
+            .alias("total_revenue")
+        )
+    )
+    mx = rev.select(pl.col("total_revenue").max().alias("mx"))
+    return (
+        t["supplier"]
+        .lazy()
+        .join(rev, left_on="s_suppkey", right_on="l_suppkey")
+        .join(mx, how="cross")
+        .filter(pl.col("total_revenue") == pl.col("mx"))
+        .select("s_suppkey", "s_name", "s_address", "s_phone", "total_revenue")
+        .sort("s_suppkey")
+        .collect()
+    )
+
+
+# --- Q20: Potential Part Promotion (nested semi/anti over composite key) ----
+def lp_q20(t):
+    lo, hi = pd.Timestamp("1994-01-01"), pd.Timestamp("1995-01-01")
+    forest = (
+        _lp(t["part"])
+        .filter(col("p_name").str.startswith("forest"))
+        .select(col("p_partkey"))
+    )
+    qty = (
+        _lp(t["lineitem"])
+        .filter((col("l_shipdate") >= lo) & (col("l_shipdate") < hi))
+        .group_by("l_partkey", "l_suppkey")
+        .agg((0.5 * col("l_quantity").sum()).alias("half_qty"))
+    )
+    target = (
+        _lp(t["partsupp"])
+        .join(forest, left_on="ps_partkey", right_on="p_partkey")
+        .join(
+            qty,
+            left_on=["ps_partkey", "ps_suppkey"],
+            right_on=["l_partkey", "l_suppkey"],
+        )
+        .filter(col("ps_availqty") > col("half_qty"))
+        .select(col("ps_suppkey"))
+        .distinct()
+    )
+    return (
+        _lp(t["supplier"])
+        .join(
+            _lp(t["nation"]).filter(col("n_name") == "CANADA"),
+            left_on="s_nationkey",
+            right_on="n_nationkey",
+        )
+        .join(target, left_on="s_suppkey", right_on="ps_suppkey")
+        .select(col("s_name"), col("s_address"))
+        .sort("s_name")
+    )
+
+
+def pl_q20(t):
+    lo, hi = pd.Timestamp("1994-01-01"), pd.Timestamp("1995-01-01")
+    forest = (
+        t["part"]
+        .lazy()
+        .filter(pl.col("p_name").str.starts_with("forest"))
+        .select("p_partkey")
+    )
+    qty = (
+        t["lineitem"]
+        .lazy()
+        .filter((pl.col("l_shipdate") >= lo) & (pl.col("l_shipdate") < hi))
+        .group_by("l_partkey", "l_suppkey")
+        .agg((0.5 * pl.col("l_quantity").sum()).alias("half_qty"))
+    )
+    target = (
+        t["partsupp"]
+        .lazy()
+        .join(forest, left_on="ps_partkey", right_on="p_partkey", how="semi")
+        .join(
+            qty,
+            left_on=["ps_partkey", "ps_suppkey"],
+            right_on=["l_partkey", "l_suppkey"],
+        )
+        .filter(pl.col("ps_availqty") > pl.col("half_qty"))
+        .select("ps_suppkey")
+        .unique()
+    )
+    return (
+        t["supplier"]
+        .lazy()
+        .join(
+            t["nation"].lazy().filter(pl.col("n_name") == "CANADA"),
+            left_on="s_nationkey",
+            right_on="n_nationkey",
+        )
+        .join(target, left_on="s_suppkey", right_on="ps_suppkey", how="semi")
+        .select("s_name", "s_address")
+        .sort("s_name")
+        .collect()
+    )
+
+
+# --- Q21: Suppliers Who Kept Orders Waiting (EXISTS + NOT EXISTS) -----------
+# Decorrelated: per order, count distinct suppliers (nsupp) and distinct late
+# suppliers (late_nsupp). A late line l1 qualifies when nsupp>1 (some other
+# supplier on the order = EXISTS l2) and late_nsupp==1 (l1 is the only late
+# supplier = NOT EXISTS l3).
+def lp_q21(t):
+    li = _lp(t["lineitem"])
+    nsupp = li.group_by("l_orderkey").agg(col("l_suppkey").n_unique().alias("nsupp"))
+    late = li.filter(col("l_receiptdate") > col("l_commitdate"))
+    late_nsupp = late.group_by("l_orderkey").agg(
+        col("l_suppkey").n_unique().alias("late_nsupp")
+    )
+    o = _lp(t["orders"]).filter(col("o_orderstatus") == "F")
+    nation = _lp(t["nation"]).filter(col("n_name") == "SAUDI ARABIA")
+    return (
+        late.join(o, left_on="l_orderkey", right_on="o_orderkey")
+        .join(nsupp, on="l_orderkey")
+        .join(late_nsupp, on="l_orderkey")
+        .filter((col("nsupp") > 1) & (col("late_nsupp") == 1))
+        .join(_lp(t["supplier"]), left_on="l_suppkey", right_on="s_suppkey")
+        .join(nation, left_on="s_nationkey", right_on="n_nationkey")
+        .group_by("s_name")
+        .agg(col("l_orderkey").count().alias("numwait"))
+        .sort("numwait", "s_name", descending=[True, False])
+        .limit(100)
+    )
+
+
+def pl_q21(t):
+    li = t["lineitem"].lazy()
+    nsupp = li.group_by("l_orderkey").agg(pl.col("l_suppkey").n_unique().alias("nsupp"))
+    late = li.filter(pl.col("l_receiptdate") > pl.col("l_commitdate"))
+    late_nsupp = late.group_by("l_orderkey").agg(
+        pl.col("l_suppkey").n_unique().alias("late_nsupp")
+    )
+    o = t["orders"].lazy().filter(pl.col("o_orderstatus") == "F")
+    nation = t["nation"].lazy().filter(pl.col("n_name") == "SAUDI ARABIA")
+    return (
+        late.join(o, left_on="l_orderkey", right_on="o_orderkey")
+        .join(nsupp, on="l_orderkey")
+        .join(late_nsupp, on="l_orderkey")
+        .filter((pl.col("nsupp") > 1) & (pl.col("late_nsupp") == 1))
+        .join(t["supplier"].lazy(), left_on="l_suppkey", right_on="s_suppkey")
+        .join(nation, left_on="s_nationkey", right_on="n_nationkey")
+        .group_by("s_name")
+        .agg(pl.len().alias("numwait"))
+        .sort(["numwait", "s_name"], descending=[True, False])
+        .limit(100)
+        .collect()
+    )
+
+
+# --- Q22: Global Sales Opportunity (substring, scalar avg, anti-join) -------
+def lp_q22(t):
+    codes = ["13", "31", "23", "29", "30", "18", "17"]
+    cust = (
+        _lp(t["customer"])
+        .with_columns(col("c_phone").str.slice(0, 2).alias("cntrycode"))
+        .filter(col("cntrycode").isin(codes))
+    )
+    avg_bal = (
+        cust.filter(col("c_acctbal") > 0.0)
+        .with_columns(lit(1).alias("__g"))
+        .group_by("__g")
+        .agg(col("c_acctbal").mean().alias("avg_bal"))
+        .select(col("avg_bal"))
+    )
+    no_orders = _lp(t["orders"]).select(col("o_custkey")).distinct()
+    return (
+        cust.join(avg_bal, how="cross")
+        .filter(col("c_acctbal") > col("avg_bal"))
+        .join(no_orders, left_on="c_custkey", right_on="o_custkey", how="left")
+        .filter(col("o_custkey").is_null())
+        .group_by("cntrycode")
+        .agg(
+            col("c_custkey").count().alias("numcust"),
+            col("c_acctbal").sum().alias("totacctbal"),
+        )
+        .sort("cntrycode")
+    )
+
+
+def pl_q22(t):
+    codes = ["13", "31", "23", "29", "30", "18", "17"]
+    cust = (
+        t["customer"]
+        .lazy()
+        .with_columns(pl.col("c_phone").str.slice(0, 2).alias("cntrycode"))
+        .filter(pl.col("cntrycode").is_in(codes))
+    )
+    avg_bal = cust.filter(pl.col("c_acctbal") > 0.0).select(
+        pl.col("c_acctbal").mean().alias("avg_bal")
+    )
+    no_orders = t["orders"].lazy().select("o_custkey").unique()
+    return (
+        cust.join(avg_bal, how="cross")
+        .filter(pl.col("c_acctbal") > pl.col("avg_bal"))
+        .join(no_orders, left_on="c_custkey", right_on="o_custkey", how="anti")
+        .group_by("cntrycode")
+        .agg(
+            pl.len().alias("numcust"),
+            pl.col("c_acctbal").sum().alias("totacctbal"),
+        )
+        .sort("cntrycode")
+        .collect()
+    )
+
+
 QUERIES = {
     1: (lp_q1, pl_q1),
     2: (lp_q2, pl_q2),
@@ -1048,13 +1349,18 @@ QUERIES = {
     8: (lp_q8, pl_q8),
     9: (lp_q9, pl_q9),
     10: (lp_q10, pl_q10),
+    11: (lp_q11, pl_q11),
     12: (lp_q12, pl_q12),
     13: (lp_q13, pl_q13),
     14: (lp_q14, pl_q14),
+    15: (lp_q15, pl_q15),
     16: (lp_q16, pl_q16),
     17: (lp_q17, pl_q17),
     18: (lp_q18, pl_q18),
     19: (lp_q19, pl_q19),
+    20: (lp_q20, pl_q20),
+    21: (lp_q21, pl_q21),
+    22: (lp_q22, pl_q22),
 }
 
 
