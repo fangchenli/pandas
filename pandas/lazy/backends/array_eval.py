@@ -49,6 +49,24 @@ if TYPE_CHECKING:
 _NUMEXPR_MIN_ELEMENTS = 100_000
 
 
+def _coerce_temporal_scalar(arg):
+    """Coerce a pandas Timestamp/Timedelta scalar to its NumPy equivalent.
+
+    ``np.greater_equal(datetime64_array, pd.Timestamp)`` (and the other
+    comparisons) fall to a ~1000x-slower element-wise object path, whereas the
+    same against a ``np.datetime64``/``np.timedelta64`` is vectorized. The
+    duck-typed ``getattr`` checks are cheap and avoid importing pandas on the
+    hot path (a non-temporal scalar returns immediately).
+    """
+    to_dt64 = getattr(arg, "to_datetime64", None)
+    if to_dt64 is not None:
+        return to_dt64()
+    to_td64 = getattr(arg, "to_timedelta64", None)
+    if to_td64 is not None:
+        return to_td64()
+    return arg
+
+
 class ArrayEvaluator:
     """
     Evaluates IR expressions directly on arrays.
@@ -218,8 +236,11 @@ class ArrayEvaluator:
                 if isinstance(arg, (np.ndarray, pa.Array, pa.ChunkedArray)):
                     converted_args.append(ensure_backend(arg, backend))
                 else:
-                    # Scalar - keep as is
-                    converted_args.append(arg)
+                    # Scalar - keep as is, but coerce pandas temporal scalars
+                    # to NumPy: np.greater_equal(datetime64_array, pd.Timestamp)
+                    # falls to a ~1000x-slower element-wise object comparison,
+                    # where the same against a np.datetime64 is vectorized.
+                    converted_args.append(_coerce_temporal_scalar(arg))
 
             # Call kernel directly
             return kernel(*converted_args, **node.kwargs)

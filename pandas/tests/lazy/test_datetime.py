@@ -385,3 +385,53 @@ class TestDatetimeTypeInference:
         node = Call("dt_date", (FieldRef("ts"),))
         dtype = infer_expr_dtype(node, schema)
         assert dtype.category == "datetime"
+
+
+class TestDatetimeScalarComparison:
+    """Comparing a datetime column to a pandas Timestamp literal.
+
+    Regression: np.greater_equal(datetime64_array, pd.Timestamp) falls to a
+    ~1000x-slower element-wise object comparison, so the evaluator must coerce
+    pandas temporal scalars to NumPy (np.datetime64 / np.timedelta64). These
+    guard correctness through the physical engine (which routes wide
+    filter+project pipelines morsel-parallel via the NumPy kernels).
+    """
+
+    def test_coerce_temporal_scalar_helper(self):
+        import numpy as np
+
+        from pandas.lazy.backends.array_eval import _coerce_temporal_scalar
+
+        assert isinstance(
+            _coerce_temporal_scalar(pd.Timestamp("2020-01-01")), np.datetime64
+        )
+        assert isinstance(_coerce_temporal_scalar(pd.Timedelta(days=1)), np.timedelta64)
+        # non-temporal scalars pass through unchanged
+        assert _coerce_temporal_scalar(5) == 5
+        assert _coerce_temporal_scalar("x") == "x"
+
+    def test_filter_datetime_literal_matches_eager(self):
+        import numpy as np
+
+        rng = np.random.default_rng(0)
+        n = 5000
+        df = pd.DataFrame(
+            {
+                "d": pd.to_datetime("2020-01-01")
+                + pd.to_timedelta(rng.integers(0, 1000, n), unit="D"),
+                "v": rng.standard_normal(n),
+                "s": rng.choice(["a", "b", "c"], n),  # widen -> morsel path
+            }
+        )
+        cutoff = pd.Timestamp("2021-06-01")
+        out = (
+            df.select()
+            .filter(col("d") >= cutoff)
+            .select(col("v"))
+            .collect(use_physical_planner=True)
+        )
+        expected = df.loc[df["d"] >= cutoff, ["v"]].reset_index(drop=True)
+        assert len(out) == len(expected)
+        assert np.allclose(
+            np.sort(out["v"].to_numpy()), np.sort(expected["v"].to_numpy())
+        )
