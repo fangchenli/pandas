@@ -28,6 +28,17 @@ print(ldf.explain())                 # logical plan (text | tree | json)
 print(ldf.explain(physical=True))    # physical plan with pipeline boundaries
 ```
 
+## Capabilities
+
+Beyond `select`/`filter`/`with_columns`/`sort`/`limit`/`join`/`collect`, the
+lazy frame supports: **manipulation verbs** `rename`, `drop`, `drop_nulls`,
+`fill_null`, `cast`, `pipe`, `unpivot`/`melt`, and frame-level aggregations
+(`sum`/`mean`/`min`/`max`/`std`/`var`/`median`/`count`); **group-by** via
+`group_by().agg(...)` including arithmetic *over* aggregates
+(`max(a) - min(b)`), composed `corr`, and grouped top-k via
+`sort(...).group_by(...).head(k)`. Collection options include
+`collect(order="relaxed")` and `collect(spill_config=...)` for out-of-core.
+
 ## Document Map
 
 | Document | Contents |

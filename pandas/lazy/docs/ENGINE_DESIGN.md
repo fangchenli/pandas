@@ -152,15 +152,19 @@ size).
 
 ### Breakers as parallel algorithms
 
-Each sink is specified with its parallel form — all three have working
-prototypes in the current codebase:
+Each sink is specified with its parallel form. **Two of these were superseded
+by what actually shipped (see "Post-milestone work" below):** the Sort sink is
+now a Cython thread-parallel LSD radix argsort/lexsort (not the k-way merge),
+and the Join sink is `pd.merge` for in-memory equi-joins (the partitioned-build
+/ `get_join_indexers` design was measured *slower* in M5). The table is the
+original spec; the live forms are noted in the right column.
 
-| Sink | Parallel form | Existing prototype |
+| Sink | Spec'd parallel form | Actual shipped form |
 |---|---|---|
-| Aggregate | per-worker partial aggregation (Arrow `group_by` per morsel or pandas Cython), **radix over-partitioned** → parallel per-partition merge | streaming aggregation's partial states |
-| Sort | per-worker stable sorted runs → **k-way merge with computed non-overlapping intersections** | `_parallel_argsort` (chunked sort; its pairwise merge is upgraded — see below); external sorter's run merging |
-| Join build | partition-by-hash into per-worker hash tables; probe pipelines stream morsels against them | grace hash join partitioning; `get_join_indexers` per partition |
-| Distinct | per-worker seen-sets on hashed keys → merge | — |
+| Aggregate | per-worker partial aggregation (Arrow `group_by` per morsel or pandas Cython), **radix over-partitioned** → parallel per-partition merge | acero hash aggregate (`groupby_prefers_arrow` routes numeric/arrow-string keys); streaming partials for mergeable aggs |
+| Sort | per-worker stable sorted runs → **k-way merge** | **Cython radix argsort/lexsort** (`lazy_radix`); k-way merge is the fallback |
+| Join build | partition-by-hash into per-worker hash tables; stream-probe | **`pd.merge`** (in-memory equi-joins); acero for order-free sinks; Grace (size-triggered) out-of-core |
+| Distinct | per-worker seen-sets on hashed keys → merge | unique-indices kernel |
 
 Research-driven specifications for the two hardest sinks:
 

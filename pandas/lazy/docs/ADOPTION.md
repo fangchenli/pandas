@@ -38,6 +38,14 @@ Technically lower risk, and immediately attacks our worst gaps (join
 0.15x, sort 0.2x, aggregation 0.2x vs Polars — all DuckDB strengths);
 the prototype is ~90% shaped for it already.
 
+> **Note (June 2026):** those gap figures were the *motivating* pre-engine-work
+> numbers. The own-engine cycle has since closed most of them — sort and
+> aggregation now beat Polars on several H2O queries and int-key joins are
+> ~parity (see `benchmarks/H2O_BENCHMARK.md`). The remaining real gaps
+> (string-key/left joins, exact median) are structural. This does not change
+> the strategic argument for capture/delegation, but the specific "worst gap"
+> numbers are stale.
+
 ### Why the prototype is ready
 
 - The **optimized logical plan** is engine-neutral; `PhysicalPlanner`

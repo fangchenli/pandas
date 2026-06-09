@@ -26,44 +26,53 @@ Faithful port of the [DuckDB Labs db-benchmark](https://github.com/duckdblabs/db
 
 | query | LP cold (ms) | LP hot (ms) | PL hot (ms) | hotx |
 |---|---|---|---|---|
-| q1: sum(v1) by id1 (str, 100 grp) | 262 | 14 | 18 | **1.23** |
-| q2: sum(v1) by id1,id2 (str, 10k grp) | 138 | 21 | 140 | **6.59** |
-| q3: sum(v1),mean(v3) by id3 (str, 100k grp) | 576 | 111 | 233 | **2.10** |
-| q4: mean(v1,v2,v3) by id4 (int, 100 grp) | 22 | 20 | 13 | 0.65 |
-| q5: sum(v1,v2,v3) by id6 (int, 100k grp) | 159 | 124 | 145 | **1.18** |
-| q6: median(v3),std(v3) by id4,id5 | 807 | 534 | 171 | 0.32 |
-| q7: max(v1)-min(v2) by id3 | 146 | 104 | 218 | **2.11** |
-| q8: top2 v3 by id6 | 959 | 704 | 247 | 0.35 |
-| q9: corr(v1,v2)^2 by id2,id4 | 107 | 91 | 251 | **2.76** |
-| q10: sum(v3),count by id1..id6 (10M grp) | 1732 | 1913 | 1001 | 0.52 |
+| q1: sum(v1) by id1 (str, 100 grp) | 275 | 14 | 17 | **1.21** |
+| q2: sum(v1) by id1,id2 (str, 10k grp) | 136 | 20 | 142 | **7.23** |
+| q3: sum(v1),mean(v3) by id3 (str, 100k grp) | 470 | 102 | 212 | **2.08** |
+| q4: mean(v1,v2,v3) by id4 (int, 100 grp) | 21 | 19 | 13 | 0.66 |
+| q5: sum(v1,v2,v3) by id6 (int, 100k grp) | 138 | 124 | 151 | **1.21** |
+| q6: median(v3),std(v3) by id4,id5 | 550 | 532 | 165 | 0.31 |
+| q7: max(v1)-min(v2) by id3 | 112 | 103 | 209 | **2.03** |
+| q8: top2 v3 by id6 | 861 | 734 | 215 | 0.29 |
+| q9: corr(v1,v2)^2 by id2,id4 | 101 | 81 | 250 | **3.09** |
+| q10: sum(v3),count by id1..id6 (10M grp) | 1800 | 1860 | 1055 | 0.57 |
 
-**Group-by: lazy pandas wins 6 of the 8 supported queries.** String keys
-(q1/q2/q3) are arrow-backed (`str` dtype in pandas 3.0) and route to acero —
-they beat Polars at steady state (q2 by 6.6x). q4/q5 (numeric) hit the acero
-path after the routing fix. q7/q9 are now supported via post-aggregation
-projection (below) and also beat Polars. The one genuine loss is **q10**
-(group by all six columns → ~10M near-unique groups, 0.52x). Note the `cold`
-column: the first Arrow-routed query pays a real one-time cost (q3 cold 576 ms
-vs hot 111 ms) for acero init + building the key dictionary cache.
+**Group-by: all 10 queries supported; lazy pandas beats Polars on 6.** String
+keys (q1/q2/q3) are arrow-backed (`str` dtype in pandas 3.0) and route to
+acero — they beat Polars at steady state (q2 ~7x). q4/q5 (numeric) hit the
+acero path via the routing fix. q7 (agg arithmetic) and q9 (`corr`) are
+supported via post-aggregation projection and beat Polars; q6 (exact grouped
+median) and q8 (top-k via `GroupByHead`) are supported but slower (exact
+median resists parallelism, q8 is sort-bound). The remaining loss is q10
+(~10M near-unique groups, 0.57x). The `cold` column shows the one-time
+first-Arrow-query cost (acero init + building the key dictionary cache).
 
 > **Update (post-aggregation projection).** q7 (`max(v1)-min(v2)`) and q9
 > (`corr(v1,v2)²`) were unsupported. One capability closes both:
 > `group_by().agg()` decomposes an expression wrapping arithmetic over
 > aggregates (or aggregating a computed input like `sum(x*y)`) into
 > pre-project → aggregate → post-project; `corr` is composed from six sums.
-> Exact (validated vs eager/Polars) and **ahead of Polars** (q7 2.11x,
-> q9 2.76x). Remaining unsupported: q6 (exact grouped median) and q8
-> (grouped top-k + explode).
+> Exact (validated vs eager/Polars) and **ahead of Polars** (q7 ~2x,
+> q9 ~3x). (q6 exact grouped median and q8 grouped top-k were subsequently
+> added too — all 10 group-by queries now run.)
 
 ## Join (10M rows)
 
 | query | LP cold (ms) | LP hot (ms) | PL hot (ms) | hotx |
 |---|---|---|---|---|
-| q1: inner join small on id1 | 312 | 153 | 86 | 0.56 |
-| q2: inner join medium on id2 | 192 | 175 | 244 | **1.40** |
-| q3: left join medium on id2 | 206 | 178 | 60 | 0.34 |
-| q4: inner join medium on id5 (str key) | 912 | 857 | 217 | 0.25 |
-| q5: inner join big on id3 (10M×10M) | 710 | 733 | 646 | 0.88 |
+| q1: inner join small on id1 | 366 | 157 | 204 | **1.30** |
+| q2: inner join medium on id2 | 186 | 172 | 93 | 0.54 |
+| q3: left join medium on id2 | 179 | 180 | 60 | 0.33 |
+| q4: inner join medium on id5 (str key) | 879 | 805 | 111 | 0.14 |
+| q5: inner join big on id3 (10M×10M) | 804 | 826 | 708 | 0.86 |
+
+> **Note on join variance.** Our join times (LP) are stable run-to-run, but
+> Polars' join times swing substantially (e.g. q2 PL has been measured from
+> ~90 to ~290 ms across runs), so the join `hotx` ratios are noisy — q1/q2 in
+> particular flip between win and loss between runs. The stable signal: int-key
+> joins are roughly at parity, the 10M×10M build (q5) is ~0.86x, and the
+> string-key (q4) and left (q3) joins are genuine losses to Polars' parallel
+> hash join.
 
 > **Update (pd.merge join path).** Joins previously ran the custom indexer hash
 > join or, under `order="relaxed"`, Arrow/acero. Both were slower than just
@@ -86,10 +95,11 @@ is exceptionally fast at ~60 ms).** Both survive warm-up, so they are genuine.
    acero init. No engine change was needed here — only the benchmark's timing.
 2. **Numeric-key group-by routing — landed.** q4/q5 reach the acero path
    (`groupby_prefers_arrow`); q4 was 0.06x before that fix.
-3. **Joins — much improved via the pd.merge path** (0.15–0.58x → 0.25–1.40x);
-   q2 now wins, q5 near-parity. Remaining: string-key join (q4 0.25x) and
-   left join (q3 0.34x).
-4. **q10** (group by 6 cols, ~10M groups) is the one slow group-by (0.52x).
+3. **Joins — much improved via the pd.merge path** (was 0.15–0.58x). Now
+   roughly at parity on int-key joins (run-to-run noisy — see the join
+   variance note); genuine remaining losses are the string-key join (q4) and
+   the left join (q3) to Polars' parallel hash join.
+4. **q10** (group by 6 cols, ~10M groups) is the one slow group-by (0.57x).
 5. **q7 (agg arithmetic) and q9 (corr) — landed** via post-aggregation
    projection; both beat Polars.
 6. **q6 (grouped median) — now supported** (exact, NumPy `groupby_median`
@@ -118,7 +128,7 @@ is exceptionally fast at ~60 ms).** Both survive warm-up, so they are genuine.
    not help.** Our multi-key arrow path is already 1731 ms (6x faster than a
    raw single `pa.Table.group_by` on 6 keys at 11 s, and faster than every
    partitioned-acero variant: ×16 parallel 1923 ms, full split+agg+concat
-   4077 ms). The 0.66x residual vs Polars is its structural radix-partitioned
+   4077 ms). The ~0.57x residual vs Polars is its structural radix-partitioned
    contiguous-group-state aggregate engine, not reachable via Python-level
    partitioning. Left as-is.
 8. ~~Grouped top-k (q8)~~ — **done** via `sort → group_by().head(k)`

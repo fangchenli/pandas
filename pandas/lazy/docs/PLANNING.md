@@ -101,11 +101,12 @@ the physical node:
 | `Project` | `PhysicalProject` | parallel expression evaluation above threshold |
 | `Filter` | `PhysicalFilter` | — (backend chosen at runtime, see below) |
 | `Aggregate` | `PhysicalHashAggregate` | input wrapped in `PhysicalMaterialize` |
-| `Sort` | `PhysicalSort` | input materialized; quicksort default |
+| `Sort` | `PhysicalSort` | input materialized; Cython radix argsort/lexsort for numeric & factorized-string keys, Arrow/`np.lexsort` fallback |
 | `TopK` (from optimizer) | `PhysicalTopK` | partial-sort selection |
 | `Limit` | `PhysicalLimit` | streaming early termination (`head`); `tail` non-streaming |
 | `Distinct` | `PhysicalDistinct` | input materialized |
-| `Join` | `PhysicalHashJoin` | both sides materialized; left/right row estimates attached for build-side choice |
+| `GroupByHead` | `PhysicalGroupByHead` | group-wise head (first n rows per group); with a preceding `Sort` gives top-k per group |
+| `Join` | `PhysicalHashJoin` | both sides materialized; in-memory equi-joins route to `pd.merge` (primary), with acero / indexer / size-triggered Grace as fallbacks; left/right row estimates attached for build-side choice |
 | `Convert` (from optimizer) | `PhysicalConvert` | backend conversion point |
 | `Concat` | `PhysicalConcat` | sequential batch streaming across inputs |
 | `SetIndex`/`ResetIndex` | `PhysicalSetIndex`/`PhysicalResetIndex` | sets `user_set_index` semantics |
@@ -176,13 +177,19 @@ join row estimates.
 [THRESHOLDS.md](THRESHOLDS.md)):
 
 - Filter backend: Arrow vs NumPy by row count (`filter_arrow_threshold`)
-- GroupBy backend: Arrow vs pandas-Cython by rows/cardinality thresholds
-- Hash join build side: smaller side by estimate, re-checked against
-  actual materialized sizes
-- Grace hash join: only when a `spill_manager` is present; after
-  partitioning, **skew statistics are inspected and the join falls back to
-  `PhysicalSortMergeJoin`** when partitions are pathological (high skew
-  ratio or a partition exceeding the memory budget)
+- GroupBy backend: `groupby_prefers_arrow` — Arrow/acero when every aggregation
+  has an Arrow kernel **and** (a relevant column is Arrow-backed **or** all
+  relevant columns are numeric); `median` (no Arrow kernel) forces the exact
+  NumPy path. Row/cardinality thresholds are a secondary factor.
+- Join strategy: in-memory equi-joins use `pd.merge` (eager-correct, fastest);
+  acero for order-free sinks; the indexer hash join for index-observing joins
+  (build on the smaller side by estimate, re-checked against materialized
+  sizes)
+- Grace hash join: **size-triggered** — only when a `spill_manager` is present
+  *and* the materialized inputs exceed the operator budget (small joins with
+  spill enabled still take `pd.merge`). After partitioning, **skew statistics
+  are inspected and the join falls back to sort-merge** when partitions are
+  pathological (high skew ratio or a partition exceeding the budget)
 - Expression parallelism: thread pool only above `parallel_expr_threshold`
 - NumExpr fusion of arithmetic subtrees by array size
 

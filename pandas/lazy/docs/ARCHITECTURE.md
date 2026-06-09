@@ -140,17 +140,27 @@ operands when needed. It integrates:
 
 ## Joins
 
-`PhysicalHashJoin` implements:
+`PhysicalHashJoin` chooses a strategy after materializing both sides:
 
-- **Build/probe selection** — for inner joins the hash table is built on the
-  smaller side; left/right joins fix the build side by semantics.
-- **Semi/anti joins** — Arrow uses native `left semi`/`left anti` join types;
-  NumPy uses the pandas Cython `hashtable.ismember` for O(n+m).
-- **Grace hash join** — when inputs exceed the memory budget, both sides are
-  hash-partitioned and spilled, then partition pairs are joined in memory.
-- **Sort-merge fallback** — runtime adaptation: pathological partitioning
-  (heavy key skew) falls back to sort-merge
-  (`physical.py:_execute_sort_merge_fallback`).
+- **`pd.merge` (primary, in-memory equi-joins)** — the default path
+  (`_execute_pandas_merge`). `pd.merge` *is* the eager-pandas join semantics
+  this engine promises to match, so it is row-order- and null-correct by
+  construction, and it is the fastest path measured (it beats both the custom
+  indexer hash join and Arrow/acero — see `benchmarks/H2O_BENCHMARK.md`). Used
+  whenever the index is not observed downstream.
+- **acero hash join** — for joins feeding an order-free sink (or under
+  `collect(order="relaxed")`) with acero-safe keys; an internally-parallel
+  fallback, now rarely faster than `pd.merge` for in-memory data.
+- **Indexer hash join** — the build/probe path (build on the smaller side;
+  left/right fix the build side; semi/anti via pandas Cython
+  `hashtable.ismember`). Kept for index-observing joins (preserves the left
+  index).
+- **Grace hash join (size-triggered, out-of-core)** — used *only* when
+  spilling is enabled **and** the materialized inputs exceed the operator
+  budget; small joins with spill enabled still take the fast `pd.merge` path.
+  Both sides are hash-partitioned and spilled, partition pairs joined in
+  memory (each pair itself via `pd.merge`), with a **sort-merge fallback**
+  on pathological skew (`physical.py:_execute_sort_merge_fallback`).
 - **Parallel side execution** — left and right subplans execute concurrently.
 
 ### Join Column Disambiguation

@@ -18,7 +18,7 @@ with a single integration point (`DataFrame.select()`) and everything else
 isolated under a new `pandas.lazy` module.
 
 The prototype is complete enough to evaluate the design: ~30k lines of
-implementation, ~1,575 tests (including an eager↔physical equivalence
+implementation, ~1,650 tests (including an eager↔physical equivalence
 suite), and an honest benchmark story — 2–10x wins over eager pandas on
 pipelines, ahead of Polars in three categories (string transforms 2.1×,
 aggregation 1.2×, glob scans 1.6×) and within 0.2–0.9x elsewhere, with
@@ -210,7 +210,7 @@ What works today (each backed by tests):
 | Out-of-core | `SpillConfig` — Arrow IPC spill files, external sort, grace hash join |
 | File scans | Parquet (predicate incl. row-group stats + projection pushdown), CSV; glob + fsspec URLs |
 | Index contract | Default RangeIndex / `preserve_index=True`, identical between engines |
-| Tests | 1,531 in `pandas/tests/lazy`, incl. eager↔physical equivalence suite (12 query shapes × index modes) and NaN-semantics regression coverage |
+| Tests | ~1,650 in `pandas/tests/lazy`, incl. eager↔physical equivalence suite (12 query shapes × index modes) and NaN-semantics regression coverage |
 
 Honest numbers (Apple Silicon; details in
 [`../benchmarks/`](../benchmarks/README.md)):
@@ -232,6 +232,13 @@ Honest numbers (Apple Silicon; details in
   documented price of eager `pd.merge` row-order semantics) 0.22×,
   filter+project 0.23×. In-memory `head()` remains Polars' best case
   (µs vs our ~300 µs of plan construction).
+  - **Update (the figures above are the older custom microbenchmark; the
+    authoritative cross-engine standing is now the H2O db-benchmark,
+    `../benchmarks/H2O_BENCHMARK.md`):** all 10 H2O group-by and all 5 join
+    queries run; lazy pandas beats Polars on **6 of 10 group-by** queries
+    (string-key sums up to ~7×, `corr` ~3×, agg-arithmetic ~2×). The
+    "joins 0.22×" figure is superseded — joins now route to `pd.merge` and
+    int-key joins are ~parity; string-key/left joins remain the genuine loss.
 
 These numbers are the product of two distinct development phases, both
 fully documented:

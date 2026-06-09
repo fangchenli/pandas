@@ -17,7 +17,8 @@ This document describes which operations use which backend (Arrow, NumPy, or pan
 | `PhysicalTopK` | Arrow/NumPy kernel | Full sort | Uses `select_k_unstable` kernel |
 | `PhysicalLimit` | Direct slicing | N/A | No kernel needed |
 | `PhysicalDistinct` | Arrow/NumPy kernel | `np.unique` | Uses `unique_indices` kernel |
-| `PhysicalHashJoin` | Arrow/NumPy kernel | `pd.merge` | Uses `hash_join` kernel |
+| `PhysicalGroupByHead` | pandas `groupby().head(n)` | — | Group-wise head; with a preceding sort gives top-k rows per group |
+| `PhysicalHashJoin` | **`pd.merge` (in-memory equi-joins)** | Arrow/NumPy `hash_join`, Grace (size-triggered) | `pd.merge` is primary (eager semantics, fastest); acero/indexer/Grace are fallbacks |
 | `PhysicalConvert` | Direct conversion | N/A | Backend conversion |
 
 ## Kernel Categories
@@ -106,6 +107,7 @@ This document describes which operations use which backend (Arrow, NumPy, or pan
 | `groupby_count` | `np.bincount` | `pa.Table.group_by` | Equivalent |
 | `groupby_std` | Two-pass algorithm | `pa.Table.group_by` | Equivalent |
 | `groupby_var` | Two-pass algorithm | `pa.Table.group_by` | Equivalent |
+| `groupby_median` | pandas grouped median | *(no Arrow kernel)* | Exact; forces the NumPy path (Arrow has only approximate t-digest) |
 | `groupby_first` | Index-based | `pa.Table.group_by` | Equivalent |
 | `groupby_last` | Index-based | `pa.Table.group_by` | Equivalent |
 
@@ -149,7 +151,7 @@ This document describes which operations use which backend (Arrow, NumPy, or pan
 
 | Kernel | NumPy | Arrow | Performance Notes |
 |--------|-------|-------|-------------------|
-| `hash_join` | Factorize-based | `pa.Table.join` | 93-98% of pandas |
+| `hash_join` | Factorize-based | `pa.Table.join` | Fallback only — the primary in-memory path is `pd.merge` (see below) |
 | `inner_join` | Via hash_join | Via hash_join | Equivalent |
 | `left_join` | Via hash_join | Via hash_join | Equivalent |
 | `right_join` | Via hash_join | Via hash_join | Equivalent |
@@ -204,8 +206,13 @@ These operations follow the input data format:
 - Logical: `and_`, `or_`, `invert`
 - Aggregations: `sum`, `mean`, `min`, `max`, etc.
 
-### NumPy-Preferred Operations
-Currently none forced to NumPy.
+### Backend routing for group-by
+`groupby_prefers_arrow` routes a hash aggregation to Arrow/acero when every
+aggregation has an Arrow groupby kernel **and** (a relevant column is
+Arrow-backed **or** all relevant columns are numeric). So numeric-keyed
+group-by goes to acero (NumPy→Arrow numeric conversion is zero-copy), not the
+pandas NumPy path. The exception is `median`, which has no Arrow kernel and is
+therefore forced to the exact NumPy `groupby_median`.
 
 ### Bottleneck-Accelerated Operations
 When Bottleneck is installed (`pip install bottleneck`) and enabled:
@@ -214,19 +221,24 @@ When Bottleneck is installed (`pip install bottleneck`) and enabled:
 
 ## Performance Summary
 
-### Where Lazy Pandas Wins
-1. **String operations on Arrow data**: 2-10x faster than pandas
-2. **Filter pushdown**: Reduces data before expensive operations
-3. **Projection pruning**: Only computes needed columns
-4. **TopK optimization**: O(n log k) vs O(n log n) for small k
-5. **Cumulative operations**: Competitive with pandas
+Standings below are vs **Polars** on the H2O db-benchmark
+(`benchmarks/H2O_BENCHMARK.md`) unless noted vs pandas.
 
-### Where Lazy Pandas is Competitive (90-100%)
-1. **Joins**: 93-98% of pandas merge speed
+### Where Lazy Pandas Wins (vs Polars)
+1. **Sort (numeric)**: radix argsort, faster than Polars `arg_sort`
+2. **Group-by**: 6 of 10 H2O queries beat Polars (string-key sums up to ~7x,
+   `corr` ~3x, agg-arithmetic ~2x)
+3. **String operations on Arrow data**: faster than pandas
+4. **Filter pushdown / projection pruning**: reduces work before expensive ops
+5. **TopK optimization**: O(n log k) vs O(n log n) for small k
+
+### Where Lazy Pandas is Competitive
+1. **Joins**: route to `pd.merge` (≈ pandas merge speed by construction);
+   vs Polars 0.14–1.30x on H2O depending on shape (Polars' parallel hash join
+   wins on string-key/left joins)
 2. **Rolling operations (with Bottleneck)**: ~100% of pandas Cython
-3. **Arithmetic/comparison**: Equivalent to pandas
-4. **Sort operations**: Equivalent to pandas
-5. **Fill operations (with Bottleneck)**: ~100% of pandas
+3. **Arithmetic/comparison**: equivalent to pandas
+4. **Fill operations (with Bottleneck)**: ~100% of pandas
 
 ### Where Lazy Pandas is Slower (NumPy fallback only)
 Without Bottleneck installed:

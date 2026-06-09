@@ -52,6 +52,13 @@ pd.set_option("compute.lazy.adaptive_thresholds", True)
 | `compute.lazy.groupby_arrow_row_threshold` | 100,000 | int | Row count above which Arrow groupby is preferred |
 | `compute.lazy.groupby_arrow_cardinality_threshold` | 100 | int | Group count above which Arrow groupby is preferred |
 | `compute.lazy.arrow_majority_fraction` | 0.5 | float | Fraction of Arrow columns needed to prefer Arrow backend |
+| `compute.lazy.morsel_size` | 131,072 | int or None | Morsel (batch) size for pipeline execution; `None` uses the cost-model default (`MORSEL_SIZE`) |
+
+> The engine cost constants that are **not** option-backed (`MIN_PARALLEL_ROWS`,
+> `MAX_WORKERS`, `PARALLEL_SORT_MIN_ROWS`, `PARALLEL_TAKE_MIN_ROWS`,
+> `ARROW_MULTIKEY_SORT_MIN_ROWS`, `MIN_ENCODE_ROWS`, …) live in
+> `pandas/lazy/cost.py` with measured provenance; change them there, not via
+> options.
 
 ### Parallelization Thresholds
 

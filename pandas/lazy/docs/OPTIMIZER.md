@@ -19,29 +19,35 @@ Defined in `optimize/base.py`; implementations in `optimize/passes.py` and
 |---|------|--------|
 | 1 | `ConstantFolding` | Evaluate constant subexpressions at plan time (`2 + 3` → `5`) |
 | 2 | `ExpressionSimplification` | Algebraic identities: `x*1→x`, `x+0→x`, De Morgan's laws, self-cancellation (`x-x→0`, `x==x→True`), idempotence (`x&x→x`) |
-| 3 | `DeadCodeElimination` | Remove no-op nodes: `Filter(True)`, identity projections |
-| 4 | `FilterFusion` | `Filter(p1, Filter(p2, X))` → `Filter(p1 AND p2, X)` |
-| 5 | `PredicatePushdown` | Move filters toward sources (through Project/Join/Concat/file sources) |
-| 6 | `AggregatePushdown` | Push aggregates through pass-through projects |
-| 7 | `ProjectionPruning` | Drop columns not needed downstream; push column selection into file scans |
-| 8 | `LimitPushdown` | Push `Limit` through `Project`; merge consecutive limits |
-| 9 | `SortLimitToTopK` | Sort+Limit → TopK: O(n log k) instead of O(n log n) |
-| 10 | `EngineSelection` | Analyze backend requirements; insert explicit `Convert` nodes |
-| 11 | `ConversionElimination` | Remove redundant `Convert` nodes |
+| 3 | `FilterFusion` | `Filter(p1, Filter(p2, X))` → `Filter(p1 AND p2, X)` |
+| 4 | `PredicatePushdown` | Move filters toward sources (through Project/Join/Concat/file sources) |
+| 5 | `AggregatePushdown` | Push aggregates through pass-through projects |
+| 6 | `ProjectionPruning` | Drop columns not needed downstream; push column selection into file scans |
+| 7 | `LimitPushdown` | Push `Limit` through `Project`; merge consecutive limits |
+| 8 | `SortLimitToTopK` | Sort+Limit → TopK: O(n log k) instead of O(n log n) |
+| 9 | `CommonSubexpressionElimination` | Deduplicate repeated subexpressions (folding/simplification first maximize exact matches) |
+| 10 | `DeadCodeElimination` | Remove no-op nodes: `Filter(True)`, identity projections (incl. those CSE/pruning leave behind) |
+| 11 | `EngineSelection` | Analyze backend requirements; insert explicit `Convert` nodes |
+| 12 | `ConversionElimination` | Remove redundant `Convert` nodes |
 
-`CommonSubexpressionElimination` is available but not in the default
-pipeline (enable explicitly).
+All 12 are in the default pipeline (`Optimizer._default_passes`).
 
 ### Why This Order
 
 ```
-FilterFusion         before pushdown: a single fused filter is easier to push
-PredicatePushdown    before pruning: filters may reference columns that
-                     pruning would otherwise remove
-ProjectionPruning    after pushdown: filter columns are now in final position
-LimitPushdown        after pruning: fewer columns flow through limits
-EngineSelection      last on the logical plan: all operation movement is done,
-                     so backend decisions are final
+ConstantFolding /     first: maximize literals and shrink the tree so later
+ExpressionSimplif.    passes see the simplest form
+FilterFusion          before pushdown: a single fused filter is easier to push
+PredicatePushdown     before pruning: filters may reference columns that
+                      pruning would otherwise remove
+ProjectionPruning     after pushdown: filter columns are now in final position
+LimitPushdown         after pruning: fewer columns flow through limits
+CSE                   late: folding/simplification have maximized exact-match
+                      subexpressions, so dedup catches the most
+DeadCodeElimination   after CSE: removes identity/no-op nodes CSE and pruning
+                      leave behind
+EngineSelection       last on the logical plan: all operation movement is done,
+                      so backend decisions are final
 ConversionElimination cleanup of the converts EngineSelection inserted
 ```
 

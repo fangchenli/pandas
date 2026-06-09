@@ -8,16 +8,21 @@ landed). Dated performance reports live in `../benchmarks/`.
 
 ## Competitive Standing (vs Polars, June 2026 — engine era)
 
-From `../benchmarks/LAZY_VS_POLARS_BENCHMARK.md` (1M–10M rows, mixed-dtype
-data, Apple Silicon; physical engine). Speedup > 1.0 = lazy pandas faster.
+Two benchmarks: the **H2O db-benchmark** (`../benchmarks/H2O_BENCHMARK.md`) is
+the authoritative cross-engine standard (group-by + join, same harness as
+Polars/DuckDB) — there lazy pandas now **supports all 10 group-by and all 5
+join queries and beats Polars on 6 group-by queries**; int-key joins are
+roughly at parity (run-to-run noisy) with string-key/left joins the genuine
+remaining losses. The table below is from the custom `LAZY_VS_POLARS_BENCHMARK.md`
+microbenchmark (1M–10M rows, mixed-dtype, Apple Silicon). Speedup > 1.0 = lazy
+pandas faster.
 
 | Category | Standing | Driver |
 |----------|----------|--------|
 | string | **2.07x avg — wins** (`str.lower` 4.38x, `contains` 1.71x) | pass-through fix + compute-bound morsel parallelism |
-| aggregation | **1.17x avg — wins** (multi-agg 3.47x, groupby-sum 1.02x @10M) | groupby routing + dictionary-encoding cache (warm from 2nd query) |
+| aggregation | **wins** (H2O group-by: 6/10 beat Polars, string-key sums up to ~7x, `corr` ~3x) | `groupby_prefers_arrow` routing (numeric + arrow-string → acero) + post-aggregation projection |
 | parquet scan | 0.86x avg — glob `head()` **wins 1.55x** (6.7 ms vs 10.3) | limit pushdown into scans + direct ParquetFile path + vectorized index |
-| join (order-preserving) | 0.42x default; **0.89x with `order="relaxed"`** | eager `pd.merge` row order by default; `collect(order="relaxed")` routes to acero |
-| join→groupby composite | 0.58x | acero routing for order-free joins |
+| join | **`pd.merge` path** — int-key joins ~parity (noisy); string-key (H2O q4) and left (q3) joins lag Polars' parallel hash join — see H2O_BENCHMARK.md | `pd.merge` is the in-memory equi-join path (eager-correct, fastest); acero/Grace fallbacks |
 | sort | numeric ~0.9x (argsort beats Polars); string-key multi-sort 0.46→0.88x; full mixed sort gather-bound | radix argsort + radix lexsort (numeric & factorized string keys) + breaker copy-free output; string payload gather is the wall |
 | category-key groupby | 0.43x vs Polars-categorical | zero-copy dictionary flow (was 313 ms, now 21) |
 | full-scan select+filter | ~0.37x (21 ms) | vectorized index column (was 104 ms) |
@@ -107,14 +112,16 @@ competitive-standing table.
 ### API gaps vs Polars LazyFrame
 
 The basic manipulation verbs are landed (`rename`, `drop`, `drop_nulls`,
-`fill_null`, `cast`, `pipe`, frame aggregations, `unpivot`/`melt`). Remaining,
-roughly by value:
+`fill_null`, `cast`, `pipe`, frame aggregations, `unpivot`/`melt`); group-by
+also has `agg` with arithmetic-over-aggregates + `corr`, and `head(n)` /
+grouped top-k (`GroupByHead`). Remaining, roughly by value:
 
 - **Time-series** — `join_asof` (as-of/nearest join), `group_by_dynamic`,
   `rolling` (time-windowed aggregation). The biggest area; a project on its
   own.
-- **Row ops** — `top_k`/`bottom_k`, `reverse`, `slice`, `gather`,
-  `gather_every` (mostly sort/limit reuse).
+- **Row ops** — frame-level `top_k`/`bottom_k`, `reverse`, `slice`, `gather`,
+  `gather_every` (mostly sort/limit reuse; grouped top-k already exists via
+  `sort → group_by().head(k)`).
 - **Reshape** — `pivot` (output schema is *data-dependent*, so it needs
   materialization — awkward in a lazy plan), `explode`/`unnest` (nested
   dtypes).
