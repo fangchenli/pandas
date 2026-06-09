@@ -162,6 +162,13 @@ roughly by value:
 
 Newest first. Detail in the git log and the docs above.
 
+- **H2O db-benchmark + numeric-key group-by routing** — added a faithful port
+  of the H2O.ai db-benchmark (`benchmarks/bench_h2o.py`, group-by + join vs
+  Polars; see `docs/BENCHMARK_SUITES.md`). It immediately exposed that
+  integer-keyed aggregation ran the slow pandas NumPy path (q4 0.06x vs
+  Polars). Fixed by routing numeric-keyed aggregation to acero
+  (`groupby_prefers_arrow`): **q4 226→19 ms (0.06x→0.68x), q5 0.76x→1.16x**.
+  Remaining group-by gap is string keys (NumPy; object→Arrow not zero-copy).
 - **Core frame verbs** — `rename`, `drop`, `drop_nulls`, `fill_null`, `cast`,
   `pipe`, frame aggregations (`sum`/`mean`/`min`/`max`/`std`/`var`/`median`/
   `count` → one-row frame), and `unpivot`/`melt`, closing the most visible
