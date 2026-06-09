@@ -595,6 +595,230 @@ def pl_q2(t):
     )
 
 
+# --- Q13: Customer Distribution (LEFT join + count distribution) -----------
+def lp_q13(t):
+    o = _lp(t["orders"]).filter(~col("o_comment").str.contains("special.*requests"))
+    c_orders = (
+        _lp(t["customer"])
+        .join(o, left_on="c_custkey", right_on="o_custkey", how="left")
+        .group_by("c_custkey")
+        .agg(col("o_orderkey").count().alias("c_count"))
+    )
+    return (
+        c_orders.group_by("c_count")
+        .agg(col("c_custkey").count().alias("custdist"))
+        .sort("custdist", "c_count", descending=[True, True])
+    )
+
+
+def pl_q13(t):
+    o = (
+        t["orders"]
+        .lazy()
+        .filter(~pl.col("o_comment").str.contains("special.*requests"))
+    )
+    c_orders = (
+        t["customer"]
+        .lazy()
+        .join(o, left_on="c_custkey", right_on="o_custkey", how="left")
+        .group_by("c_custkey")
+        .agg(pl.col("o_orderkey").count().alias("c_count"))
+    )
+    return (
+        c_orders.group_by("c_count")
+        .agg(pl.len().alias("custdist"))
+        .sort(["custdist", "c_count"], descending=[True, True])
+        .collect()
+    )
+
+
+# --- Q16: Parts/Supplier Relationship (count distinct + anti-join) ---------
+def lp_q16(t):
+    bad = (
+        _lp(t["supplier"])
+        .filter(col("s_comment").str.contains("Customer.*Complaints"))
+        .select(col("s_suppkey"))
+        .distinct()
+    )
+    p = _lp(t["part"]).filter(
+        (col("p_brand") != "Brand#45")
+        & ~col("p_type").str.startswith("MEDIUM POLISHED")
+        & col("p_size").isin([49, 14, 23, 45, 19, 3, 36, 9])
+    )
+    return (
+        _lp(t["partsupp"])
+        .join(p, left_on="ps_partkey", right_on="p_partkey")
+        .join(bad, left_on="ps_suppkey", right_on="s_suppkey", how="left")
+        .filter(col("s_suppkey").is_null())
+        .group_by("p_brand", "p_type", "p_size")
+        .agg(col("ps_suppkey").n_unique().alias("supplier_cnt"))
+        .sort(
+            "supplier_cnt",
+            "p_brand",
+            "p_type",
+            "p_size",
+            descending=[True, False, False, False],
+        )
+    )
+
+
+def pl_q16(t):
+    bad = (
+        t["supplier"]
+        .lazy()
+        .filter(pl.col("s_comment").str.contains("Customer.*Complaints"))
+        .select("s_suppkey")
+    )
+    p = (
+        t["part"]
+        .lazy()
+        .filter(
+            (pl.col("p_brand") != "Brand#45")
+            & ~pl.col("p_type").str.starts_with("MEDIUM POLISHED")
+            & pl.col("p_size").is_in([49, 14, 23, 45, 19, 3, 36, 9])
+        )
+    )
+    return (
+        t["partsupp"]
+        .lazy()
+        .join(p, left_on="ps_partkey", right_on="p_partkey")
+        .join(bad, left_on="ps_suppkey", right_on="s_suppkey", how="anti")
+        .group_by("p_brand", "p_type", "p_size")
+        .agg(pl.col("ps_suppkey").n_unique().alias("supplier_cnt"))
+        .sort(
+            ["supplier_cnt", "p_brand", "p_type", "p_size"],
+            descending=[True, False, False, False],
+        )
+        .collect()
+    )
+
+
+# --- Q18: Large Volume Customer (HAVING via group-filter + semi-join) ------
+def lp_q18(t):
+    big = (
+        _lp(t["lineitem"])
+        .group_by("l_orderkey")
+        .agg(col("l_quantity").sum().alias("sumq"))
+        .filter(col("sumq") > 300)
+        .select(col("l_orderkey").alias("big_orderkey"))
+    )
+    return (
+        _lp(t["customer"])
+        .join(_lp(t["orders"]), left_on="c_custkey", right_on="o_custkey")
+        .join(big, left_on="o_orderkey", right_on="big_orderkey")
+        .join(_lp(t["lineitem"]), left_on="o_orderkey", right_on="l_orderkey")
+        .group_by("c_name", "c_custkey", "o_orderkey", "o_orderdate", "o_totalprice")
+        .agg(col("l_quantity").sum().alias("sum_qty"))
+        .sort("o_totalprice", "o_orderdate", descending=[True, False])
+        .limit(100)
+    )
+
+
+def pl_q18(t):
+    big = (
+        t["lineitem"]
+        .lazy()
+        .group_by("l_orderkey")
+        .agg(pl.col("l_quantity").sum().alias("sumq"))
+        .filter(pl.col("sumq") > 300)
+        .select(pl.col("l_orderkey").alias("big_orderkey"))
+    )
+    return (
+        t["customer"]
+        .lazy()
+        .join(t["orders"].lazy(), left_on="c_custkey", right_on="o_custkey")
+        .join(big, left_on="o_orderkey", right_on="big_orderkey")
+        .join(t["lineitem"].lazy(), left_on="o_orderkey", right_on="l_orderkey")
+        .group_by("c_name", "c_custkey", "o_orderkey", "o_orderdate", "o_totalprice")
+        .agg(pl.col("l_quantity").sum().alias("sum_qty"))
+        .sort(["o_totalprice", "o_orderdate"], descending=[True, False])
+        .limit(100)
+        .collect()
+    )
+
+
+# --- Q19: Discounted Revenue (large OR of conjunctions, global sum) --------
+def lp_q19(t):
+    j = _lp(t["lineitem"]).join(
+        _lp(t["part"]), left_on="l_partkey", right_on="p_partkey"
+    )
+    common = col("l_shipmode").isin(["AIR", "AIR REG"]) & (
+        col("l_shipinstruct") == "DELIVER IN PERSON"
+    )
+    c1 = (
+        (col("p_brand") == "Brand#12")
+        & col("p_container").isin(["SM CASE", "SM BOX", "SM PACK", "SM PKG"])
+        & (col("l_quantity") >= 1)
+        & (col("l_quantity") <= 11)
+        & (col("p_size") >= 1)
+        & (col("p_size") <= 5)
+    )
+    c2 = (
+        (col("p_brand") == "Brand#23")
+        & col("p_container").isin(["MED BAG", "MED BOX", "MED PKG", "MED PACK"])
+        & (col("l_quantity") >= 10)
+        & (col("l_quantity") <= 20)
+        & (col("p_size") >= 1)
+        & (col("p_size") <= 10)
+    )
+    c3 = (
+        (col("p_brand") == "Brand#34")
+        & col("p_container").isin(["LG CASE", "LG BOX", "LG PACK", "LG PKG"])
+        & (col("l_quantity") >= 20)
+        & (col("l_quantity") <= 30)
+        & (col("p_size") >= 1)
+        & (col("p_size") <= 15)
+    )
+    return (
+        j.filter((c1 | c2 | c3) & common)
+        .select((col("l_extendedprice") * (1 - col("l_discount"))).alias("revenue"))
+        .sum()
+    )
+
+
+def pl_q19(t):
+    j = (
+        t["lineitem"]
+        .lazy()
+        .join(t["part"].lazy(), left_on="l_partkey", right_on="p_partkey")
+    )
+    common = pl.col("l_shipmode").is_in(["AIR", "AIR REG"]) & (
+        pl.col("l_shipinstruct") == "DELIVER IN PERSON"
+    )
+    c1 = (
+        (pl.col("p_brand") == "Brand#12")
+        & pl.col("p_container").is_in(["SM CASE", "SM BOX", "SM PACK", "SM PKG"])
+        & (pl.col("l_quantity") >= 1)
+        & (pl.col("l_quantity") <= 11)
+        & (pl.col("p_size") >= 1)
+        & (pl.col("p_size") <= 5)
+    )
+    c2 = (
+        (pl.col("p_brand") == "Brand#23")
+        & pl.col("p_container").is_in(["MED BAG", "MED BOX", "MED PKG", "MED PACK"])
+        & (pl.col("l_quantity") >= 10)
+        & (pl.col("l_quantity") <= 20)
+        & (pl.col("p_size") >= 1)
+        & (pl.col("p_size") <= 10)
+    )
+    c3 = (
+        (pl.col("p_brand") == "Brand#34")
+        & pl.col("p_container").is_in(["LG CASE", "LG BOX", "LG PACK", "LG PKG"])
+        & (pl.col("l_quantity") >= 20)
+        & (pl.col("l_quantity") <= 30)
+        & (pl.col("p_size") >= 1)
+        & (pl.col("p_size") <= 15)
+    )
+    return (
+        j.filter((c1 | c2 | c3) & common)
+        .select(
+            (pl.col("l_extendedprice") * (1 - pl.col("l_discount"))).alias("revenue")
+        )
+        .sum()
+        .collect()
+    )
+
+
 QUERIES = {
     1: (lp_q1, pl_q1),
     2: (lp_q2, pl_q2),
@@ -604,8 +828,12 @@ QUERIES = {
     6: (lp_q6, pl_q6),
     10: (lp_q10, pl_q10),
     12: (lp_q12, pl_q12),
+    13: (lp_q13, pl_q13),
     14: (lp_q14, pl_q14),
+    16: (lp_q16, pl_q16),
     17: (lp_q17, pl_q17),
+    18: (lp_q18, pl_q18),
+    19: (lp_q19, pl_q19),
 }
 
 
