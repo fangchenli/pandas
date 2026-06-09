@@ -35,22 +35,83 @@ from typing import (
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    import numpy as np
-
     from pandas import DataFrame
-    from pandas.lazy.backends.spill import (
-        SpillConfig,
-        SpillManager,
-    )
-    from pandas.lazy.backends.types import ArrayDict
-    from pandas.lazy.expr import Expr
-    from pandas.lazy.plan import LogicalPlan
     from pandas.lazy.types import Schema
 
 
 # =============================================================================
 # Helper Functions
 # =============================================================================
+
+
+import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.dataset as ds
+import pyarrow.parquet as pq
+
+from pandas.lazy.backends import (
+    dispatch_kernel,
+    has_kernel,
+)
+from pandas.lazy.backends.array_eval import ArrayEvaluator
+from pandas.lazy.backends.convert import (
+    arrays_to_dataframe,
+    dataframe_to_arrays,
+    ensure_backend,
+    extract_array,
+    get_array_backend,
+    to_arrow,
+)
+from pandas.lazy.backends.memory_pool import PoolingStrategy
+from pandas.lazy.backends.numpy.core import radix_lexsort
+from pandas.lazy.backends.spill import (
+    ExternalSorter,
+    GraceHashJoiner,
+    SpillConfig,
+    SpillManager,
+    get_arrays_bytes,
+)
+from pandas.lazy.backends.types import (
+    INDEX_COL_NAME,
+    ArrayDict,
+    index_col_name,
+    is_index_col,
+)
+from pandas.lazy.cost import (
+    ARROW_MULTIKEY_SORT_MIN_ROWS,
+    PARALLEL_TAKE_MIN_ROWS,
+)
+from pandas.lazy.expr import (
+    Expr,
+    extract_output_name,
+)
+from pandas.lazy.ir import (
+    Alias,
+    Call,
+    FieldRef,
+)
+from pandas.lazy.ir import (
+    Literal as IRLiteral,  # distinct from typing.Literal used in annotations
+)
+from pandas.lazy.plan import (
+    Aggregate,
+    Concat,
+    Convert,
+    CSVSource,
+    DataFrameSource,
+    Distinct,
+    Filter,
+    Join,
+    Limit,
+    LogicalPlan,
+    ParquetSource,
+    Project,
+    ResetIndex,
+    SetIndex,
+    Sort,
+    TopK,
+)
 
 
 def _get_ordered_columns(batches: list) -> list[str]:
@@ -342,8 +403,6 @@ class ExecutionContext:
             return self._spill_manager
 
         if self._spill_config is not None and self._spill_config.enabled:
-            from pandas.lazy.backends.spill import SpillManager
-
             self._spill_manager = SpillManager(self._spill_config)
             return self._spill_manager
 
@@ -492,8 +551,6 @@ class PhysicalMaterialize(PhysicalPlan):
         This consumes the entire input (via execute_batches if streaming,
         otherwise via execute) and returns the complete dataset.
         """
-        import numpy as np
-        import pyarrow as pa
 
         # If input doesn't support streaming, just execute directly
         if not self.input.supports_streaming:
@@ -696,12 +753,6 @@ class PhysicalFusedPipeline(PhysicalPlan):
         ArrayDict
             Result after applying all operations.
         """
-        import numpy as np
-        import pyarrow as pa
-
-        from pandas.lazy.backends.array_eval import ArrayEvaluator
-        from pandas.lazy.backends.types import is_index_col
-        from pandas.lazy.expr import extract_output_name
 
         if not input_arrays:
             return {}
@@ -808,7 +859,6 @@ class PhysicalFusedPipeline(PhysicalPlan):
         combine_chunks copy and rebuilt the Arrow mask per column) and
         threshold-gated parallel fan-out across columns.
         """
-        import numpy as np
 
         indices = np.flatnonzero(np.asarray(mask))
         return _take_all_columns(arrays, indices)
@@ -847,8 +897,6 @@ class PhysicalScan(PhysicalPlan):
 
     def execute(self, context: ExecutionContext) -> ArrayDict:
         import pandas as pd
-        from pandas.lazy.backends.convert import extract_array
-        from pandas.lazy.backends.types import index_col_name
 
         arrays: ArrayDict = {}
 
@@ -944,11 +992,6 @@ class PhysicalParquetScan(PhysicalPlan):
         Reads files in order with iter_batches, stopping as soon as the
         limit is satisfied - no Dataset scanner, no fragment readahead.
         """
-        import numpy as np
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-
-        from pandas.lazy.backends.types import INDEX_COL_NAME
 
         file_list = [paths] if isinstance(paths, str) else list(paths)
         columns = list(self.columns) if self.columns else None
@@ -991,10 +1034,6 @@ class PhysicalParquetScan(PhysicalPlan):
         ArrayDict
             Batches of data from the Parquet file(s).
         """
-        import pyarrow as pa
-        import pyarrow.dataset as ds
-
-        from pandas.lazy.backends.types import INDEX_COL_NAME
 
         # Resolve file paths
         paths = self._resolve_paths()
@@ -1054,7 +1093,6 @@ class PhysicalParquetScan(PhysicalPlan):
             # Python range: pa.array(range(...)) iterates one Python int
             # per row - it dominated full-scan time (104 ms for a
             # 2.9M-row file whose raw threaded read costs 9 ms).
-            import numpy as np
 
             arrays[INDEX_COL_NAME] = pa.array(
                 np.arange(row_offset, row_offset + batch_len, dtype=np.int64)
@@ -1079,9 +1117,6 @@ class PhysicalParquetScan(PhysicalPlan):
         all data. Materializes batches from execute_batches() into
         a single ArrayDict.
         """
-        import pyarrow as pa
-
-        from pandas.lazy.backends.types import INDEX_COL_NAME
 
         # Collect all batches
         batches = list(self.execute_batches(context))
@@ -1131,18 +1166,11 @@ class PhysicalParquetScan(PhysicalPlan):
 
     def _ir_to_arrow_expr(self, ir):
         """Convert IR node to PyArrow compute expression."""
-        import pyarrow.compute as pc
-
-        from pandas.lazy.ir import (
-            Call,
-            FieldRef,
-            Literal,
-        )
 
         if isinstance(ir, FieldRef):
             return pc.field(ir.name)
 
-        if isinstance(ir, Literal):
+        if isinstance(ir, IRLiteral):
             return ir.value
 
         if isinstance(ir, Call):
@@ -1215,8 +1243,6 @@ class PhysicalParquetScan(PhysicalPlan):
 
             # isin operator - enables row group filtering on dict/categorical
             elif ir.function == "isin" and len(ir.args) >= 1:
-                import pyarrow as pa
-
                 col = self._ir_to_arrow_expr(ir.args[0])
                 # Values can be in args[1] or kwargs["values"]
                 values = ir.args[1] if len(ir.args) > 1 else ir.kwargs.get("values")
@@ -1237,7 +1263,7 @@ class PhysicalParquetScan(PhysicalPlan):
                 col = self._ir_to_arrow_expr(ir.args[0])
                 prefix_arg = ir.args[1] if len(ir.args) > 1 else ir.kwargs.get("prefix")
                 # Extract value if it's a Literal
-                if isinstance(prefix_arg, Literal):
+                if isinstance(prefix_arg, IRLiteral):
                     prefix = prefix_arg.value
                 else:
                     prefix = prefix_arg
@@ -1248,7 +1274,7 @@ class PhysicalParquetScan(PhysicalPlan):
                 col = self._ir_to_arrow_expr(ir.args[0])
                 suffix_arg = ir.args[1] if len(ir.args) > 1 else ir.kwargs.get("suffix")
                 # Extract value if it's a Literal
-                if isinstance(suffix_arg, Literal):
+                if isinstance(suffix_arg, IRLiteral):
                     suffix = suffix_arg.value
                 else:
                     suffix = suffix_arg
@@ -1261,7 +1287,7 @@ class PhysicalParquetScan(PhysicalPlan):
                     ir.args[1] if len(ir.args) > 1 else ir.kwargs.get("pattern")
                 )
                 # Extract value if it's a Literal
-                if isinstance(pattern_arg, Literal):
+                if isinstance(pattern_arg, IRLiteral):
                     pattern = pattern_arg.value
                 else:
                     pattern = pattern_arg
@@ -1350,10 +1376,7 @@ class PhysicalCSVScan(PhysicalPlan):
         ArrayDict
             Batches of data from the CSV file(s).
         """
-        import pyarrow as pa
         from pyarrow import csv
-
-        from pandas.lazy.backends.types import INDEX_COL_NAME
 
         # Resolve file paths
         paths = self._resolve_paths()
@@ -1439,9 +1462,6 @@ class PhysicalCSVScan(PhysicalPlan):
         all data. Materializes batches from execute_batches() into
         a single ArrayDict.
         """
-        import pyarrow as pa
-
-        from pandas.lazy.backends.types import INDEX_COL_NAME
 
         # Collect all batches
         batches = list(self.execute_batches(context))
@@ -1522,10 +1542,6 @@ class PhysicalProject(PhysicalPlan):
         self, input_arrays: ArrayDict, context: ExecutionContext
     ) -> ArrayDict:
         """Evaluate projection expressions on a single batch."""
-        import numpy as np
-        import pyarrow as pa
-
-        from pandas.lazy.backends.types import is_index_col
 
         result: ArrayDict = {}
 
@@ -1562,9 +1578,6 @@ class PhysicalProject(PhysicalPlan):
         pa,
     ) -> ArrayDict:
         """Evaluate expressions sequentially."""
-        from pandas.lazy.backends.array_eval import ArrayEvaluator
-        from pandas.lazy.backends.memory_pool import PoolingStrategy
-        from pandas.lazy.expr import extract_output_name
 
         evaluator = ArrayEvaluator(
             input_arrays,
@@ -1598,10 +1611,6 @@ class PhysicalProject(PhysicalPlan):
     ) -> ArrayDict:
         """Evaluate expressions in parallel using ThreadPoolExecutor."""
         from concurrent.futures import ThreadPoolExecutor
-
-        from pandas.lazy.backends.array_eval import ArrayEvaluator
-        from pandas.lazy.backends.memory_pool import PoolingStrategy
-        from pandas.lazy.expr import extract_output_name
 
         arr_len = len(next(iter(input_arrays.values()))) if input_arrays else 0
 
@@ -1708,17 +1717,6 @@ class PhysicalFilter(PhysicalPlan):
         """Apply predicate filter to a single batch."""
         import time
 
-        import numpy as np
-        import pyarrow as pa
-
-        from pandas.lazy.backends import dispatch_kernel
-        from pandas.lazy.backends.array_eval import ArrayEvaluator
-        from pandas.lazy.backends.convert import (
-            get_array_backend,
-            to_arrow,
-        )
-        from pandas.lazy.backends.types import is_index_col
-
         # Separate data columns from index columns
         data_arrays = {k: v for k, v in input_arrays.items() if not is_index_col(k)}
         index_arrays = {k: v for k, v in input_arrays.items() if is_index_col(k)}
@@ -1751,8 +1749,6 @@ class PhysicalFilter(PhysicalPlan):
         start_time = time.perf_counter()
 
         if use_arrow_filter:
-            import pyarrow.compute as pc
-
             table = pa.table(data_arrays)
             evaluator = ArrayEvaluator(dict(data_arrays), preferred_backend="arrow")
             mask = evaluator.evaluate(self.predicate._ir)
@@ -1892,15 +1888,6 @@ class PhysicalHashAggregate(PhysicalPlan):
     planned_backend: str | None = None
 
     def execute(self, context: ExecutionContext) -> ArrayDict:
-        from pandas.lazy.backends.convert import (
-            get_array_backend,
-        )
-        from pandas.lazy.expr import extract_output_name
-        from pandas.lazy.ir import (
-            Alias,
-            Call,
-            FieldRef,
-        )
 
         # Extract group-by column names and aggregation specs early
         # (needed to decide if streaming is beneficial)
@@ -1996,11 +1983,6 @@ class PhysicalHashAggregate(PhysicalPlan):
         context: ExecutionContext,
     ) -> ArrayDict:
         """Execute aggregation without grouping (global aggregates)."""
-        import numpy as np
-        import pyarrow as pa
-
-        from pandas.lazy.backends import dispatch_kernel
-        from pandas.lazy.backends.convert import get_array_backend
 
         result: ArrayDict = {}
 
@@ -2054,7 +2036,6 @@ class PhysicalHashAggregate(PhysicalPlan):
         as index columns (using __index__ naming convention) rather than
         as regular data columns, mimicking pandas groupby behavior.
         """
-        from pandas.lazy.backends import has_kernel
 
         # For Arrow data, prefer the Arrow Table-based groupby path
         # This handles both single-key and multi-key cases efficiently
@@ -2132,14 +2113,6 @@ class PhysicalHashAggregate(PhysicalPlan):
         context: ExecutionContext,
     ) -> ArrayDict:
         """Execute single-key groupby using optimized kernels."""
-        import pyarrow as pa
-
-        from pandas.lazy.backends import (
-            dispatch_kernel,
-            has_kernel,
-        )
-        from pandas.lazy.backends.convert import ensure_backend
-        from pandas.lazy.backends.types import INDEX_COL_NAME
 
         key_arr = input_arrays[group_col]
         result: ArrayDict = {}
@@ -2217,17 +2190,6 @@ class PhysicalHashAggregate(PhysicalPlan):
         context: ExecutionContext,
     ) -> ArrayDict:
         """Execute multi-key groupby using hash_aggregate kernel."""
-        import pyarrow as pa
-
-        from pandas.lazy.backends import (
-            dispatch_kernel,
-            has_kernel,
-        )
-        from pandas.lazy.backends.convert import ensure_backend
-        from pandas.lazy.backends.types import (
-            INDEX_COL_NAME,
-            index_col_name,
-        )
 
         if backend == "arrow" and has_kernel("group_by", "arrow"):
             # Use Arrow's native table-based group_by
@@ -2303,14 +2265,6 @@ class PhysicalHashAggregate(PhysicalPlan):
         3. Vectorized SIMD operations in Arrow's C++ backend
         4. Memory-efficient columnar processing
         """
-        import pyarrow as pa
-
-        from pandas.lazy.backends import dispatch_kernel
-        from pandas.lazy.backends.types import (
-            INDEX_COL_NAME,
-            index_col_name,
-            is_index_col,
-        )
 
         # Build Arrow table from arrays (excluding index columns)
         columns = {k: v for k, v in input_arrays.items() if not is_index_col(k)}
@@ -2392,15 +2346,6 @@ class PhysicalHashAggregate(PhysicalPlan):
         ArrayDict
             Result with group keys and all aggregated values.
         """
-        import numpy as np
-        import pyarrow as pa
-
-        from pandas.lazy.backends import dispatch_kernel
-        from pandas.lazy.backends.types import (
-            INDEX_COL_NAME,
-            index_col_name,
-            is_index_col,
-        )
 
         def _factorize(arr):
             """Factorize array using appropriate backend, returning NumPy codes."""
@@ -2587,14 +2532,6 @@ class PhysicalHashAggregate(PhysicalPlan):
         ArrayDict
             Aggregated result with group keys and aggregated values.
         """
-        import pyarrow as pa
-
-        from pandas.lazy.backends import dispatch_kernel
-        from pandas.lazy.backends.types import (
-            INDEX_COL_NAME,
-            index_col_name,
-            is_index_col,
-        )
 
         # Separate mean aggregations (need special handling)
         mean_aggs: list[tuple[str, str]] = []  # (output_name, input_col)
@@ -2676,7 +2613,6 @@ class PhysicalHashAggregate(PhysicalPlan):
                 sum_col = result_table.column(f"__sum_{output_name}__")
                 count_col = result_table.column(f"__count_{output_name}__")
                 # Compute mean (handle chunked arrays)
-                import pyarrow.compute as pc
 
                 mean_arr = pc.divide(
                     pc.cast(sum_col, pa.float64()), pc.cast(count_col, pa.float64())
@@ -2734,12 +2670,6 @@ class PhysicalHashAggregate(PhysicalPlan):
         context: ExecutionContext,
     ) -> ArrayDict:
         """Create empty result for aggregation with no input rows."""
-        import pyarrow as pa
-
-        from pandas.lazy.backends.types import (
-            INDEX_COL_NAME,
-            index_col_name,
-        )
 
         result: ArrayDict = {}
 
@@ -2779,10 +2709,6 @@ class PhysicalHashAggregate(PhysicalPlan):
 # Minimum rows before per-column gather is parallelized. Both np.take and
 # pc.take release the GIL, so a thread pool over columns scales (~2.5x for
 # 4 columns at 10M rows).
-from pandas.lazy.cost import (
-    ARROW_MULTIKEY_SORT_MIN_ROWS,
-    PARALLEL_TAKE_MIN_ROWS,
-)
 
 # Minimum rows before multi-key sort routes through Arrow's table-level
 # sort_indices (multi-threaded; ~1.65x over np.lexsort at 10M rows).
@@ -2797,11 +2723,6 @@ def _take_all_columns(input_arrays: ArrayDict, indices) -> ArrayDict:
     """
     from concurrent.futures import ThreadPoolExecutor
     import os
-
-    import numpy as np
-
-    from pandas.lazy.backends import dispatch_kernel
-    from pandas.lazy.backends.convert import get_array_backend
 
     backends = {name: get_array_backend(arr) for name, arr in input_arrays.items()}
     np_indices = indices
@@ -2838,7 +2759,6 @@ def _keys_for_radix_lexsort(sort_key_arrays) -> list | None:
     special casing. Returns None if any key is a kind the coder does not
     cover (datetime, etc.), so the caller falls back to Arrow's table sort.
     """
-    import numpy as np
 
     import pandas as pd
 
@@ -2868,8 +2788,6 @@ def _keys_for_radix_lexsort(sort_key_arrays) -> list | None:
 
 def _is_arrow_sortable(arr) -> bool:
     """Whether an array can be routed through Arrow's table sort."""
-    import numpy as np
-    import pyarrow as pa
 
     if isinstance(arr, (pa.Array, pa.ChunkedArray)):
         return True
@@ -2906,15 +2824,6 @@ class PhysicalSort(PhysicalPlan):
     algorithm: Literal["quicksort", "mergesort", "heapsort", "stable"] = "quicksort"
 
     def execute(self, context: ExecutionContext) -> ArrayDict:
-        import numpy as np
-
-        from pandas.lazy.backends import dispatch_kernel
-        from pandas.lazy.backends.array_eval import ArrayEvaluator
-        from pandas.lazy.backends.convert import get_array_backend
-        from pandas.lazy.ir import (
-            Alias,
-            FieldRef,
-        )
 
         # Check if we should use external sort (spill-enabled out-of-core sorting)
         if context.spill_enabled:
@@ -2977,8 +2886,6 @@ class PhysicalSort(PhysicalPlan):
         if n_rows >= ARROW_MULTIKEY_SORT_MIN_ROWS:
             radix_keys = _keys_for_radix_lexsort(sort_key_arrays)
             if radix_keys is not None:
-                from pandas.lazy.backends.numpy.core import radix_lexsort
-
                 sort_indices = radix_lexsort(radix_keys, self.descending)
                 return _take_all_columns(input_arrays, sort_indices)
 
@@ -2989,11 +2896,6 @@ class PhysicalSort(PhysicalPlan):
             _is_arrow_sortable(arr) for arr in sort_key_arrays
         ):
             try:
-                import pyarrow as pa
-                import pyarrow.compute as pc
-
-                from pandas.lazy.backends.convert import to_arrow
-
                 key_table = pa.table(
                     {
                         f"__sort_key_{i}__": to_arrow(arr)
@@ -3039,11 +2941,6 @@ class PhysicalSort(PhysicalPlan):
         2. Sort and spill each batch as a sorted run
         3. K-way merge all runs to produce final sorted output
         """
-        from pandas.lazy.backends.spill import ExternalSorter
-        from pandas.lazy.ir import (
-            Alias,
-            FieldRef,
-        )
 
         spill_manager = context.spill_manager
         if spill_manager is None:
@@ -3094,15 +2991,6 @@ class PhysicalSort(PhysicalPlan):
         self, input_arrays: ArrayDict, context: ExecutionContext
     ) -> ArrayDict:
         """In-memory sort fallback."""
-        import numpy as np
-
-        from pandas.lazy.backends import dispatch_kernel
-        from pandas.lazy.backends.array_eval import ArrayEvaluator
-        from pandas.lazy.backends.convert import get_array_backend
-        from pandas.lazy.ir import (
-            Alias,
-            FieldRef,
-        )
 
         # Handle simple single-column sort using kernels directly
         if len(self.by) == 1:
@@ -3171,7 +3059,6 @@ class PhysicalSort(PhysicalPlan):
 
     def _maybe_reverse(self, arrays: ArrayDict, sort_keys: list[str]) -> ArrayDict:
         """Reverse arrays if descending sort is needed."""
-        import numpy as np
 
         # Check if all sort keys are descending
         all_descending = all(self.descending)
@@ -3186,7 +3073,6 @@ class PhysicalSort(PhysicalPlan):
         for name, arr in arrays.items():
             if hasattr(arr, "to_pylist"):
                 # Arrow array - convert to numpy, reverse, convert back
-                import pyarrow as pa
 
                 np_arr = np.asarray(arr.to_pylist())
                 result[name] = pa.array(np_arr[::-1].copy())
@@ -3289,10 +3175,6 @@ class PhysicalTopK(PhysicalPlan):
 
     def _concat_array_dicts(self, arrays_list: list[ArrayDict]) -> ArrayDict:
         """Concatenate multiple ArrayDicts into one."""
-        import numpy as np
-        import pyarrow as pa
-
-        from pandas.lazy.backends.convert import get_array_backend
 
         if not arrays_list:
             return {}
@@ -3324,15 +3206,6 @@ class PhysicalTopK(PhysicalPlan):
         For single-key: uses select_k_unstable kernel (O(n) partitioning)
         For multi-key: uses lexsort + take (O(n log n) but vectorized)
         """
-        import numpy as np
-
-        from pandas.lazy.backends import dispatch_kernel
-        from pandas.lazy.backends.array_eval import ArrayEvaluator
-        from pandas.lazy.backends.convert import get_array_backend
-        from pandas.lazy.ir import (
-            Alias,
-            FieldRef,
-        )
 
         first_arr = next(iter(arrays.values()))
         arr_len = len(first_arr)
@@ -3412,15 +3285,6 @@ class PhysicalTopK(PhysicalPlan):
 
     def _sort_arrays(self, arrays: ArrayDict) -> ArrayDict:
         """Sort arrays by the sort keys (used when k >= array length)."""
-        import numpy as np
-
-        from pandas.lazy.backends import dispatch_kernel
-        from pandas.lazy.backends.array_eval import ArrayEvaluator
-        from pandas.lazy.backends.convert import get_array_backend
-        from pandas.lazy.ir import (
-            Alias,
-            FieldRef,
-        )
 
         evaluator = ArrayEvaluator(arrays, preferred_backend="auto")
         sort_key_arrays = []
@@ -3457,7 +3321,6 @@ class PhysicalTopK(PhysicalPlan):
 
     def _make_empty_result(self, context: ExecutionContext) -> ArrayDict:
         """Create empty result arrays matching schema."""
-        import numpy as np
 
         result: ArrayDict = {}
         for name in self.schema.names:
@@ -3466,15 +3329,6 @@ class PhysicalTopK(PhysicalPlan):
         return result
 
     def _execute_materialized_topk(self, context: ExecutionContext) -> ArrayDict:
-        import numpy as np
-
-        from pandas.lazy.backends import dispatch_kernel
-        from pandas.lazy.backends.array_eval import ArrayEvaluator
-        from pandas.lazy.backends.convert import get_array_backend
-        from pandas.lazy.ir import (
-            Alias,
-            FieldRef,
-        )
 
         input_arrays = self.input.execute(context)
 
@@ -3494,7 +3348,6 @@ class PhysicalTopK(PhysicalPlan):
 
         if self.k >= arr_len:
             # Need full sort - delegate to sort behavior
-            from pandas.lazy.backends.convert import get_array_backend
 
             if len(self.by) == 1:
                 expr = self.by[0]
@@ -3779,7 +3632,6 @@ class PhysicalLimit(PhysicalPlan):
 
     def _materialize_batches(self, context: ExecutionContext) -> ArrayDict:
         """Materialize batches from execute_batches into single result."""
-        import pyarrow as pa
 
         batches = list(self.execute_batches(context))
 
@@ -3804,7 +3656,6 @@ class PhysicalLimit(PhysicalPlan):
                     result[col_name] = chunked.combine_chunks()
                 else:
                     # NumPy arrays
-                    import numpy as np
 
                     result[col_name] = np.concatenate(chunks)
 
@@ -3834,14 +3685,6 @@ class PhysicalDistinct(PhysicalPlan):
     schema: Schema
 
     def execute(self, context: ExecutionContext) -> ArrayDict:
-        import numpy as np
-
-        from pandas.lazy.backends import (
-            dispatch_kernel,
-            has_kernel,
-        )
-        from pandas.lazy.backends.convert import get_array_backend
-        from pandas.lazy.backends.types import is_index_col
 
         input_arrays = self.input.execute(context)
 
@@ -3986,11 +3829,6 @@ class PhysicalHashJoin(PhysicalPlan):
     planned_acero: bool = False
 
     def execute(self, context: ExecutionContext) -> ArrayDict:
-        from pandas.lazy.backends import has_kernel
-        from pandas.lazy.backends.convert import (
-            get_array_backend,
-        )
-        from pandas.lazy.backends.types import is_index_col
 
         # Check if we should use Grace hash join (spill-enabled out-of-core join)
         if context.spill_enabled and self.how in ("inner", "left", "right"):
@@ -4140,12 +3978,6 @@ class PhysicalHashJoin(PhysicalPlan):
         backend: str,
     ) -> ArrayDict:
         """Execute semi or anti join."""
-        import numpy as np
-
-        from pandas.lazy.backends import (
-            dispatch_kernel,
-            has_kernel,
-        )
 
         kernel_name = "semi_join" if self.how == "semi" else "anti_join"
 
@@ -4161,8 +3993,6 @@ class PhysicalHashJoin(PhysicalPlan):
 
         # Try Arrow kernel
         if backend == "arrow" and has_kernel(kernel_name, "arrow"):
-            import pyarrow as pa
-
             left_table = pa.table(left_data)
             right_table = pa.table(right_data)
 
@@ -4208,10 +4038,6 @@ class PhysicalHashJoin(PhysicalPlan):
         guards passed. Index columns are dropped: row order does not
         survive, and the caller's sink does not observe it.
         """
-        import pyarrow as pa
-
-        from pandas.lazy.backends.convert import to_arrow
-        from pandas.lazy.backends.types import is_index_col
 
         def to_table(arrays: ArrayDict) -> pa.Table:
             cols = {}
@@ -4254,9 +4080,6 @@ class PhysicalHashJoin(PhysicalPlan):
         swapped: bool = False,
     ) -> ArrayDict:
         """Execute join using Arrow's native join."""
-        import pyarrow as pa
-
-        from pandas.lazy.backends import dispatch_kernel
 
         # Build Arrow tables
         left_table = pa.table(left_data)
@@ -4310,7 +4133,6 @@ class PhysicalHashJoin(PhysicalPlan):
         swapped: bool = False,
     ) -> ArrayDict:
         """Execute join using the indexer-based hash join kernel."""
-        from pandas.lazy.backends import dispatch_kernel
 
         # Pass arrays through in their native backend: the kernel computes
         # indexers from key columns only and gathers payload columns with
@@ -4369,8 +4191,6 @@ class PhysicalHashJoin(PhysicalPlan):
         (skewed partitions, max partition exceeds budget), it falls back
         to sort-merge join which has more predictable I/O patterns.
         """
-        from pandas.lazy.backends.spill import GraceHashJoiner
-        from pandas.lazy.backends.types import is_index_col
 
         spill_manager = context.spill_manager
         if spill_manager is None:
@@ -4400,7 +4220,6 @@ class PhysicalHashJoin(PhysicalPlan):
         operator_budget = spill_config.operator_budget_mb * 1024 * 1024
 
         # Estimate size of left + right data
-        from pandas.lazy.backends.spill import get_arrays_bytes
 
         left_size = get_arrays_bytes(left_data)
         right_size = get_arrays_bytes(right_data)
@@ -4467,8 +4286,6 @@ class PhysicalHashJoin(PhysicalPlan):
         Sort-merge join has more predictable I/O patterns and handles
         skewed data better than hash join with many partitions.
         """
-        from pandas.lazy.backends import dispatch_kernel
-        from pandas.lazy.backends.convert import get_array_backend
 
         # Sort both sides by join keys
         def sort_by_keys(arrays: ArrayDict, keys: list[str]) -> ArrayDict:
@@ -4510,11 +4327,6 @@ class PhysicalHashJoin(PhysicalPlan):
         context: ExecutionContext,
     ) -> ArrayDict:
         """Fallback to DataFrame-based join."""
-        from pandas.lazy.backends.convert import (
-            arrays_to_dataframe,
-            dataframe_to_arrays,
-        )
-        from pandas.lazy.backends.types import is_index_col
 
         left_df = arrays_to_dataframe(
             left_arrays,
@@ -4553,11 +4365,6 @@ class PhysicalHashJoin(PhysicalPlan):
         context: ExecutionContext,
     ) -> ArrayDict:
         """Execute cross join (Cartesian product)."""
-        from pandas.lazy.backends.convert import (
-            arrays_to_dataframe,
-            dataframe_to_arrays,
-        )
-        from pandas.lazy.backends.types import is_index_col
 
         left_df = arrays_to_dataframe(
             left_data,
@@ -4713,8 +4520,6 @@ class PhysicalSortMergeJoin(PhysicalPlan):
         context: ExecutionContext,
     ) -> ArrayDict:
         """Sort arrays by the specified keys."""
-        from pandas.lazy.backends import dispatch_kernel
-        from pandas.lazy.backends.convert import get_array_backend
 
         if not keys:
             return arrays
@@ -4743,9 +4548,6 @@ class PhysicalSortMergeJoin(PhysicalPlan):
         context: ExecutionContext,
     ) -> ArrayDict:
         """Merge two sorted arrays on join keys."""
-        import numpy as np
-
-        from pandas.lazy.backends.types import is_index_col
 
         # Get key arrays (use first key for now)
         left_key = left[left_keys[0]]
@@ -4819,7 +4621,6 @@ class PhysicalSortMergeJoin(PhysicalPlan):
 
         Returns (left_indices, right_indices) where -1 indicates null (no match).
         """
-        import numpy as np
 
         left_idx = []
         right_idx = []
@@ -4894,7 +4695,6 @@ class PhysicalSortMergeJoin(PhysicalPlan):
 
     def _take_with_nulls(self, arr: np.ndarray, indices: np.ndarray) -> np.ndarray:
         """Take from array, handling -1 as null."""
-        import numpy as np
 
         # Create output array
         if np.issubdtype(arr.dtype, np.floating):
@@ -4946,7 +4746,6 @@ class PhysicalConvert(PhysicalPlan):
     schema: Schema
 
     def execute(self, context: ExecutionContext) -> ArrayDict:
-        from pandas.lazy.backends.convert import ensure_backend
 
         input_arrays = self.input.execute(context)
 
@@ -4980,10 +4779,6 @@ class PhysicalSetIndex(PhysicalPlan):
     schema: Schema
 
     def execute(self, context: ExecutionContext) -> ArrayDict:
-        from pandas.lazy.backends.types import (
-            INDEX_COL_NAME,
-            index_col_name,
-        )
 
         input_arrays = self.input.execute(context)
         result: ArrayDict = {}
@@ -5037,11 +4832,6 @@ class PhysicalResetIndex(PhysicalPlan):
     schema: Schema
 
     def execute(self, context: ExecutionContext) -> ArrayDict:
-        from pandas.lazy.backends.types import (
-            INDEX_COL_NAME,
-            index_col_name,
-            is_index_col,
-        )
 
         input_arrays = self.input.execute(context)
         result: ArrayDict = {}
@@ -5134,9 +4924,6 @@ class PhysicalConcat(PhysicalPlan):
         """
         from concurrent.futures import ThreadPoolExecutor
         import os
-
-        import numpy as np
-        import pyarrow as pa
 
         if len(self.inputs) > 1:
             # Each input gets an independent context: scans/set_index mutate
@@ -5283,23 +5070,6 @@ class PhysicalPlanner:
 
     def _plan_recursive(self, logical_plan: LogicalPlan) -> PhysicalPlan:
         """Recursively convert logical plan to physical plan."""
-        from pandas.lazy.plan import (
-            Aggregate,
-            Concat,
-            Convert,
-            CSVSource,
-            DataFrameSource,
-            Distinct,
-            Filter,
-            Join,
-            Limit,
-            ParquetSource,
-            Project,
-            ResetIndex,
-            SetIndex,
-            Sort,
-            TopK,
-        )
 
         if isinstance(logical_plan, DataFrameSource):
             return self._plan_scan(logical_plan)
@@ -5726,7 +5496,6 @@ def execute_physical_plan(
         The execution result.
     """
     import pandas as pd
-    from pandas.lazy.backends.convert import arrays_to_dataframe
 
     # Check if adaptive thresholds are enabled
     adaptive_enabled = pd.get_option("compute.lazy.adaptive_thresholds")
