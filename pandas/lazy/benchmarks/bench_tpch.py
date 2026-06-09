@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""
+TPC-H (PDS-H) benchmark for lazy pandas vs Polars, validated against DuckDB.
+
+TPC-H is the decision-support benchmark Polars markets against pandas/Dask/
+Spark/DuckDB (22 queries over an 8-table schema with multi-table joins,
+aggregations, sorting, and subqueries). It stress-tests the *whole* engine on
+realistic analytical pipelines, unlike the H2O group-by/join microbenchmark.
+
+Data and reference results both come from DuckDB's first-party ``tpch``
+extension: ``CALL dbgen(sf=...)`` generates the tables, ``PRAGMA tpch(n)`` is
+the authoritative result for query n. Each lazy-pandas query is validated
+against that reference, then timed against Polars.
+
+Queries are hand-translated from the TPC-H SQL into the lazy DataFrame API
+(reference: pola.rs/polars-benchmark). Implemented queries are registered in
+``QUERIES``; the suite grows incrementally.
+
+Usage::
+
+    python pandas/lazy/benchmarks/bench_tpch.py --sf 1
+    python pandas/lazy/benchmarks/bench_tpch.py --sf 1 --queries 1,6
+"""
+
+from __future__ import annotations
+
+import argparse
+import time
+
+import numpy as np
+
+import pandas as pd
+from pandas.lazy import col
+
+try:
+    import polars as pl
+
+    HAS_POLARS = True
+except ImportError:
+    HAS_POLARS = False
+
+import duckdb
+
+TABLES = [
+    "lineitem",
+    "orders",
+    "customer",
+    "supplier",
+    "part",
+    "partsupp",
+    "nation",
+    "region",
+]
+
+
+# ---------------------------------------------------------------------------
+# Data generation (via DuckDB dbgen) + the DuckDB reference connection
+# ---------------------------------------------------------------------------
+def make_duckdb(sf: float) -> duckdb.DuckDBPyConnection:
+    con = duckdb.connect()
+    con.execute("INSTALL tpch; LOAD tpch")
+    con.execute(f"CALL dbgen(sf={sf})")
+    return con
+
+
+def load_tables(con) -> dict[str, pd.DataFrame]:
+    """Export each TPC-H table to a pandas DataFrame.
+
+    Decimal columns are cast to float64 (TPC-H permits float arithmetic; the
+    validation uses a tolerance), and date columns to datetime64.
+    """
+    tables = {}
+    for name in TABLES:
+        df = con.execute(f"SELECT * FROM {name}").df()
+        for c in df.columns:
+            if (
+                df[c].dtype == object
+                and len(df)
+                and isinstance(df[c].iloc[0], __import__("decimal").Decimal)
+            ):
+                df[c] = df[c].astype("float64")
+        tables[name] = df
+    return tables
+
+
+# ---------------------------------------------------------------------------
+# Queries: QUERIES[n] = (lazy_pandas_fn(tables) -> LazyDataFrame, polars_fn)
+# ---------------------------------------------------------------------------
+def _lp(df):
+    return df.select()
+
+
+# --- Q1: Pricing Summary Report --------------------------------------------
+def lp_q1(t):
+    cutoff = pd.Timestamp("1998-12-01") - pd.Timedelta(days=90)
+    li = t["lineitem"]
+    disc_price = col("l_extendedprice") * (1 - col("l_discount"))
+    charge = col("l_extendedprice") * (1 - col("l_discount")) * (1 + col("l_tax"))
+    return (
+        _lp(li)
+        .filter(col("l_shipdate") <= cutoff)
+        .group_by("l_returnflag", "l_linestatus")
+        .agg(
+            col("l_quantity").sum().alias("sum_qty"),
+            col("l_extendedprice").sum().alias("sum_base_price"),
+            disc_price.sum().alias("sum_disc_price"),
+            charge.sum().alias("sum_charge"),
+            col("l_quantity").mean().alias("avg_qty"),
+            col("l_extendedprice").mean().alias("avg_price"),
+            col("l_discount").mean().alias("avg_disc"),
+            col("l_quantity").count().alias("count_order"),
+        )
+        .sort("l_returnflag", "l_linestatus")
+    )
+
+
+def pl_q1(t):
+    cutoff = pd.Timestamp("1998-12-01") - pd.Timedelta(days=90)
+    li = pl.from_pandas(t["lineitem"]).lazy()
+    return (
+        li.filter(pl.col("l_shipdate") <= cutoff)
+        .group_by("l_returnflag", "l_linestatus")
+        .agg(
+            pl.sum("l_quantity").alias("sum_qty"),
+            pl.sum("l_extendedprice").alias("sum_base_price"),
+            (pl.col("l_extendedprice") * (1 - pl.col("l_discount")))
+            .sum()
+            .alias("sum_disc_price"),
+            (
+                pl.col("l_extendedprice")
+                * (1 - pl.col("l_discount"))
+                * (1 + pl.col("l_tax"))
+            )
+            .sum()
+            .alias("sum_charge"),
+            pl.mean("l_quantity").alias("avg_qty"),
+            pl.mean("l_extendedprice").alias("avg_price"),
+            pl.mean("l_discount").alias("avg_disc"),
+            pl.len().alias("count_order"),
+        )
+        .sort("l_returnflag", "l_linestatus")
+        .collect()
+    )
+
+
+# --- Q6: Forecasting Revenue Change ----------------------------------------
+def lp_q6(t):
+    li = t["lineitem"]
+    return (
+        _lp(li)
+        .filter(
+            (col("l_shipdate") >= pd.Timestamp("1994-01-01"))
+            & (col("l_shipdate") < pd.Timestamp("1995-01-01"))
+            & (col("l_discount") >= 0.05)
+            & (col("l_discount") <= 0.07)
+            & (col("l_quantity") < 24)
+        )
+        .select((col("l_extendedprice") * col("l_discount")).alias("revenue"))
+        .sum()
+    )
+
+
+def pl_q6(t):
+    li = pl.from_pandas(t["lineitem"]).lazy()
+    return (
+        li.filter(
+            (pl.col("l_shipdate") >= pd.Timestamp("1994-01-01"))
+            & (pl.col("l_shipdate") < pd.Timestamp("1995-01-01"))
+            & (pl.col("l_discount") >= 0.05)
+            & (pl.col("l_discount") <= 0.07)
+            & (pl.col("l_quantity") < 24)
+        )
+        .select((pl.col("l_extendedprice") * pl.col("l_discount")).alias("revenue"))
+        .sum()
+        .collect()
+    )
+
+
+QUERIES = {
+    1: (lp_q1, pl_q1),
+    6: (lp_q6, pl_q6),
+}
+
+
+# ---------------------------------------------------------------------------
+# Validation + timing
+# ---------------------------------------------------------------------------
+def _normalize(df: pd.DataFrame) -> pd.DataFrame:
+    """Sort rows and columns so two results compare regardless of order."""
+    df = df.copy()
+    df.columns = [c.lower() for c in df.columns]
+    df = df.reindex(sorted(df.columns), axis=1)
+    return df.sort_values(list(df.columns)).reset_index(drop=True)
+
+
+def validate(lazy_df: pd.DataFrame, ref_df: pd.DataFrame) -> tuple[bool, str]:
+    a, b = _normalize(lazy_df), _normalize(ref_df)
+    if a.shape != b.shape:
+        return False, f"shape {a.shape} != ref {b.shape}"
+    for col_a, col_b in zip(a.columns, b.columns, strict=True):
+        sa, sb = a[col_a], b[col_b]
+        if pd.api.types.is_numeric_dtype(sa) and pd.api.types.is_numeric_dtype(sb):
+            if not np.allclose(
+                sa.to_numpy(dtype="float64"),
+                sb.to_numpy(dtype="float64"),
+                rtol=1e-3,
+                atol=1e-2,
+            ):
+                return False, f"numeric mismatch in {col_a}"
+        elif not (
+            sa.astype(str)
+            .reset_index(drop=True)
+            .equals(sb.astype(str).reset_index(drop=True))
+        ):
+            return False, f"value mismatch in {col_a}"
+    return True, "ok"
+
+
+def time_query(fn, arg, warm=1, runs=3):
+    for _ in range(warm):
+        fn(arg)
+    best = float("inf")
+    for _ in range(runs):
+        s = time.perf_counter()
+        fn(arg)
+        best = min(best, (time.perf_counter() - s) * 1000)
+    return best
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--sf", type=float, default=1.0)
+    ap.add_argument("--queries", default=None, help="comma list, e.g. 1,6")
+    args = ap.parse_args()
+
+    which = (
+        [int(q) for q in args.queries.split(",")] if args.queries else sorted(QUERIES)
+    )
+
+    print("TPC-H (PDS-H) — lazy pandas vs Polars, validated vs DuckDB")
+    print(f"scale factor: {args.sf}  polars={'yes' if HAS_POLARS else 'NO'}")
+    t0 = time.perf_counter()
+    con = make_duckdb(args.sf)
+    tables = load_tables(con)
+    print(
+        f"[generated SF-{args.sf} in {time.perf_counter() - t0:.1f}s; "
+        f"lineitem={len(tables['lineitem']):,} rows]\n"
+    )
+
+    print(f"{'query':>6} {'valid':>7} {'LP (ms)':>10} {'PL (ms)':>10} {'PL/LP':>7}")
+    print("-" * 46)
+    for n in which:
+        if n not in QUERIES:
+            print(f"{'q' + str(n):>6}   not implemented")
+            continue
+        lp_fn, pl_fn = QUERIES[n]
+        try:
+            lp_res = lp_fn(tables).collect(use_physical_planner=True)
+            ref = con.execute(f"PRAGMA tpch({n})").df()
+            ok, msg = validate(lp_res, ref)
+            lp_ms = time_query(
+                lambda t: lp_fn(t).collect(use_physical_planner=True), tables
+            )
+            pl_ms = time_query(pl_fn, tables) if HAS_POLARS else float("nan")
+            ratio = pl_ms / lp_ms if lp_ms else float("nan")
+            flag = "OK" if ok else f"FAIL:{msg}"
+            print(
+                f"{'q' + str(n):>6} {flag:>7} {lp_ms:10.1f} {pl_ms:10.1f} {ratio:7.2f}"
+            )
+        except Exception as e:
+            print(f"{'q' + str(n):>6}   ERROR: {type(e).__name__}: {str(e)[:60]}")
+
+
+if __name__ == "__main__":
+    main()
