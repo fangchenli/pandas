@@ -5,8 +5,21 @@ lazy vs eager execution, Arrow vs NumPy backends, and competitive analysis
 against Polars and DuckDB.
 
 Dated result reports in this directory:
-- `LAZY_VS_POLARS_BENCHMARK.md` — head-to-head vs Polars
+- `H2O_BENCHMARK.md` — H2O.ai db-benchmark vs Polars (group-by + join, the
+  cross-engine standard); lazy pandas wins 6/10 group-by queries
+- `LAZY_VS_POLARS_BENCHMARK.md` — custom head-to-head vs Polars
 - `STREAMING_BENCHMARK_REPORT.md` — streaming execution speedups
+
+**Honest standing vs Polars (read this first):** lazy pandas is
+competitive-to-winning on **single operations** (H2O group-by/join) but
+**behind on full analytical pipelines** — the TPC-H harness (`bench_tpch.py`,
+validated against DuckDB) shows Polars winning every query (0.14–0.67x at
+SF-1), because our engine pays a pandas↔Arrow conversion at each operator
+boundary where Polars stays native end to end. **Fairness rule for every
+vs-Polars benchmark here: convert the Polars frames once, up front — never
+inside the timed loop.** Timing `pl.from_pandas(...)` per run charges Polars a
+conversion (~75% of a TPC-H query at SF-1) that the native lazy path never
+pays; doing so once inflated TPC-H into apparent wins until corrected.
 
 ## Quick Start
 
@@ -110,7 +123,9 @@ scripts and review found a tie-order bug the scripts could not see.
 
 | Benchmark | File | Description | Requirements |
 |-----------|------|-------------|--------------|
-| vs Polars | `bench_vs_polars.py` | Head-to-head comparison with Polars | `pip install polars` |
+| vs Polars | `bench_vs_polars.py` | Custom head-to-head comparison with Polars | `pip install polars` |
+| H2O db-benchmark | `bench_h2o.py` | Standard group-by + join benchmark vs Polars (single-op) | `pip install polars` |
+| TPC-H / PDS-H | `bench_tpch.py` | Full analytical pipelines; data + reference results from DuckDB, each query validated vs `PRAGMA tpch(n)` | `pip install polars duckdb` |
 | NYC Taxi | `bench_nyc_taxi.py` | Real-world dataset benchmark | NYC Taxi parquet files |
 | 1TB Transactions | `bench_1tb_transactions.py` | Larger-than-memory workloads | S3 access or generated data |
 

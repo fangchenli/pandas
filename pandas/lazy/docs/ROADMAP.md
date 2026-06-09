@@ -17,6 +17,21 @@ remaining losses. The table below is from the custom `LAZY_VS_POLARS_BENCHMARK.m
 microbenchmark (1M–10M rows, mixed-dtype, Apple Silicon). Speedup > 1.0 = lazy
 pandas faster.
 
+**TPC-H is the other side of the story — and the honest one for *pipelines*.**
+The TPC-H/PDS-H harness (`../benchmarks/bench_tpch.py`, every query validated
+exact against DuckDB's `PRAGMA tpch(n)`) stress-tests full analytical pipelines
+(multi-table joins + filters + group-by + sort). **Polars wins every
+implemented query, 0.14–0.67x at SF-1.** The single-op H2O wins do *not* extend
+to multi-op pipelines: our engine pays a pandas↔Arrow conversion at each
+operator boundary, while Polars stays in one native columnar representation end
+to end, so the conversions compound across a deep pipeline. (Measured fairly —
+each engine on its native input, query only; an earlier revision timed Polars'
+`from_pandas` per run and so inflated our ratios into apparent wins. Corrected.)
+So: **competitive-to-winning on single operations (H2O); behind on full
+analytical pipelines (TPC-H).** Two TPC-H probes also surfaced real engine bugs,
+now fixed — a datetime-filter comparison (~150x on our own prior path) and a CSE
+expression-conflation correctness bug.
+
 | Category | Standing | Driver |
 |----------|----------|--------|
 | string | **2.14x avg — wins** (`str.lower` 5.30x, `contains` up to 1.55x) | pass-through fix + compute-bound morsel parallelism |
