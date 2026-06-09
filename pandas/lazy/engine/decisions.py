@@ -41,13 +41,23 @@ from pandas.lazy.engine.pipeline import (
     Pipeline,
     PipelineGraph,
 )
+from pandas.lazy.expr import extract_output_name
+from pandas.lazy.ir import (
+    Alias,
+    Call,
+    FieldRef,
+)
 from pandas.lazy.physical import (
     PhysicalConcat,
     PhysicalConvert,
     PhysicalDistinct,
     PhysicalFilter,
+    PhysicalFusedPipeline,
     PhysicalHashAggregate,
     PhysicalHashJoin,
+    PhysicalLimit,
+    PhysicalMaterialize,
+    PhysicalProject,
     PhysicalSort,
     PhysicalTopK,
 )
@@ -100,10 +110,6 @@ def _pipeline_output_schema(pipeline: Pipeline) -> Schema | None:
 def _expr_is_order_transparent(ir) -> bool:
     """True if evaluating this expression cannot observe row order."""
     from pandas.lazy.engine.parallel import ORDER_SENSITIVE_FUNCTIONS
-    from pandas.lazy.ir import (
-        Alias,
-        Call,
-    )
 
     if isinstance(ir, Alias):
         return _expr_is_order_transparent(ir.arg)
@@ -118,12 +124,6 @@ def _op_is_order_transparent(op) -> bool:
     """True if this streaming operator neither observes nor depends on
     its input's row order (limits observe it; window/cumulative
     expressions depend on it; plain filters/projects/converts do not)."""
-    from pandas.lazy.physical import (
-        PhysicalFusedPipeline,
-        PhysicalLimit,
-        PhysicalMaterialize,
-    )
-
     if isinstance(op, (PhysicalConvert, PhysicalMaterialize)):
         return True
     if isinstance(op, PhysicalLimit):
@@ -143,8 +143,6 @@ def _op_is_order_transparent(op) -> bool:
             ):
                 return False
         return True
-    from pandas.lazy.physical import PhysicalProject
-
     if isinstance(op, PhysicalProject):
         return all(_expr_is_order_transparent(e._ir) for e in op.exprs)
     return False  # unknown operator: assume it observes order
@@ -157,13 +155,6 @@ def _plan_groupby_backend(node: PhysicalHashAggregate, input_schema: Schema) -> 
     from group keys + aggregation value columns only; Arrow wins if any
     relevant column is Arrow-backed.
     """
-    from pandas.lazy.expr import extract_output_name
-    from pandas.lazy.ir import (
-        Alias,
-        Call,
-        FieldRef,
-    )
-
     relevant: set[str] = set()
     for expr in node.group_by:
         relevant.add(extract_output_name(expr))
