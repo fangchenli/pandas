@@ -112,6 +112,18 @@ is exceptionally fast at ~60 ms).** Both survive warm-up, so they are genuine.
    categorical-encode approaches measured *slower* than `pd.merge` (they
    re-hash the strings); the real fix is Arrow string-view storage (large,
    structural). Left at `pd.merge` (0.25x).
-7. High-cardinality group-by q10 (~10M groups, 0.52x) — hash pre-partition
-   (the remaining tractable perf gap).
-8. Grouped top-k + `explode` (q8) — sort + within-group head-k.
+7. ~~High-cardinality group-by q10~~ — **hash pre-partition investigated, does
+   not help.** Our multi-key arrow path is already 1731 ms (6x faster than a
+   raw single `pa.Table.group_by` on 6 keys at 11 s, and faster than every
+   partitioned-acero variant: ×16 parallel 1923 ms, full split+agg+concat
+   4077 ms). The 0.66x residual vs Polars is its structural radix-partitioned
+   contiguous-group-state aggregate engine, not reachable via Python-level
+   partitioning. Left as-is.
+8. Grouped top-k + `explode` (q8) — sort + within-group head-k. The last
+   unsupported query; niche, larger effort.
+
+**Net: the H2O board is now closed to the point where the only remaining gaps
+are structural** — Arrow string-view storage (q3 left join, q4 string join)
+and Polars' aggregate-engine internals (q10) — plus one niche unsupported
+query (q8). No further quick wins remain without a major storage/representation
+change.

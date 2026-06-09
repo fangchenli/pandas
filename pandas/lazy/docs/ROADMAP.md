@@ -62,6 +62,19 @@ competitive-standing table.
   or free-threading is the common deployment. (Most lazy kernels already
   release the GIL via numpy/arrow/nogil Cython, so they need no change.)
 
+- **H2O q10 hash pre-partition** — *does not help* (measured June 2026). For a
+  near-unique 6-key group-by (~10M groups/10M rows), our multi-key arrow path
+  is 1731 ms — already 6x faster than a raw single `pa.Table.group_by` on six
+  keys (11 s) and faster than every partitioned-acero variant (×16 parallel
+  1923 ms; full split+agg+concat 4077 ms). The 0.66x residual vs Polars is its
+  radix-partitioned contiguous-group-state aggregate engine — structural, not
+  reachable by Python-level partitioning.
+- **H2O q4 string-key join via factorize** — *slower, not faster* (measured
+  June 2026). Factorizing both sides to a shared int code space (1726 ms) and
+  categorical-encoding (1228 ms) both lose to plain `pd.merge` on the string
+  keys (824 ms): they re-hash the 10M strings that `pd.merge` already
+  factorizes internally once. The real fix is Arrow string-view storage
+  (length-independent hashing + zero-copy gather) — large and structural.
 - **Acero raw-string hash gap** — *the gap does not exist* (re-measured June
   2026). acero groups raw `large_string` keys at **80 ms/10M — faster than
   Polars' 118 ms** on the same raw strings. The ROADMAP's "Polars 18 ms" was
