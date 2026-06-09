@@ -36,18 +36,16 @@ semantics, not by missing optimizations — see "Blocked on upstream" below.
 
 The forward list — open items only. Landed work is recorded further down.
 
-1. **Cardinality — histograms for skew.** In-memory column statistics
-   (sampled NDV + exact min/max) and Parquet row-group statistics (min/max +
-   null count from the footer, free) are both landed. Remaining: a per-column
-   equi-depth histogram so range selectivity tracks skewed distributions —
-   the current uniform min/max interpolation over-/under-estimates when data
-   clusters. (Parquet carries no cross-group distinct count, so equality on
-   scans still uses the constant; a sampled NDV during the first scan batch
-   could close that.)
-2. **Planning-overhead fast paths.** Single-op queries pay 60–80% of lazy
+1. **Planning-overhead fast paths.** Single-op queries pay 60–80% of lazy
    overhead in the optimizer (`bench_planning_phases.py`); skip passes by
    plan shape. The ~300 µs limit floor is this item. (Low leverage:
    sub-millisecond, invisible on real data.)
+
+This is the only remaining open performance item, and it is low-leverage. The
+engine's real-operation gaps are now either upstream-blocked (Arrow
+string-view `take`) or structural (pandas mutation semantics); see the
+competitive-standing table.
+
 ### Considered and set aside (with measurements)
 
 - **Free-threaded partition joins** — *mechanism validated, niche too narrow*
@@ -155,6 +153,9 @@ Newest first. Detail in the git log and the docs above.
   join-free queries (only computed when a join/agg estimate is requested).
   `ParquetSource` gets the same from row-group footer metadata (min/max +
   null count) with zero data read — range and is_null selectivity for scans.
+  Range selectivity uses an **equi-depth histogram** (sampled quantiles) so it
+  tracks skew — `col < median` of a lognormal estimates ~0.5, where flat
+  min/max interpolation collapses to ~0.001.
 - **String-key multi-column sort** — a string sort key is factorized
   (`sort=True`) into order-preserving float codes (nulls as NaN), so the
   radix lexsort handles it with per-key descending and nulls-last for free;

@@ -330,6 +330,30 @@ class TestCardinalityEstimation:
         # One row per distinct group: ~80, not the sqrt heuristic (~7000).
         assert 70 <= est <= 90
 
+    def test_histogram_range_selectivity_tracks_skew(self):
+        import numpy as np
+
+        from pandas.lazy.optimize.cardinality import (
+            compute_column_stats,
+            estimate_selectivity,
+        )
+
+        rng = np.random.default_rng(0)
+        n = 1_000_000
+        v = rng.lognormal(0.0, 1.5, n)  # heavily right-skewed
+        df = pd.DataFrame({"v": v})
+        stats = {"v": compute_column_stats(df["v"])}.get
+
+        # The histogram exists and tracks the true selectivity at each
+        # quantile, where flat min/max interpolation collapses to ~0 (the
+        # long tail inflates max).
+        assert stats("v").histogram is not None
+        for p in (10, 50, 90):
+            x = float(np.percentile(v, p))
+            true = float((v < x).mean())
+            est = estimate_selectivity((col("v") < x)._ir, stats)
+            assert abs(est - true) < 0.02
+
     def test_parquet_statistics_refine_range_and_null(self, tmp_path):
         import numpy as np
 

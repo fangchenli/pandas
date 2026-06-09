@@ -10,11 +10,11 @@ estimate so a selective equality and a broad range no longer look alike.
 Reference: P. Griffiths Selinger, M. M. Astrahan, D. D. Chamberlin, R. A.
 Lorie & T. G. Price, "Access Path Selection in a Relational Database
 Management System", SIGMOD 1979 — the System R optimizer, which introduced
-this constant-selectivity model. The constants below are its textbook
-defaults; without column statistics (distinct-value counts, histograms) they
-are deliberately rough. Their job is to *rank* plan alternatives, not to
-predict exact row counts. Statistics-driven refinement (1/NDV for equality,
-Parquet min/max for ranges) is the natural next step — see ROADMAP.md.
+this constant-selectivity model. The constants are its textbook defaults and
+remain the fallback. When column statistics are available
+(``compute_column_stats`` for in-memory frames, Parquet footer metadata for
+scans) the estimate is refined: equality by ``1/NDV``, ranges by an equi-depth
+histogram (or min/max interpolation), ``is_null`` by the null fraction.
 """
 
 from __future__ import annotations
@@ -42,6 +42,12 @@ SEL_DEFAULT = 0.3  # unknown predicate (the previous flat estimate)
 # to spend planning; a random sample of this many rows costs <1 ms and is
 # exact for the low-cardinality columns that actually flip join build sides.
 STATS_SAMPLE_SIZE = 65_536
+
+# Equi-depth histogram buckets. Each holds ~1/N of the data, so dense regions
+# get narrow buckets and sparse regions wide ones — range selectivity then
+# tracks skew, where flat min/max interpolation is catastrophically wrong on a
+# long tail (col < median of a lognormal estimates 0.001 vs the true 0.5).
+HIST_BUCKETS = 32
 
 _RANGE_OPS = frozenset({"less", "less_equal", "greater", "greater_equal"})
 _STRING_MATCH_OPS = frozenset({"str_contains", "str_startswith", "str_endswith"})
@@ -71,6 +77,9 @@ class ColumnStats:
     max_val: float | None = None
     null_count: int | None = None
     approximate: bool = False
+    # Equi-depth bucket edges (HIST_BUCKETS + 1 ascending floats), or None.
+    # Used for range selectivity on skewed columns.
+    histogram: object | None = None
 
 
 def _field_and_literal(ir) -> tuple[str, object, bool] | None:
@@ -90,20 +99,46 @@ def _field_and_literal(ir) -> tuple[str, object, bool] | None:
     return None
 
 
-def _range_selectivity(fn, value, field_left, lo, hi) -> float | None:
-    """Linear-interpolation selectivity for ``col <op> value`` over [lo, hi]."""
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return None
+def _fraction_below(value, lo, hi, hist) -> float | None:
+    """Fraction of rows with ``col < value``.
+
+    Uses the equi-depth histogram when present (each bucket holds 1/B of the
+    data, so this tracks skew); otherwise falls back to uniform interpolation
+    over ``[lo, hi]``.
+    """
+    if hist is not None:
+        import numpy as np
+
+        edges = hist
+        buckets = len(edges) - 1
+        if buckets < 1:
+            return None
+        if value <= edges[0]:
+            return 0.0
+        if value >= edges[-1]:
+            return 1.0
+        i = min(max(int(np.searchsorted(edges, value)) - 1, 0), buckets - 1)
+        width = edges[i + 1] - edges[i]
+        frac = (value - edges[i]) / width if width > 0 else 0.0
+        return (i + frac) / buckets
+
     if lo is None or hi is None or hi <= lo:
+        return None
+    return min(1.0, max(0.0, (value - lo) / (hi - lo)))
+
+
+def _range_selectivity(fn, value, field_left, lo, hi, hist=None) -> float | None:
+    """Selectivity for ``col <op> value`` from histogram or [lo, hi]."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
     if not field_left:  # "value <op> col" == "col <flipped-op> value"
         fn = _RANGE_FLIP[fn]
-    span = hi - lo
+    below = _fraction_below(value, lo, hi, hist)
+    if below is None:
+        return None
     if fn in ("less", "less_equal"):
-        frac = (value - lo) / span
-    else:  # greater / greater_equal
-        frac = (hi - value) / span
-    return min(1.0, max(0.0, frac))
+        return below
+    return max(0.0, 1.0 - below)  # greater / greater_equal
 
 
 def estimate_selectivity(ir: IRNode, stats: StatsLookup | None = None) -> float:
@@ -168,7 +203,12 @@ def estimate_selectivity(ir: IRNode, stats: StatsLookup | None = None) -> float:
                 st = stats(name)
                 if st is not None:
                     sel = _range_selectivity(
-                        fn, value, field_left, st.min_val, st.max_val
+                        fn,
+                        value,
+                        field_left,
+                        st.min_val,
+                        st.max_val,
+                        st.histogram,
                     )
                     if sel is not None:
                         return sel
@@ -242,12 +282,22 @@ def compute_column_stats(series, sample_size: int = STATS_SAMPLE_SIZE):
         ndv = sample_distinct
 
     min_val = max_val = None
+    histogram = None
     if values.dtype.kind in ("i", "u", "f"):
         try:
             min_val = float(np.nanmin(values))
             max_val = float(np.nanmax(values))
         except (ValueError, TypeError):
             pass
+        # Equi-depth histogram from the sample (drop NaN). Cheap (quantiles of
+        # ~64k values, ~1 ms); only kept when the column actually has spread.
+        try:
+            clean = sample.astype(np.float64)
+            clean = clean[~np.isnan(clean)]
+            if clean.size >= HIST_BUCKETS and clean.min() < clean.max():
+                histogram = np.quantile(clean, np.linspace(0.0, 1.0, HIST_BUCKETS + 1))
+        except (ValueError, TypeError):
+            histogram = None
 
     null_count = None
     if values.dtype.kind == "f":
@@ -260,4 +310,5 @@ def compute_column_stats(series, sample_size: int = STATS_SAMPLE_SIZE):
         max_val=max_val,
         null_count=null_count,
         approximate=approximate,
+        histogram=histogram,
     )
