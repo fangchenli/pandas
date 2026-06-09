@@ -1852,6 +1852,40 @@ _STREAMING_MERGE_FUNCS: dict[str, str] = {
 }
 
 
+def _array_is_numeric(arr) -> bool:
+    """True for an int/float/bool NumPy or Arrow column."""
+    dt = getattr(arr, "dtype", None)
+    if dt is not None and hasattr(dt, "kind"):
+        return dt.kind in "iufb"
+    t = getattr(arr, "type", None)
+    if t is not None:
+        return (
+            pa.types.is_integer(t) or pa.types.is_floating(t) or pa.types.is_boolean(t)
+        )
+    return False
+
+
+def groupby_prefers_arrow(
+    relevant_backends: set[str], all_numeric: bool, agg_funcs: set[str]
+) -> bool:
+    """Whether a hash aggregation should run on Arrow/acero rather than NumPy.
+
+    Acero's internally-parallel hash aggregation beats the pandas-backed NumPy
+    path at *every* size measured (e.g. ~10x at 10M rows, and still faster at
+    1k) - and converting NumPy-resident *numeric* columns to Arrow is
+    zero-copy. So numeric-keyed aggregation goes to Arrow even when the data is
+    NumPy-backed, not only when a column is already Arrow-backed.
+
+    Gated on every aggregation having an Arrow groupby kernel: ``median`` has
+    none, so a query using it stays on NumPy (where pandas computes it).
+    """
+    if not agg_funcs or not all(has_kernel(f"groupby_{f}", "arrow") for f in agg_funcs):
+        return False
+    if "arrow" in relevant_backends:
+        return True
+    return all_numeric
+
+
 @dataclass
 class PhysicalHashAggregate(PhysicalPlan):
     """
@@ -1951,12 +1985,13 @@ class PhysicalHashAggregate(PhysicalPlan):
         else:
             value_cols = {col for _, col, _ in agg_specs}
             relevant_cols = value_cols.union(group_cols or ())
-            relevant_backends = {
-                get_array_backend(input_arrays[col])
-                for col in relevant_cols
-                if col in input_arrays
-            }
-            if "arrow" in relevant_backends:
+            present = [c for c in relevant_cols if c in input_arrays]
+            relevant_backends = {get_array_backend(input_arrays[c]) for c in present}
+            all_numeric = bool(present) and all(
+                _array_is_numeric(input_arrays[c]) for c in present
+            )
+            agg_funcs = {f for _, _, f in agg_specs}
+            if groupby_prefers_arrow(relevant_backends, all_numeric, agg_funcs):
                 backend = "arrow"
             elif relevant_backends:
                 backend = "numpy"

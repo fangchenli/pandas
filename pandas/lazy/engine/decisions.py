@@ -60,6 +60,7 @@ from pandas.lazy.physical import (
     PhysicalProject,
     PhysicalSort,
     PhysicalTopK,
+    groupby_prefers_arrow,
 )
 
 # Sinks that do not observe their input's row order: a join feeding one
@@ -156,6 +157,7 @@ def _plan_groupby_backend(node: PhysicalHashAggregate, input_schema: Schema) -> 
     relevant column is Arrow-backed.
     """
     relevant: set[str] = set()
+    agg_funcs: set[str] = set()
     for expr in node.group_by:
         relevant.add(extract_output_name(expr))
     for expr in node.agg_exprs:
@@ -163,17 +165,18 @@ def _plan_groupby_backend(node: PhysicalHashAggregate, input_schema: Schema) -> 
         if isinstance(ir, Alias):
             ir = ir.arg
         if isinstance(ir, Call):
+            agg_funcs.add(ir.function)
             for arg in ir.args:
                 if isinstance(arg, FieldRef):
                     relevant.add(arg.name)
 
-    backends = {
-        input_schema[name].storage_backend for name in relevant if name in input_schema
-    }
-    if "arrow" in backends:
+    present = [name for name in relevant if name in input_schema]
+    backends = {input_schema[name].storage_backend for name in present}
+    all_numeric = bool(present) and all(
+        input_schema[name].is_numeric() for name in present
+    )
+    if groupby_prefers_arrow(backends, all_numeric, agg_funcs):
         return "arrow"
-    if backends:
-        return "numpy"
     return "numpy"
 
 

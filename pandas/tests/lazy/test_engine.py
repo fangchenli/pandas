@@ -222,7 +222,12 @@ class TestDecisionLayer:
         assert len(agg_sinks) == 1
         assert agg_sinks[0].node.planned_backend == "arrow"
 
-    def test_numeric_only_groupby_planned_numpy(self):
+    def test_numeric_groupby_planned_arrow(self):
+        # Numeric-keyed aggregation routes to Arrow/acero: its internally
+        # parallel hash aggregation beats the pandas NumPy path at every size
+        # (~10x at 10M rows), and numeric NumPy->Arrow conversion is zero-copy.
+        # The relevant columns (g, v) being numeric is what decides; an
+        # irrelevant Arrow payload column does not change it either way.
         df = pd.DataFrame(
             {
                 "g": np.array([1, 2] * 50),
@@ -241,9 +246,23 @@ class TestDecisionLayer:
             for p in graph.pipelines
             if isinstance(p.sink, NodeSink) and isinstance(p.sink.node, Agg)
         )
-        # irrelevant arrow payload must not flip the decision... but note
-        # projection pruning may have dropped 's' already; either way the
-        # relevant columns (g, v) are numpy
+        assert agg.planned_backend == "arrow"
+
+    def test_groupby_without_arrow_kernel_planned_numpy(self):
+        # An aggregation Arrow has no groupby kernel for (median) must stay on
+        # NumPy even with numeric keys - the has_kernel gate guards this.
+        df = pd.DataFrame({"g": np.array([1, 2] * 50), "v": np.arange(100.0)})
+        ldf = df.select().group_by("g").agg(col("v").median().alias("t"))
+
+        from pandas.lazy.engine.decisions import annotate_decisions
+        from pandas.lazy.physical import PhysicalHashAggregate as Agg
+
+        graph = annotate_decisions(compile_graph(ldf))
+        agg = next(
+            p.sink.node
+            for p in graph.pipelines
+            if isinstance(p.sink, NodeSink) and isinstance(p.sink.node, Agg)
+        )
         assert agg.planned_backend == "numpy"
 
     def test_explain_shows_decisions(self):

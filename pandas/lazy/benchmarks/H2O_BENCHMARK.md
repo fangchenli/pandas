@@ -17,16 +17,23 @@ Faithful port of the [DuckDB Labs db-benchmark](https://github.com/duckdblabs/db
 
 | query | LP cold (ms) | LP hot (ms) | PL hot (ms) | hotx |
 |---|---|---|---|---|
-| q1: sum(v1) by id1 (str, 100 grp) | 912 | 135 | 33 | 0.24 |
-| q2: sum(v1) by id1,id2 (str, 10k grp) | 193 | 127 | 156 | **1.24** |
-| q3: sum(v1),mean(v3) by id3 (str, 100k grp) | 467 | 302 | 218 | 0.72 |
-| q4: mean(v1,v2,v3) by id4 (int, 100 grp) | 273 | 226 | 13 | **0.06** |
-| q5: sum(v1,v2,v3) by id6 (int, 100k grp) | 222 | 197 | 150 | 0.76 |
-| q6: median(v3),std(v3) by id4,id5 | — | unsupported | 229 | — |
-| q7: max(v1)-min(v2) by id3 | — | unsupported | 220 | — |
-| q8: top2 v3 by id6 | — | unsupported | 219 | — |
-| q9: corr(v1,v2)^2 by id2,id4 | — | unsupported | 351 | — |
-| q10: sum(v3),count by id1..id6 (10M grp) | 1992 | 2251 | 1185 | 0.53 |
+| q1: sum(v1) by id1 (str, 100 grp) | 258 | 114 | 22 | 0.19 |
+| q2: sum(v1) by id1,id2 (str, 10k grp) | 129 | 125 | 154 | **1.23** |
+| q3: sum(v1),mean(v3) by id3 (str, 100k grp) | 431 | 323 | 208 | 0.64 |
+| q4: mean(v1,v2,v3) by id4 (int, 100 grp) | 20 | 19 | 13 | 0.68 |
+| q5: sum(v1,v2,v3) by id6 (int, 100k grp) | 124 | 122 | 141 | **1.16** |
+| q6: median(v3),std(v3) by id4,id5 | — | unsupported | 172 | — |
+| q7: max(v1)-min(v2) by id3 | — | unsupported | 210 | — |
+| q8: top2 v3 by id6 | — | unsupported | 210 | — |
+| q9: corr(v1,v2)^2 by id2,id4 | — | unsupported | 314 | — |
+| q10: sum(v3),count by id1..id6 (10M grp) | 1913 | 1920 | 1258 | 0.66 |
+
+> **Update (numeric-key routing fix).** q4 and q5 use integer keys. They
+> previously ran on the pandas-backed NumPy path (q4 0.06x — 17x slower than
+> Polars). Routing numeric-keyed aggregation to Arrow/acero (the
+> `groupby_prefers_arrow` rule) took **q4 226→19 ms (0.06x → 0.68x)** and
+> **q5 197→122 ms (0.76x → 1.16x, now ahead of Polars)**. String-keyed
+> group-by (q1/q3) still uses NumPy and is the remaining gap — see below.
 
 ## Join (10M rows)
 
@@ -45,14 +52,14 @@ competitive on high-cardinality group-by (q3/q5 at 0.72–0.76x), and materially
 slower elsewhere. The benchmark surfaced concrete, investigable targets that
 the custom microbenchmarks missed:
 
-1. **Low-cardinality group-by is the worst gap — q4 int-key mean is 17x slower
-   (0.06x), q1 str-key sum 4x (0.24x).** A 100-group aggregation over 10M rows
-   is pure memory-bandwidth work; Polars does it in 13–33 ms, we take
-   135–226 ms. This is the most common group-by shape in practice and the
-   highest-value thing to fix. Likely cause: not hitting an
-   internally-parallel hash aggregation for plain numeric/raw-string keys (the
-   dictionary-key fast path that recovered 15x earlier only triggers for
-   Categorical columns). **Top follow-up.**
+1. **Numeric-key group-by — FIXED.** Was the worst gap (q4 0.06x); plain
+   integer keys ran the pandas NumPy path. Routing numeric-keyed aggregation
+   to Arrow/acero fixed it (q4 → 0.68x, q5 → 1.16x). **Remaining group-by gap
+   is string keys** (q1 0.19x, q3 0.64x): object-string keys still use NumPy
+   because object→Arrow `large_string` conversion is not zero-copy. acero's
+   raw-string hashing (~67 ms/10M) would still beat our NumPy path (~114 ms) —
+   the next group-by target is routing string keys to Arrow once the
+   conversion cost is paid (or via dictionary-encoding the key).
 
 2. **Joins lag, worst on left and large-build.** q3 (left join) 0.08x and q5
    (10M×10M inner) 0.14x. Left joins likely do not take the acero path (acero
@@ -71,7 +78,8 @@ the custom microbenchmarks missed:
 
 ### Priority order for closing the gap
 
-1. Low-cardinality numeric/string group-by (q1, q4) — biggest, most common.
-2. Left-join and large-build-join routing (q3, q5).
-3. Grouped `median` + aggregation arithmetic (q6, q7) — unlocks 2 queries.
-4. Per-call teardown overhead (the hot ≥ cold anomaly).
+1. ~~Numeric-key group-by~~ — **done** (q4 0.06x→0.68x, q5 0.76x→1.16x).
+2. **String-key group-by** (q1 0.19x, q3 0.64x) — route to Arrow/dictionary.
+3. Left-join and large-build-join routing (join q3 0.08x, q5 0.14x).
+4. Grouped `median` + aggregation arithmetic (q6, q7) — unlocks 2 queries.
+5. Per-call teardown overhead (the hot ≥ cold anomaly).
