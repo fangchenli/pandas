@@ -170,11 +170,15 @@ roughly by value:
     16-byte inline views, no offset indirection or variable byte copy).
     That's the only way past the bandwidth bound, and **pyarrow 23 and 24
     both lack** `string_view` support in `array_take`, `hash_aggregate`, and
-    `hash_join` (re-tested on 24.0.0 — identical failures). The achievable
-    bridge is dictionary-encoding low/medium-cardinality string columns
-    (`take` 28x faster on codes; group_by/join supported today) — scoped in
-    `docs/STRING_STORAGE_SCOPING.md`. Revisit string-view when the pyarrow
-    C++ compute kernels ship it.
+    `hash_join` (re-tested on 24.0.0 — identical failures). The
+    dictionary-encoding "bridge" was scoped and then **measured-and-disproven**
+    (`docs/STRING_STORAGE_SCOPING.md`): end-to-end it regresses 13x on q3
+    because the one-shot encode (~180 ms) + output decode (~1900 ms) dwarf the
+    gather saving, and string payload is only ~40% of the merge cost anyway.
+    The only winning case (already-encoded input, Categorical output) is
+    already covered by the Categorical→DictionaryArray path. So the remaining
+    string gaps are genuinely structural; revisit only when pyarrow C++ ships
+    `string_view` compute kernels.
 
 ## Recently Landed (June 2026 cycle)
 

@@ -40,7 +40,41 @@ Gathering a dictionary column takes the **integer codes**, not the string
 bytes — the same structural win string-view's view-copy `take` would give.
 Hashing dictionary codes is also length-independent.
 
-## Decision
+## Track A Phase 1 — MEASURED AND DISPROVEN (June 2026)
+
+Before building Phase 1, the end-to-end approach was measured on q3 (left join,
+10M, string payload `id4`/`id5`). **It regresses badly — do not implement:**
+
+| q3 left join, 10M | time |
+|---|---|
+| str payload merge (current) | **182 ms** |
+| dict payload, full e2e (encode → merge → decode) | 2344 ms (**13x slower**) |
+| dict merge, no final decode | 440 ms (still slower) |
+| encode `id5` (str→dict) alone | 179 ms |
+| left join numeric-only (no string payload) | 98 ms |
+| Polars | ~60 ms |
+
+Why the 28x micro-benchmark did not translate:
+- The 28x (`take` on codes) only holds for an **already-encoded** column
+  gathered repeatedly. A single join→output query pays the **encode**
+  (~180 ms to hash 10M strings into a dictionary) *and* the **decode**
+  (~1900 ms to materialize 10M `str` values from codes at output, required to
+  match eager). Together they dwarf any gather saving.
+- String payload is only **~71 ms** of q3's 169 ms merge (169 with strings vs
+  98 numeric-only) — not the dominant cost. And even eliminating it entirely
+  (98 ms) would not reach Polars' 60 ms: **half the gap is the join algorithm**
+  (Polars' parallel hash join), not the gather.
+- This confirms the earlier ROADMAP note: "dictionary `take` is 2.8x only when
+  *already-encoded*; one-shot encode erases it."
+
+**Consequence:** dictionary encoding adds nothing over the existing Categorical
+path for plain-`str` single-pass queries — the only case it wins (already
+zero-copy-encoded input, output stays Categorical, no decode) is exactly what
+the Categorical handling already covers. Track A is **not pursued**. The
+remaining string gaps are genuinely structural — Track B (string-view),
+upstream-blocked.
+
+## Decision (superseded by the measurement above)
 
 Two tracks, sequenced:
 
@@ -157,15 +191,23 @@ it is not actionable from a pyarrow-based engine.
   each pyarrow upgrade. When they pass, scope the migration of the block
   manager's string representation to `string_view`.
 
-## Recommendation
+## Recommendation (updated after measurement)
 
-The remaining gaps are **real but bounded** (the queries are correct, just
-slower), and the literal string-view fix is **upstream-blocked**. Track A
-(dictionary encoding) is the achievable bridge and reuses machinery we already
-have — but it is a medium-large migration with a genuine cardinality caveat,
-justified only if string-heavy low/medium-cardinality workloads are a target.
+**Do not pursue Track A.** Phase 1 was measured on q3 and regresses 13x
+(encode + decode overhead dwarfs the gather saving; the gather isn't even the
+dominant cost). The only case dictionary encoding wins — already-encoded input
+with Categorical output and no decode — is already handled by the existing
+Categorical → `DictionaryArray` path. There is no dictionary "bridge" for
+plain-`str` single-pass join/output queries.
 
-Suggested entry point if pursued: **Phase 1 (payload-gather dictionary
-encoding) only**, behind the cardinality gate, measured on q3 — it is the
-lowest-risk slice and directly tests whether the 28x gather win survives
-end-to-end before committing to the full migration.
+The remaining string gaps (q3 0.34x, q4 0.25x) are therefore **genuinely
+structural and upstream-blocked**: the fix is Arrow string-view, and pyarrow's
+C++ `take`/`group_by`/`join` kernels do not support it (confirmed on 23 and
+24). The queries are **correct, just slower**; this is a documented,
+bounded gap, not a missing capability.
+
+**Action:** none until pyarrow ships `string_view` compute kernels. Re-run the
+feasibility probe (top of this doc) on each pyarrow upgrade; when `take` /
+`group_by` / `join` accept `string_view`, scope migrating the block manager's
+string representation to it (Track B) — that fix needs no per-column encode or
+decode and handles all cardinalities.
