@@ -176,9 +176,113 @@ def pl_q6(t):
     )
 
 
+# --- Q3: Shipping Priority (3-table join) ----------------------------------
+def lp_q3(t):
+    cut = pd.Timestamp("1995-03-15")
+    c = _lp(t["customer"]).filter(col("c_mktsegment") == "BUILDING")
+    o = _lp(t["orders"]).filter(col("o_orderdate") < cut)
+    li = _lp(t["lineitem"]).filter(col("l_shipdate") > cut)
+    return (
+        c.join(o, left_on="c_custkey", right_on="o_custkey")
+        .join(li, left_on="o_orderkey", right_on="l_orderkey")
+        .group_by("l_orderkey", "o_orderdate", "o_shippriority")
+        .agg((col("l_extendedprice") * (1 - col("l_discount"))).sum().alias("revenue"))
+        .sort("revenue", "o_orderdate", descending=[True, False])
+        .limit(10)
+    )
+
+
+def pl_q3(t):
+    cut = pd.Timestamp("1995-03-15")
+    c = (
+        pl.from_pandas(t["customer"])
+        .lazy()
+        .filter(pl.col("c_mktsegment") == "BUILDING")
+    )
+    o = pl.from_pandas(t["orders"]).lazy().filter(pl.col("o_orderdate") < cut)
+    li = pl.from_pandas(t["lineitem"]).lazy().filter(pl.col("l_shipdate") > cut)
+    return (
+        c.join(o, left_on="c_custkey", right_on="o_custkey")
+        .join(li, left_on="o_orderkey", right_on="l_orderkey")
+        .group_by("o_orderkey", "o_orderdate", "o_shippriority")
+        .agg(
+            (pl.col("l_extendedprice") * (1 - pl.col("l_discount")))
+            .sum()
+            .alias("revenue")
+        )
+        .sort(["revenue", "o_orderdate"], descending=[True, False])
+        .limit(10)
+        .collect()
+    )
+
+
+# --- Q10: Returned Item Reporting (4-table join) ---------------------------
+def lp_q10(t):
+    lo = pd.Timestamp("1993-10-01")
+    hi = pd.Timestamp("1994-01-01")
+    c = _lp(t["customer"])
+    o = _lp(t["orders"]).filter((col("o_orderdate") >= lo) & (col("o_orderdate") < hi))
+    li = _lp(t["lineitem"]).filter(col("l_returnflag") == "R")
+    n = _lp(t["nation"])
+    return (
+        c.join(o, left_on="c_custkey", right_on="o_custkey")
+        .join(li, left_on="o_orderkey", right_on="l_orderkey")
+        .join(n, left_on="c_nationkey", right_on="n_nationkey")
+        .group_by(
+            "c_custkey",
+            "c_name",
+            "c_acctbal",
+            "c_phone",
+            "n_name",
+            "c_address",
+            "c_comment",
+        )
+        .agg((col("l_extendedprice") * (1 - col("l_discount"))).sum().alias("revenue"))
+        .sort("revenue", descending=True)
+        .limit(20)
+    )
+
+
+def pl_q10(t):
+    lo = pd.Timestamp("1993-10-01")
+    hi = pd.Timestamp("1994-01-01")
+    c = pl.from_pandas(t["customer"]).lazy()
+    o = (
+        pl.from_pandas(t["orders"])
+        .lazy()
+        .filter((pl.col("o_orderdate") >= lo) & (pl.col("o_orderdate") < hi))
+    )
+    li = pl.from_pandas(t["lineitem"]).lazy().filter(pl.col("l_returnflag") == "R")
+    n = pl.from_pandas(t["nation"]).lazy()
+    return (
+        c.join(o, left_on="c_custkey", right_on="o_custkey")
+        .join(li, left_on="o_orderkey", right_on="l_orderkey")
+        .join(n, left_on="c_nationkey", right_on="n_nationkey")
+        .group_by(
+            "c_custkey",
+            "c_name",
+            "c_acctbal",
+            "c_phone",
+            "n_name",
+            "c_address",
+            "c_comment",
+        )
+        .agg(
+            (pl.col("l_extendedprice") * (1 - pl.col("l_discount")))
+            .sum()
+            .alias("revenue")
+        )
+        .sort("revenue", descending=True)
+        .limit(20)
+        .collect()
+    )
+
+
 QUERIES = {
     1: (lp_q1, pl_q1),
+    3: (lp_q3, pl_q3),
     6: (lp_q6, pl_q6),
+    10: (lp_q10, pl_q10),
 }
 
 
