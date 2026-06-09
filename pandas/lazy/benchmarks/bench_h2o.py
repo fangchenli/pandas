@@ -317,15 +317,26 @@ def _collect(result):
     return result
 
 
-def time_twice(fn, arg):
-    """Return (cold_ms, hot_ms, nrows) or raise."""
-    times = []
-    out = None
-    for _ in range(2):
-        start = time.perf_counter()
+def time_query(fn, arg, warm_runs=4):
+    """Return (cold_ms, hot_ms, nrows).
+
+    cold = the very first run (all caches cold - includes one-time process
+    costs: acero thread-pool init and the per-column dictionary-encoding key
+    cache build). hot = min of ``warm_runs`` subsequent runs, i.e. steady
+    state once those one-time costs are amortized. The original "run twice"
+    convention conflated the two: for the first Arrow-routed query in a
+    process, *both* of its runs sat in the warm-up tail (e.g. string-key q1
+    measured 114 ms when steady state is ~13 ms).
+    """
+    start = time.perf_counter()
+    out = _collect(fn(arg))
+    cold = (time.perf_counter() - start) * 1000
+    hot = float("inf")
+    for _ in range(warm_runs):
+        s = time.perf_counter()
         out = _collect(fn(arg))
-        times.append((time.perf_counter() - start) * 1000)
-    return times[0], times[1], len(out)
+        hot = min(hot, (time.perf_counter() - s) * 1000)
+    return cold, hot, len(out)
 
 
 def run_task(name, queries, arg, label):
@@ -337,7 +348,7 @@ def run_task(name, queries, arg, label):
         pl_hot = None
         if HAS_POLARS and pl_fn is not None:
             try:
-                _, pl_hot, _ = time_twice(pl_fn, arg["pl"])
+                _, pl_hot, _ = time_query(pl_fn, arg["pl"])
             except Exception as e:
                 pl_hot = f"ERR:{type(e).__name__}"
         # lazy pandas
@@ -346,7 +357,7 @@ def run_task(name, queries, arg, label):
             ratio = ""
         else:
             try:
-                lp_cold, lp_hot, _ = time_twice(lp_fn, arg["lp"])
+                lp_cold, lp_hot, _ = time_query(lp_fn, arg["lp"])
                 ratio = (
                     f"{pl_hot / lp_hot:.2f}"
                     if isinstance(pl_hot, float) and lp_hot
