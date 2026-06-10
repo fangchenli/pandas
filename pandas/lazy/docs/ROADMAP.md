@@ -192,6 +192,23 @@ is the user-facing decision tool either way.
   the laggards are now non-join costs: q19 (big-OR filter evaluation,
   561 ms), q21 (n_unique-heavy group-bys, 1.4 s), q22/q15/q16 (strings &
   small-query floors). The next profile-driven target list lives there.*
+
+- **P2.5 — next profiled targets (June 2026, fresh cProfile data):**
+  - **q19** (546 ms total): ~350 ms is filter-expression evaluation in the
+    fused pipeline, of which ~230 ms is 4 `isin` kernel calls — three on the
+    *same* string column (`p_container`). Suspect: per-call backend
+    conversion of the same column (no memoization in `ArrayEvaluator`'s
+    kernel dispatch — `ensure_backend` converts per argument per call).
+    Probe first: log the input array type reaching `arrow_isin`; if it is
+    object/str-NumPy each call, add a per-evaluation conversion cache keyed
+    on `(id(arr), backend)` and re-measure. ~190 ms of the rest is the
+    (full-hit, chain-ineligible-shape) li⋈part join.
+  - **q21** (2.2 s profiled): ~1.1 s in three group-by executes (the two
+    6M-row `n_unique` decorrelations) + ~0.85 s in filter backend work.
+    `n_unique` over ~3–4.5M groups is intrinsically heavy; Polars does the
+    whole query in ~190 ms. Investigate: acero `count_distinct` routing for
+    the n_unique aggregations, and whether the two decorrelated counts can
+    share one factorization of `l_orderkey`.
 - **P3 — Cardinality, then reorder default-on.** Exact NDV for small relations
   (dimensions are cheap to count exactly), HyperLogLog-class sketches for fact
   tables; re-test the q9 backwards-model case; then enable `JoinReorder` by
