@@ -340,6 +340,17 @@ Projected arc if gates hold: 0.40 → ~0.43 (G1) → ~0.45 (G2) → ~0.50 (G3)
 that. Ceiling stays as analyzed: ~0.6–0.7x pipelines, wins kept on single
 ops.
 
+> **CAMPAIGN CLOSE-OUT (June 2026, clean-machine scorecard): S1 geo-mean
+> 0.43x** — campaign start 0.22x, suite 7.5 s vs Polars 4.8 s, all 22
+> validated. 14/22 queries ≥0.4x; q7 0.90x, q22 0.75x, q12 0.68x, q19
+> 0.64x, q21 0.46x (was 0.13x). Landed: G1 (global filter fusion), G2
+> (composite-key packing), G4 (streaming + worker-partial aggregation);
+> G3 closed by measurement. The projection overestimated G3 (redirected)
+> and underestimated run-noise; the result sits where the per-phase gates
+> actually delivered. Remaining: G5 (string_view, external) and the
+> join-feeding materialization residual. N3 (PDEP) is the planned next
+> move.
+
 ## The Next Phase (superseded by the Gap-Closing Campaign above; N1/N2 complete) (planned June 2026, geo-mean at 0.39x)
 
 Three phases, in order — engineering to cross the gate, then re-verify the
