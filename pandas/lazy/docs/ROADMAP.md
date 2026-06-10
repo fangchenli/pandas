@@ -198,10 +198,15 @@ grouped top-k (`GroupByHead`). Remaining, roughly by value:
 
 ### Known bugs (not design choices)
 
-- **Duplicate column labels** crash with `AttributeError` instead of a clear
-  "unsupported" error at plan construction.
-- **`shift` is unimplemented in the eager evaluator** while `lag` works in
-  both engines — audit Expr-API coverage parity between engines.
+- ~~**Duplicate column labels** crash with `AttributeError`~~ — fixed: now a
+  clear `NotImplementedError` at plan construction.
+- ~~**`shift` unimplemented in the eager evaluator**~~ — fixed. The parity
+  audit it prompted also fixed `clip` and `diff` (physical-only → both engines).
+- **Minor parity gaps remaining** (low priority): `rank` returns int on the
+  physical path vs float (pandas) on the eager path — the dtype is fixed by the
+  type model but overridden somewhere in the physical dispatch (multiple rank
+  code paths); and `abs`/`round` have no `Expr` method yet (API addition, not a
+  parity bug).
 
 ## Blocked on upstream
 

@@ -416,6 +416,25 @@ class Evaluator:
                 result = _convert_series_to_nullable(result, original_dtype)
             return result
 
+        elif func == "shift":
+            # Parity with the physical evaluator's shift (was unimplemented in
+            # the eager path). pandas Series.shift handles positive/negative
+            # periods and the optional fill value directly.
+            periods = node.kwargs.get("periods", 1)
+            fill_value = node.kwargs.get("fill_value")
+            result = args[0].shift(periods)
+            if fill_value is not None:
+                result = result.fillna(fill_value)
+            return result
+
+        elif func == "clip":
+            # Parity with the physical evaluator (was eager-unimplemented).
+            return args[0].clip(node.kwargs.get("lower"), node.kwargs.get("upper"))
+
+        elif func == "diff":
+            # Parity with the physical evaluator (was eager-unimplemented).
+            return args[0].diff(node.kwargs.get("periods", 1))
+
         elif func == "cum_sum":
             return args[0].cumsum()
 

@@ -115,6 +115,15 @@ class DataFrameSource(LogicalPlan):
     df: DataFrame
 
     def __post_init__(self) -> None:
+        # Duplicate labels make column lookup return a DataFrame instead of a
+        # Series, which otherwise crashes deep in execution with a cryptic
+        # AttributeError. Fail clearly at plan construction instead.
+        if self.df.columns.has_duplicates:
+            dups = self.df.columns[self.df.columns.duplicated()].unique().tolist()
+            raise NotImplementedError(
+                "lazy pandas does not support DataFrames with duplicate column "
+                f"labels: {dups}. Rename or drop the duplicates before going lazy."
+            )
         self._cached_schema = None
         self._stats_cache: dict[str, object] = {}
 

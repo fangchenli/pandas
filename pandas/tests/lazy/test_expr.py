@@ -420,3 +420,49 @@ class TestExpressionComposition:
         assert isinstance(result._ir, Alias)
         assert result._ir.name == "total"
         assert result._ir.arg.function == "multiply"
+
+
+class TestEngineParityRobustness:
+    """Eager↔physical parity for Expr ops + clear errors (robustness pass).
+
+    Regressions: shift/clip/diff were implemented in the physical evaluator but
+    raised NotImplementedError in the eager one; rank diverged in dtype (int vs
+    pandas' float); duplicate column labels crashed deep in execution with a
+    cryptic AttributeError.
+    """
+
+    def _df(self):
+        import pandas as pd
+
+        return pd.DataFrame({"x": [1.0, -2.0, 3.0, 4.0]})
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda: col("x").shift(1),
+            lambda: col("x").shift(-1, fill_value=0),
+            lambda: col("x").clip(0, 3),
+            lambda: col("x").clip(0, None),
+            lambda: col("x").diff(),
+        ],
+    )
+    def test_eager_physical_parity(self, build):
+        import numpy as np
+
+        df = self._df()
+        plan = df.select().select(build().alias("r"))
+        phys = plan.collect(use_physical_planner=True)["r"]
+        eager = plan.collect(use_physical_planner=False)["r"]
+        assert str(phys.dtype) == str(eager.dtype)
+        assert np.allclose(
+            phys.to_numpy(dtype="float64"),
+            eager.to_numpy(dtype="float64"),
+            equal_nan=True,
+        )
+
+    def test_duplicate_labels_raise_clearly(self):
+        import pandas as pd
+
+        df = pd.DataFrame([[1, 2, 3]], columns=["a", "a", "b"])
+        with pytest.raises(NotImplementedError, match="duplicate column"):
+            df.select()
