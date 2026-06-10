@@ -278,7 +278,10 @@ crosses ~0.5x or gains plateau, whichever first.
   baselines. Watch small-query overhead (fusing a tiny filter is near-free,
   but verify with `run_all.py --quick`). *Gate: q20 ≥2x; zero controlled
   losses across all 22; suite green.*
-- **G2 — Composite-key joins via key packing (small).** The `partsupp`
+- **G2 — DONE (June 2026): composite-key joins via int64 packing.** q9
+  637→477 ms (1.34x, gate met); 2-key int joins use the kernel + chains
+  (non-int composites stay nested for acero routing); range-gated with
+  pd.merge fallback. Geo-mean 0.41→**0.42x**. Original plan: **(small).** The `partsupp`
   two-key steps (q9/q16/q18) bail from the Cython kernel and chains. The
   packing trick already proven in `n_unique` applies: when both key pairs
   are ints whose ranges pack into int63, synthesize one packed key array
