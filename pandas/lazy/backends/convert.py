@@ -488,11 +488,12 @@ def arrays_to_dataframe(
       ``str`` — a deliberate, documented simplification).
     - **categorical** (Arrow dictionary) → ``Categorical``.
 
-    Known limitation: pandas *masked* nullable dtypes (``Int64``/``Float64``)
-    are indistinguishable from their NumPy counterparts once a join/aggregate
-    has marked the schema nullable, so they come out NumPy-backed (tracked
-    under "Nullable dtype preservation" in ROADMAP.md). Genuine
-    ``pd.ArrowDtype`` columns are preserved.
+    Masked nullable ``Int*``/``UInt*``/``boolean`` are restored (NumPy int/bool
+    can't be null, so a ``nullable`` int/bool is unambiguously a masked input).
+    Masked ``Float64`` is *not* — NumPy ``float64`` holds NaN and is also flagged
+    nullable, so it is indistinguishable at the LazyDtype level and comes out
+    NumPy-backed (tracked under "Nullable dtype preservation" in ROADMAP.md).
+    Genuine ``pd.ArrowDtype`` columns are preserved.
 
     Notes
     -----
@@ -595,8 +596,53 @@ def arrays_to_dataframe(
                 return pd.array(arr, dtype=pd.Float64Dtype())
         return arr
 
+    def _masked_target(dt):
+        """pandas masked-nullable dtype string for ``dt``, or None.
+
+        Restores only the cases that LazyDtype can *unambiguously* identify as
+        masked: integer and boolean. NumPy int/bool cannot hold nulls, so a
+        ``nullable`` integer/boolean dtype can only have been a pandas masked
+        ``Int*``/``boolean`` input. NumPy ``float64`` *can* hold NaN and so is
+        also flagged ``nullable`` — indistinguishable from masked ``Float64`` at
+        the LazyDtype level — so float (and string, handled elsewhere) are left
+        to the standard branches. Fully restoring ``Float64`` needs the type
+        model to track masked storage (ROADMAP).
+        """
+        if dt is None or not dt.nullable or dt.arrow_type is not None:
+            return None
+        if dt.is_boolean():
+            return "boolean"
+        np_dt = dt.numpy_dtype
+        if dt.is_numeric() and np_dt is not None:
+            if np_dt.kind == "i":
+                return f"Int{np_dt.itemsize * 8}"
+            if np_dt.kind == "u":
+                return f"UInt{np_dt.itemsize * 8}"
+        return None
+
     def to_pandas_array_contract(arr, dt):
         """Enforce the output dtype contract for a user-facing column."""
+        # Restore pandas masked nullable dtypes (Int64/Float64/boolean/string)
+        # when the input column was masked-nullable. The eager path preserves
+        # them; converting to NumPy would turn pd.NA into NaN and silently
+        # change dtype (e.g. Int64 -> float64), which is data loss.
+        target = _masked_target(dt)
+        if target is not None:
+            if isinstance(arr, (pa.Array, pa.ChunkedArray)):
+                chunked = pa.chunked_array([arr]) if isinstance(arr, pa.Array) else arr
+                if pa.types.is_string(chunked.type) or pa.types.is_large_string(
+                    chunked.type
+                ):
+                    values = chunked.to_pandas()
+                else:
+                    values = chunked.to_numpy(zero_copy_only=False)
+            else:
+                values = arr
+            try:
+                return pd.array(values, dtype=target)
+            except (TypeError, ValueError):
+                pass  # fall through to the standard branches
+
         if isinstance(arr, (pa.Array, pa.ChunkedArray)):
             chunked = pa.chunked_array([arr]) if isinstance(arr, pa.Array) else arr
             atype = chunked.type
@@ -636,9 +682,9 @@ def arrays_to_dataframe(
                 except (TypeError, ValueError):
                     pass
         # NumPy numeric/bool/float pass through unchanged: float nulls stay
-        # np.nan (matching eager), no nullable-Float64 promotion. Masked
-        # nullable dtypes (Int64/Float64) are not restored here - see the
-        # contract notes and ROADMAP "Nullable dtype preservation".
+        # np.nan (matching eager). Masked Int*/boolean were already restored at
+        # the top; masked Float64 is indistinguishable from NumPy float64 at the
+        # LazyDtype level and stays NumPy (ROADMAP "Nullable dtype preservation").
         return arr
 
     if schema is not None:

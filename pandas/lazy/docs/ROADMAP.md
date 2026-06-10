@@ -176,11 +176,19 @@ grouped top-k (`GroupByHead`). Remaining, roughly by value:
 
 ### Smaller items
 
-- **Nullable dtype preservation** — the output contract preserves genuine
-  `pd.ArrowDtype` but *not* pandas masked nullable (`Int64`/`Float64`): once
-  a join/aggregate marks the schema nullable, a masked source is
-  indistinguishable from its NumPy counterpart and comes out NumPy-backed.
-  Needs the schema to track "originated as a masked extension dtype".
+- **Nullable dtype preservation** — *partially fixed.* The output contract now
+  restores masked **`Int*`/`UInt*`/`boolean`** (NumPy int/bool can't be null, so
+  a `nullable` int/bool dtype can only be a masked input; aggregate inference
+  was also fixed to propagate input nullability so `sum(numpy int)` stays
+  `int64` while `sum(Int64)` stays `Int64`). **`Float64` remains a gap**: NumPy
+  `float64` holds NaN and is also flagged `nullable`, so LazyDtype cannot tell
+  masked `Float64` from NumPy `float64` — fully fixing it needs the type model
+  to carry a real masked-storage flag (set in `from_pandas_dtype`, propagated
+  through `infer_expr_dtype`). Genuine `pd.ArrowDtype` is preserved as before.
+- **Masked `boolean` in the arrow group-by** crashes (`ArrowInvalid: Could not
+  convert <NA> ... to boolean`) when a masked boolean column with `pd.NA` is
+  present in a grouped frame — the acero path can't ingest it. Pre-existing;
+  needs a null-safe conversion in `_execute_arrow_table_groupby`.
 - **CSV limit pushdown** — Parquet scans got `ParquetSource.limit` + the
   direct small-limit path; CSV scans have neither.
 - **JSON scanning** — `scan.py` accepts `format="json"` but raises

@@ -517,9 +517,16 @@ def _infer_call_dtype(node: Call, schema: Schema) -> LazyDtype:
         elif node.function in {"mean", "std", "var"}:
             return LazyDtype("numeric", np.dtype("float64"), None, True)
         elif node.args:
+            # sum/min/max preserve the input's nullability: an aggregate of a
+            # NumPy int column stays NumPy int64 (eager semantics), while one of
+            # a masked Int64 column stays nullable — keeping ``nullable`` a
+            # reliable masked-vs-NumPy signal for the output dtype contract.
             arg_dtype = infer_expr_dtype(node.args[0], schema)
             return LazyDtype(
-                arg_dtype.category, arg_dtype.numpy_dtype, arg_dtype.arrow_type, True
+                arg_dtype.category,
+                arg_dtype.numpy_dtype,
+                arg_dtype.arrow_type,
+                arg_dtype.nullable,
             )
 
     # Arithmetic: propagate from first arg, mark nullable if any input nullable

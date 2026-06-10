@@ -306,3 +306,54 @@ class TestIsNullNaNSemantics:
         df = pd.DataFrame({"x": [1.0, np.nan, 3.0], "s": ["a", "b", "c"]})
         out = df.select().filter(col("x").is_null()).collect(use_physical_planner=True)
         assert out["s"].tolist() == ["b"]
+
+
+class TestMaskedNullableDtypePreservation:
+    """The physical engine must preserve pandas masked nullable Int/boolean
+    dtypes (matching the eager path), instead of dropping them to NumPy — which
+    silently turned pd.NA into NaN and Int64 into float64.
+
+    Float64 is a known remaining gap: LazyDtype can't distinguish masked
+    Float64 from NumPy float64 (both nullable, NumPy-backed), so it falls back.
+    """
+
+    def test_int_and_bool_preserved_passthrough(self):
+        df = pd.DataFrame(
+            {
+                "g": [1, 1, 2],
+                "i": pd.array([10, 20, None], dtype="Int64"),
+                "b": pd.array([True, None, False], dtype="boolean"),
+                "ni": [10, 20, 30],  # plain NumPy int stays NumPy
+            }
+        )
+        out = df.select().filter(col("g") > 0).collect(use_physical_planner=True)
+        assert str(out["i"].dtype) == "Int64"
+        assert str(out["b"].dtype) == "boolean"
+        assert str(out["ni"].dtype) == "int64"
+        # pd.NA preserved, not turned into NaN
+        assert out["i"].isna().sum() == 1
+
+    def test_aggregate_dtype_matches_eager(self):
+        df = pd.DataFrame(
+            {
+                "g": [1, 1, 2],
+                "i": pd.array([10, 20, 30], dtype="Int64"),
+                "ni": [10, 20, 30],
+            }
+        )
+        plan = (
+            df.select()
+            .group_by("g")
+            .agg(
+                col("i").sum().alias("si"),
+                col("ni").sum().alias("sni"),
+            )
+        )
+        phys = plan.collect(use_physical_planner=True)
+        eager = plan.collect(use_physical_planner=False)
+        # masked input -> masked output; NumPy input -> NumPy output
+        assert str(phys["si"].dtype) == "Int64"
+        assert str(phys["sni"].dtype) == "int64"
+        assert {c: str(phys[c].dtype) for c in phys.columns} == {
+            c: str(eager[c].dtype) for c in eager.columns
+        }
