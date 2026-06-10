@@ -131,7 +131,9 @@ def run_one(q: int, sf: float, data_dir: str, engine: str = "lp") -> None:
     con.execute("LOAD tpch")
     ref = con.execute(f"PRAGMA tpch({q})").df()
     ok, msg = bt.validate(res, ref)
-    rss_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e9
+    # ru_maxrss is BYTES on macOS but KILOBYTES on Linux.
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    rss_gb = rss / 1e9 if sys.platform == "darwin" else rss * 1024 / 1e9
     print(
         "RESULT "
         + json.dumps({"q": q, "ok": ok, "msg": msg, "ms": ms, "rss_gb": rss_gb})
