@@ -14,7 +14,7 @@ User Query (Expr API)
 Logical Plan (plan.py)            built incrementally by LazyDataFrame methods
     │
     ▼
-Optimizer (optimize/)             11 rule-based passes, cached per LazyDataFrame
+Optimizer (optimize/)             12 rule-based passes, cached per LazyDataFrame
     │
     ▼
 Physical Planner (physical.py)    logical → physical operators, operator fusion

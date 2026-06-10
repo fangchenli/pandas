@@ -66,10 +66,10 @@ joins. The enumeration is the easy part; cardinality is the real work.
 
 | Category | Standing | Driver |
 |----------|----------|--------|
-| string | **2.14x avg — wins** (`str.lower` 5.30x, `contains` up to 1.55x) | pass-through fix + compute-bound morsel parallelism |
+| string | **2.38x avg — wins** (`str.lower` 5.93x; re-measured June 2026) | pass-through fix + compute-bound morsel parallelism |
 | aggregation | **wins** (H2O group-by: 6/10 beat Polars, string-key sums up to ~7x, `corr` ~3x) | `groupby_prefers_arrow` routing (numeric + arrow-string → acero) + post-aggregation projection |
 | parquet scan | 0.88x avg — glob `head()` **wins 1.5x** | limit pushdown into scans + direct ParquetFile path + vectorized index |
-| join | **`pd.merge` path** (eager-correct, fastest — 5x over acero on this shape). H2O single joins 0.48–0.83x int-key (re-verified June 2026); the microbenchmark's *many-to-many* ~100M-row-result join is ~0.3x (result materialization, where Polars parallelizes); string-key/left joins lag — see H2O_BENCHMARK.md | `pd.merge` in-memory equi-join; acero/Grace fallbacks |
+| join | **`pd.merge` path** (eager-correct, fastest — 5x over acero on this shape). H2O single joins 0.48–0.83x int-key (re-verified June 2026); the microbenchmark's *many-to-many* ~100M-row-result join is ~0.4x (result materialization, where Polars parallelizes); string-key/left joins lag — see H2O_BENCHMARK.md | `pd.merge` in-memory equi-join; acero/Grace fallbacks |
 | sort | string-key multi-sort **wins 1.09x at 10M**; numeric ~parity (0.91–0.97x at 10M); smaller sorts and full mixed sort gather-bound (0.4–0.8x) | radix argsort + radix lexsort (numeric & factorized string keys) + breaker copy-free output; string payload gather is the wall |
 | category-key groupby | 0.43x vs Polars-categorical | zero-copy dictionary flow (was 313 ms, now 21) |
 | full-scan select+filter | ~0.37x (21 ms) | vectorized index column (was 104 ms) |
@@ -275,7 +275,7 @@ upstream; masked-`Float64` storage flag; chain build caps at scale.
   comparisons). Rationale: at SF-1 half the queries run in 20–150 ms where
   run-to-run noise is a meaningful fraction; the machine has 16 GB, so SF-5+
   risks the swap distortion seen before (SF-3 ≈ 7 GB resident across all
-  three engines). Findings at SF-3 (geo-mean **0.34x**, slightly better
+  three engines). Findings at SF-3 (geo-mean **0.34x** then — **0.40x as of the N1 gate**, see above; slightly better
   than SF-1's 0.32 — the engine scales):
   - **q7 reaches 0.95x — near parity with Polars** on a 5-table 18M-row
     join pipeline.

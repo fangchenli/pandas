@@ -8,7 +8,7 @@ Dated result reports in this directory:
 - `H2O_BENCHMARK.md` — H2O.ai db-benchmark vs Polars (group-by + join, the
   cross-engine standard); lazy pandas wins 6/10 group-by queries
 - `TPCH_BENCHMARK.md` — all 22 TPC-H queries vs Polars, validated against
-  DuckDB; dual-scenario (S1 native-vs-native geo-mean 0.23x; S2
+  DuckDB; dual-scenario; **SF-3 is the scorecard standard** (`TPCH_BENCHMARK_SF3.md`, S1 geo-mean 0.40x as of June 2026; S2
   pandas-resident break-evens — conversion ~0.4 s vs ~3.2 s/pass deficit,
   so the conversion moat protects only light or few-run usage)
 - `LAZY_VS_POLARS_BENCHMARK.md` — custom head-to-head vs Polars

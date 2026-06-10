@@ -16,7 +16,7 @@ This document describes which operations use which backend (Arrow, NumPy, or pan
 | `PhysicalSort` | Cython radix argsort / radix lexsort | `np.lexsort` | Numeric keys via `pandas._libs.lazy_radix` (single-key parallel radix, multi-key + factorized-string lexsort); Arrow/`np.lexsort` fallback |
 | `PhysicalTopK` | Arrow/NumPy kernel | Full sort | Uses `select_k_unstable` kernel |
 | `PhysicalLimit` | Direct slicing | N/A | No kernel needed |
-| `PhysicalDistinct` | Arrow/NumPy kernel | `np.unique` | Uses `unique_indices` kernel |
+| `PhysicalDistinct` | Arrow/NumPy kernel | sortedness-aware first-occurrence kernel (diff-based when sorted, hash-based `duplicated()` otherwise — no argsort) | Uses `unique_indices` kernel |
 | `PhysicalGroupByHead` | pandas `groupby().head(n)` | — | Group-wise head; with a preceding sort gives top-k rows per group |
 | `PhysicalHashJoin` | **`pd.merge` (in-memory equi-joins)** | Arrow/NumPy `hash_join`, Grace (size-triggered) | `pd.merge` is primary (eager semantics, fastest); acero/indexer/Grace are fallbacks |
 | `PhysicalConvert` | Direct conversion | N/A | Backend conversion |
@@ -181,8 +181,8 @@ This document describes which operations use which backend (Arrow, NumPy, or pan
 | `sort_indices` | Cython LSD radix argsort (`lazy_radix`), thread-parallel ≥1M; k-way merge / `np.argsort` fallback | `pc.sort_indices` | Radix ~130 ms/10M float64, faster than Polars `arg_sort` |
 | `take` | `arr[indices]` | `pc.take` | Equivalent |
 | `select_k_unstable` | `np.argpartition` | `pc.select_k_unstable` | NumPy slightly faster |
-| `unique` | `np.unique` | `pc.unique` | Equivalent |
-| `unique_indices` | `np.unique` with return_index | N/A | **NumPy only** |
+| `unique` | sortedness-aware first-occurrence kernel (diff-based when sorted, hash-based `duplicated()` otherwise — no argsort) | `pc.unique` | Equivalent |
+| `unique_indices` | sortedness-aware first-occurrence kernel (diff-based when sorted, hash-based `duplicated()` otherwise — no argsort) with return_index | N/A | **NumPy only** |
 
 ## Backend Routing
 
