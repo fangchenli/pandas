@@ -232,7 +232,11 @@ class NodeSink(Sink):
             children = self.node.children()
             inputs: list[PhysicalPlan] = [
                 (
-                    PrecomputedBatches(batches=m.batches, schema=child.output_schema)
+                    PrecomputedBatches(
+                        batches=m.batches,
+                        schema=child.output_schema,
+                        preaggregated=m.preaggregated,
+                    )
                     if m.batches is not None  # type: ignore[union-attr]
                     else PrecomputedInput(
                         arrays=m.arrays,  # type: ignore[union-attr]

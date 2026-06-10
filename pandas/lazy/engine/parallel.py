@@ -257,6 +257,7 @@ def run_morsel_parallel(
     context: ExecutionContext,
     n_rows: int,
     return_batches: bool = False,
+    morsel_post=None,
 ):
     """Run the pipeline's operator chain morsel-parallel over ``arrays``.
 
@@ -290,6 +291,8 @@ def run_morsel_parallel(
                 out = _slice_arrays(arrays, start, end)
                 for apply_op in appliers:
                     out = apply_op(out, ctx)
+                if morsel_post is not None:
+                    out = morsel_post(out, ctx)
                 results[i] = out
             except BaseException as exc:  # propagate to caller
                 errors.append(exc)

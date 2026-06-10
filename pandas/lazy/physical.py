@@ -2560,6 +2560,32 @@ class PhysicalHashAggregate(PhysicalPlan):
                 return False  # non-simple agg: streaming would drop it
         return self._can_stream_aggregation(specs)
 
+    def partial_aggregate_batch(self, batch: ArrayDict) -> ArrayDict:
+        """Phase-1 partial aggregation of one morsel (G4 worker-side).
+
+        Same per-batch spec as the streaming map/reduce path (mean emits
+        __sum_/__count_ columns); the sink later merges partials only.
+        """
+        group_cols = [extract_output_name(e) for e in self.group_by]
+        agg_specs: list[tuple[str, str, str]] = []
+        for expr in self.agg_exprs:
+            ir = expr._ir
+            if isinstance(ir, Alias):
+                ir = ir.arg
+            agg_specs.append((extract_output_name(expr), ir.args[0].name, ir.function))
+        batch_specs: list[tuple[str, str, str]] = []
+        for output_name, col_name, agg_func in agg_specs:
+            if agg_func == "mean":
+                batch_specs.append((f"__sum_{output_name}__", col_name, "sum"))
+                batch_specs.append((f"__count_{output_name}__", col_name, "count"))
+            else:
+                batch_specs.append((output_name, col_name, agg_func))
+        columns = {k: v for k, v in batch.items() if not is_index_col(k)}
+        table = dispatch_kernel(
+            "group_by", "arrow", pa.table(columns), group_cols, batch_specs
+        )
+        return {name: table.column(name) for name in table.column_names}
+
     def _can_stream_aggregation(self, agg_specs: list[tuple[str, str, str]]) -> bool:
         """
         Check if all aggregations can be computed in streaming mode.
@@ -2633,6 +2659,20 @@ class PhysicalHashAggregate(PhysicalPlan):
         # Phase 1: Per-batch aggregation
         partial_tables: list[pa.Table] = []
 
+        # G4: morsel workers may have partial-aggregated already — the
+        # incoming batches ARE phase-1 partials (mean already decomposed
+        # into __sum_/__count_); skip straight to the merge.
+        if getattr(self.input, "preaggregated", False):
+            for batch in self.input.execute_batches(context):
+                if not batch:
+                    continue
+                columns = {k: v for k, v in batch.items() if not is_index_col(k)}
+                if columns and len(next(iter(columns.values()))):
+                    partial_tables.append(pa.table(columns))
+            return self._merge_streaming_partials(
+                partial_tables, group_cols, agg_specs, mean_aggs, direct_aggs, context
+            )
+
         for batch in self.input.execute_batches(context):
             # Skip empty batches
             first_arr = next(iter(batch.values()))
@@ -2666,6 +2706,20 @@ class PhysicalHashAggregate(PhysicalPlan):
                 )
             partial_tables.append(partial)
 
+        return self._merge_streaming_partials(
+            partial_tables, group_cols, agg_specs, mean_aggs, direct_aggs, context
+        )
+
+    def _merge_streaming_partials(
+        self,
+        partial_tables: list,
+        group_cols: list[str],
+        agg_specs: list[tuple[str, str, str]],
+        mean_aggs: list[tuple[str, str]],
+        direct_aggs: list[tuple[str, str, str]],
+        context: ExecutionContext,
+    ) -> ArrayDict:
+        """Phase 2 of streaming aggregation: merge partials and finish."""
         # Handle empty result
         if not partial_tables:
             return self._make_empty_aggregate_result(group_cols, agg_specs, context)
