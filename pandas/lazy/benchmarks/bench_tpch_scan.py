@@ -42,7 +42,7 @@ import bench_tpch as bt
 import duckdb
 
 DATA_ROOT = os.environ.get("TPCH_SCAN_DIR", "/tmp/tpch_scan")
-TIMEOUT_S = 900
+TIMEOUT_S = int(os.environ.get("TPCH_SCAN_TIMEOUT_S", "900"))
 
 
 def gen_parquet(sf: float) -> str:
