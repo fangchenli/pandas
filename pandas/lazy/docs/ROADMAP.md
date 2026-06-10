@@ -247,6 +247,21 @@ is the user-facing decision tool either way.
   distributed cost (sub-60 ms operators; the `late` filter subtree likely
   executes twice — no common-subplan reuse across pipelines). q21
   2759 → 2087 ms. Remaining leads: common-subplan caching, the chain's
+
+- **Common-subplan caching (June 2026): infrastructure landed, DEFAULT-OFF.**
+  Two pieces: (1) **PlanVisitor.visit is now memoized per pass run** — the
+  optimizer was silently destroying plan-DAG sharing (every shared subtree
+  rebuilt into distinct copies by the first rebuilding pass; q21/q2/q15 each
+  had shared subtrees in the raw plan, zero after optimization). The memo
+  preserves the DAG and dedups optimization work — kept ON, pure win.
+  (2) An execute-once `PhysicalCachedSubplan` wrapper (planner counts parent
+  edges; context-shared, lock-guarded cache; inner runs through the full
+  pipeline engine). Measured: q21 0.96x, q2/q18 neutral — but **q15 3.5x
+  WORSE through an unexplained mechanism**: not the shared aggregate itself
+  (52 ms standalone, strict==relaxed), not morsel-parallelism loss, not the
+  Aggregate root (gating it changed nothing — the shared root is a Project).
+  Off via `physical._SUBPLAN_CACHE_ENABLED` until diagnosed; repro: toggle
+  the flag, q15 at SF-3 goes 112 → 399 ms.
   build caps at scale.
 - **P3 — Cardinality, then reorder default-on.** Exact NDV for small relations
   (dimensions are cheap to count exactly), HyperLogLog-class sketches for fact
