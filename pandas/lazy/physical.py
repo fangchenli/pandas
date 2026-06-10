@@ -5681,15 +5681,11 @@ class PhysicalPlanner:
         # operator fusion and chain collapse (measured: q15's shared filter
         # ran unfused at 663 ms vs 44 ms fused). Apply them to each wrapper's
         # inner explicitly; nested shared wrappers are in the dict too.
-        self._fuse_single_filter = True
-        try:
-            for wrapper in getattr(self, "_shared_wrappers", {}).values():
-                inner = wrapper.inner
-                if enable_fusion:
-                    inner = self._apply_fusion(inner)
-                wrapper.inner = self._collapse_join_chains(inner)
-        finally:
-            self._fuse_single_filter = False
+        for wrapper in getattr(self, "_shared_wrappers", {}).values():
+            inner = wrapper.inner
+            if enable_fusion:
+                inner = self._apply_fusion(inner)
+            wrapper.inner = self._collapse_join_chains(inner)
 
         return physical_plan
 
@@ -6171,18 +6167,13 @@ class PhysicalPlanner:
         # Reverse to get operations in execution order (bottom-up to top-down)
         operations.reverse()
 
-        # A single FILTER still fuses inside cached shared subplans (flag set
-        # by the wrapper post-pass): PhysicalFusedPipeline is what carries
+        # A single FILTER always fuses: PhysicalFusedPipeline is what carries
         # morsel parallelism and prune-before-mask, so a bare PhysicalFilter
-        # over a large input is ~15x slower than the same filter fused
-        # (measured 691 vs 44 ms on an 18M-row date-range filter). Globally
-        # fusing lone filters changes plan shapes everywhere, so it stays
-        # scoped to wrapper inners.
-        if (
-            len(operations) == 1
-            and operations[0].op_type == "filter"
-            and getattr(self, "_fuse_single_filter", False)
-        ):
+        # over a large input is ~15-20x slower than the same filter fused
+        # (q15's shared filter: 691 vs 44 ms; q20's filter-on-join-output:
+        # 929 ms bare). Single project/limit chains keep the no-benefit
+        # exemption — they have no mask/prune work to parallelize.
+        if len(operations) == 1 and operations[0].op_type == "filter":
             return PhysicalFusedPipeline(
                 input=base_input,
                 operations=tuple(operations),
