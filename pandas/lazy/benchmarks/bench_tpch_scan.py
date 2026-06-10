@@ -108,14 +108,25 @@ def scan_tables(data_dir: str) -> dict:
     return {n: _ScanTable(scan(f"{data_dir}/{n}.parquet")) for n in bt.TABLES}
 
 
-def run_one(q: int, sf: float, data_dir: str) -> None:
+def run_one(q: int, sf: float, data_dir: str, engine: str = "lp") -> None:
     """Child process: run + validate one query, print one JSON line."""
-    bt._lp = lambda x: x if isinstance(x, _ScanTable) else x.select()
-    t = scan_tables(data_dir)
-    lp_fn, _ = bt.QUERIES[q]
-    t0 = time.perf_counter()
-    res = lp_fn(t).collect(use_physical_planner=True)
-    ms = (time.perf_counter() - t0) * 1000
+    if engine == "pl":
+        import polars as pl
+
+        tables = {n: pl.scan_parquet(f"{data_dir}/{n}.parquet") for n in bt.TABLES}
+        _, pl_fn = bt.QUERIES[q]
+        t0 = time.perf_counter()
+        res = pl_fn(tables)  # pl_* queries collect internally (default engine)
+        ms = (time.perf_counter() - t0) * 1000
+        if hasattr(res, "to_pandas"):
+            res = res.to_pandas()
+    else:
+        bt._lp = lambda x: x if isinstance(x, _ScanTable) else x.select()
+        t = scan_tables(data_dir)
+        lp_fn, _ = bt.QUERIES[q]
+        t0 = time.perf_counter()
+        res = lp_fn(t).collect(use_physical_planner=True)
+        ms = (time.perf_counter() - t0) * 1000
     con = duckdb.connect(f"{data_dir}/ref.duckdb", read_only=True)
     con.execute("LOAD tpch")
     ref = con.execute(f"PRAGMA tpch({q})").df()
@@ -132,11 +143,12 @@ def main() -> None:
     ap.add_argument("--sf", type=float, default=1.0)
     ap.add_argument("--one", type=int, default=None)
     ap.add_argument("--queries", default=None)
+    ap.add_argument("--engine", default="lp", choices=["lp", "pl"])
     args = ap.parse_args()
 
     data_dir = gen_parquet(args.sf)
     if args.one is not None:
-        run_one(args.one, args.sf, data_dir)
+        run_one(args.one, args.sf, data_dir, args.engine)
         return
 
     which = (
@@ -144,7 +156,7 @@ def main() -> None:
         if args.queries
         else sorted(bt.QUERIES)
     )
-    print(f"TPC-H SCAN-STREAMING run, SF-{args.sf:g} ({data_dir})")
+    print(f"TPC-H SCAN-STREAMING run [{args.engine}], SF-{args.sf:g} ({data_dir})")
     print(f"{'query':>6} {'status':>22} {'ms':>9} {'peakRSS':>8}")
     rows = []
     for q in which:
@@ -155,6 +167,8 @@ def main() -> None:
             str(args.sf),
             "--one",
             str(q),
+            "--engine",
+            args.engine,
         ]
         try:
             p = subprocess.run(
