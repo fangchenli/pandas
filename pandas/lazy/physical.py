@@ -594,13 +594,18 @@ class PhysicalMaterialize(PhysicalPlan):
 
             first = arrays_to_concat[0]
             if isinstance(first, (pa.Array, pa.ChunkedArray)):
-                # Arrow concat
-                result[col] = pa.concat_arrays(
-                    [
-                        arr if isinstance(arr, pa.Array) else arr.combine_chunks()
-                        for arr in arrays_to_concat
-                    ]
-                )
+                # Arrow concat as a ChunkedArray: concat_arrays/combine_chunks
+                # on string columns overflows int32 offsets past 2 GB (TPC-H
+                # q13's o_comment at SF-100 — "offset overflow while
+                # concatenating arrays"). Chunked output avoids the copy AND
+                # the overflow; downstream kernels accept ChunkedArray.
+                chunks: list = []
+                for arr in arrays_to_concat:
+                    if isinstance(arr, pa.ChunkedArray):
+                        chunks.extend(arr.chunks)
+                    else:
+                        chunks.append(arr)
+                result[col] = pa.chunked_array(chunks)
             else:
                 # NumPy concat
                 result[col] = np.concatenate(arrays_to_concat)
@@ -4638,6 +4643,15 @@ class PhysicalHashJoin(PhysicalPlan):
                         if isinstance(arr, pa.ChunkedArray)
                         else pa.chunked_array([arr])
                     )
+                    # int32-offset string/binary columns overflow past 2 GB
+                    # inside merge's pyarrow take (SEGFAULT, not a clean
+                    # raise — TPC-H q2/q18 at SF-100). Upcast to 64-bit
+                    # offsets before merge; only the offsets buffer is
+                    # rebuilt, not the string bytes.
+                    if ca.type == pa.string():
+                        ca = ca.cast(pa.large_string())
+                    elif ca.type == pa.binary():
+                        ca = ca.cast(pa.large_binary())
                     cols[name] = ArrowExtensionArray(ca)
                 else:
                     cols[name] = arr
