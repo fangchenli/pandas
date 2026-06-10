@@ -287,7 +287,14 @@ crosses ~0.5x or gains plateau, whichever first.
   are ints whose ranges pack into int63, synthesize one packed key array
   per side and proceed single-key (kernel + chain eligibility both).
   *Gate: q9 ≥1.3x; parity tests incl. range edges; all 22 validate.*
-- **G3 — Parallelize the residual kernels (ordinary engineering).**
+- **G3 — CLOSED BY MEASUREMENT (June 2026): both halves redirected.**
+  (b) block-aware gather **disproven**: per-column 404 ms vs
+  pre-consolidated block take 411 ms on 10M×6 — random-access gather is
+  bandwidth-bound either way; pd.merge has no block advantage to copy.
+  (a) deprioritized: q21's fresh profile shows the n_unique sort is no
+  longer the rock — the cached `late` filter's 779 ms is ~all output
+  materialization (G4-class), as are q1's 403 ms and q20's 367 ms. G4 is
+  the right next move. Original plan: **(ordinary engineering).**
   (a) Thread the `n_unique` dedup using the existing `lazy_radix` parallel
   sort machinery on the packed keys (~600 ms of q21 → target ≤250 ms).
   (b) High-hit terminal joins (H2O ~0.5x): the loss is the per-column
