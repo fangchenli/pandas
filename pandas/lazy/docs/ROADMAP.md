@@ -138,13 +138,28 @@ is the user-facing decision tool either way.
   query). *Result: S1 geo-mean 0.23x; conversion ~400 ms vs ~3.2 s/pass
   suite deficit — the S2 moat is thin for heavy analytics, so P1/P2 carry
   the plan.*
-- **P1 — Parallel join kernel (1–2 sessions).** The single biggest S1 lever.
-  Measure three candidates on filtered TPC-H shapes before building: (a) acero
-  hash join for order-free sinks at scale (parallel; re-measure — it lost on
-  raw many-to-many, not on filtered pipeline shapes), (b) partitioned parallel
-  `pd.merge` (factorize keys once, probe partitions in threads), (c) a Cython
-  hash join over the radix infrastructure. *Gate: q3/q5/q10 ≥2x; S1 geo-mean
-  ≥0.35x.*
+- **P1 — Parallel join kernel (in progress).** The single biggest S1 lever.
+  **Candidate measurements done (June 2026), on q3's real filtered shapes**
+  (c 30k ⋈ o 727k ⋈ li 3.2M; Polars reference on identical inputs: **6.8 ms**
+  vs our `pd.merge` chain 84 ms — 12x):
+  - ~~(a) acero~~ — 69 ms (1.2x): parallel C++ but the Arrow round-trip and
+    its probe cost leave it nowhere near Polars. Insufficient.
+  - ~~(b) partitioned parallel `pd.merge`~~ — 86 ms: **no win** (GIL +
+    concat overhead eat the parallelism).
+  - ~~(c′) NumPy direct-address (LUT) join~~ — 3.1x standalone on the
+    dominant join (72→23 ms, dense unique int build keys), but **in-engine it
+    is suite-neutral (1.01x total across all 22 queries)** and unstable
+    per-query even after five eligibility gates (build-side screen, density
+    vs probe, sampled selectivity pre-probe, hashtable uniqueness pre-check,
+    probe/build ratio cap). Root cause: the multi-pass NumPy probe has a
+    ~8.5 ms/M-row floor, vs `pd.merge`'s shape-dependent 5–25 ms/M — the
+    crossover is too narrow to gate reliably. Built, measured, **reverted**.
+  - **(c) Cython single-pass hash join — the remaining candidate.** Probe +
+    emit in one nogil loop (parallelizable across probe chunks) removes the
+    multi-pass floor; the LUT round supplies the spec: exact `pd.merge`
+    inner-order semantics (probe-order when build unique; stable
+    left-key-major regroup otherwise), selective-join gating, build-side
+    selection. *Gate unchanged: q3/q5/q10 ≥2x; S1 geo-mean ≥0.35x.*
 - **P2 — Pipelined joins.** Stop materializing the probe side and the join
   output between chained joins (the known "hash join materializes both sides"
   limitation): probe batches stream through the next join. *Gate: multi-join
