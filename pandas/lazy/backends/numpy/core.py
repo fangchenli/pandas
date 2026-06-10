@@ -805,11 +805,19 @@ def numpy_unique_indices(arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     tuple of np.ndarray
         (unique_values, indices of first occurrence, ascending)
     """
-    # Hash-based first-occurrence detection (pandas duplicated) instead of
-    # np.unique(return_index=True): return_index forces a stable argsort,
-    # which is what made Distinct scale superlinearly (TPC-H q22 at SF-3:
-    # 5.4 s -> 0.3 s on the 13.5M-row probe, 17x). Indices come out already
-    # ascending (= first-occurrence order).
+    # Sortedness-aware first-occurrence detection. np.unique(return_index=
+    # True) forces a stable argsort, which made Distinct scale superlinearly
+    # on random keys (TPC-H q22 at SF-3: 17x slower than hashing) - but on
+    # already-sorted keys the sort is nearly free while hashing pays full
+    # price (q4's ordered l_orderkey: 159 ms sort vs 407 ms hash). So:
+    # sorted integer input (O(n) check, short-circuits fast on random data)
+    # -> diff-based run starts with no sort or hash at all; anything else ->
+    # pandas' hash-based duplicated(). Indices are ascending in both paths.
+    if arr.dtype.kind in "iu" and len(arr):
+        if not bool((arr[1:] < arr[:-1]).any()):  # already sorted
+            change = np.flatnonzero(arr[1:] != arr[:-1])
+            indices = np.concatenate(([0], change + 1))
+            return arr[indices], indices
     import pandas as pd
 
     mask = pd.Series(arr).duplicated().to_numpy()
