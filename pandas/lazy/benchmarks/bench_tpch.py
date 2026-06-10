@@ -12,11 +12,21 @@ extension: ``CALL dbgen(sf=...)`` generates the tables, ``PRAGMA tpch(n)`` is
 the authoritative result for query n. Each lazy-pandas query is validated
 against that reference, then timed against Polars.
 
-Fairness: each engine is timed on its **native** input doing **only the
-query** - lazy pandas on the pandas tables, Polars on Polars tables converted
-once up front (not inside the timed loop). Timing Polars' ``from_pandas`` per
-run would charge it a pandas->Arrow conversion (~75% of a query's time at
-SF-1) that the already-native lazy-pandas path does not pay.
+Two scenarios are reported, answering two different questions:
+
+- **S1 (native vs native, engine quality)**: each engine is timed on its
+  **native** input doing **only the query** - lazy pandas on the pandas
+  tables, Polars on Polars tables converted once up front (not inside the
+  timed loop). Timing Polars' ``from_pandas`` per run would charge it a
+  pandas->Arrow conversion (~75% of a query's time at SF-1) that the
+  already-native lazy-pandas path does not pay.
+- **S2 (pandas-resident)**: the user's data already lives in pandas, so
+  converting to Polars is a real **one-time** cost they would pay. It is
+  timed exactly once and reported as a per-query **break-even**: the number
+  of runs of that query below which staying in lazy pandas is faster
+  end-to-end. It is never charged per query (a real user converts once and
+  runs many queries - charging it per run would overstate our advantage,
+  the inverse of the S1 bug this section guards against).
 
 Queries are hand-translated from the TPC-H SQL into the lazy DataFrame API
 (reference: pola.rs/polars-benchmark). Implemented queries are registered in
@@ -1409,10 +1419,83 @@ def time_query(fn, arg, warm=1, runs=3):
     return best
 
 
+def _breakeven(conv_ms: float, lp_ms: float, pl_ms: float) -> str:
+    """S2 break-even: largest number of runs of this query for which staying
+    in pandas is faster end-to-end than converting to Polars first.
+
+    ``lp * N < conv + pl * N``  =>  ``N < conv / (lp - pl)`` when lp > pl.
+    "always": lazy pandas is at least as fast natively, wins at any N.
+    "never": the single-run deficit already exceeds the conversion cost —
+    converting to Polars wins from the very first run.
+    """
+    import math
+
+    if lp_ms <= pl_ms:
+        return "always"
+    n = math.floor(conv_ms / (lp_ms - pl_ms))
+    return f"≤{n}" if n >= 1 else "never"
+
+
+def _write_report(path, sf, conv_ms, rows, geo, totals):
+    import platform
+
+    import polars as _pl
+
+    import pandas as _pd
+
+    total_lp, total_pl = totals
+    suite_be = _breakeven(conv_ms, total_lp, total_pl)
+    lines = [
+        "# TPC-H (PDS-H): lazy pandas vs Polars",
+        "",
+        f"SF-{sf}, every query validated exact against DuckDB `PRAGMA tpch(n)`. "
+        f"pandas {_pd.__version__}, polars {_pl.__version__}, "
+        f"{platform.platform()}.",
+        "",
+        "Two scenarios, two questions:",
+        "",
+        "- **S1 — native vs native** (engine quality): each engine on its own",
+        "  format, query only. `from_pandas` is **never** timed here.",
+        "- **S2 — pandas-resident** (the data already lives in pandas): converting",
+        f"  all 8 tables to Polars costs **{conv_ms:.0f} ms once**; the break-even",
+        "  column is the number of runs of that query below which staying in",
+        "  lazy pandas is faster end-to-end. Conversion is a one-time cost —",
+        "  it is never charged per query.",
+        "",
+        f"**S1 geometric mean: {geo:.2f}x** (PL/LP; >1 means lazy pandas faster).",
+        f"**S2 whole-suite**: one pass of all queries — lazy pandas "
+        f"{total_lp:.0f} ms vs convert+Polars {conv_ms + total_pl:.0f} ms "
+        f"({conv_ms:.0f} + {total_pl:.0f}); "
+        + (
+            "converting to Polars wins from the very first pass."
+            if suite_be == "never"
+            else f"staying in pandas wins for {suite_be} suite passes."
+        ),
+        "",
+        "| query | valid | LP (ms) | PL (ms) | S1 PL/LP | S2 break-even (runs) |",
+        "|---|---|---|---|---|---|",
+    ]
+    for n, flag, lp_ms, pl_ms, ratio in rows:
+        be = _breakeven(conv_ms, lp_ms, pl_ms)
+        lines.append(
+            f"| q{n} | {flag} | {lp_ms:.1f} | {pl_ms:.1f} | {ratio:.2f}x | {be} |"
+        )
+    lines += [
+        "",
+        "Regenerate: `python pandas/lazy/benchmarks/bench_tpch.py --sf 1 "
+        "--report pandas/lazy/benchmarks/TPCH_BENCHMARK.md`",
+        "",
+    ]
+    with open(path, "w") as f:
+        f.write("\n".join(lines))
+    print(f"\n[report written to {path}]")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sf", type=float, default=1.0)
     ap.add_argument("--queries", default=None, help="comma list, e.g. 1,6")
+    ap.add_argument("--report", default=None, help="write markdown report here")
     args = ap.parse_args()
 
     which = (
@@ -1426,21 +1509,28 @@ def main():
     tables = load_tables(con)
     # Pre-convert the Polars tables ONCE, outside the timed query: each engine
     # is timed on its native input doing only the query (lazy pandas on the
-    # pandas frames, Polars on Polars frames). Timing Polars' from_pandas per
-    # run would charge it a pandas->Arrow conversion the native lazy path never
-    # pays - not a fair engine comparison.
-    pl_tables = (
-        {name: pl.from_pandas(df) for name, df in tables.items()}
-        if HAS_POLARS
-        else None
-    )
+    # pandas frames, Polars on Polars frames) — the S1 scenario. Timing
+    # Polars' from_pandas per run would charge it a conversion the native lazy
+    # path never pays. The conversion is timed separately, exactly once, as
+    # the S2 (pandas-resident) one-time cost feeding the break-even numbers.
+    conv_ms = float("nan")
+    pl_tables = None
+    if HAS_POLARS:
+        t1 = time.perf_counter()
+        pl_tables = {name: pl.from_pandas(df) for name, df in tables.items()}
+        conv_ms = (time.perf_counter() - t1) * 1000
     print(
         f"[generated SF-{args.sf} in {time.perf_counter() - t0:.1f}s; "
-        f"lineitem={len(tables['lineitem']):,} rows]\n"
+        f"lineitem={len(tables['lineitem']):,} rows; "
+        f"pandas->polars conversion (one-time): {conv_ms:.0f} ms]\n"
     )
 
-    print(f"{'query':>6} {'valid':>7} {'LP (ms)':>10} {'PL (ms)':>10} {'PL/LP':>7}")
-    print("-" * 46)
+    print(
+        f"{'query':>6} {'valid':>7} {'LP (ms)':>10} {'PL (ms)':>10} "
+        f"{'PL/LP':>7} {'S2 break-even':>14}"
+    )
+    print("-" * 62)
+    rows = []
     for n in which:
         if n not in QUERIES:
             print(f"{'q' + str(n):>6}   not implemented")
@@ -1456,11 +1546,32 @@ def main():
             pl_ms = time_query(pl_fn, pl_tables) if HAS_POLARS else float("nan")
             ratio = pl_ms / lp_ms if lp_ms else float("nan")
             flag = "OK" if ok else f"FAIL:{msg}"
+            be = _breakeven(conv_ms, lp_ms, pl_ms)
+            rows.append((n, flag, lp_ms, pl_ms, ratio))
             print(
-                f"{'q' + str(n):>6} {flag:>7} {lp_ms:10.1f} {pl_ms:10.1f} {ratio:7.2f}"
+                f"{'q' + str(n):>6} {flag:>7} {lp_ms:10.1f} {pl_ms:10.1f} "
+                f"{ratio:7.2f} {be:>14}"
             )
         except Exception as e:
             print(f"{'q' + str(n):>6}   ERROR: {type(e).__name__}: {str(e)[:60]}")
+
+    if rows and HAS_POLARS:
+        import math
+
+        ok_rows = [r for r in rows if r[1] == "OK"]
+        geo = math.exp(sum(math.log(r[4]) for r in ok_rows) / len(ok_rows))
+        total_lp = sum(r[2] for r in ok_rows)
+        total_pl = sum(r[3] for r in ok_rows)
+        print("-" * 62)
+        print(
+            f"S1 geo-mean: {geo:.2f}x | suite: LP {total_lp:.0f} ms vs "
+            f"convert+PL {conv_ms + total_pl:.0f} ms "
+            f"(break-even {_breakeven(conv_ms, total_lp, total_pl)} passes)"
+        )
+        if args.report:
+            _write_report(
+                args.report, args.sf, conv_ms, rows, geo, (total_lp, total_pl)
+            )
 
 
 if __name__ == "__main__":

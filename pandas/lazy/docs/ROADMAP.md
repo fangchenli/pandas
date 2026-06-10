@@ -93,17 +93,23 @@ measured record (H2O, TPC-H, the join investigation), not aspiration.
 - **S1 — native vs native** (engine quality): each engine on its own format,
   query only. TPC-H SF-1 geometric mean today: **0.22x** (range 0.06–0.67;
   5/22 queries ≥0.4x, 11/22 below 0.2x). H2O single-op: we win 6/10 group-by.
-- **S2 — pandas-resident** (the data already lives in pandas DataFrames, the
-  dominant real-world case for our users): Polars must pay `from_pandas`
-  (~75% of a TPC-H query's time at SF-1); we pay nothing. This is the
-  structural moat — likely already winning, **not yet measured as a mode**.
+- **S2 — pandas-resident** (the data already lives in pandas DataFrames):
+  Polars must pay `from_pandas` once; we never do. **Measured (P0, June
+  2026): the moat is thin for heavy analytics.** Converting all 8 SF-1
+  tables costs only ~400 ms one-time, while our suite deficit is ~3.2 s per
+  pass — so converting to Polars pays for itself within 1–10 runs of most
+  queries (for the heaviest, q21, from the very first run). The moat
+  genuinely protects only light or few-run usage (q6/q11/q14 break-evens of
+  ~20–30 runs). See `../benchmarks/TPCH_BENCHMARK.md`.
 
-The realistic bet is *not* full native parity across all 22 TPC-H queries
-against a decade of Rust/SIMD/Rayon. It is: (1) **win S2 decisively and
-publish it** — "the fastest engine for data already in pandas"; (2) reach
-**S1 ≥ 0.5x geo-mean**, the point where the conversion advantage dominates
-for any pandas user end-to-end; (3) keep the outright wins (group-by
-analytics, string ops, large sorts).
+The P0 measurement reframed the bet: **S2 does not rescue the standing — S1
+engine work is the only real path.** The realistic goal is still not full
+native parity across all 22 queries against a decade of Rust/SIMD/Rayon; it
+is: (1) close S1 enough (**≥0.5x geo-mean** mid-term) that the per-query
+deficit shrinks toward the conversion cost and the S2 break-evens swing our
+way; (2) keep and extend the outright wins (group-by analytics, string ops,
+large sorts); (3) publish both scenarios honestly — the S2 break-even table
+is the user-facing decision tool either way.
 
 ### Where the S1 gap lives (measured, with disproven paths marked)
 
@@ -125,13 +131,13 @@ analytics, string ops, large sorts).
 
 ### Roadmap (phased, each with a measured gate)
 
-- **P0 — Scorecard (1 session).** Add a pandas-resident mode to `bench_tpch`,
-  clearly labeled S2 and distinct from the fixed S1 fairness rule (S1 never
-  times `from_pandas`; that stays). S2 must not overclaim in the other
-  direction either: a real user converts **once** and runs many queries, so
-  report the conversion as a separate one-time cost plus a **break-even** ("lazy
-  pandas wins end-to-end below N queries per dataset"), not conversion charged
-  to every query. *Gate: an honest S1/S2 scorecard to steer everything below.*
+- **P0 — Scorecard. DONE (June 2026).** `bench_tpch --report` now emits the
+  dual-scenario table (`../benchmarks/TPCH_BENCHMARK.md`): S1 never times
+  `from_pandas` (the fixed fairness rule stays); S2 times the conversion
+  exactly once and reports per-query **break-evens** (never charged per
+  query). *Result: S1 geo-mean 0.23x; conversion ~400 ms vs ~3.2 s/pass
+  suite deficit — the S2 moat is thin for heavy analytics, so P1/P2 carry
+  the plan.*
 - **P1 — Parallel join kernel (1–2 sessions).** The single biggest S1 lever.
   Measure three candidates on filtered TPC-H shapes before building: (a) acero
   hash join for order-free sinks at scale (parallel; re-measure — it lost on
