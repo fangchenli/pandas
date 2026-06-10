@@ -7,37 +7,37 @@ Two scenarios, two questions:
 - **S1 — native vs native** (engine quality): each engine on its own
   format, query only. `from_pandas` is **never** timed here.
 - **S2 — pandas-resident** (the data already lives in pandas): converting
-  all 8 tables to Polars costs **1240 ms once**; the break-even
+  all 8 tables to Polars costs **1401 ms once**; the break-even
   column is the number of runs of that query below which staying in
   lazy pandas is faster end-to-end. Conversion is a one-time cost —
   it is never charged per query.
 
-**S1 geometric mean: 0.40x** (PL/LP; >1 means lazy pandas faster).
-**S2 whole-suite**: one pass of all queries — lazy pandas 7977 ms vs convert+Polars 4788 ms (1240 + 3548); converting to Polars wins from the very first pass.
+**S1 geometric mean: 0.41x** (PL/LP; >1 means lazy pandas faster).
+**S2 whole-suite**: one pass of all queries — lazy pandas 7917 ms vs convert+Polars 5093 ms (1401 + 3692); converting to Polars wins from the very first pass.
 
 | query | valid | LP (ms) | PL (ms) | S1 PL/LP | S2 break-even (runs) |
 |---|---|---|---|---|---|
-| q1 | OK | 422.8 | 252.1 | 0.60x | ≤7 |
-| q2 | OK | 158.4 | 65.1 | 0.41x | ≤13 |
-| q3 | OK | 158.9 | 66.7 | 0.42x | ≤13 |
-| q4 | OK | 186.8 | 85.4 | 0.46x | ≤12 |
-| q5 | OK | 240.0 | 84.8 | 0.35x | ≤7 |
-| q6 | OK | 67.7 | 25.6 | 0.38x | ≤29 |
-| q7 | OK | 391.1 | 336.9 | 0.86x | ≤22 |
-| q8 | OK | 85.6 | 30.7 | 0.36x | ≤22 |
-| q9 | OK | 566.6 | 184.4 | 0.33x | ≤3 |
-| q10 | OK | 341.2 | 102.8 | 0.30x | ≤5 |
-| q11 | OK | 46.0 | 19.8 | 0.43x | ≤47 |
-| q12 | OK | 333.3 | 228.3 | 0.68x | ≤11 |
-| q13 | OK | 649.0 | 304.3 | 0.47x | ≤3 |
-| q14 | OK | 82.5 | 17.1 | 0.21x | ≤18 |
-| q15 | OK | 116.8 | 20.1 | 0.17x | ≤12 |
-| q16 | OK | 108.5 | 24.0 | 0.22x | ≤14 |
-| q17 | OK | 488.5 | 289.7 | 0.59x | ≤6 |
-| q18 | OK | 702.1 | 282.2 | 0.40x | ≤2 |
-| q19 | OK | 359.7 | 228.5 | 0.64x | ≤9 |
-| q20 | OK | 739.7 | 131.2 | 0.18x | ≤2 |
-| q21 | OK | 1663.1 | 718.1 | 0.43x | ≤1 |
-| q22 | OK | 68.9 | 50.5 | 0.73x | ≤67 |
+| q1 | OK | 525.3 | 237.9 | 0.45x | ≤4 |
+| q2 | OK | 163.7 | 63.6 | 0.39x | ≤13 |
+| q3 | OK | 159.2 | 67.2 | 0.42x | ≤15 |
+| q4 | OK | 187.7 | 111.7 | 0.60x | ≤18 |
+| q5 | OK | 223.8 | 83.7 | 0.37x | ≤10 |
+| q6 | OK | 68.0 | 25.2 | 0.37x | ≤32 |
+| q7 | OK | 383.2 | 335.3 | 0.87x | ≤29 |
+| q8 | OK | 89.2 | 29.1 | 0.33x | ≤23 |
+| q9 | OK | 570.2 | 195.2 | 0.34x | ≤3 |
+| q10 | OK | 338.4 | 104.8 | 0.31x | ≤5 |
+| q11 | OK | 45.3 | 19.6 | 0.43x | ≤54 |
+| q12 | OK | 330.7 | 228.5 | 0.69x | ≤13 |
+| q13 | OK | 649.6 | 300.5 | 0.46x | ≤4 |
+| q14 | OK | 80.7 | 19.3 | 0.24x | ≤22 |
+| q15 | OK | 115.4 | 20.9 | 0.18x | ≤14 |
+| q16 | OK | 116.9 | 24.1 | 0.21x | ≤15 |
+| q17 | OK | 484.7 | 275.8 | 0.57x | ≤6 |
+| q18 | OK | 718.7 | 350.4 | 0.49x | ≤3 |
+| q19 | OK | 382.8 | 240.6 | 0.63x | ≤9 |
+| q20 | OK | 487.1 | 141.1 | 0.29x | ≤4 |
+| q21 | OK | 1729.2 | 765.5 | 0.44x | ≤1 |
+| q22 | OK | 67.2 | 51.8 | 0.77x | ≤90 |
 
 Regenerate: `python pandas/lazy/benchmarks/bench_tpch.py --sf 1 --report pandas/lazy/benchmarks/TPCH_BENCHMARK.md`

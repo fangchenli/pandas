@@ -266,7 +266,12 @@ One phase per gap-analysis item, ordered by ROI over dependency; re-run the
 SF-3 scorecard at each gate; N3 (the PDEP draft) triggers when the geo-mean
 crosses ~0.5x or gains plateau, whichever first.
 
-- **G1 — Lone-filter fusion, done right (days; the 929 ms q20 item).**
+- **G1 — DONE (June 2026): lone-filter fusion global.** q20 732→444 ms
+  (1.65x — the 929 ms bare filter cured; the residual is its input flow,
+  a G4-class cost). The feared "53 plan-shape test failures" were a buggy
+  first attempt (missing schema arg), not real expectations — the proper
+  construction passed the suite unchanged. Geo-mean 0.40→**0.41x**.
+  Original plan: **(days; the 929 ms q20 item).**
   Remove the single-filter fusion exemption globally; update the ~53
   plan-shape test expectations (they assert `PhysicalFilter` nodes that
   rightly become `PhysicalFusedPipeline`); re-record the local benchmark
