@@ -224,6 +224,23 @@ is the user-facing decision tool either way.
      "planning-overhead fast paths" item) — worth one profiling pass to
      see if a shared fix moves all five.
   *Gate to close P3-next: S1 geo-mean ≥ 0.4x.*
+
+- **Scale check (June 2026): SF-3 is now the scorecard standard**
+  (`../benchmarks/TPCH_BENCHMARK_SF3.md`; SF-1 kept for fast inner-loop
+  comparisons). Rationale: at SF-1 half the queries run in 20–150 ms where
+  run-to-run noise is a meaningful fraction; the machine has 16 GB, so SF-5+
+  risks the swap distortion seen before (SF-3 ≈ 7 GB resident across all
+  three engines). Findings at SF-3 (geo-mean **0.34x**, slightly better
+  than SF-1's 0.32 — the engine scales):
+  - **q7 reaches 0.95x — near parity with Polars** on a 5-table 18M-row
+    join pipeline.
+  - **q22 is the scale anomaly: 0.15x → 0.05x** (LP 222 → 1006 ms, ~4.5x
+    for 3x data — superlinear; Polars 47 ms). Suspects: `distinct` over the
+    4.5M-row `o_custkey`, the left-join anti-join path, or `str.slice` —
+    profile first. This jumps to the top of the target list with q21
+    (2.6 s at SF-3).
+  - Small-query floors matter less at scale, as expected (q15/q16 ratios
+    improved); q20 scales linearly on both engines (ratio stable at 0.18).
 - **P3 — Cardinality, then reorder default-on.** Exact NDV for small relations
   (dimensions are cheap to count exactly), HyperLogLog-class sketches for fact
   tables; re-test the q9 backwards-model case; then enable `JoinReorder` by
