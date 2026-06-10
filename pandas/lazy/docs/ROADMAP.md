@@ -208,6 +208,58 @@ is the user-facing decision tool either way.
     it actually runs (the rerouting also exposed and fixed a multi-key
     `n_unique` spelling crash).
 
+## Gap Analysis: where the remaining 0.40x → 1.0 lives (June 2026)
+
+Every component measured; ordered by size and closability. The question this
+answers (pre-PDEP): is the rest of the gap closable, and at what cost?
+
+1. **Lone-filter no-fusion — immediately closable.** The "single-op chains
+   have no fusion benefit" exemption is false for filters (fusion carries
+   morsel parallelism + prune-before-mask). q20 loses **929 ms to one bare
+   `PhysicalFilter`** on a join output (vs ~44 ms fused for comparable
+   work) — the same disease the q15 cache anomaly had, in the open. A
+   global fix broke 53 plan-shape tests and was scoped to cache-wrapper
+   inners; doing it properly (fix the test expectations) is days, not
+   weeks. Est. q20 0.18x → ~0.5x, plus scattered gains.
+2. **Breaker materialization between filter and aggregate — closable,
+   moderate.** q1 spends **403 ms materializing ~17.5M rows × 7 columns**
+   (its filter keeps 98% of rows) before a 288 ms aggregate; Polars streams
+   the filter into the aggregation. A streaming/morsel aggregate input
+   (sink consumes batches instead of one materialized ArrayDict) is the
+   single biggest remaining architectural item. Affects every
+   scan→filter→aggregate query (q1, q6, q12...).
+3. **Single-threaded kernels on the residual hot paths — closable.** The
+   packed `n_unique` kernel sorts single-threaded (~600 ms of q21);
+   high-hit single joins still go through `pd.merge`'s single-threaded
+   factorize (H2O joins ~0.5x). The Cython join already has thread-parallel
+   probe machinery; extending parallel build + high-hit coverage and
+   threading the radix dedup are ordinary engineering.
+4. **Composite-key joins bail from every fast path — closable, small.**
+   The Cython kernel and chains are single-key only, so q9/q16/q18's
+   `partsupp` composite-key steps fall back to `pd.merge`. A two-key
+   hash-combine variant is a straightforward kernel extension.
+5. **String layout — structural, upstream-blocked.** Arrow `large_string`
+   gathers are a measured memory-bandwidth wall (~4x vs Polars' German
+   strings); pyarrow 23 AND 24 lack `string_view` kernels (re-verified).
+   Caps q13 (regex over 1.5M comments), q16, H2O join q4 (0.13x),
+   filter_project (0.21x). Closable only by contributing `string_view`
+   take/hash kernels to Arrow upstream or vendoring string kernels — the
+   one item that is someone else's timeline.
+6. **What is NOT the gap** (measured and ruled out across the campaign):
+   pandas↔Arrow conversions (absent from profiles), join order on
+   hand-written queries, column pruning through joins, planning overhead
+   at SF-3 scale.
+
+**Verdict:** items 1–4 are ordinary profiled engineering and plausibly take
+the geo-mean from **0.40x to ~0.55–0.65x**; item 5 gates several stubborn
+queries and needs upstream Arrow work; beyond ~0.7x means matching Polars'
+fused streaming + SIMD Rust kernels everywhere — effectively rebuilding a
+vectorized engine, not realistic inside the NumPy/Arrow kernel model. The
+honest ceiling of this architecture is ~**0.6–0.7x geo-mean on TPC-H
+pipelines, with outright wins kept on single ops** (H2O 6/10) **and
+near-parity where the shapes fit** (q7 0.88x). That is the framing N3
+should carry.
+
 ## The Next Phase (planned June 2026, geo-mean at 0.39x)
 
 Three phases, in order — engineering to cross the gate, then re-verify the
