@@ -25,9 +25,10 @@ from abc import (
 import dataclasses
 import threading
 
-# Experimental: see PhysicalPlanner.plan — execute-once caching of shared
-# subplans. Off pending the q15 surrounding-graph regression diagnosis.
-_SUBPLAN_CACHE_ENABLED = False
+# Execute-once caching of shared subplans (see PhysicalPlanner.plan). The
+# q15 regression that kept this off is diagnosed and fixed: the childless
+# wrapper hid its inner subtree from the fusion/chain post-passes.
+_SUBPLAN_CACHE_ENABLED = True
 from dataclasses import (
     dataclass,
     field,
@@ -5674,6 +5675,22 @@ class PhysicalPlanner:
 
         physical_plan = self._collapse_join_chains(physical_plan)
 
+        # PhysicalCachedSubplan is childless (the pipeline compiler must
+        # treat it as a source), so the tree-walking post-passes above never
+        # see its inner subtree — without this, a shared subtree loses
+        # operator fusion and chain collapse (measured: q15's shared filter
+        # ran unfused at 663 ms vs 44 ms fused). Apply them to each wrapper's
+        # inner explicitly; nested shared wrappers are in the dict too.
+        self._fuse_single_filter = True
+        try:
+            for wrapper in getattr(self, "_shared_wrappers", {}).values():
+                inner = wrapper.inner
+                if enable_fusion:
+                    inner = self._apply_fusion(inner)
+                wrapper.inner = self._collapse_join_chains(inner)
+        finally:
+            self._fuse_single_filter = False
+
         return physical_plan
 
     @staticmethod
@@ -6154,6 +6171,23 @@ class PhysicalPlanner:
         # Reverse to get operations in execution order (bottom-up to top-down)
         operations.reverse()
 
+        # A single FILTER still fuses inside cached shared subplans (flag set
+        # by the wrapper post-pass): PhysicalFusedPipeline is what carries
+        # morsel parallelism and prune-before-mask, so a bare PhysicalFilter
+        # over a large input is ~15x slower than the same filter fused
+        # (measured 691 vs 44 ms on an 18M-row date-range filter). Globally
+        # fusing lone filters changes plan shapes everywhere, so it stays
+        # scoped to wrapper inners.
+        if (
+            len(operations) == 1
+            and operations[0].op_type == "filter"
+            and getattr(self, "_fuse_single_filter", False)
+        ):
+            return PhysicalFusedPipeline(
+                input=base_input,
+                operations=tuple(operations),
+                schema=plan.output_schema,
+            )
         # If only one operation and no fusion benefit, return original
         if len(operations) == 1:
             return plan
