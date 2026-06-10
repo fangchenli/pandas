@@ -1399,6 +1399,17 @@ def validate(lazy_df: pd.DataFrame, ref_df: pd.DataFrame) -> tuple[bool, str]:
                 atol=1e-2,
             ):
                 return False, f"numeric mismatch in {col_a}"
+        # Datetime-typed on either side: normalize both through
+        # pd.to_datetime (a TIMESTAMP-cast parquet column stringifies as
+        # "1995-03-05 00:00:00" vs DuckDB DATE's "1995-03-05" — same
+        # value, different repr).
+        elif pd.api.types.is_datetime64_any_dtype(
+            sa
+        ) or pd.api.types.is_datetime64_any_dtype(sb):
+            ta = pd.to_datetime(sa).reset_index(drop=True)
+            tb = pd.to_datetime(sb).reset_index(drop=True)
+            if not ta.equals(tb):
+                return False, f"datetime mismatch in {col_a}"
         elif not (
             sa.astype(str)
             .reset_index(drop=True)

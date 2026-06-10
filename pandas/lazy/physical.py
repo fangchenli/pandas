@@ -1084,6 +1084,18 @@ class PhysicalParquetScan(PhysicalPlan):
             batch_size=context.batch_size,
         )
 
+        # Pushdown is BEST-EFFORT: _build_arrow_filters returns None for
+        # predicates Arrow dataset expressions can't represent (e.g. regex
+        # contains). The Filter node was already removed from the plan by
+        # the optimizer, so when conversion fails the predicate MUST be
+        # applied here per batch — silently dropping it returned every row
+        # (TPC-H q16/q13 through scans gave wrong results).
+        fallback_predicate = (
+            self.predicate._ir
+            if self.predicate is not None and filter_expr is None
+            else None
+        )
+
         rows_yielded = 0
         row_offset = 0  # Track row offset for index generation
 
@@ -1091,6 +1103,21 @@ class PhysicalParquetScan(PhysicalPlan):
             batch_len = batch.num_rows
             if batch_len == 0:
                 continue
+
+            if fallback_predicate is not None:
+                from pandas.lazy.backends.array_eval import ArrayEvaluator
+
+                cols0 = {n: batch.column(n) for n in batch.schema.names}
+                mask = ArrayEvaluator(cols0, preferred_backend="auto").evaluate(
+                    fallback_predicate
+                )
+                if isinstance(mask, (pa.Array, pa.ChunkedArray)):
+                    mask = mask.to_numpy(zero_copy_only=False)
+                mask = np.asarray(mask, dtype=bool)
+                batch = batch.filter(pa.array(mask))
+                batch_len = batch.num_rows
+                if batch_len == 0:
+                    continue
 
             # Check limit for early termination
             if self.limit is not None:
@@ -1310,8 +1337,17 @@ class PhysicalParquetScan(PhysicalPlan):
                 else:
                     pattern = pattern_arg
                 if col is not None and isinstance(pattern, str):
-                    # Use match_substring for contains
-                    return pc.match_substring(col, pattern)
+                    # Expr.str.contains defaults to REGEX semantics (pandas
+                    # str.contains), but pc.match_substring is LITERAL — a
+                    # regex pattern pushed as a literal silently filters
+                    # everything out (TPC-H q16's 'Customer.*Complaints'
+                    # matched 0 rows through a scan). Push down only when
+                    # the match is literal-safe; otherwise leave the filter
+                    # in-engine where the regex kernel evaluates it.
+                    regex = ir.kwargs.get("regex", True)
+                    if not regex or not (set(".^$*+?{}[]\\|()") & set(pattern)):
+                        return pc.match_substring(col, pattern)
+                    return None
 
         # Cannot convert this expression
         return None
@@ -3938,6 +3974,12 @@ class PhysicalDistinct(PhysicalPlan):
                     "take", col_backend, col_arr, unique_indices
                 )
             return result
+
+        # Defensive: an empty input (no rows materialized upstream, e.g. a
+        # fully-filtered scan) must return empty, not crash on the
+        # structured-array path below.
+        if not input_arrays or not check_cols:
+            return dict(input_arrays)
 
         # Multi-column distinct - need to combine columns for uniqueness check
         # Convert relevant columns to numpy and use structured array approach

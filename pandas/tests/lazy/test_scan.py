@@ -610,3 +610,55 @@ class TestCSVSourceSchema:
             assert "a" in schema
             assert "c" in schema
             assert "b" not in schema
+
+
+class TestScanPredicateFallback:
+    """Predicates that Arrow dataset expressions cannot represent must be
+    applied in-engine per batch — NOT silently dropped (regex contains
+    pushed as literal match_substring returned wrong rows, then after the
+    literal-guard, dropping the filter returned every row: TPC-H q13/q16
+    through scans)."""
+
+    def test_regex_contains_through_scan(self, tmp_path):
+        import numpy as np
+
+        rng = np.random.default_rng(3)
+        df = pd.DataFrame(
+            {
+                "s": ["alpha beta", "alphabet", "beta only", "alpha gamma beta"] * 500,
+                "v": rng.standard_normal(2000),
+            }
+        )
+        path = str(tmp_path / "t.parquet")
+        df.to_parquet(path)
+        from pandas.lazy import (
+            col,
+            scan,
+        )
+
+        out = (
+            scan(path)
+            .filter(col("s").str.contains("alpha.*beta"))
+            .select(col("s"))
+            .collect(use_physical_planner=True)
+        )
+        expected = df[df["s"].str.contains("alpha.*beta")]
+        assert len(out) == len(expected) == 1000
+        assert set(out["s"]) == set(expected["s"])
+
+    def test_literal_contains_still_pushes_and_matches(self, tmp_path):
+        df = pd.DataFrame({"s": ["foo", "bar", "foobar", "baz"] * 10})
+        path = str(tmp_path / "t2.parquet")
+        df.to_parquet(path)
+        from pandas.lazy import (
+            col,
+            scan,
+        )
+
+        out = (
+            scan(path)
+            .filter(col("s").str.contains("foo"))
+            .select(col("s"))
+            .collect(use_physical_planner=True)
+        )
+        assert len(out) == 20
