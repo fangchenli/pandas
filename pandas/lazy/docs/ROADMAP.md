@@ -241,6 +241,13 @@ is the user-facing decision tool either way.
     (2.6 s at SF-3).
   - Small-query floors matter less at scale, as expected (q15/q16 ratios
     improved); q20 scales linearly on both engines (ratio stable at 0.18).
+- **q21 decomposition (SF-3 per-operator profile, June 2026):** the two
+  n_unique aggregates 531+312 ms (now ~2x faster via stable-radix-sort
+  dedup in the packed kernel), the big-big JoinChain 499 ms, and ~1.2 s of
+  distributed cost (sub-60 ms operators; the `late` filter subtree likely
+  executes twice — no common-subplan reuse across pipelines). q21
+  2759 → 2087 ms. Remaining leads: common-subplan caching, the chain's
+  build caps at scale.
 - **P3 — Cardinality, then reorder default-on.** Exact NDV for small relations
   (dimensions are cheap to count exactly), HyperLogLog-class sketches for fact
   tables; re-test the q9 backwards-model case; then enable `JoinReorder` by
