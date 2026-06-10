@@ -207,9 +207,44 @@ is the user-facing decision tool either way.
     it actually runs (the rerouting also exposed and fixed a multi-key
     `n_unique` spelling crash).
 
-- **P3-next — ranked from the fresh scorecard (SF-3 standard, June 2026:
-  S1 geo-mean **0.39x**, suite 9.2 s vs Polars 5.3 s, all 22 validated;
-  campaign start was 0.22x. Biggest remaining laggards by absolute time):**
+## The Next Phase (planned June 2026, geo-mean at 0.39x)
+
+Three phases, in order — engineering to cross the gate, then re-verify the
+whole story, then take it to the strategic table.
+
+- **N1 — Cross the 0.4 gate (engineering).** Two targets, both with
+  existing leads:
+  1. **The q15 cache anomaly is on the critical path** — diagnosing it
+     unblocks the default-off subplan cache, which is also the fix for
+     q21's suspected double-executed `late` subtree. One-line repro exists
+     (`_SUBPLAN_CACHE_ENABLED=True`, q15 SF-3 112→399 ms). Compare the two
+     pipeline graphs (`explain` + decisions) with the flag on/off; the
+     290 ms hides in the *surrounding* graph restructure.
+  2. **q20 (732 ms, 0.18x) has never been profiled.** Nested semi/anti +
+     distinct over a composite key; fresh per-operator profile first —
+     q22's 15x came from exactly this kind of unexamined query.
+  Fallback if both stall: the small-query floors (q14/q15/q16, 0.18–0.23x)
+  share the planning-overhead problem (60–80% of single-op overhead).
+- **N2 — Re-verify the broader story (consistency).** The engine changed
+  substantially this campaign (join kernel + chains, groupby routing,
+  distinct, n_unique, optimizer memo): **re-run H2O** (docs claim 6/10
+  group-by wins — verify it still holds, either way), re-run the vs-Polars
+  microbenchmark, and do a doc-consistency pass so no stale claim
+  undermines what follows.
+- **N3 — Strategic checkpoint (the positioning question).** With the gate
+  crossed and docs fresh, the evidence base is: H2O single-op wins, TPC-H
+  0.22→0.4x+ trajectory with every step validated, three real bug classes
+  found by benchmarking, and honest dual-scenario reporting. That is the
+  material for the PDEP / `pandas.lazy` positioning discussion — the open
+  question the project has been building toward. Draft it then, not now:
+  "crossed 0.4 from 0.22" with current docs is the stronger opening.
+
+Parked (unchanged): HyperLogLog NDV → join-reorder default-on; `string_view`
+upstream; masked-`Float64` storage flag; chain build caps at scale.
+
+- **P3-next — original ranked list (SF-3 standard, June 2026: S1 geo-mean
+  **0.39x**, suite 9.2 s vs Polars 5.3 s, all 22 validated; campaign start
+  was 0.22x. Biggest remaining laggards by absolute time):**
   1. **q21 remainder (746 ms, 0.25x — the largest single chunk).** The
      group-bys are fixed; what remains is its big⋈big join chain (late
      3.8M ⋈ orders-F 730k ⋈ two 1.5M-row aggregate sides). Suspect the
