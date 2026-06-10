@@ -11,9 +11,10 @@ landed). Dated performance reports live in `../benchmarks/`.
 Two benchmarks: the **H2O db-benchmark** (`../benchmarks/H2O_BENCHMARK.md`) is
 the authoritative cross-engine standard (group-by + join, same harness as
 Polars/DuckDB) — there lazy pandas now **supports all 10 group-by and all 5
-join queries and beats Polars on 6 group-by queries**; int-key joins are
-roughly at parity (run-to-run noisy) with string-key/left joins the genuine
-remaining losses. The table below is from the custom `LAZY_VS_POLARS_BENCHMARK.md`
+join queries and beats Polars on 6 group-by queries** (re-verified June
+2026 after the TPC-H engine campaign — the standing holds); H2O joins are
+0.13–0.83x (the earlier "int-key ~parity" claim was a Polars-slow-run
+artifact; single full-hit joins are not helped by the selective fast paths). The table below is from the custom `LAZY_VS_POLARS_BENCHMARK.md`
 microbenchmark (1M–10M rows, mixed-dtype, Apple Silicon). Speedup > 1.0 = lazy
 pandas faster.
 
@@ -68,7 +69,7 @@ joins. The enumeration is the easy part; cardinality is the real work.
 | string | **2.14x avg — wins** (`str.lower` 5.30x, `contains` up to 1.55x) | pass-through fix + compute-bound morsel parallelism |
 | aggregation | **wins** (H2O group-by: 6/10 beat Polars, string-key sums up to ~7x, `corr` ~3x) | `groupby_prefers_arrow` routing (numeric + arrow-string → acero) + post-aggregation projection |
 | parquet scan | 0.88x avg — glob `head()` **wins 1.5x** | limit pushdown into scans + direct ParquetFile path + vectorized index |
-| join | **`pd.merge` path** (eager-correct, fastest — 5x over acero on this shape). H2O 1:1-ish joins ~parity (noisy); the microbenchmark's *many-to-many* ~100M-row-result join is ~0.3x (result materialization, where Polars parallelizes); string-key/left joins lag — see H2O_BENCHMARK.md | `pd.merge` in-memory equi-join; acero/Grace fallbacks |
+| join | **`pd.merge` path** (eager-correct, fastest — 5x over acero on this shape). H2O single joins 0.48–0.83x int-key (re-verified June 2026); the microbenchmark's *many-to-many* ~100M-row-result join is ~0.3x (result materialization, where Polars parallelizes); string-key/left joins lag — see H2O_BENCHMARK.md | `pd.merge` in-memory equi-join; acero/Grace fallbacks |
 | sort | string-key multi-sort **wins 1.09x at 10M**; numeric ~parity (0.91–0.97x at 10M); smaller sorts and full mixed sort gather-bound (0.4–0.8x) | radix argsort + radix lexsort (numeric & factorized string keys) + breaker copy-free output; string payload gather is the wall |
 | category-key groupby | 0.43x vs Polars-categorical | zero-copy dictionary flow (was 313 ms, now 21) |
 | full-scan select+filter | ~0.37x (21 ms) | vectorized index column (was 104 ms) |

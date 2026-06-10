@@ -26,16 +26,16 @@ Faithful port of the [DuckDB Labs db-benchmark](https://github.com/duckdblabs/db
 
 | query | LP cold (ms) | LP hot (ms) | PL hot (ms) | hotx |
 |---|---|---|---|---|
-| q1: sum(v1) by id1 (str, 100 grp) | 275 | 14 | 17 | **1.21** |
-| q2: sum(v1) by id1,id2 (str, 10k grp) | 136 | 20 | 142 | **7.23** |
-| q3: sum(v1),mean(v3) by id3 (str, 100k grp) | 470 | 102 | 212 | **2.08** |
-| q4: mean(v1,v2,v3) by id4 (int, 100 grp) | 21 | 19 | 13 | 0.66 |
-| q5: sum(v1,v2,v3) by id6 (int, 100k grp) | 138 | 124 | 151 | **1.21** |
-| q6: median(v3),std(v3) by id4,id5 | 550 | 532 | 165 | 0.31 |
-| q7: max(v1)-min(v2) by id3 | 112 | 103 | 209 | **2.03** |
-| q8: top2 v3 by id6 | 861 | 734 | 215 | 0.29 |
-| q9: corr(v1,v2)^2 by id2,id4 | 101 | 81 | 250 | **3.09** |
-| q10: sum(v3),count by id1..id6 (10M grp) | 1800 | 1860 | 1055 | 0.57 |
+| q1: sum(v1) by id1 (str, 100 grp) | 220 | 12 | 16 | **1.29** |
+| q2: sum(v1) by id1,id2 (str, 10k grp) | 131 | 19 | 131 | **6.98** |
+| q3: sum(v1),mean(v3) by id3 (str, 100k grp) | 409 | 98 | 195 | **1.99** |
+| q4: mean(v1,v2,v3) by id4 (int, 100 grp) | 21 | 19 | 12 | 0.64 |
+| q5: sum(v1,v2,v3) by id6 (int, 100k grp) | 118 | 119 | 134 | **1.13** |
+| q6: median(v3),std(v3) by id4,id5 | 526 | 507 | 140 | 0.28 |
+| q7: max(v1)-min(v2) by id3 | 97 | 93 | 192 | **2.06** |
+| q8: top2 v3 by id6 | 669 | 666 | 198 | 0.30 |
+| q9: corr(v1,v2)^2 by id2,id4 | 79 | 78 | 217 | **2.77** |
+| q10: sum(v3),count by id1..id6 (10M grp) | 1465 | 1408 | 655 | 0.47 |
 
 **Group-by: all 10 queries supported; lazy pandas beats Polars on 6.** String
 keys (q1/q2/q3) are arrow-backed (`str` dtype in pandas 3.0) and route to
@@ -58,13 +58,23 @@ first-Arrow-query cost (acero init + building the key dictionary cache).
 
 ## Join (10M rows)
 
+> **Re-verified June 2026** (after the TPC-H engine campaign: Cython join
+> kernel + chains, groupby routing, distinct/n_unique changes): the
+> group-by standing **holds — 6/10 wins**, no regressions. One honest
+> correction on joins: q1's previously recorded 1.30x win does not
+> reproduce (0.51x here, our time stable, Polars faster) — per the
+> variance note below it was a Polars-slow-run artifact; H2O joins are
+> 0.13–0.83x, with the single high-hit join shapes not helped by the
+> TPC-H-era selective fast paths (which bail on full-hit single joins by
+> design).
+
 | query | LP cold (ms) | LP hot (ms) | PL hot (ms) | hotx |
 |---|---|---|---|---|
-| q1: inner join small on id1 | 366 | 157 | 204 | **1.30** |
-| q2: inner join medium on id2 | 186 | 172 | 93 | 0.54 |
-| q3: left join medium on id2 | 179 | 180 | 60 | 0.33 |
-| q4: inner join medium on id5 (str key) | 879 | 805 | 111 | 0.14 |
-| q5: inner join big on id3 (10M×10M) | 804 | 826 | 708 | 0.86 |
+| q1: inner join small on id1 | 154 | 140 | 71 | 0.51 |
+| q2: inner join medium on id2 | 169 | 164 | 79 | 0.48 |
+| q3: left join medium on id2 | 170 | 169 | 55 | 0.33 |
+| q4: inner join medium on id5 (str key) | 764 | 762 | 96 | 0.13 |
+| q5: inner join big on id3 (10M×10M) | 665 | 672 | 556 | 0.83 |
 
 > **Note on join variance.** Our join times (LP) are stable run-to-run, but
 > Polars' join times swing substantially (e.g. q2 PL has been measured from
