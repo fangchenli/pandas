@@ -173,10 +173,25 @@ is the user-facing decision tool either way.
     wide intermediates is (pd.merge's block-take advantage). That is P2
     territory (pipelined joins / block-aware gather). *Gate progress:
     q3/q5/q10 at 1.15–1.7x of the ≥2x target; S1 geo-mean re-measure due.*
-- **P2 — Pipelined joins.** Stop materializing the probe side and the join
-  output between chained joins (the known "hash join materializes both sides"
-  limitation): probe batches stream through the next join. *Gate: multi-join
-  queries (q5/q7/q9/q21) approach sum-of-single-join cost; S1 geo-mean ≥0.45x.*
+- **P2 — Late-materialization join chains (spiked, 2.2x measured).** Stop
+  gathering payload columns between chained joins: compose the Cython
+  kernel's indexers across the chain (per step, gather only the next probe
+  *key* column) and gather each needed payload column **once** at the end,
+  from its base table. Spike on q7's full-hit 4-table chain (the worst
+  high-hit case the P1 gates exclude): pd.merge cascade 189 ms → composed
+  indexers 86 ms (**2.2x**, exact result match; Polars 48 ms). In chain
+  mode there are no intermediate gathers, so the P1 selectivity gates
+  become unnecessary — it covers selective *and* high-hit chains uniformly.
+  **Design:** no new planner node — the decisions pass (reusing the acero
+  order-freeness walk, `output_order_unobservable`) marks a join that feeds
+  another eligible join through an operator-free pipeline with
+  `chain_emit_indexers`; such a join returns a composite (bases + index
+  arrays) instead of gathered output, the consuming join composes, and the
+  topmost chain join gathers. Any runtime gate failure materializes at that
+  node and the rest proceeds normally (graceful per-node degradation).
+  Requires an order-free sink (group-by/sort/topk — all the TPC-H chain
+  queries end in one) since composition does not preserve the pd.merge
+  cascade order. *Gate: q7/q18/q21 ≥1.5x; S1 geo-mean ≥0.35x.*
 - **P3 — Cardinality, then reorder default-on.** Exact NDV for small relations
   (dimensions are cheap to count exactly), HyperLogLog-class sketches for fact
   tables; re-test the q9 backwards-model case; then enable `JoinReorder` by
