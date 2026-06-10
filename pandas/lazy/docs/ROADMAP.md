@@ -193,22 +193,37 @@ is the user-facing decision tool either way.
   561 ms), q21 (n_unique-heavy group-bys, 1.4 s), q22/q15/q16 (strings &
   small-query floors). The next profile-driven target list lives there.*
 
-- **P2.5 — next profiled targets (June 2026, fresh cProfile data):**
-  - **q19** (546 ms total): ~350 ms is filter-expression evaluation in the
-    fused pipeline, of which ~230 ms is 4 `isin` kernel calls — three on the
-    *same* string column (`p_container`). Suspect: per-call backend
-    conversion of the same column (no memoization in `ArrayEvaluator`'s
-    kernel dispatch — `ensure_backend` converts per argument per call).
-    Probe first: log the input array type reaching `arrow_isin`; if it is
-    object/str-NumPy each call, add a per-evaluation conversion cache keyed
-    on `(id(arr), backend)` and re-measure. ~190 ms of the rest is the
-    (full-hit, chain-ineligible-shape) li⋈part join.
-  - **q21** (2.2 s profiled): ~1.1 s in three group-by executes (the two
-    6M-row `n_unique` decorrelations) + ~0.85 s in filter backend work.
-    `n_unique` over ~3–4.5M groups is intrinsically heavy; Polars does the
-    whole query in ~190 ms. Investigate: acero `count_distinct` routing for
-    the n_unique aggregations, and whether the two decorrelated counts can
-    share one factorization of `l_orderkey`.
+- **P2.5 — DONE (June 2026): q19 + q21 attacked, geo-mean 0.27 → 0.32x.**
+  - **q19 550 → 138 ms (0.13 → 0.55x)**: the probe disproved the conversion
+    hypothesis (arrays were already Arrow; `pc.is_in` itself costs ~58 ms on
+    6M `large_string` rows) — the real fix was **predicate derivation** in
+    PredicatePushdown's cannot-push join branch: side-only conjuncts of a
+    mixed AND push fully (and drop from the upper filter); a mixed
+    OR-of-conjunctions pushes the implied side-only OR in addition.
+  - **q21 1400 → 780 ms (0.13 → 0.25x)**: acero `count_distinct` disproven
+    (448 ms — slower than the pandas fallback). Landed a packed-dedup NumPy
+    `n_unique` kernel (pack (key,value) into int64, `np.unique`, run-length
+    count: 183 ms) and excluded `n_unique` from arrow groupby preference so
+    it actually runs (the rerouting also exposed and fixed a multi-key
+    `n_unique` spelling crash).
+
+- **P3-next — ranked from the fresh scorecard (S1 geo-mean 0.32x, suite
+  3.0 s vs Polars 1.0 s; biggest remaining laggards by absolute time):**
+  1. **q21 remainder (746 ms, 0.25x — the largest single chunk).** The
+     group-bys are fixed; what remains is its big⋈big join chain (late
+     3.8M ⋈ orders-F 730k ⋈ two 1.5M-row aggregate sides). Suspect the
+     Cython-join build cap (≤500k) and the chain's eligibility exclude
+     these; profile, then consider raising the cap for the parallel kernel
+     / letting order-free chains take big builds.
+  2. **String-heavy q22 (222 ms, 0.15x) and q13 (211 ms, 0.48x).** q13's
+     left join is chain-ineligible and its `str.contains` regex runs over
+     1.5M comments single-threaded; q22 is `str.slice` + cross + anti.
+     Leads: morsel-parallel string kernels, left-join chain support.
+  3. **Small-query floors: q15/q16/q20/q8/q14 (20–60 ms absolute).**
+     Dominated by per-operator overhead and planning (the long-standing
+     "planning-overhead fast paths" item) — worth one profiling pass to
+     see if a shared fix moves all five.
+  *Gate to close P3-next: S1 geo-mean ≥ 0.4x.*
 - **P3 — Cardinality, then reorder default-on.** Exact NDV for small relations
   (dimensions are cheap to count exactly), HyperLogLog-class sketches for fact
   tables; re-test the q9 backwards-model case; then enable `JoinReorder` by
