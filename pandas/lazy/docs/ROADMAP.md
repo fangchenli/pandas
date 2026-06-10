@@ -260,7 +260,52 @@ pipelines, with outright wins kept on single ops** (H2O 6/10) **and
 near-parity where the shapes fit** (q7 0.88x). That is the framing N3
 should carry.
 
-## The Next Phase (planned June 2026, geo-mean at 0.39x)
+## The Gap-Closing Campaign (planned June 2026, from 0.40x)
+
+One phase per gap-analysis item, ordered by ROI over dependency; re-run the
+SF-3 scorecard at each gate; N3 (the PDEP draft) triggers when the geo-mean
+crosses ~0.5x or gains plateau, whichever first.
+
+- **G1 — Lone-filter fusion, done right (days; the 929 ms q20 item).**
+  Remove the single-filter fusion exemption globally; update the ~53
+  plan-shape test expectations (they assert `PhysicalFilter` nodes that
+  rightly become `PhysicalFusedPipeline`); re-record the local benchmark
+  baselines. Watch small-query overhead (fusing a tiny filter is near-free,
+  but verify with `run_all.py --quick`). *Gate: q20 ≥2x; zero controlled
+  losses across all 22; suite green.*
+- **G2 — Composite-key joins via key packing (small).** The `partsupp`
+  two-key steps (q9/q16/q18) bail from the Cython kernel and chains. The
+  packing trick already proven in `n_unique` applies: when both key pairs
+  are ints whose ranges pack into int63, synthesize one packed key array
+  per side and proceed single-key (kernel + chain eligibility both).
+  *Gate: q9 ≥1.3x; parity tests incl. range edges; all 22 validate.*
+- **G3 — Parallelize the residual kernels (ordinary engineering).**
+  (a) Thread the `n_unique` dedup using the existing `lazy_radix` parallel
+  sort machinery on the packed keys (~600 ms of q21 → target ≤250 ms).
+  (b) High-hit terminal joins (H2O ~0.5x): the loss is the per-column
+  gather vs `pd.merge`'s consolidated block take — measure a block-aware
+  gather (consolidate same-dtype NumPy columns, one 2-D take) before
+  building. *Gate: q21 ≥1.3x; H2O join avg ≥0.7x with no losses.*
+- **G4 — Streaming aggregate input (the architectural item).** q1's 403 ms
+  materialization of a 98%-pass filter feeding a 288 ms aggregate. The
+  pipeline layer already anticipates this (NodeSink docstring: "M4/M5
+  replace specific NodeSinks with truly parallel accumulate/merge sinks
+  behind this same interface"): an accumulating aggregate sink consumes
+  morsels and merges partials (sum/count/min/max/mean are mergeable;
+  median/n_unique keep the materializing path). *Gate: q1+q6 ≥1.4x;
+  eager↔physical equivalence suite green; all 22 validate.*
+- **G5 — string_view, parallel external track.** (a) Prototype a vendored
+  string-view gather on the 10M-row hot path to validate the ~4x win
+  before committing anywhere; (b) locate/file the Arrow issue for
+  `string_view` take/hash kernels and size an upstream contribution.
+  *Gate to proceed past prototype: measured ≥2x on the string gather.*
+
+Projected arc if gates hold: 0.40 → ~0.43 (G1) → ~0.45 (G2) → ~0.50 (G3)
+→ ~0.55–0.6 (G4), with G5 unlocking the string-bound stragglers beyond
+that. Ceiling stays as analyzed: ~0.6–0.7x pipelines, wins kept on single
+ops.
+
+## The Next Phase (superseded by the Gap-Closing Campaign above; N1/N2 complete) (planned June 2026, geo-mean at 0.39x)
 
 Three phases, in order — engineering to cross the gate, then re-verify the
 whole story, then take it to the strategic table.
