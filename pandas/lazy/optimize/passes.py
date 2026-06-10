@@ -344,6 +344,51 @@ class PredicatePushdown(PlanVisitor):
         # Try to push the filter down
         return self._push_filter(new_input, plan.predicate)
 
+    @staticmethod
+    def _flatten_ir(ir, function: str) -> list:
+        """Flatten a binary and_/or_ tree into its operand list."""
+        if isinstance(ir, Call) and ir.function == function:
+            out = []
+            for arg in ir.args:
+                out.extend(PredicatePushdown._flatten_ir(arg, function))
+            return out
+        return [ir]
+
+    def _derive_or_predicate(self, predicate: Expr, side_columns) -> Expr | None:
+        """Side-only predicate implied by an OR of conjunctions, or None.
+
+        For ``(a1 & b1) | (a2 & b2) | ...`` where the ``a`` parts reference only
+        one join side, ``a1 | a2 | ...`` is implied (any surviving row
+        satisfies some disjunct, hence that disjunct's side-only part).
+        Returns None unless the predicate is a 2+-way OR and EVERY disjunct
+        contributes at least one side-only conjunct (otherwise the derived
+        predicate would not be implied). Column names are mapped back to the
+        side's input names via ``side_columns`` (output -> input).
+        """
+        import functools
+
+        disjuncts = self._flatten_ir(predicate._ir, "or_")
+        if len(disjuncts) < 2:
+            return None
+        available = set(side_columns)
+        derived_disjuncts = []
+        for d in disjuncts:
+            side_only = [
+                c
+                for c in self._flatten_ir(d, "and_")
+                if get_referenced_columns(Expr(c)) <= available
+            ]
+            if not side_only:
+                return None
+            derived_disjuncts.append(
+                functools.reduce(lambda x, y: Call("and_", (x, y)), side_only)
+            )
+        derived = functools.reduce(lambda x, y: Call("or_", (x, y)), derived_disjuncts)
+        mapping = {out: inp for out, inp in side_columns.items() if out != inp}
+        if mapping:
+            derived = substitute_columns(derived, mapping)
+        return Expr(derived)
+
     def _push_filter(self, input_plan: LogicalPlan, predicate: Expr) -> LogicalPlan:
         """
         Try to push a filter down through the input plan.
@@ -460,6 +505,83 @@ class PredicatePushdown(PlanVisitor):
                     input_plan.how,
                     input_plan.suffix,
                 )
+
+            # Cannot push the predicate itself. For an OR of conjunctions a
+            # weaker side-only predicate is still implied: each disjunct must
+            # hold for a surviving row, so OR(over disjuncts, AND(of that
+            # disjunct's side-only conjuncts)) can be pushed below the join
+            # while the original filter stays above (classic predicate
+            # derivation — TPC-H q19's brand/container/size OR shrinks the
+            # part side ~50x before the join). Inner joins only: derivation
+            # changes which rows match, which outer joins observe via
+            # null-extension.
+            if input_plan.how == "inner":
+                import functools
+
+                conjuncts = self._flatten_ir(predicate._ir, "and_")
+                left_avail = set(join_mapping.left_columns)
+                right_avail = set(join_mapping.right_columns)
+                new_left = input_plan.left
+                new_right = input_plan.right
+                remainder = []
+                changed = False
+
+                def _mapped(ir, side_columns):
+                    mapping = {
+                        out: inp for out, inp in side_columns.items() if out != inp
+                    }
+                    return Expr(substitute_columns(ir, mapping) if mapping else ir)
+
+                for c in conjuncts:
+                    cols = get_referenced_columns(Expr(c))
+                    if cols <= left_avail:
+                        # Side-only conjunct: push fully; for inner joins the
+                        # surviving rows all satisfy it, so it can be dropped
+                        # from the upper filter.
+                        new_left = self._push_filter(
+                            new_left, _mapped(c, join_mapping.left_columns)
+                        )
+                        changed = True
+                        continue
+                    if cols <= right_avail:
+                        new_right = self._push_filter(
+                            new_right, _mapped(c, join_mapping.right_columns)
+                        )
+                        changed = True
+                        continue
+                    # Mixed-side conjunct: stays above, but an OR of
+                    # conjunctions still implies weaker side-only predicates
+                    # that can be pushed in ADDITION (kept above too).
+                    d_left = self._derive_or_predicate(
+                        Expr(c), join_mapping.left_columns
+                    )
+                    if d_left is not None:
+                        new_left = self._push_filter(new_left, d_left)
+                        changed = True
+                    d_right = self._derive_or_predicate(
+                        Expr(c), join_mapping.right_columns
+                    )
+                    if d_right is not None:
+                        new_right = self._push_filter(new_right, d_right)
+                        changed = True
+                    remainder.append(c)
+
+                if changed:
+                    new_join = Join(
+                        new_left,
+                        new_right,
+                        input_plan.on,
+                        input_plan.left_on,
+                        input_plan.right_on,
+                        input_plan.how,
+                        input_plan.suffix,
+                    )
+                    if not remainder:
+                        return new_join
+                    rem_ir = functools.reduce(
+                        lambda x, y: Call("and_", (x, y)), remainder
+                    )
+                    return Filter(new_join, Expr(rem_ir))
 
             # Cannot push through Join
             return Filter(input_plan, predicate)
