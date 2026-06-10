@@ -247,20 +247,24 @@ def compute_column_stats(series, sample_size: int = STATS_SAMPLE_SIZE):
     if n == 0:
         return ColumnStats(row_count=0)
 
-    values = series.to_numpy() if hasattr(series, "to_numpy") else np.asarray(series)
-
     # Random sample (not strided): a stride aliases against periodic or sorted
     # data — e.g. ``arange(n) % 7`` strided by 7 samples only zeros. Indices
     # are de-duplicated so ``sample_n`` counts distinct positions; a unique
     # column then saturates exactly (every position a distinct value), which
     # the extrapolation below relies on. A fixed seed keeps planning
-    # deterministic.
+    # deterministic. Only the sample is materialized — a full ``to_numpy`` on a
+    # 10M-row column is ~5 ms and dominated planning when sizing joins.
     if n <= sample_size:
-        sample = values
+        sample = (
+            series.to_numpy() if hasattr(series, "to_numpy") else np.asarray(series)
+        )
         approximate = False
     else:
         idx = np.unique(np.random.default_rng(0).integers(0, n, sample_size))
-        sample = values[idx]
+        if hasattr(series, "iloc"):
+            sample = series.iloc[idx].to_numpy()
+        else:
+            sample = np.asarray(series)[idx]
         approximate = True
     sample_n = len(sample)
 
@@ -278,10 +282,14 @@ def compute_column_stats(series, sample_size: int = STATS_SAMPLE_SIZE):
 
     min_val = max_val = None
     histogram = None
-    if values.dtype.kind in ("i", "u", "f"):
+    if sample.dtype.kind in ("i", "u", "f"):
         try:
-            min_val = float(np.nanmin(values))
-            max_val = float(np.nanmax(values))
+            # min/max from the sample, not the full column: a full-array scan
+            # is O(n) (~10 ms on 10M rows x2) and dominates planning, while the
+            # range model is already sample-based (the histogram below). Exact
+            # when the column fits in the sample.
+            min_val = float(np.nanmin(sample))
+            max_val = float(np.nanmax(sample))
         except (ValueError, TypeError):
             pass
         # Equi-depth histogram from the sample (drop NaN). Cheap (quantiles of
@@ -295,7 +303,7 @@ def compute_column_stats(series, sample_size: int = STATS_SAMPLE_SIZE):
             histogram = None
 
     null_count = None
-    if values.dtype.kind == "f":
+    if sample.dtype.kind == "f":
         null_count = int(np.isnan(sample).sum() / sample_n * n)
 
     return ColumnStats(
