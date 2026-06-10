@@ -173,25 +173,25 @@ is the user-facing decision tool either way.
     wide intermediates is (pd.merge's block-take advantage). That is P2
     territory (pipelined joins / block-aware gather). *Gate progress:
     q3/q5/q10 at 1.15–1.7x of the ≥2x target; S1 geo-mean re-measure due.*
-- **P2 — Late-materialization join chains (spiked, 2.2x measured).** Stop
-  gathering payload columns between chained joins: compose the Cython
-  kernel's indexers across the chain (per step, gather only the next probe
-  *key* column) and gather each needed payload column **once** at the end,
-  from its base table. Spike on q7's full-hit 4-table chain (the worst
-  high-hit case the P1 gates exclude): pd.merge cascade 189 ms → composed
-  indexers 86 ms (**2.2x**, exact result match; Polars 48 ms). In chain
-  mode there are no intermediate gathers, so the P1 selectivity gates
-  become unnecessary — it covers selective *and* high-hit chains uniformly.
-  **Design:** no new planner node — the decisions pass (reusing the acero
-  order-freeness walk, `output_order_unobservable`) marks a join that feeds
-  another eligible join through an operator-free pipeline with
-  `chain_emit_indexers`; such a join returns a composite (bases + index
-  arrays) instead of gathered output, the consuming join composes, and the
-  topmost chain join gathers. Any runtime gate failure materializes at that
-  node and the rest proceeds normally (graceful per-node degradation).
-  Requires an order-free sink (group-by/sort/topk — all the TPC-H chain
-  queries end in one) since composition does not preserve the pd.merge
-  cascade order. *Gate: q7/q18/q21 ≥1.5x; S1 geo-mean ≥0.35x.*
+- **P2 — Late-materialization join chains. LANDED (June 2026,
+  `PhysicalJoinChain`).** A planner post-pass collapses left-deep trees of
+  eligible inner single-int-key joins into one breaker fed the BASE
+  relations; it composes the Cython kernel's indexers step by step (only
+  each probe key is gathered) and gathers every payload column exactly once.
+  Two hard-won lessons: (1) the executor rebinds breaker children to
+  pre-materialized inputs, so the chain had to be a planner-level node — a
+  direct-recursion version could never fire; (2) **order-freeness is the
+  win condition on full-hit chains** — the decision layer (acero's
+  order-unobservability walk) marks chains feeding group-by/sort sinks
+  `order_free`, skipping cascade-order restoration (q18 flipped from a
+  1.83x loss to a 0.70x win on that flag alone). Controlled on/off, all 22
+  validated: q5 0.48x, q2 0.49x, q11 0.69x, q18 0.70x, q7 0.72x, q3 0.75x —
+  8 wins, zero regressions. **S1 geo-mean: 0.22x (pre-P1) → 0.27x.**
+  *Gate status: q7 1.39x / q18 1.43x of the ≥1.5x target (q21's cost is not
+  its joins); geo-mean 0.27 vs ≥0.35 — the join side has largely delivered;
+  the laggards are now non-join costs: q19 (big-OR filter evaluation,
+  561 ms), q21 (n_unique-heavy group-bys, 1.4 s), q22/q15/q16 (strings &
+  small-query floors). The next profile-driven target list lives there.*
 - **P3 — Cardinality, then reorder default-on.** Exact NDV for small relations
   (dimensions are cheap to count exactly), HyperLogLog-class sketches for fact
   tables; re-test the q9 backwards-model case; then enable `JoinReorder` by
