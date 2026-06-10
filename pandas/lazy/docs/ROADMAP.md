@@ -83,9 +83,83 @@ bandwidth-bound paths; and the residual losers (sort gather, filter_project)
 are bounded by the Arrow `large_string` layout and pandas' mutation
 semantics, not by missing optimizations — see "Blocked on upstream" below.
 
+## The Plan: Competing with Polars
+
+Goal stated June 2026: actually compete. Everything below is grounded in the
+measured record (H2O, TPC-H, the join investigation), not aspiration.
+
+### What "compete" means — two scenarios, one metric each
+
+- **S1 — native vs native** (engine quality): each engine on its own format,
+  query only. TPC-H SF-1 geometric mean today: **0.22x** (range 0.06–0.67;
+  5/22 queries ≥0.4x, 11/22 below 0.2x). H2O single-op: we win 6/10 group-by.
+- **S2 — pandas-resident** (the data already lives in pandas DataFrames, the
+  dominant real-world case for our users): Polars must pay `from_pandas`
+  (~75% of a TPC-H query's time at SF-1); we pay nothing. This is the
+  structural moat — likely already winning, **not yet measured as a mode**.
+
+The realistic bet is *not* full native parity across all 22 TPC-H queries
+against a decade of Rust/SIMD/Rayon. It is: (1) **win S2 decisively and
+publish it** — "the fastest engine for data already in pandas"; (2) reach
+**S1 ≥ 0.5x geo-mean**, the point where the conversion advantage dominates
+for any pandas user end-to-end; (3) keep the outright wins (group-by
+analytics, string ops, large sorts).
+
+### Where the S1 gap lives (measured, with disproven paths marked)
+
+1. **Join-chain execution dominates** — q5 profile: ~89% in joins, ~52% in
+   `pd.merge`'s single-threaded `_factorize_keys`. A *single* join is ~1.3x
+   off Polars (68 vs 53 ms); chains are 3–7x off because per-join factorize +
+   full intermediate materialization compound, while Polars runs a parallel
+   hash join and keeps intermediates flowing.
+2. ~~Column pruning through joins~~ — **disproven** (manually pre-projecting
+   q3's inputs changes nothing; the optimizer already prunes).
+3. ~~Join order on hand-written queries~~ — order is the lever only for
+   *naively written* queries (star join: optimal order beats Polars 49 vs
+   122 ms); the reorderer exists but is blocked on NDV estimation quality.
+4. **String gather wall** (`large_string` bandwidth; `string_view` blocked
+   upstream in pyarrow 23/24) — caps filter_project (0.21x) and string-key
+   joins.
+5. **Planning overhead floor** (~300 µs; 60–80% of single-op lazy overhead in
+   the optimizer) — hurts small interactive queries only.
+
+### Roadmap (phased, each with a measured gate)
+
+- **P0 — Scorecard (1 session).** Add a pandas-resident mode to `bench_tpch`
+  (clearly labeled S2: Polars timed including `from_pandas`, once per query) and
+  publish the dual-scenario table + geo-means. *Gate: an honest S1/S2 scorecard
+  to steer everything below.*
+- **P1 — Parallel join kernel (1–2 sessions).** The single biggest S1 lever.
+  Measure three candidates on filtered TPC-H shapes before building: (a) acero
+  hash join for order-free sinks at scale (parallel; re-measure — it lost on
+  raw many-to-many, not on filtered pipeline shapes), (b) partitioned parallel
+  `pd.merge` (factorize keys once, probe partitions in threads), (c) a Cython
+  hash join over the radix infrastructure. *Gate: q3/q5/q10 ≥2x; S1 geo-mean
+  ≥0.35x.*
+- **P2 — Pipelined joins.** Stop materializing the probe side and the join
+  output between chained joins (the known "hash join materializes both sides"
+  limitation): probe batches stream through the next join. *Gate: multi-join
+  queries (q5/q7/q9/q21) approach sum-of-single-join cost; S1 geo-mean ≥0.45x.*
+- **P3 — Cardinality, then reorder default-on.** Exact NDV for small relations
+  (dimensions are cheap to count exactly), HyperLogLog-class sketches for fact
+  tables; re-test the q9 backwards-model case; then enable `JoinReorder` by
+  default behind its confidence gate; bushy (GOO) after. *Gate: naive-order
+  queries ≥2x with zero regressions on hand-ordered ones.*
+- **P4 — String representation (parallel track, long lead).** The only path
+  past the bandwidth wall is `string_view` ("German strings"): contribute
+  take/hash kernels to Arrow upstream, or vendor a Cython string-view gather.
+  *Gate: filter_project 0.21x → ≥0.5x; string-key join parity.*
+- **P5 — Positioning.** Take the dual-scenario scorecard to the PDEP /
+  maintainer discussion (`pandas.lazy` namespace, `select()` entry point —
+  the contested questions need the numbers this plan produces).
+
+Floor work continues alongside: masked-`Float64` storage flag in the type
+model, the arrow-group-by masked-`boolean` crash, `rank` dtype, CI.
+
 ## Planned Work (ranked)
 
-The forward list — open items only. Landed work is recorded further down.
+The forward list — open items only; the phases above sequence the big ones.
+Landed work is recorded further down.
 
 1. **Planning-overhead fast paths.** Single-op queries pay 60–80% of lazy
    overhead in the optimizer (`bench_planning_phases.py`); skip passes by
