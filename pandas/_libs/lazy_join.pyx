@@ -1,0 +1,233 @@
+"""
+Single-pass hash inner join over ``int64`` keys.
+
+Used by the lazy execution engine's join (``pandas/lazy``) as a fast path for
+inner equi-joins on a single integer key. It produces the ``(left_indices,
+right_indices)`` gather indexers; payload columns are gathered by the caller
+with its existing parallel take.
+
+Row-order contract — exactly ``pd.merge(how="inner")``: the hash table is
+built on the RIGHT side with each key's right-row list kept in right-row
+order (CSR layout), and the LEFT side is probed in row order, emitting every
+(left, right) pair as encountered. Output is therefore left-row-major with
+right matches in right order, which is pandas' documented inner-merge order.
+
+Why this beats ``pd.merge``'s factorize-then-join: probe and emit happen in
+one tight loop per row (no intermediate factorization arrays, no DataFrame
+round-trip), and the probe is embarrassingly parallel — the count and fill
+passes are ``nogil`` chunk kernels driven by a Python thread pool, same
+pattern as ``lazy_radix.pyx`` (pandas builds without OpenMP).
+
+The hash table is open-addressing with linear probing at load factor <= 0.5
+(power-of-two size), using a Fibonacci/avalanche hash of the key. Classic
+textbook structure; see Knuth TAOCP Vol. 3 §6.4.
+"""
+
+cimport cython
+from cython cimport Py_ssize_t
+from libc.stdint cimport (
+    int64_t,
+    uint64_t,
+)
+
+import numpy as np
+
+cimport numpy as cnp
+
+cnp.import_array()
+
+
+@cython.cdivision(True)
+cdef inline uint64_t _hash(int64_t key) noexcept nogil:
+    cdef uint64_t h = <uint64_t>key
+    h *= <uint64_t>0x9E3779B97F4A7C15
+    h ^= h >> 32
+    return h
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef void _build(
+    const int64_t[::1] keys,
+    int64_t[::1] slot_key,
+    int64_t[::1] slot_gid,
+    int64_t[::1] gids,
+    int64_t[::1] counts,
+    int64_t* n_groups_out,
+) noexcept nogil:
+    """Insert all right keys; record each row's group id and group sizes."""
+    cdef Py_ssize_t n = keys.shape[0]
+    cdef uint64_t mask = <uint64_t>(slot_key.shape[0] - 1)
+    cdef Py_ssize_t i, j
+    cdef int64_t key, gid, n_groups = 0
+    for i in range(n):
+        key = keys[i]
+        j = <Py_ssize_t>(_hash(key) & mask)
+        while True:
+            gid = slot_gid[j]
+            if gid == -1:
+                slot_key[j] = key
+                slot_gid[j] = n_groups
+                gids[i] = n_groups
+                counts[n_groups] = 1
+                n_groups += 1
+                break
+            if slot_key[j] == key:
+                gids[i] = gid
+                counts[gid] += 1
+                break
+            j = <Py_ssize_t>((<uint64_t>j + 1) & mask)
+    n_groups_out[0] = n_groups
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef void _fill_groups(
+    const int64_t[::1] gids,
+    const int64_t[::1] offsets,
+    int64_t[::1] cursor,
+    int64_t[::1] group_rows,
+) noexcept nogil:
+    """Scatter right-row numbers into their group's slice, in right order."""
+    cdef Py_ssize_t i, n = gids.shape[0]
+    cdef int64_t g
+    for i in range(n):
+        g = gids[i]
+        group_rows[offsets[g] + cursor[g]] = i
+        cursor[g] += 1
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef int64_t _probe_count(
+    const int64_t[::1] keys,
+    Py_ssize_t lo,
+    Py_ssize_t hi,
+    const int64_t[::1] slot_key,
+    const int64_t[::1] slot_gid,
+    const int64_t[::1] counts,
+) noexcept nogil:
+    """Output rows produced by probe rows [lo, hi)."""
+    cdef uint64_t mask = <uint64_t>(slot_key.shape[0] - 1)
+    cdef Py_ssize_t i, j
+    cdef int64_t key, gid, total = 0
+    for i in range(lo, hi):
+        key = keys[i]
+        j = <Py_ssize_t>(_hash(key) & mask)
+        while True:
+            gid = slot_gid[j]
+            if gid == -1:
+                break
+            if slot_key[j] == key:
+                total += counts[gid]
+                break
+            j = <Py_ssize_t>((<uint64_t>j + 1) & mask)
+    return total
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef void _probe_fill(
+    const int64_t[::1] keys,
+    Py_ssize_t lo,
+    Py_ssize_t hi,
+    const int64_t[::1] slot_key,
+    const int64_t[::1] slot_gid,
+    const int64_t[::1] counts,
+    const int64_t[::1] offsets,
+    const int64_t[::1] group_rows,
+    int64_t[::1] out_left,
+    int64_t[::1] out_right,
+    Py_ssize_t out_start,
+) noexcept nogil:
+    """Emit (left, right) index pairs for probe rows [lo, hi)."""
+    cdef uint64_t mask = <uint64_t>(slot_key.shape[0] - 1)
+    cdef Py_ssize_t i, j, pos = out_start
+    cdef int64_t key, gid, k, off, cnt
+    for i in range(lo, hi):
+        key = keys[i]
+        j = <Py_ssize_t>(_hash(key) & mask)
+        while True:
+            gid = slot_gid[j]
+            if gid == -1:
+                break
+            if slot_key[j] == key:
+                off = offsets[gid]
+                cnt = counts[gid]
+                for k in range(cnt):
+                    out_left[pos] = i
+                    out_right[pos] = group_rows[off + k]
+                    pos += 1
+                break
+            j = <Py_ssize_t>((<uint64_t>j + 1) & mask)
+
+
+def probe_count_chunk(
+    const int64_t[::1] keys,
+    Py_ssize_t lo,
+    Py_ssize_t hi,
+    const int64_t[::1] slot_key,
+    const int64_t[::1] slot_gid,
+    const int64_t[::1] counts,
+):
+    """Thread-friendly wrapper: count output rows for probe rows [lo, hi)."""
+    with nogil:
+        total = _probe_count(keys, lo, hi, slot_key, slot_gid, counts)
+    return total
+
+
+def probe_fill_chunk(
+    const int64_t[::1] keys,
+    Py_ssize_t lo,
+    Py_ssize_t hi,
+    const int64_t[::1] slot_key,
+    const int64_t[::1] slot_gid,
+    const int64_t[::1] counts,
+    const int64_t[::1] offsets,
+    const int64_t[::1] group_rows,
+    int64_t[::1] out_left,
+    int64_t[::1] out_right,
+    Py_ssize_t out_start,
+):
+    """Thread-friendly wrapper: fill output pairs for probe rows [lo, hi)."""
+    with nogil:
+        _probe_fill(
+            keys, lo, hi, slot_key, slot_gid, counts, offsets, group_rows,
+            out_left, out_right, out_start,
+        )
+
+
+def build_join_table_i8(const int64_t[::1] keys):
+    """Build the right-side hash table.
+
+    Returns ``(slot_key, slot_gid, counts, offsets, group_rows)`` — the CSR
+    group structure consumed by the probe kernels. ``counts``/``offsets`` are
+    sized to the number of groups.
+    """
+    cdef Py_ssize_t n = keys.shape[0]
+    cdef Py_ssize_t m = 8
+    while m < 2 * n:
+        m <<= 1
+    slot_key = np.empty(m, dtype=np.int64)
+    slot_gid = np.full(m, -1, dtype=np.int64)
+    gids = np.empty(n, dtype=np.int64)
+    counts_full = np.empty(n, dtype=np.int64)
+    cdef int64_t n_groups = 0
+    cdef int64_t[::1] slot_key_v = slot_key
+    cdef int64_t[::1] slot_gid_v = slot_gid
+    cdef int64_t[::1] gids_v = gids
+    cdef int64_t[::1] counts_v = counts_full
+    with nogil:
+        _build(keys, slot_key_v, slot_gid_v, gids_v, counts_v, &n_groups)
+    counts = counts_full[:n_groups]
+    offsets = np.empty(n_groups + 1, dtype=np.int64)
+    offsets[0] = 0
+    np.cumsum(counts, out=offsets[1:])
+    group_rows = np.empty(n, dtype=np.int64)
+    cursor = np.zeros(n_groups, dtype=np.int64)
+    cdef const int64_t[::1] offs_v = offsets[:n_groups]
+    cdef int64_t[::1] cursor_v = cursor
+    cdef int64_t[::1] rows_v = group_rows
+    with nogil:
+        _fill_groups(gids_v, offs_v, cursor_v, rows_v)
+    return slot_key, slot_gid, np.asarray(counts), offsets, group_rows

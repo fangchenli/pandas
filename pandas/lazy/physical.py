@@ -4194,6 +4194,110 @@ class PhysicalHashJoin(PhysicalPlan):
         out: ArrayDict = {name: result.column(name) for name in result.column_names}
         return self._reorder_columns(out)
 
+    def _try_cython_join(
+        self,
+        left_arrays: ArrayDict,
+        right_arrays: ArrayDict,
+    ) -> ArrayDict | None:
+        """Single-pass Cython hash join for inner equi-joins on one int key.
+
+        ``pd.merge``'s factorize-then-join machinery is the dominant cost of
+        analytical join pipelines (measured: ~52% of TPC-H q5 in
+        ``_factorize_keys`` alone). ``pandas._libs.lazy_join`` replaces it
+        with a CSR-grouped hash table and a probe whose count/fill passes
+        are ``nogil`` and thread-parallel — measured 7-11x over ``pd.merge``
+        on the dominant TPC-H join shapes at the indexer level.
+
+        Row order is exactly ``pd.merge``'s inner order. The kernel builds on
+        the RIGHT and probes the LEFT in row order, which IS that order; when
+        the right side is much larger we build on the LEFT instead (hash
+        builds should be on the small side) and restore left-row-major order
+        with one stable integer argsort of the output indices.
+
+        Falls through to ``pd.merge`` (returns None) unless: inner join,
+        exactly one key pair, both keys NumPy integer (uint64 excluded — its
+        upper range cannot round-trip through int64), and no overlapping
+        payload names (keeps output naming trivially identical to pd.merge).
+        """
+        if self.how != "inner":
+            return None
+        if self.on is not None:
+            if len(self.on) != 1:
+                return None
+            lkey = rkey = self.on[0]
+        elif self.left_on is not None and self.right_on is not None:
+            if len(self.left_on) != 1 or len(self.right_on) != 1:
+                return None
+            lkey, rkey = self.left_on[0], self.right_on[0]
+        else:
+            return None
+
+        left_cols = {n: a for n, a in left_arrays.items() if not is_index_col(n)}
+        right_cols = {n: a for n, a in right_arrays.items() if not is_index_col(n)}
+        lk = left_cols.get(lkey)
+        rk = right_cols.get(rkey)
+        if not (
+            isinstance(lk, np.ndarray)
+            and isinstance(rk, np.ndarray)
+            and lk.dtype.kind in "iu"
+            and rk.dtype.kind in "iu"
+            and lk.dtype != np.dtype("uint64")
+            and rk.dtype != np.dtype("uint64")
+            and len(lk)
+            and len(rk)
+        ):
+            return None
+        if lkey == rkey and lk.dtype != rk.dtype:
+            # The shared key column is gathered from one side; mismatched
+            # dtypes would diverge from pd.merge's upcast result.
+            return None
+        overlap = (set(left_cols) & set(right_cols)) - (
+            {lkey} if lkey == rkey else set()
+        )
+        if overlap:
+            return None
+
+        from pandas.lazy.backends.numpy.join import inner_join_indexers_i8
+
+        lk64 = np.ascontiguousarray(lk, dtype=np.int64)
+        rk64 = np.ascontiguousarray(rk, dtype=np.int64)
+        # Selectivity cap: this path wins on selective joins (filtered probes
+        # hitting a fraction of rows — the dominant analytical shape). On
+        # high-hit joins the per-column gather of wide intermediates loses to
+        # pd.merge's consolidated block take (measured: q7 1.85x worse), so
+        # the driver bails after a sampled probe estimate.
+        cap = 0.5
+        # Build-side cap: when even the smaller side is large, the join is a
+        # big⋈big shape whose high hit-rate would bail at the sample screen
+        # anyway — skip before paying the hash build (~30 ms at 1.5M rows).
+        if min(len(lk64), len(rk64)) > 500_000:
+            return None
+        if len(rk64) <= 4 * len(lk64):
+            # Natural direction: build right, probe left → pd.merge order.
+            result = inner_join_indexers_i8(lk64, rk64, max_hit_fraction=cap)
+            if result is None:
+                return None
+            left_idx, right_idx = result
+        else:
+            # Right side much larger: build on the (small) left, probe with
+            # the right, then restore left-row-major order. NumPy's stable
+            # sort on integers is a radix sort.
+            result = inner_join_indexers_i8(rk64, lk64, max_hit_fraction=cap)
+            if result is None:
+                return None
+            right_probe, left_build = result
+            order = np.argsort(left_build, kind="stable")
+            left_idx = left_build[order]
+            right_idx = right_probe[order]
+
+        out: ArrayDict = {}
+        out.update(_take_all_columns(left_cols, left_idx))
+        right_gather = {
+            n: a for n, a in right_cols.items() if not (lkey == rkey and n == rkey)
+        }
+        out.update(_take_all_columns(right_gather, right_idx))
+        return out
+
     def _execute_pandas_merge(
         self,
         left_arrays: ArrayDict,
@@ -4209,6 +4313,10 @@ class PhysicalHashJoin(PhysicalPlan):
         import pandas as pd
         from pandas import DataFrame
         from pandas.arrays import ArrowExtensionArray
+
+        fast = self._try_cython_join(left_arrays, right_arrays)
+        if fast is not None:
+            return self._reorder_columns(fast)
 
         def to_frame(arrays: ArrayDict) -> DataFrame:
             cols = {}

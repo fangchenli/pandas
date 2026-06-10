@@ -764,3 +764,116 @@ def numpy_anti_join(
 
 
 # =============================================================================
+
+
+# =============================================================================
+# Cython single-pass hash join driver (pandas._libs.lazy_join)
+# =============================================================================
+
+# Probe rows below this run single-threaded (thread-pool overhead dominates).
+PARALLEL_JOIN_MIN_ROWS = 500_000
+
+
+def inner_join_indexers_i8(
+    left_keys: np.ndarray,
+    right_keys: np.ndarray,
+    max_hit_fraction: float | None = None,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """``(left_idx, right_idx)`` for an inner join on int64 keys.
+
+    Exactly ``pd.merge``'s inner row order: the Cython kernel builds a
+    CSR-grouped hash table on the RIGHT side and probes the LEFT in row
+    order, so the output is left-row-major with right matches in right
+    order by construction (no reordering pass).
+
+    The probe (count + fill) is embarrassingly parallel: ``nogil`` chunk
+    kernels driven by a thread pool above ``PARALLEL_JOIN_MIN_ROWS`` probe
+    rows — the same no-OpenMP pattern as the radix sort driver in core.py.
+    """
+    from pandas._libs.lazy_join import (
+        build_join_table_i8,
+        probe_count_chunk,
+        probe_fill_chunk,
+    )
+
+    n_left = len(left_keys)
+    if n_left == 0 or len(right_keys) == 0:
+        empty = np.empty(0, dtype=np.int64)
+        return empty, empty
+
+    slot_key, slot_gid, counts, offsets, group_rows = build_join_table_i8(right_keys)
+
+    if max_hit_fraction is not None and n_left > 200_000:
+        # Sampled selectivity pre-screen: the caller only wants this path for
+        # *selective* joins (high-hit shapes lose to pd.merge's consolidated
+        # block gather on wide intermediates). A strided sample of the probe
+        # estimates output/probe cheaply; bail before paying the full probe.
+        step = max(1, n_left // 65_536)
+        samp = np.ascontiguousarray(left_keys[::step])
+        est = probe_count_chunk(samp, 0, len(samp), slot_key, slot_gid, counts) / len(
+            samp
+        )
+        if est > max_hit_fraction:
+            return None
+
+    import os
+
+    n_threads = min(8, os.cpu_count() or 1)
+    if n_left < PARALLEL_JOIN_MIN_ROWS or n_threads == 1:
+        total = probe_count_chunk(left_keys, 0, n_left, slot_key, slot_gid, counts)
+        out_left = np.empty(total, dtype=np.int64)
+        out_right = np.empty(total, dtype=np.int64)
+        probe_fill_chunk(
+            left_keys,
+            0,
+            n_left,
+            slot_key,
+            slot_gid,
+            counts,
+            offsets,
+            group_rows,
+            out_left,
+            out_right,
+            0,
+        )
+        return out_left, out_right
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    bounds = np.linspace(0, n_left, n_threads + 1).astype(np.int64)
+    spans = [
+        (int(bounds[i]), int(bounds[i + 1]))
+        for i in range(n_threads)
+        if bounds[i] < bounds[i + 1]
+    ]
+    with ThreadPoolExecutor(len(spans)) as ex:
+        chunk_counts = list(
+            ex.map(
+                lambda s: probe_count_chunk(
+                    left_keys, s[0], s[1], slot_key, slot_gid, counts
+                ),
+                spans,
+            )
+        )
+        starts = np.concatenate(([0], np.cumsum(chunk_counts)))
+        out_left = np.empty(int(starts[-1]), dtype=np.int64)
+        out_right = np.empty(int(starts[-1]), dtype=np.int64)
+        list(
+            ex.map(
+                lambda sa: probe_fill_chunk(
+                    left_keys,
+                    sa[0][0],
+                    sa[0][1],
+                    slot_key,
+                    slot_gid,
+                    counts,
+                    offsets,
+                    group_rows,
+                    out_left,
+                    out_right,
+                    sa[1],
+                ),
+                zip(spans, (int(s) for s in starts[:-1]), strict=False),
+            )
+        )
+    return out_left, out_right

@@ -154,12 +154,25 @@ is the user-facing decision tool either way.
     probe/build ratio cap). Root cause: the multi-pass NumPy probe has a
     ~8.5 ms/M-row floor, vs `pd.merge`'s shape-dependent 5–25 ms/M — the
     crossover is too narrow to gate reliably. Built, measured, **reverted**.
-  - **(c) Cython single-pass hash join — the remaining candidate.** Probe +
-    emit in one nogil loop (parallelizable across probe chunks) removes the
-    multi-pass floor; the LUT round supplies the spec: exact `pd.merge`
-    inner-order semantics (probe-order when build unique; stable
-    left-key-major regroup otherwise), selective-join gating, build-side
-    selection. *Gate unchanged: q3/q5/q10 ≥2x; S1 geo-mean ≥0.35x.*
+  - **(c) Cython single-pass hash join — LANDED (June 2026,
+    `pandas/_libs/lazy_join.pyx`).** CSR-grouped hash table built on the
+    small side; `nogil` count/fill probe passes driven thread-parallel
+    (no-OpenMP pattern, like `lazy_radix`); output is `pd.merge`'s exact
+    inner order by construction (probe-in-row-order; one stable integer
+    argsort restores it when the build side is the left). At the indexer
+    level it is **7–11x over `pd.merge`** on the dominant shapes (q3's big
+    join: 6.5 ms vs 72.9 ms). In-engine, gated to *selective* joins
+    (sampled hit-rate ≤0.5, build side ≤500k — on high-hit wide
+    intermediates the per-column gather loses to pd.merge's consolidated
+    block take, measured q7 1.85x before the gates): **q3 0.60x→, q5
+    0.72x→, q10 0.87x→, q18 0.63x→ of their former times, no real
+    regressions** (borderline cases are ≤1.03x at 4 reps). All 22 queries
+    still validate; 1677 tests pass.
+  - **P1 remaining:** the bottleneck has *moved* — on selective joins the
+    kernel is no longer the cost; on high-hit joins the payload gather of
+    wide intermediates is (pd.merge's block-take advantage). That is P2
+    territory (pipelined joins / block-aware gather). *Gate progress:
+    q3/q5/q10 at 1.15–1.7x of the ≥2x target; S1 geo-mean re-measure due.*
 - **P2 — Pipelined joins.** Stop materializing the probe side and the join
   output between chained joins (the known "hash join materializes both sides"
   limitation): probe batches stream through the next join. *Gate: multi-join
