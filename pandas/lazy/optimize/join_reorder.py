@@ -54,6 +54,7 @@ class JoinReorder(PlanVisitor):
     """Reorder maximal inner-join blocks by estimated cardinality."""
 
     def optimize(self, plan: LogicalPlan) -> LogicalPlan:
+        self._visit_memo = {}
         # Per-run schema cache keyed by id() — reset each call so reused object
         # ids from a previous plan can never return stale column sets.
         self._COLS_CACHE = {}

@@ -652,6 +652,7 @@ class ProjectionPruning(PlanVisitor):
     """
 
     def optimize(self, plan: LogicalPlan) -> LogicalPlan:
+        self._visit_memo = {}
         # Start with all output columns as needed
         output_cols = set(plan.resolve_schema().names)
         return self._prune(plan, output_cols)
@@ -1047,6 +1048,7 @@ class CommonSubexpressionElimination(PlanVisitor):
         return name
 
     def optimize(self, plan: LogicalPlan) -> LogicalPlan:
+        self._visit_memo = {}
         self._cse_counter = 0  # Reset counter for each optimization run
         return self.visit(plan)
 

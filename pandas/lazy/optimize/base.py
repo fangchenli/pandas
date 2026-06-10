@@ -62,11 +62,20 @@ class PlanVisitor(OptimizationPass):
 
     def optimize(self, plan: LogicalPlan) -> LogicalPlan:
         """Apply the visitor to transform the plan."""
+        self._visit_memo: dict[int, LogicalPlan] = {}
         return self.visit(plan)
 
     def visit(self, plan: LogicalPlan) -> LogicalPlan:
         """
         Dispatch to the appropriate visit_* method based on node type.
+
+        Memoized per ``optimize()`` run by input-node identity: LazyFrame
+        reuse makes plans DAGs (one subtree object, several parents), and an
+        unmemoized rebuild visits each parent's copy separately — returning
+        two distinct rebuilt objects and silently destroying the sharing that
+        common-subplan caching (PhysicalCachedSubplan) depends on. With the
+        memo, an identical input node maps to the identical output object, so
+        the DAG survives every pass.
 
         Parameters
         ----------
@@ -78,6 +87,17 @@ class PlanVisitor(OptimizationPass):
         LogicalPlan
             The transformed plan node.
         """
+        memo = getattr(self, "_visit_memo", None)
+        if memo is not None:
+            cached = memo.get(id(plan))
+            if cached is not None:
+                return cached
+        result = self._dispatch(plan)
+        if memo is not None:
+            memo[id(plan)] = result
+        return result
+
+    def _dispatch(self, plan: LogicalPlan) -> LogicalPlan:
         # Import here to avoid circular imports
         from pandas.lazy.plan import (
             Aggregate,

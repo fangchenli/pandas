@@ -23,6 +23,11 @@ from abc import (
     abstractmethod,
 )
 import dataclasses
+import threading
+
+# Experimental: see PhysicalPlanner.plan — execute-once caching of shared
+# subplans. Off pending the q15 surrounding-graph regression diagnosis.
+_SUBPLAN_CACHE_ENABLED = False
 from dataclasses import (
     dataclass,
     field,
@@ -324,6 +329,14 @@ class ExecutionContext:
     # Cache for intermediate results (for CSE)
     cache: dict[int, Any] = field(default_factory=dict)
 
+    # Results of common (shared) subplans, computed once per collect and
+    # reused by every consumer (see PhysicalCachedSubplan). Unlike the CSE
+    # cache this is deliberately SHARED across clone_for_subplan contexts -
+    # concurrent feeders of different breakers may request the same shared
+    # subplan; the lock serializes its first computation.
+    subplan_cache: dict[int, Any] = field(default_factory=dict)
+    subplan_lock: Any = field(default_factory=threading.Lock)
+
     # Index metadata (populated by PhysicalScan)
     index_names: list[str | None] = field(default_factory=list)
     index_is_multi: bool = False
@@ -390,6 +403,8 @@ class ExecutionContext:
             adaptive_thresholds=self.adaptive_thresholds,
             _spill_manager=self._spill_manager,
             _spill_config=self._spill_config,
+            subplan_cache=self.subplan_cache,
+            subplan_lock=self.subplan_lock,
         )
 
     @property
@@ -4876,6 +4891,49 @@ class PhysicalHashJoin(PhysicalPlan):
 
 
 @dataclass
+class PhysicalCachedSubplan(PhysicalPlan):
+    """Execute-once wrapper for a subplan shared by multiple consumers.
+
+    LazyFrame reuse makes the logical plan a DAG (the same Filter/Join
+    subtree object feeding several branches, e.g. TPC-H q21's ``late``
+    filter or q2's 4-table ``base`` join), but pipelines executed each
+    consumer's copy independently. The planner wraps each shared non-source
+    subtree in ONE of these (memoized by logical node identity); whichever
+    consumer pipeline reaches it first computes, the rest reuse the cached
+    arrays via the context-shared ``subplan_cache``. Childless on purpose:
+    the pipeline compiler treats it as a source, and the inner subtree
+    executes through the ordinary direct ``execute`` path.
+    """
+
+    inner: PhysicalPlan
+    key: int
+    schema: Schema
+
+    def children(self) -> list[PhysicalPlan]:
+        return []
+
+    @property
+    def output_schema(self) -> Schema:
+        return self.schema
+
+    def execute(self, context: ExecutionContext) -> ArrayDict:
+        with context.subplan_lock:
+            if self.key not in context.subplan_cache:
+                # Execute the inner subtree through the full pipeline engine
+                # (not direct recursion) so it keeps morsel parallelism and
+                # the decision layer — direct execution cost q15 3.5x.
+                from pandas.lazy.engine.pipeline import execute_as_pipelines
+
+                context.subplan_cache[self.key] = execute_as_pipelines(
+                    self.inner, context
+                )
+            return context.subplan_cache[self.key]
+
+    def __repr__(self) -> str:
+        return f"PhysicalCachedSubplan({type(self.inner).__name__})"
+
+
+@dataclass
 class PhysicalJoinChain(PhysicalPlan):
     """Late-materialization chain of inner joins (one breaker, N base inputs).
 
@@ -5593,6 +5651,22 @@ class PhysicalPlanner:
         PhysicalPlan
             The physical execution plan.
         """
+        # Common-subplan detection: LazyFrame reuse makes the logical plan a
+        # DAG (preserved through optimization by PlanVisitor's visit memo);
+        # shared non-source subtrees can be planned once and wrapped in an
+        # execute-once PhysicalCachedSubplan. DEFAULT-OFF pending diagnosis:
+        # the wrapper wins modestly where expected (q21 0.96x) but makes
+        # q15's *surrounding* graph ~3.5x slower through a mechanism not yet
+        # understood (probed and ruled out: the aggregate itself, the order
+        # contract, morsel-parallelism loss — inner runs through the full
+        # pipeline engine). See ROADMAP "common-subplan caching".
+        self._shared_ids = (
+            self._find_shared_subplans(logical_plan)
+            if _SUBPLAN_CACHE_ENABLED
+            else set()
+        )
+        self._shared_wrappers: dict[int, PhysicalCachedSubplan] = {}
+
         physical_plan = self._plan_recursive(logical_plan)
 
         if enable_fusion:
@@ -5601,6 +5675,49 @@ class PhysicalPlanner:
         physical_plan = self._collapse_join_chains(physical_plan)
 
         return physical_plan
+
+    @staticmethod
+    def _find_shared_subplans(plan: LogicalPlan) -> set[int]:
+        """ids of non-source logical nodes referenced by 2+ parents."""
+        from pandas.lazy.plan import (
+            Aggregate,
+            CSVSource,
+            DataFrameSource,
+            ParquetSource,
+        )
+
+        counts: dict[int, int] = {}
+
+        def walk(node) -> None:
+            nid = id(node)
+            counts[nid] = counts.get(nid, 0) + 1
+            if counts[nid] == 1:  # recurse each subtree once (DAG-safe)
+                for child in node.children():
+                    walk(child)
+
+        walk(plan)
+        shared: set[int] = set()
+        seen: set[int] = set()
+
+        def collect(node) -> None:
+            nid = id(node)
+            if nid in seen:
+                return
+            seen.add(nid)
+            if counts.get(nid, 0) >= 2 and not isinstance(
+                node,
+                (DataFrameSource, ParquetSource, CSVSource, Aggregate),
+            ):
+                # Aggregates excluded for now: wrapping q15's shared groupby
+                # made the SURROUNDING graph ~3.5x slower (not the aggregate
+                # itself — probed strict-vs-relaxed identical; root cause in
+                # the restructured pipeline graph still open, see ROADMAP).
+                shared.add(nid)
+            for child in node.children():
+                collect(child)
+
+        collect(plan)
+        return shared
 
     def _collapse_join_chains(self, plan: PhysicalPlan) -> PhysicalPlan:
         """Collapse left-deep trees of eligible inner joins into one
@@ -5666,6 +5783,20 @@ class PhysicalPlanner:
 
     def _plan_recursive(self, logical_plan: LogicalPlan) -> PhysicalPlan:
         """Recursively convert logical plan to physical plan."""
+
+        nid = id(logical_plan)
+        shared = getattr(self, "_shared_ids", None)
+        if shared is not None and nid in shared:
+            wrapper = self._shared_wrappers.get(nid)
+            if wrapper is None:
+                shared.discard(nid)  # avoid recursing into this hook
+                inner = self._plan_recursive(logical_plan)
+                shared.add(nid)
+                wrapper = PhysicalCachedSubplan(
+                    inner=inner, key=nid, schema=logical_plan.resolve_schema()
+                )
+                self._shared_wrappers[nid] = wrapper
+            return wrapper
 
         if isinstance(logical_plan, DataFrameSource):
             return self._plan_scan(logical_plan)
