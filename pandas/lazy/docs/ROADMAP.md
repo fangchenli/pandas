@@ -212,6 +212,14 @@ is the user-facing decision tool either way.
 Three phases, in order — engineering to cross the gate, then re-verify the
 whole story, then take it to the strategic table.
 
+> **N1 GATE CROSSED (June 2026): S1 geo-mean 0.40x** (campaign start
+> 0.22x; suite 8.0 s vs Polars 4.8 s, all 22 validated). The q15 anomaly
+> diagnosis delivered both halves: the childless cache wrapper had been
+> hiding its inner subtree from the fusion/chain post-passes (a bare
+> filter at 691 ms vs 44 ms fused); fixing that flipped the subplan cache
+> ON, which eliminated q21's double-executed `late` subtree (q21
+> 2254 → 1482 ms, ratio ~0.45x). Next: N2 (re-verify H2O + docs).
+
 - **N1 — Cross the 0.4 gate (engineering).** Two targets, both with
   existing leads:
   1. **The q15 cache anomaly is on the critical path** — diagnosing it
