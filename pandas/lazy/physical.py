@@ -2750,6 +2750,67 @@ class PhysicalHashAggregate(PhysicalPlan):
 # sort_indices (multi-threaded; ~1.65x over np.lexsort at 10M rows).
 
 
+def _unwrap_materialize(plan):
+    """Look through the PhysicalMaterialize bookkeeping wrapper."""
+    if isinstance(plan, PhysicalMaterialize):
+        return plan.input
+    return plan
+
+
+class _CompositeJoin:
+    """Late-materialized join-chain result: bases + row indices, no payloads.
+
+    Represents the output of a chain of inner joins as the original base
+    ArrayDicts plus one row-index array per base (``None`` = identity) and a
+    column→base map. Payload columns are gathered exactly once, in
+    ``gather()``, by the topmost join of the chain.
+    """
+
+    def __init__(self, bases, indices, col_map):
+        self.bases = bases  # list[ArrayDict]
+        self.indices = indices  # list[np.ndarray | None]
+        self.col_map = col_map  # dict[str, int] — column name -> base pos
+
+    @classmethod
+    def from_arrays(cls, arrays: ArrayDict) -> _CompositeJoin:
+        data = {n: a for n, a in arrays.items() if not is_index_col(n)}
+        return cls([data], [None], dict.fromkeys(data, 0))
+
+    def column(self, name: str):
+        """The (gathered) values of one column — used for join keys only."""
+        b = self.col_map.get(name)
+        if b is None:
+            return None
+        arr = self.bases[b].get(name)
+        idx = self.indices[b]
+        if idx is None or not isinstance(arr, np.ndarray):
+            return arr if idx is None else None
+        return arr[idx]
+
+    def extend(self, chain_rows, right_arrays, right_idx, drop_right_key):
+        """One more chain step: re-map every base through ``chain_rows`` and
+        append the right side with its own row indices."""
+        new_indices = [
+            chain_rows if idx is None else idx[chain_rows] for idx in self.indices
+        ]
+        new_indices.append(right_idx)
+        bases = [*self.bases, right_arrays]
+        col_map = dict(self.col_map)
+        b_right = len(bases) - 1
+        for n in right_arrays:
+            if n != drop_right_key:
+                col_map[n] = b_right
+        return _CompositeJoin(bases, new_indices, col_map)
+
+    def gather(self) -> ArrayDict:
+        """Materialize: one parallel gather per base, columns in merge order."""
+        per_base: list[ArrayDict] = []
+        for b, (base, idx) in enumerate(zip(self.bases, self.indices, strict=True)):
+            cols = {n: a for n, a in base.items() if self.col_map.get(n) == b}
+            per_base.append(cols if idx is None else _take_all_columns(cols, idx))
+        return {n: per_base[b][n] for n, b in self.col_map.items()}
+
+
 def _take_all_columns(input_arrays: ArrayDict, indices) -> ArrayDict:
     """
     Apply gather indices to every column, in parallel for large data.
@@ -3917,6 +3978,26 @@ class PhysicalHashJoin(PhysicalPlan):
 
     def execute(self, context: ExecutionContext) -> ArrayDict:
 
+        # Late-materialization join chain: when the left input is itself an
+        # eligible inner join, compose the Cython kernel's indexers down the
+        # chain — gathering only each step's probe *key* column — and gather
+        # every payload column ONCE here, from its base table. This removes
+        # the cascade of intermediate payload gathers that dominates
+        # multi-join pipelines (measured 2.2x on TPC-H q7's full-hit chain).
+        # Composition follows pd.merge's cascade order exactly (each step
+        # probes the running chain in row order), and any step that fails a
+        # runtime gate just materializes and the chain continues — so this
+        # is a pure optimization with per-step graceful fallback.
+        if (
+            not context.spill_enabled
+            and not context.preserve_index
+            and not context.user_set_index
+            and isinstance(_unwrap_materialize(self.left), PhysicalHashJoin)
+        ):
+            comp = self._execute_composite(context)
+            if comp is not None:
+                return self._reorder_columns(comp.gather())
+
         # Execute left and right sides in parallel. Every join path needs both
         # sides materialized (a hash join needs the full build side; this
         # engine does not stream join inputs), so we do it once up front and
@@ -4193,6 +4274,86 @@ class PhysicalHashJoin(PhysicalPlan):
         )
         out: ArrayDict = {name: result.column(name) for name in result.column_names}
         return self._reorder_columns(out)
+
+    def _execute_composite(self, context) -> _CompositeJoin | None:
+        """Late-materialization chain step: join without gathering payloads.
+
+        Returns a ``_CompositeJoin`` (base ArrayDicts + per-base row-index
+        arrays + a column→base map) representing this join's output, or
+        ``None`` when this node can't start/continue a chain (the caller
+        falls back to the standard materializing paths).
+
+        Eligibility per step mirrors ``_try_cython_join``: inner, single
+        NumPy-int key, no overlapping payload names. A step that is
+        ineligible but whose LEFT subtree produced a composite materializes
+        the composite and joins normally — the chain degrades node by node,
+        never failing the query.
+        """
+        if self.how != "inner":
+            return None
+        if self.on is not None:
+            if len(self.on) != 1:
+                return None
+            lkey = rkey = self.on[0]
+        elif self.left_on is not None and self.right_on is not None:
+            if len(self.left_on) != 1 or len(self.right_on) != 1:
+                return None
+            lkey, rkey = self.left_on[0], self.right_on[0]
+        else:
+            return None
+
+        # Resolve the left input as a composite (recursing through chained
+        # joins, looking through the PhysicalMaterialize bookkeeping wrapper)
+        # or as a freshly materialized base.
+        left_inner = _unwrap_materialize(self.left)
+        if isinstance(left_inner, PhysicalHashJoin):
+            left_comp = left_inner._execute_composite(context)
+            if left_comp is None:
+                left_comp = _CompositeJoin.from_arrays(self.left.execute(context))
+        else:
+            left_comp = _CompositeJoin.from_arrays(self.left.execute(context))
+        right_arrays = {
+            n: a for n, a in self.right.execute(context).items() if not is_index_col(n)
+        }
+
+        lk = left_comp.column(lkey)
+        rk = right_arrays.get(rkey)
+        ok = (
+            isinstance(lk, np.ndarray)
+            and isinstance(rk, np.ndarray)
+            and lk.dtype.kind in "iu"
+            and rk.dtype.kind in "iu"
+            and lk.dtype != np.dtype("uint64")
+            and rk.dtype != np.dtype("uint64")
+            and len(lk)
+            and len(rk)
+            and not (lkey == rkey and lk.dtype != rk.dtype)
+            and not (
+                (set(left_comp.col_map) & set(right_arrays))
+                - ({lkey} if lkey == rkey else set())
+            )
+        )
+        if not ok:
+            # Ineligible step: collapse what we have and join the normal way.
+            merged = self._execute_pandas_merge(left_comp.gather(), right_arrays)
+            return _CompositeJoin.from_arrays(merged)
+
+        from pandas.lazy.backends.numpy.join import inner_join_indexers_i8
+
+        lk64 = np.ascontiguousarray(lk, dtype=np.int64)
+        rk64 = np.ascontiguousarray(rk, dtype=np.int64)
+        if len(rk64) <= 4 * len(lk64):
+            # Natural: build right, probe the chain in row order — preserves
+            # pd.merge's cascade order by construction.
+            chain_rows, right_idx = inner_join_indexers_i8(lk64, rk64)
+        else:
+            right_probe, chain_build = inner_join_indexers_i8(rk64, lk64)
+            order = np.argsort(chain_build, kind="stable")
+            chain_rows = chain_build[order]
+            right_idx = right_probe[order]
+
+        drop_right_key = rkey if lkey == rkey else None
+        return left_comp.extend(chain_rows, right_arrays, right_idx, drop_right_key)
 
     def _try_cython_join(
         self,

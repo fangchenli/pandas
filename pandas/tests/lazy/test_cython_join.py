@@ -14,6 +14,7 @@ import pytest
 
 import pandas as pd
 import pandas._testing as tm
+from pandas.lazy import col
 
 
 @pytest.fixture
@@ -136,3 +137,88 @@ class TestEngineParity:
         left = pd.DataFrame({"k": np.arange(10) + 5000, "v": np.ones(10)})
         right = pd.DataFrame({"rk": np.arange(1000), "w": np.ones(1000)})
         self._check(left, right, left_on="k", right_on="rk")
+
+
+class TestJoinChainComposition:
+    """Late-materialization join chains (PhysicalHashJoin._execute_composite).
+
+    Chains of inner int-key joins compose kernel indexers instead of
+    gathering intermediate payloads; output must equal the eager cascade
+    exactly (order included), and ineligible steps must degrade gracefully.
+    """
+
+    def _check(self, plan):
+        phys = plan.collect(use_physical_planner=True)
+        eager = plan.collect(use_physical_planner=False)
+        tm.assert_frame_equal(phys, eager)
+
+    def test_three_table_chain(self, rng):
+        a = pd.DataFrame(
+            {"k1": rng.integers(0, 300, 4000), "v": rng.standard_normal(4000)}
+        )
+        b = pd.DataFrame(
+            {
+                "k1": np.arange(300),
+                "k2": rng.integers(0, 100, 300),
+                "w": rng.standard_normal(300),
+            }
+        )
+        c = pd.DataFrame({"k2": np.arange(100), "x": rng.standard_normal(100)})
+        self._check(a.select().join(b.select(), on="k1").join(c.select(), on="k2"))
+
+    def test_chain_with_duplicate_keys(self, rng):
+        a = pd.DataFrame(
+            {"k1": rng.integers(0, 300, 4000), "v": rng.standard_normal(4000)}
+        )
+        b = pd.DataFrame(
+            {
+                "k1": np.arange(300),
+                "k2": rng.integers(0, 50, 300),
+                "w": rng.standard_normal(300),
+            }
+        )
+        d = pd.DataFrame(
+            {"k3": rng.integers(0, 50, 5000), "y": rng.standard_normal(5000)}
+        )
+        self._check(
+            a.select()
+            .join(b.select(), on="k1")
+            .join(d.select(), left_on="k2", right_on="k3")
+        )
+
+    def test_ineligible_step_degrades_gracefully(self, rng):
+        a = pd.DataFrame(
+            {"k1": rng.integers(0, 300, 4000), "v": rng.standard_normal(4000)}
+        )
+        e = pd.DataFrame(
+            {
+                "s": rng.choice(["p", "q", "r"], 300),
+                "k1": np.arange(300),
+                "z": np.ones(300),
+            }
+        )
+        f = pd.DataFrame({"s": ["p", "q"], "t": [1.0, 2.0]})
+        self._check(a.select().join(e.select(), on="k1").join(f.select(), on="s"))
+
+    def test_chain_into_groupby(self, rng):
+        a = pd.DataFrame(
+            {"k1": rng.integers(0, 300, 4000), "v": rng.standard_normal(4000)}
+        )
+        b = pd.DataFrame(
+            {
+                "k1": np.arange(300),
+                "k2": rng.integers(0, 100, 300),
+                "w": rng.standard_normal(300),
+            }
+        )
+        c = pd.DataFrame({"k2": np.arange(100), "x": rng.standard_normal(100)})
+        plan = (
+            a.select()
+            .join(b.select(), on="k1")
+            .join(c.select(), on="k2")
+            .group_by("k2")
+            .agg(col("v").sum().alias("sv"), col("x").mean().alias("mx"))
+        )
+        phys = plan.collect(use_physical_planner=True).sort_values("k2")
+        eager = plan.collect(use_physical_planner=False).sort_values("k2")
+        tm.assert_frame_equal(phys.reset_index(drop=True), eager.reset_index(drop=True))
