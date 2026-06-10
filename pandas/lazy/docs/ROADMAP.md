@@ -367,9 +367,11 @@ crosses ~0.5x or gains plateau, whichever first.
   gracefully while Polars' (old) streaming engine hard-failed; DuckDB has
   since done SF-100,000 (~27 TB, 7 TB spilled) on one box. Staged plan for
   us (total cloud cost ~$25–65/day, spot):
-  1. **SF-10 locally** — correctness of all 22 via the parquet-scan
-     streaming path (the in-memory pandas path is a hard wall at scale;
-     any full-pandas intermediate caps at RAM).
+  1. **SF-10 locally — DONE (June 2026): 22/22 completed and validated**,
+     peak RSS 1.1–8.0 GB on 16 GB (data ~14 GB as frames — the streaming
+     path carried it). The shakeout fixed 3 real bugs incl. a
+     silent-wrong-results scan-pushdown class. See
+     `../benchmarks/TPCH_SCAN_STREAMING.md`.
   2. **SF-100 on c7a.24xlarge-class (192 GB)** — the headline run,
      directly comparable to Polars' published numbers (DuckDB 19.7 s,
      Polars-streaming 23.9 s, Polars in-memory 152 s for all 22).
