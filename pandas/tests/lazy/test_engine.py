@@ -692,7 +692,10 @@ class TestOrderFreenessPropagation:
         assert "acero" not in q.explain(physical=True)
 
     def test_order_freeness_recurses_through_joins(self):
-        # join -> join -> groupby: both joins route
+        # join -> join -> groupby. Single-int-key inner chains now collapse
+        # into one PhysicalJoinChain (late materialization supersedes acero
+        # routing for these trees); acero recursion still applies to joins
+        # the chain does not take, e.g. composite keys.
         rng = np.random.default_rng(15)
         left, right = self._frames()
         third = pd.DataFrame({"k": np.arange(500), "z": rng.standard_normal(500)})
@@ -703,7 +706,20 @@ class TestOrderFreenessPropagation:
             .group_by("k")
             .agg(col("v").sum().alias("s"))
         )
-        assert q.explain(physical=True).count("acero") == 2
+        assert "JoinChain" in q.explain(physical=True)
+
+        # Composite keys keep the nested joins -> both route to acero.
+        left2 = left.assign(k2=left["k"] % 7)
+        right2 = right.assign(k2=right["k"] % 7)
+        third2 = third.assign(k2=third["k"] % 7)
+        q2 = (
+            left2.select()
+            .join(right2.select(), on=["k", "k2"])
+            .join(third2.select(), on=["k", "k2"])
+            .group_by("k")
+            .agg(col("v").sum().alias("s"))
+        )
+        assert q2.explain(physical=True).count("acero") == 2
 
 
 class TestOrderRelaxedCollect:

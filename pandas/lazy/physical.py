@@ -22,6 +22,7 @@ from abc import (
     ABC,
     abstractmethod,
 )
+import dataclasses
 from dataclasses import (
     dataclass,
     field,
@@ -3978,32 +3979,25 @@ class PhysicalHashJoin(PhysicalPlan):
 
     def execute(self, context: ExecutionContext) -> ArrayDict:
 
-        # Late-materialization join chain: when the left input is itself an
-        # eligible inner join, compose the Cython kernel's indexers down the
-        # chain — gathering only each step's probe *key* column — and gather
-        # every payload column ONCE here, from its base table. This removes
-        # the cascade of intermediate payload gathers that dominates
-        # multi-join pipelines (measured 2.2x on TPC-H q7's full-hit chain).
-        # Composition follows pd.merge's cascade order exactly (each step
-        # probes the running chain in row order), and any step that fails a
-        # runtime gate just materializes and the chain continues — so this
-        # is a pure optimization with per-step graceful fallback.
-        if (
-            not context.spill_enabled
-            and not context.preserve_index
-            and not context.user_set_index
-            and isinstance(_unwrap_materialize(self.left), PhysicalHashJoin)
-        ):
-            comp = self._execute_composite(context)
-            if comp is not None:
-                return self._reorder_columns(comp.gather())
-
         # Execute left and right sides in parallel. Every join path needs both
         # sides materialized (a hash join needs the full build side; this
         # engine does not stream join inputs), so we do it once up front and
         # then choose the join strategy from the actual materialized sizes.
         left_arrays, right_arrays = self._execute_sides_parallel(context)
+        return self._join_arrays(context, left_arrays, right_arrays)
 
+    def _join_arrays(
+        self,
+        context: ExecutionContext,
+        left_arrays: ArrayDict,
+        right_arrays: ArrayDict,
+    ) -> ArrayDict:
+        """Join two materialized sides — the whole strategy ladder.
+
+        Split from ``execute`` so PhysicalJoinChain can run any chain step on
+        already-materialized arrays with exactly this node's semantics
+        (spill-aware Grace, pd.merge/Cython fast paths, acero, indexer).
+        """
         equi = self.on is not None or (
             self.left_on is not None and self.right_on is not None
         )
@@ -4275,19 +4269,22 @@ class PhysicalHashJoin(PhysicalPlan):
         out: ArrayDict = {name: result.column(name) for name in result.column_names}
         return self._reorder_columns(out)
 
-    def _execute_composite(self, context) -> _CompositeJoin | None:
+    def _compose_step(
+        self,
+        left_comp: _CompositeJoin,
+        right_arrays: ArrayDict,
+        preserve_order: bool = True,
+    ) -> _CompositeJoin | None:
         """Late-materialization chain step: join without gathering payloads.
 
-        Returns a ``_CompositeJoin`` (base ArrayDicts + per-base row-index
-        arrays + a column→base map) representing this join's output, or
-        ``None`` when this node can't start/continue a chain (the caller
-        falls back to the standard materializing paths).
+        Given the running chain as a ``_CompositeJoin`` and this step's
+        materialized right side, return the extended composite — or ``None``
+        when this step is ineligible at runtime (the chain driver then
+        materializes and joins through ``_join_arrays``, degrading
+        gracefully).
 
         Eligibility per step mirrors ``_try_cython_join``: inner, single
-        NumPy-int key, no overlapping payload names. A step that is
-        ineligible but whose LEFT subtree produced a composite materializes
-        the composite and joins normally — the chain degrades node by node,
-        never failing the query.
+        NumPy-int key, no overlapping payload names.
         """
         if self.how != "inner":
             return None
@@ -4301,20 +4298,6 @@ class PhysicalHashJoin(PhysicalPlan):
             lkey, rkey = self.left_on[0], self.right_on[0]
         else:
             return None
-
-        # Resolve the left input as a composite (recursing through chained
-        # joins, looking through the PhysicalMaterialize bookkeeping wrapper)
-        # or as a freshly materialized base.
-        left_inner = _unwrap_materialize(self.left)
-        if isinstance(left_inner, PhysicalHashJoin):
-            left_comp = left_inner._execute_composite(context)
-            if left_comp is None:
-                left_comp = _CompositeJoin.from_arrays(self.left.execute(context))
-        else:
-            left_comp = _CompositeJoin.from_arrays(self.left.execute(context))
-        right_arrays = {
-            n: a for n, a in self.right.execute(context).items() if not is_index_col(n)
-        }
 
         lk = left_comp.column(lkey)
         rk = right_arrays.get(rkey)
@@ -4334,9 +4317,7 @@ class PhysicalHashJoin(PhysicalPlan):
             )
         )
         if not ok:
-            # Ineligible step: collapse what we have and join the normal way.
-            merged = self._execute_pandas_merge(left_comp.gather(), right_arrays)
-            return _CompositeJoin.from_arrays(merged)
+            return None  # driver materializes and joins via _join_arrays
 
         from pandas.lazy.backends.numpy.join import inner_join_indexers_i8
 
@@ -4346,11 +4327,14 @@ class PhysicalHashJoin(PhysicalPlan):
             # Natural: build right, probe the chain in row order — preserves
             # pd.merge's cascade order by construction.
             chain_rows, right_idx = inner_join_indexers_i8(lk64, rk64)
-        else:
+        elif preserve_order:
             right_probe, chain_build = inner_join_indexers_i8(rk64, lk64)
             order = np.argsort(chain_build, kind="stable")
             chain_rows = chain_build[order]
             right_idx = right_probe[order]
+        else:
+            # Order-free chain: keep the kernel's probe-major order.
+            right_idx, chain_rows = inner_join_indexers_i8(rk64, lk64)
 
         drop_right_key = rkey if lkey == rkey else None
         return left_comp.extend(chain_rows, right_arrays, right_idx, drop_right_key)
@@ -4885,6 +4869,99 @@ class PhysicalHashJoin(PhysicalPlan):
     def is_pipeline_breaker(self) -> bool:
         """HashJoin requires build side fully materialized before probe."""
         return True
+
+
+@dataclass
+class PhysicalJoinChain(PhysicalPlan):
+    """Late-materialization chain of inner joins (one breaker, N base inputs).
+
+    The planner collapses ``Join(Join(Join(A,B),C),D)`` trees of statically
+    eligible joins (inner, single-key equi) into one of these so the pipeline
+    executor feeds it the BASE relations instead of pre-materializing each
+    intermediate join: the cascade of intermediate payload gathers is what
+    dominates multi-join pipelines (measured 2.2x on TPC-H q7's chain).
+
+    Execution composes the Cython kernel's indexers step by step
+    (``PhysicalHashJoin._compose_step``), gathering only each step's probe
+    key column, and gathers every payload column exactly once at the end —
+    in pd.merge's cascade order by construction. Any step that is ineligible
+    at runtime materializes the running chain and joins through the original
+    node's ``_join_arrays`` (full strategy ladder), so semantics are always
+    exactly those of the original nested joins. Spill / index-preserving
+    contexts skip composition entirely and run the cascade.
+    """
+
+    bases: tuple[PhysicalPlan, ...]  # base inputs, left-most first
+    steps: tuple[PhysicalHashJoin, ...]  # original nodes, bottom-up
+    schema: Schema
+    # Set by the decision layer when this chain feeds an order-insensitive
+    # sink (groupby/sort/topk/distinct): composition then keeps the kernel's
+    # natural probe-major order, skipping the stable-argsort restoration of
+    # pd.merge's cascade order AND making the final gather sequential-ish on
+    # the big base - the difference between losing and winning on full-hit
+    # chains (measured: q18 1.83x loss order-preserving -> win order-free).
+    order_free: bool = False
+
+    def children(self) -> list[PhysicalPlan]:
+        return list(self.bases)
+
+    @property
+    def output_schema(self) -> Schema:
+        return self.schema
+
+    @property
+    def is_pipeline_breaker(self) -> bool:
+        return True
+
+    def execute(self, context: ExecutionContext) -> ArrayDict:
+        from concurrent.futures import ThreadPoolExecutor
+
+        # Materialize all base relations (in parallel — they are independent;
+        # mirrors _execute_sides_parallel, left-most context wins for index
+        # metadata like nested joins did).
+        contexts = [context.clone_for_subplan() for _ in self.bases]
+        with ThreadPoolExecutor(max_workers=min(4, len(self.bases))) as ex:
+            base_arrays = list(
+                ex.map(
+                    lambda bc: bc[0].execute(bc[1]),
+                    zip(self.bases, contexts, strict=True),
+                )
+            )
+        context.index_names = contexts[0].index_names
+        context.index_is_multi = contexts[0].index_is_multi
+
+        compose_ok = (
+            not context.spill_enabled
+            and not context.preserve_index
+            and not context.user_set_index
+        )
+        acc: ArrayDict | None = None
+        comp: _CompositeJoin | None = (
+            _CompositeJoin.from_arrays(base_arrays[0]) if compose_ok else None
+        )
+        if not compose_ok:
+            acc = base_arrays[0]
+
+        for step, right in zip(self.steps, base_arrays[1:], strict=True):
+            if comp is not None:
+                right_data = {n: a for n, a in right.items() if not is_index_col(n)}
+                extended = step._compose_step(
+                    comp, right_data, preserve_order=not self.order_free
+                )
+                if extended is not None:
+                    comp = extended
+                    continue
+                # Runtime-ineligible step: materialize and continue eagerly.
+                acc = comp.gather()
+                comp = None
+            acc = step._join_arrays(context, acc, right)
+
+        if comp is not None:
+            return self.steps[-1]._reorder_columns(comp.gather())
+        return acc
+
+    def __repr__(self) -> str:
+        return f"PhysicalJoinChain({len(self.bases)} bases)"
 
 
 @dataclass
@@ -5517,7 +5594,71 @@ class PhysicalPlanner:
         if enable_fusion:
             physical_plan = self._apply_fusion(physical_plan)
 
+        physical_plan = self._collapse_join_chains(physical_plan)
+
         return physical_plan
+
+    def _collapse_join_chains(self, plan: PhysicalPlan) -> PhysicalPlan:
+        """Collapse left-deep trees of eligible inner joins into one
+        PhysicalJoinChain breaker (late materialization — see that class).
+
+        Statically eligible step: inner, single-key equi. Runtime gates
+        (key dtypes, name overlap, spill/index contexts) live in the chain
+        node, which degrades per step to the original join semantics.
+        """
+
+        def is_step(node) -> bool:
+            return (
+                isinstance(node, PhysicalHashJoin)
+                and node.how == "inner"
+                and (
+                    (node.on is not None and len(node.on) == 1)
+                    or (
+                        node.left_on is not None
+                        and node.right_on is not None
+                        and len(node.left_on) == 1
+                        and len(node.right_on) == 1
+                    )
+                )
+            )
+
+        def rewrite(node: PhysicalPlan) -> PhysicalPlan:
+            inner = _unwrap_materialize(node)
+            if is_step(inner) and is_step(_unwrap_materialize(inner.left)):
+                # Collect the maximal left-deep chain bottom-up.
+                steps: list[PhysicalHashJoin] = []
+                cur = inner
+                while is_step(cur):
+                    steps.append(cur)
+                    nxt = _unwrap_materialize(cur.left)
+                    if not is_step(nxt):
+                        break
+                    cur = nxt
+                steps.reverse()  # bottom-up
+                bases = [rewrite(steps[0].left)] + [rewrite(s.right) for s in steps]
+                chain = PhysicalJoinChain(
+                    bases=tuple(bases),
+                    steps=tuple(steps),
+                    schema=inner.output_schema,
+                )
+                if isinstance(node, PhysicalMaterialize):
+                    return dataclasses.replace(node, input=chain)
+                return chain
+            children = node.children()
+            if not children:
+                return node
+            new_children = [rewrite(c) for c in children]
+            if all(n is o for n, o in zip(new_children, children, strict=True)):
+                return node
+            if isinstance(node, PhysicalHashJoin):
+                return dataclasses.replace(
+                    node, left=new_children[0], right=new_children[1]
+                )
+            if isinstance(node, PhysicalConcat):
+                return dataclasses.replace(node, inputs=tuple(new_children))
+            return dataclasses.replace(node, input=new_children[0])
+
+        return rewrite(plan)
 
     def _plan_recursive(self, logical_plan: LogicalPlan) -> PhysicalPlan:
         """Recursively convert logical plan to physical plan."""

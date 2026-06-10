@@ -55,6 +55,7 @@ from pandas.lazy.physical import (
     PhysicalFusedPipeline,
     PhysicalHashAggregate,
     PhysicalHashJoin,
+    PhysicalJoinChain,
     PhysicalLimit,
     PhysicalMaterialize,
     PhysicalProject,
@@ -310,7 +311,9 @@ class DecisionLayer:
             if isinstance(nxt, NodeSink):
                 if isinstance(nxt.node, _ORDER_FREE_SINKS):
                     return True
-                if isinstance(nxt.node, (PhysicalHashJoin, PhysicalConcat)):
+                if isinstance(
+                    nxt.node, (PhysicalHashJoin, PhysicalConcat, PhysicalJoinChain)
+                ):
                     return output_order_unobservable(nxt, relaxed)
                 return False  # some other order-observing breaker
             # nxt is the terminal collect output. Under the eager
@@ -320,6 +323,16 @@ class DecisionLayer:
 
         for p in graph.pipelines:
             sink = p.sink
+            if isinstance(sink, NodeSink) and isinstance(sink.node, PhysicalJoinChain):
+                if output_order_unobservable(sink, relaxed=False) or (
+                    order_relaxed and output_order_unobservable(sink, relaxed=True)
+                ):
+                    sink.node.order_free = True
+                    if p.decisions is not None:
+                        p.decisions.sink_decision = (
+                            p.decisions.sink_decision or "join-chain"
+                        ) + " -> order-free composition"
+                continue
             if not (
                 isinstance(sink, NodeSink) and isinstance(sink.node, PhysicalHashJoin)
             ):
