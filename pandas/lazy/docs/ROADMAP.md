@@ -372,7 +372,12 @@ crosses ~0.5x or gains plateau, whichever first.
      path carried it). The shakeout fixed 3 real bugs incl. a
      silent-wrong-results scan-pushdown class. See
      `../benchmarks/TPCH_SCAN_STREAMING.md`.
-  2. **SF-100 on c7a.24xlarge-class (192 GB)** — the headline run,
+  2. **SF-100 — DONE (June 2026, r6i.8xlarge): 22/22 completed and
+     validated**, LP 1,196 s vs Polars 131 s on the same box (~9x; the
+     string wall dominates at scale). Found+fixed three 2 GB
+     string-offset bugs incl. a pd.merge pyarrow-take SEGFAULT. See
+     `../benchmarks/TPCH_SCAN_STREAMING.md`. Originally planned as:
+     **the headline run,**
      directly comparable to Polars' published numbers (DuckDB 19.7 s,
      Polars-streaming 23.9 s, Polars in-memory 152 s for all 22).
   3. **SF-300→1000 on an NVMe spot instance** — pure out-of-core stress
