@@ -2808,9 +2808,10 @@ class _CompositeJoin:
             return arr if idx is None else None
         return arr[idx]
 
-    def extend(self, chain_rows, right_arrays, right_idx, drop_right_key):
+    def extend(self, chain_rows, right_arrays, right_idx, drop_right_keys):
         """One more chain step: re-map every base through ``chain_rows`` and
-        append the right side with its own row indices."""
+        append the right side with its own row indices. ``drop_right_keys``
+        are shared-name join keys already provided by the left side."""
         new_indices = [
             chain_rows if idx is None else idx[chain_rows] for idx in self.indices
         ]
@@ -2819,7 +2820,7 @@ class _CompositeJoin:
         col_map = dict(self.col_map)
         b_right = len(bases) - 1
         for n in right_arrays:
-            if n != drop_right_key:
+            if n not in drop_right_keys:
                 col_map[n] = b_right
         return _CompositeJoin(bases, new_indices, col_map)
 
@@ -4289,6 +4290,69 @@ class PhysicalHashJoin(PhysicalPlan):
         out: ArrayDict = {name: result.column(name) for name in result.column_names}
         return self._reorder_columns(out)
 
+    def _join_key_arrays_i64(self, left_get, right_get):
+        """Resolve this join's key pair(s) to one int64 array per side.
+
+        One int key pair passes through; TWO int key pairs pack into a
+        single int64 key — ``(k1 - lo1) * span2 + (k2 - lo2)`` with offsets
+        and spans computed over BOTH sides so equal pairs map to equal
+        packed values (the same trick as the packed ``n_unique`` kernel).
+        This lets composite-key joins (TPC-H's ``partsupp`` steps) use the
+        Cython kernel and join chains. Returns ``(lk64, rk64, key_pairs)``
+        or ``None`` (>2 keys, non-int/uint64 keys, empty side, shared-name
+        dtype mismatch, or a packed range that would not fit int63).
+        """
+        if self.on is not None:
+            pairs = [(k, k) for k in self.on]
+        elif self.left_on is not None and self.right_on is not None:
+            if len(self.left_on) != len(self.right_on):
+                return None
+            pairs = list(zip(self.left_on, self.right_on, strict=True))
+        else:
+            return None
+        if len(pairs) not in (1, 2):
+            return None
+        larrs, rarrs = [], []
+        for ln, rn in pairs:
+            la, ra = left_get(ln), right_get(rn)
+            if not (
+                isinstance(la, np.ndarray)
+                and isinstance(ra, np.ndarray)
+                and la.dtype.kind in "iu"
+                and ra.dtype.kind in "iu"
+                and la.dtype != np.dtype("uint64")
+                and ra.dtype != np.dtype("uint64")
+                and len(la)
+                and len(ra)
+            ):
+                return None
+            if ln == rn and la.dtype != ra.dtype:
+                # Shared key column is gathered from one side; mismatched
+                # dtypes would diverge from pd.merge's upcast result.
+                return None
+            larrs.append(la)
+            rarrs.append(ra)
+        if len(pairs) == 1:
+            return (
+                np.ascontiguousarray(larrs[0], dtype=np.int64),
+                np.ascontiguousarray(rarrs[0], dtype=np.int64),
+                pairs,
+            )
+        lo1 = min(int(larrs[0].min()), int(rarrs[0].min()))
+        hi1 = max(int(larrs[0].max()), int(rarrs[0].max()))
+        lo2 = min(int(larrs[1].min()), int(rarrs[1].min()))
+        hi2 = max(int(larrs[1].max()), int(rarrs[1].max()))
+        span2 = hi2 - lo2 + 1
+        if span2 <= 0 or (hi1 - lo1 + 1) > (2**62) // span2:
+            return None
+        lk = (larrs[0].astype(np.int64) - lo1) * span2 + (
+            larrs[1].astype(np.int64) - lo2
+        )
+        rk = (rarrs[0].astype(np.int64) - lo1) * span2 + (
+            rarrs[1].astype(np.int64) - lo2
+        )
+        return lk, rk, pairs
+
     def _compose_step(
         self,
         left_comp: _CompositeJoin,
@@ -4308,41 +4372,16 @@ class PhysicalHashJoin(PhysicalPlan):
         """
         if self.how != "inner":
             return None
-        if self.on is not None:
-            if len(self.on) != 1:
-                return None
-            lkey = rkey = self.on[0]
-        elif self.left_on is not None and self.right_on is not None:
-            if len(self.left_on) != 1 or len(self.right_on) != 1:
-                return None
-            lkey, rkey = self.left_on[0], self.right_on[0]
-        else:
+        resolved = self._join_key_arrays_i64(left_comp.column, right_arrays.get)
+        if resolved is None:
             return None
-
-        lk = left_comp.column(lkey)
-        rk = right_arrays.get(rkey)
-        ok = (
-            isinstance(lk, np.ndarray)
-            and isinstance(rk, np.ndarray)
-            and lk.dtype.kind in "iu"
-            and rk.dtype.kind in "iu"
-            and lk.dtype != np.dtype("uint64")
-            and rk.dtype != np.dtype("uint64")
-            and len(lk)
-            and len(rk)
-            and not (lkey == rkey and lk.dtype != rk.dtype)
-            and not (
-                (set(left_comp.col_map) & set(right_arrays))
-                - ({lkey} if lkey == rkey else set())
-            )
-        )
-        if not ok:
+        lk64, rk64, key_pairs = resolved
+        shared = {rn for ln, rn in key_pairs if ln == rn}
+        if (set(left_comp.col_map) & set(right_arrays)) - shared:
             return None  # driver materializes and joins via _join_arrays
 
         from pandas.lazy.backends.numpy.join import inner_join_indexers_i8
 
-        lk64 = np.ascontiguousarray(lk, dtype=np.int64)
-        rk64 = np.ascontiguousarray(rk, dtype=np.int64)
         if len(rk64) <= 4 * len(lk64):
             # Natural: build right, probe the chain in row order — preserves
             # pd.merge's cascade order by construction.
@@ -4356,8 +4395,7 @@ class PhysicalHashJoin(PhysicalPlan):
             # Order-free chain: keep the kernel's probe-major order.
             right_idx, chain_rows = inner_join_indexers_i8(rk64, lk64)
 
-        drop_right_key = rkey if lkey == rkey else None
-        return left_comp.extend(chain_rows, right_arrays, right_idx, drop_right_key)
+        return left_comp.extend(chain_rows, right_arrays, right_idx, shared)
 
     def _try_cython_join(
         self,
@@ -4386,46 +4424,18 @@ class PhysicalHashJoin(PhysicalPlan):
         """
         if self.how != "inner":
             return None
-        if self.on is not None:
-            if len(self.on) != 1:
-                return None
-            lkey = rkey = self.on[0]
-        elif self.left_on is not None and self.right_on is not None:
-            if len(self.left_on) != 1 or len(self.right_on) != 1:
-                return None
-            lkey, rkey = self.left_on[0], self.right_on[0]
-        else:
-            return None
-
         left_cols = {n: a for n, a in left_arrays.items() if not is_index_col(n)}
         right_cols = {n: a for n, a in right_arrays.items() if not is_index_col(n)}
-        lk = left_cols.get(lkey)
-        rk = right_cols.get(rkey)
-        if not (
-            isinstance(lk, np.ndarray)
-            and isinstance(rk, np.ndarray)
-            and lk.dtype.kind in "iu"
-            and rk.dtype.kind in "iu"
-            and lk.dtype != np.dtype("uint64")
-            and rk.dtype != np.dtype("uint64")
-            and len(lk)
-            and len(rk)
-        ):
+        resolved = self._join_key_arrays_i64(left_cols.get, right_cols.get)
+        if resolved is None:
             return None
-        if lkey == rkey and lk.dtype != rk.dtype:
-            # The shared key column is gathered from one side; mismatched
-            # dtypes would diverge from pd.merge's upcast result.
-            return None
-        overlap = (set(left_cols) & set(right_cols)) - (
-            {lkey} if lkey == rkey else set()
-        )
-        if overlap:
+        lk64, rk64, key_pairs = resolved
+        shared = {rn for ln, rn in key_pairs if ln == rn}
+        if (set(left_cols) & set(right_cols)) - shared:
             return None
 
         from pandas.lazy.backends.numpy.join import inner_join_indexers_i8
 
-        lk64 = np.ascontiguousarray(lk, dtype=np.int64)
-        rk64 = np.ascontiguousarray(rk, dtype=np.int64)
         # Selectivity cap: this path wins on selective joins (filtered probes
         # hitting a fraction of rows — the dominant analytical shape). On
         # high-hit joins the per-column gather of wide intermediates loses to
@@ -4457,9 +4467,7 @@ class PhysicalHashJoin(PhysicalPlan):
 
         out: ArrayDict = {}
         out.update(_take_all_columns(left_cols, left_idx))
-        right_gather = {
-            n: a for n, a in right_cols.items() if not (lkey == rkey and n == rkey)
-        }
+        right_gather = {n: a for n, a in right_cols.items() if n not in shared}
         out.update(_take_all_columns(right_gather, right_idx))
         return out
 
@@ -5742,19 +5750,38 @@ class PhysicalPlanner:
         """
 
         def is_step(node) -> bool:
-            return (
-                isinstance(node, PhysicalHashJoin)
-                and node.how == "inner"
-                and (
-                    (node.on is not None and len(node.on) == 1)
-                    or (
-                        node.left_on is not None
-                        and node.right_on is not None
-                        and len(node.left_on) == 1
-                        and len(node.right_on) == 1
-                    )
-                )
-            )
+            if not (isinstance(node, PhysicalHashJoin) and node.how == "inner"):
+                return False
+            if node.on is not None:
+                pairs = [(k, k) for k in node.on]
+            elif (
+                node.left_on is not None
+                and node.right_on is not None
+                and len(node.left_on) == len(node.right_on)
+            ):
+                pairs = list(zip(node.left_on, node.right_on, strict=True))
+            else:
+                return False
+            if len(pairs) == 1:
+                return True
+            if len(pairs) != 2:
+                return False
+            # Two-key steps collapse only when both keys are integer (they
+            # pack into one int64 at runtime). Non-int composite keys keep
+            # the nested joins so the decision layer can still route them
+            # to acero (chains have no acero fallback inside).
+            try:
+                ls = node.left.output_schema
+                rs = node.right.output_schema
+                for ln, rn in pairs:
+                    for schema, name in ((ls, ln), (rs, rn)):
+                        dt = schema[name]
+                        np_dt = getattr(dt, "numpy_dtype", None)
+                        if np_dt is None or np_dt.kind not in "iu":
+                            return False
+            except Exception:
+                return False
+            return True
 
         def rewrite(node: PhysicalPlan) -> PhysicalPlan:
             inner = _unwrap_materialize(node)

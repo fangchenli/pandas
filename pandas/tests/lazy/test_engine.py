@@ -708,10 +708,11 @@ class TestOrderFreenessPropagation:
         )
         assert "JoinChain" in q.explain(physical=True)
 
-        # Composite keys keep the nested joins -> both route to acero.
-        left2 = left.assign(k2=left["k"] % 7)
-        right2 = right.assign(k2=right["k"] % 7)
-        third2 = third.assign(k2=third["k"] % 7)
+        # Non-integer composite keys keep the nested joins (int composite
+        # keys now pack into the join chain) -> both route to acero.
+        left2 = left.assign(k2=(left["k"] % 7).astype(str))
+        right2 = right.assign(k2=(right["k"] % 7).astype(str))
+        third2 = third.assign(k2=(third["k"] % 7).astype(str))
         q2 = (
             left2.select()
             .join(right2.select(), on=["k", "k2"])

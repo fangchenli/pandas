@@ -222,3 +222,99 @@ class TestJoinChainComposition:
         phys = plan.collect(use_physical_planner=True).sort_values("k2")
         eager = plan.collect(use_physical_planner=False).sort_values("k2")
         tm.assert_frame_equal(phys.reset_index(drop=True), eager.reset_index(drop=True))
+
+
+class TestTwoKeyPackedJoin:
+    """Composite (two-int-key) joins pack into one int64 key and use the
+    Cython kernel + chains (G2). Output must equal pd.merge exactly."""
+
+    def _check(self, left, right, **kw):
+        plan = left.select().join(right.select(), **kw)
+        tm.assert_frame_equal(
+            plan.collect(use_physical_planner=True),
+            plan.collect(use_physical_planner=False),
+        )
+
+    def test_two_key_on_dup_dup(self, rng):
+        left = pd.DataFrame(
+            {
+                "a": rng.integers(0, 50, 4000),
+                "b": rng.integers(0, 30, 4000),
+                "v": rng.standard_normal(4000),
+            }
+        )
+        right = pd.DataFrame(
+            {
+                "a": rng.integers(0, 50, 3000),
+                "b": rng.integers(0, 30, 3000),
+                "w": rng.standard_normal(3000),
+            }
+        )
+        self._check(left, right, on=["a", "b"])
+
+    def test_two_key_left_right_names_and_negatives(self, rng):
+        left = pd.DataFrame(
+            {
+                "a": rng.integers(-25, 25, 4000),
+                "b": rng.integers(0, 30, 4000),
+                "v": rng.standard_normal(4000),
+            }
+        )
+        right = pd.DataFrame(
+            {
+                "x": rng.integers(-25, 25, 3000),
+                "y": rng.integers(0, 30, 3000),
+                "w": rng.standard_normal(3000),
+            }
+        )
+        self._check(left, right, left_on=["a", "b"], right_on=["x", "y"])
+
+    def test_two_key_chain_middle_step(self, rng):
+        left = pd.DataFrame(
+            {
+                "a": rng.integers(0, 50, 4000),
+                "b": rng.integers(0, 30, 4000),
+                "v": rng.standard_normal(4000),
+            }
+        )
+        mid = pd.DataFrame(
+            {
+                "x": rng.integers(0, 50, 3000),
+                "y": rng.integers(0, 30, 3000),
+                "w": rng.standard_normal(3000),
+            }
+        )
+        last = pd.DataFrame(
+            {
+                "a": rng.integers(0, 50, 2000),
+                "b": rng.integers(0, 30, 2000),
+                "z": np.ones(2000),
+            }
+        )
+        plan = (
+            left.select()
+            .join(mid.select(), left_on=["a", "b"], right_on=["x", "y"])
+            .join(last.select(), on=["a", "b"])
+        )
+        tm.assert_frame_equal(
+            plan.collect(use_physical_planner=True),
+            plan.collect(use_physical_planner=False),
+        )
+
+    def test_huge_range_falls_back(self, rng):
+        # Packed span would exceed int63 -> falls back to pd.merge, still exact.
+        left = pd.DataFrame(
+            {
+                "a": rng.integers(0, 2**40, 1000),
+                "b": rng.integers(0, 2**40, 1000),
+                "v": np.ones(1000),
+            }
+        )
+        right = pd.DataFrame(
+            {
+                "a": rng.integers(0, 2**40, 1000),
+                "b": rng.integers(0, 2**40, 1000),
+                "w": np.ones(1000),
+            }
+        )
+        self._check(left, right, on=["a", "b"])
