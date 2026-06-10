@@ -125,10 +125,13 @@ analytics, string ops, large sorts).
 
 ### Roadmap (phased, each with a measured gate)
 
-- **P0 — Scorecard (1 session).** Add a pandas-resident mode to `bench_tpch`
-  (clearly labeled S2: Polars timed including `from_pandas`, once per query) and
-  publish the dual-scenario table + geo-means. *Gate: an honest S1/S2 scorecard
-  to steer everything below.*
+- **P0 — Scorecard (1 session).** Add a pandas-resident mode to `bench_tpch`,
+  clearly labeled S2 and distinct from the fixed S1 fairness rule (S1 never
+  times `from_pandas`; that stays). S2 must not overclaim in the other
+  direction either: a real user converts **once** and runs many queries, so
+  report the conversion as a separate one-time cost plus a **break-even** ("lazy
+  pandas wins end-to-end below N queries per dataset"), not conversion charged
+  to every query. *Gate: an honest S1/S2 scorecard to steer everything below.*
 - **P1 — Parallel join kernel (1–2 sessions).** The single biggest S1 lever.
   Measure three candidates on filtered TPC-H shapes before building: (a) acero
   hash join for order-free sinks at scale (parallel; re-measure — it lost on
