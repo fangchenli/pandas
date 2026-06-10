@@ -301,7 +301,19 @@ crosses ~0.5x or gains plateau, whichever first.
   gather vs `pd.merge`'s consolidated block take — measure a block-aware
   gather (consolidate same-dtype NumPy columns, one 2-D take) before
   building. *Gate: q21 ≥1.3x; H2O join avg ≥0.7x with no losses.*
-- **G4 — Streaming aggregate input (the architectural item).** q1's 403 ms
+- **G4 — FIRST INCREMENT LANDED (June 2026): morsel batches stream into
+  aggregates.** The discovery that made it cheap: a complete streaming
+  map/reduce aggregation already existed (built for file scans, mean
+  decomposition included) gated on `input.supports_streaming` — the G4
+  wiring hands morsel-parallel batches to it via a `PrecomputedBatches`
+  adapter (~2M-row coalescing) instead of concatenating them. Plus a
+  high-cardinality bail (first-batch partial > half the batch → one-shot
+  aggregate; q3's ~3M-group key contained from 1.07x to 1.03x). q1 0.92x
+  controlled; suite total best yet (7.6 s); geo-mean ~0.41–0.42 (run
+  noise). Remaining G4 surface: filters-on-join-output feeding aggregates
+  (q20/q21's 360–780 ms fused pipelines still materialize), and partial
+  aggregation inside the workers. Original plan: **(the architectural
+  item).** q1's 403 ms
   materialization of a 98%-pass filter feeding a 288 ms aggregate. The
   pipeline layer already anticipates this (NodeSink docstring: "M4/M5
   replace specific NodeSinks with truly parallel accumulate/merge sinks
