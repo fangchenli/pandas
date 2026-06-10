@@ -301,7 +301,7 @@ crosses ~0.5x or gains plateau, whichever first.
   gather vs `pd.merge`'s consolidated block take — measure a block-aware
   gather (consolidate same-dtype NumPy columns, one 2-D take) before
   building. *Gate: q21 ≥1.3x; H2O join avg ≥0.7x with no losses.*
-- **G4 — FIRST INCREMENT LANDED (June 2026): morsel batches stream into
+- **G4 — COMPLETE (June 2026): morsel batches stream into
   aggregates.** The discovery that made it cheap: a complete streaming
   map/reduce aggregation already existed (built for file scans, mean
   decomposition included) gated on `input.supports_streaming` — the G4
@@ -313,7 +313,15 @@ crosses ~0.5x or gains plateau, whichever first.
   noise). Remaining G4 surface: filters-on-join-output feeding aggregates
   (q20/q21's 360–780 ms fused pipelines still materialize), and partial
   aggregation inside the workers. Original plan: **(the architectural
-  item).** q1's 403 ms
+  item).** **Second increment (completion):** phase 1 now runs inside the
+  morsel workers behind a 256k-slice cardinality probe (good reduction →
+  worker partials + merge-only sink; poor → plain batches with the
+  one-shot bail). q1 best-yet 436 ms (567 pre-campaign); suite total
+  7.5 s; geo-mean steady ~0.41. The G4 gate (q1+q6 ≥1.4x) lands at q1
+  1.30x / q6 n/a (global agg, no group key) — the residual
+  materialization walls are join-feeding shapes (q21's chain-base
+  filter ~780 ms, q20's join-output flow), outside an aggregate sink's
+  reach. q1's 403 ms
   materialization of a 98%-pass filter feeding a 288 ms aggregate. The
   pipeline layer already anticipates this (NodeSink docstring: "M4/M5
   replace specific NodeSinks with truly parallel accumulate/merge sinks
