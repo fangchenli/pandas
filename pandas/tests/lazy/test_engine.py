@@ -941,3 +941,62 @@ class TestCostModel:
         assert parallel.MAX_WORKERS is cost.MAX_WORKERS
         assert core.PARALLEL_SORT_MIN_ROWS is cost.PARALLEL_SORT_MIN_ROWS
         assert keycache.MIN_ENCODE_ROWS is cost.MIN_ENCODE_ROWS
+
+
+class TestPreAggregatedMorsels:
+    """G4: a morsel-parallel pipeline feeding an eligible aggregate hands
+    its batches over unconcatenated; the aggregate's streaming map/reduce
+    partial-aggregates them. Results must equal the eager path exactly,
+    including mean (sum/count decomposition) and the high-cardinality bail.
+    """
+
+    def test_filter_groupby_parity_with_mean(self):
+        rng = np.random.default_rng(7)
+        n = 600_000  # above MIN_PARALLEL_ROWS -> morsel path
+        df = pd.DataFrame(
+            {
+                "g": rng.integers(0, 50, n),
+                "v": rng.standard_normal(n),
+                "w": rng.standard_normal(n),
+            }
+        )
+        plan = (
+            df.select()
+            .filter(col("v") > -1.0)
+            .group_by("g")
+            .agg(
+                col("v").sum().alias("s"),
+                col("v").mean().alias("m"),
+                col("w").count().alias("c"),
+                col("w").max().alias("mx"),
+            )
+        )
+        phys = plan.collect(use_physical_planner=True).sort_values("g")
+        eager = plan.collect(use_physical_planner=False).sort_values("g")
+
+        for c in ["s", "m", "mx"]:
+            assert np.allclose(
+                phys[c].to_numpy(dtype="float64"),
+                eager[c].to_numpy(dtype="float64"),
+            )
+        assert (phys["c"].to_numpy() == eager["c"].to_numpy()).all()
+
+    def test_high_cardinality_bail_is_exact(self):
+        rng = np.random.default_rng(8)
+        n = 600_000
+        df = pd.DataFrame(
+            {
+                "g": rng.integers(0, n, n),  # ~unique keys -> bail path
+                "v": rng.standard_normal(n),
+            }
+        )
+        plan = (
+            df.select()
+            .filter(col("v") > -3.0)
+            .group_by("g")
+            .agg(col("v").sum().alias("s"))
+        )
+        phys = plan.collect(use_physical_planner=True)
+        eager = plan.collect(use_physical_planner=False)
+        assert len(phys) == len(eager)
+        assert abs(phys["s"].sum() - eager["s"].sum()) < 1e-6

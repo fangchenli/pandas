@@ -36,6 +36,7 @@ from pandas.lazy.physical import (
     PhysicalCSVScan,
     PhysicalFilter,
     PhysicalFusedPipeline,
+    PhysicalHashAggregate,
     PhysicalHashJoin,
     PhysicalJoinChain,
     PhysicalLimit,
@@ -81,6 +82,9 @@ class Morsel:
 
     arrays: ArrayDict
     seq: int = 0
+    # G4: when set, the producing pipeline skipped concatenation and the
+    # consuming (aggregate) sink streams these batches instead.
+    batches: list | None = None
     index_names: list | None = None
     index_is_multi: bool = False
     user_set_index: bool = False
@@ -114,6 +118,51 @@ class PrecomputedInput(PhysicalPlan):
         if self.user_set_index:
             context.user_set_index = True
         return self.arrays
+
+    def children(self) -> list[PhysicalPlan]:
+        return []
+
+    @property
+    def output_schema(self) -> Schema:
+        return self.schema  # type: ignore[return-value]
+
+
+@dataclasses.dataclass
+class PrecomputedBatches:
+    """Adapter: a plan input whose result is a list of ready batches.
+
+    ``supports_streaming`` is True, so PhysicalHashAggregate's existing
+    streaming (map/reduce) path consumes the batches via
+    ``execute_batches`` — partial-aggregating each instead of requiring
+    one materialized input (the G4 win: no full-width concatenation of a
+    filtered 17M-row intermediate). Batches are coalesced to ~2M rows per
+    yield to amortize per-batch aggregation overhead.
+    """
+
+    batches: list
+    schema: Schema | None = None
+    COALESCE_ROWS = 2_000_000
+
+    supports_streaming = True
+
+    def execute(self, context: ExecutionContext) -> ArrayDict:
+        from pandas.lazy.engine.parallel import concat_morsel_results
+
+        return concat_morsel_results(self.batches) if self.batches else {}
+
+    def execute_batches(self, context: ExecutionContext):
+        from pandas.lazy.engine.parallel import concat_morsel_results
+
+        group: list = []
+        rows = 0
+        for b in self.batches:
+            group.append(b)
+            rows += len(next(iter(b.values()))) if b else 0
+            if rows >= self.COALESCE_ROWS:
+                yield concat_morsel_results(group)
+                group, rows = [], 0
+        if group:
+            yield concat_morsel_results(group)
 
     def children(self) -> list[PhysicalPlan]:
         return []
@@ -182,12 +231,16 @@ class NodeSink(Sink):
         if self._result is None:
             children = self.node.children()
             inputs: list[PhysicalPlan] = [
-                PrecomputedInput(
-                    arrays=m.arrays,  # type: ignore[union-attr]
-                    schema=child.output_schema,
-                    index_names=m.index_names,  # type: ignore[union-attr]
-                    index_is_multi=m.index_is_multi,  # type: ignore[union-attr]
-                    user_set_index=m.user_set_index,  # type: ignore[union-attr]
+                (
+                    PrecomputedBatches(batches=m.batches, schema=child.output_schema)
+                    if m.batches is not None  # type: ignore[union-attr]
+                    else PrecomputedInput(
+                        arrays=m.arrays,  # type: ignore[union-attr]
+                        schema=child.output_schema,
+                        index_names=m.index_names,  # type: ignore[union-attr]
+                        index_is_multi=m.index_is_multi,  # type: ignore[union-attr]
+                        user_set_index=m.user_set_index,  # type: ignore[union-attr]
+                    )
                 )
                 for m, child in zip(self._slots, children, strict=True)
             ]
@@ -355,6 +408,26 @@ class PipelineExecutor:
                 if n_rows >= MIN_PARALLEL_ROWS and pipeline_is_morsel_parallel(
                     pipeline
                 ):
+                    # G4: a pipeline feeding an eligible aggregate hands its
+                    # morsels over unconcatenated; the aggregate's streaming
+                    # map/reduce path partial-aggregates them, skipping the
+                    # full-width materialization of the filtered intermediate.
+                    sink_node = (
+                        pipeline.sink.node
+                        if isinstance(pipeline.sink, NodeSink)
+                        and pipeline.sink.n_slots == 1
+                        else None
+                    )
+                    if (
+                        isinstance(sink_node, PhysicalHashAggregate)
+                        and sink_node.can_preaggregate()
+                    ):
+                        batches = run_morsel_parallel(
+                            pipeline, arrays, ctx, n_rows, return_batches=True
+                        )
+                        morsel = Morsel({}, batches=batches)
+                        pipeline.sink.consume(morsel, pipeline.sink_slot, ctx)
+                        continue
                     arrays = run_morsel_parallel(pipeline, arrays, ctx, n_rows)
                 else:
                     for op in pipeline.operators:

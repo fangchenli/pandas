@@ -2537,6 +2537,29 @@ class PhysicalHashAggregate(PhysicalPlan):
     # Streaming Aggregation (v2) - Array-based, uses optimized kernels
     # =========================================================================
 
+    def can_preaggregate(self) -> bool:
+        """True when this aggregation can consume pre-aggregated morsel
+        batches (G4): grouped, every agg expr is a simple mergeable
+        Call(FieldRef) the streaming map/reduce path handles."""
+        group_cols = [extract_output_name(e) for e in self.group_by]
+        if not group_cols:
+            return False
+        specs: list[tuple[str, str, str]] = []
+        for expr in self.agg_exprs:
+            ir = expr._ir
+            if isinstance(ir, Alias):
+                ir = ir.arg
+            if (
+                isinstance(ir, Call)
+                and ir.is_aggregate
+                and ir.args
+                and isinstance(ir.args[0], FieldRef)
+            ):
+                specs.append((extract_output_name(expr), ir.args[0].name, ir.function))
+            else:
+                return False  # non-simple agg: streaming would drop it
+        return self._can_stream_aggregation(specs)
+
     def _can_stream_aggregation(self, agg_specs: list[tuple[str, str, str]]) -> bool:
         """
         Check if all aggregations can be computed in streaming mode.
@@ -2624,6 +2647,23 @@ class PhysicalHashAggregate(PhysicalPlan):
             partial = dispatch_kernel(
                 "group_by", "arrow", batch_table, group_cols, batch_agg_specs
             )
+
+            # Reduction-quality bail (G4): with a high-cardinality group key
+            # the partials barely shrink, so map/reduce re-aggregates nearly
+            # the full input twice (measured: q3's ~3M-group key regressed
+            # 1.07x). When the input is pre-batched in memory (the G4
+            # adapter — materializing is an option there, unlike file
+            # streams), a poor first reduction falls back to one-shot
+            # aggregation over the concatenated input.
+            if (
+                not partial_tables
+                and getattr(self.input, "batches", None) is not None
+                and partial.num_rows * 2 > len(first_arr)
+            ):
+                arrays = self.input.execute(context)
+                return self._execute_grouped_aggregation(
+                    arrays, group_cols, agg_specs, "arrow", context
+                )
             partial_tables.append(partial)
 
         # Handle empty result

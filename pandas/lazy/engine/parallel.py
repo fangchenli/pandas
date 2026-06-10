@@ -256,7 +256,8 @@ def run_morsel_parallel(
     arrays: ArrayDict,
     context: ExecutionContext,
     n_rows: int,
-) -> ArrayDict:
+    return_batches: bool = False,
+):
     """Run the pipeline's operator chain morsel-parallel over ``arrays``.
 
     Workers self-dispatch: each claims the next morsel index from a
@@ -303,4 +304,9 @@ def run_morsel_parallel(
 
     if errors:
         raise errors[0]
+    if return_batches:
+        # G4 / streaming aggregation: hand the per-morsel results to the
+        # consumer unconcatenated — an aggregate sink partial-aggregates
+        # them instead of paying a full-width materialization.
+        return [r for r in results if r]  # type: ignore[list-item]
     return concat_morsel_results(results)  # type: ignore[arg-type]
