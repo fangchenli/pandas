@@ -207,8 +207,9 @@ is the user-facing decision tool either way.
     it actually runs (the rerouting also exposed and fixed a multi-key
     `n_unique` spelling crash).
 
-- **P3-next — ranked from the fresh scorecard (S1 geo-mean 0.32x, suite
-  3.0 s vs Polars 1.0 s; biggest remaining laggards by absolute time):**
+- **P3-next — ranked from the fresh scorecard (SF-3 standard, June 2026:
+  S1 geo-mean **0.39x**, suite 9.2 s vs Polars 5.3 s, all 22 validated;
+  campaign start was 0.22x. Biggest remaining laggards by absolute time):**
   1. **q21 remainder (746 ms, 0.25x — the largest single chunk).** The
      group-bys are fixed; what remains is its big⋈big join chain (late
      3.8M ⋈ orders-F 730k ⋈ two 1.5M-row aggregate sides). Suspect the
