@@ -329,7 +329,56 @@ crosses ~0.5x or gains plateau, whichever first.
   morsels and merges partials (sum/count/min/max/mean are mergeable;
   median/n_unique keep the materializing path). *Gate: q1+q6 ≥1.4x;
   eager↔physical equivalence suite green; all 22 validate.*
-- **G5 — string_view, parallel external track.** (a) Prototype a vendored
+- **G5 — INVESTIGATED (June 2026): contribute to Arrow is the call.**
+  Researched apache/arrow directly (plus a local kernel probe on pyarrow
+  23.0.1: take/filter/equal/is_in/match_substring/sort/group-by-keys/
+  join-keys ALL throw on `string_view`):
+  - **Status**: 2.5 years after the type landed, views have only cast/
+    unique/dictionary_encode/IPC/Parquet. Comparison kernels just merged
+    ([apache/arrow#49964](https://github.com/apache/arrow/pull/49964)) →
+    pyarrow 25 (~July 2026). take/filter is tracked but unstarted
+    (GH-43010); **group-by keys and acero join keys are entirely
+    untracked** — no issues exist. One volunteer (sequencing comparisons →
+    set-lookup → take/filter); organic ETA for our three kernels spans
+    multiple releases, joins likely 2027.
+  - **Difficulty for us to contribute**: take/filter is small-medium
+    (~1–2 wk — views gather as fixed-width-16 + buffer attach; the
+    FixedWidth path is reusable and felipecrv invited a simple impl);
+    group-by keys medium (~2–3 wk — a view `KeyEncoder` in
+    `compute/row/row_encoder_internal.cc` + a `GrouperFastImpl::CanUse`
+    gate to the generic fallback); join keys functional via the SAME
+    KeyEncoder through acero's fallback engine (~1–2 wk incremental;
+    SwissJoin-fast is 4–8+ wk — the `KeyColumnArray` 3-buffer assumption
+    is the structural blocker). **Total ~4–6 person-weeks for all three,
+    functional.**
+  - **Interim bridge**: `dictionary_encode` WORKS on views, and dictionary
+    keys are supported by both the grouper fast path and the join — for
+    low/mid-cardinality string keys this preserves most of the bandwidth
+    win today.
+  - **Decision**: contributing is the only path that removes the wall
+    (vendoring would re-implement the same row-encoder work without the
+    review leverage); coordinate on GH-43010/GH-44336, file the missing
+    grouper/join issues first. Original plan: **(parallel external
+    track).**
+
+- **Scale-out evaluation (planned; researched June 2026).** The 1TB/10TB
+  comparison is **Coiled's TPC-H benchmarks** (coiled/benchmarks,
+  tpch.coiled.io): at 1 TB single-node DuckDB finished and degraded
+  gracefully while Polars' (old) streaming engine hard-failed; DuckDB has
+  since done SF-100,000 (~27 TB, 7 TB spilled) on one box. Staged plan for
+  us (total cloud cost ~$25–65/day, spot):
+  1. **SF-10 locally** — correctness of all 22 via the parquet-scan
+     streaming path (the in-memory pandas path is a hard wall at scale;
+     any full-pandas intermediate caps at RAM).
+  2. **SF-100 on c7a.24xlarge-class (192 GB)** — the headline run,
+     directly comparable to Polars' published numbers (DuckDB 19.7 s,
+     Polars-streaming 23.9 s, Polars in-memory 152 s for all 22).
+  3. **SF-300→1000 on an NVMe spot instance** — pure out-of-core stress
+     where "completes all 22 without OOM" is itself the result (the bar
+     Polars failed at Coiled). Expected blockers: ~1.5B-group q18, q21's
+     self-join grace partitions, any collect-to-pandas stage. Framing:
+     "pandas semantics at 30x the data ceiling," not a horse race with
+     DuckDB. (a) Prototype a vendored
   string-view gather on the 10M-row hot path to validate the ~4x win
   before committing anywhere; (b) locate/file the Arrow issue for
   `string_view` take/hash kernels and size an upstream contribution.
