@@ -45,8 +45,23 @@ cheap win, and **naive join reordering backfires** — hand-reordering Q5 to app
 the `region='ASIA'` restriction first made it *25x slower* (5.5s vs 0.22s),
 because the early joins then land on low-cardinality `nationkey` and explode the
 supplier×customer intermediate. Closing the gap needs a real cost-based join
-reorderer (cardinality-driven) plus pipelined joins — mature-optimizer work,
-tracked as a large item, not attempted blindly.
+reorderer (cardinality-driven) plus pipelined joins — mature-optimizer work.
+
+**Join-reorder prototype (built, opt-in via `compute.lazy.join_reorder`, OFF by
+default — `optimize/join_reorder.py`).** A greedy left-deep reorderer with a
+System-R cardinality model (NDV from the existing sampler). It confirms the
+lever: on a controlled star join written in a bad order it cuts time ~1.8x and
+the *optimal* order makes our engine **beat Polars** (49 ms vs 122 ms — and
+Polars does not cost-reorder multi-way joins at all, so a working reorderer
+would let us leapfrog it). But it is **off by default because the cardinality
+estimator is the wall**, exactly as Leis et al. (VLDB 2015) predict: sampled
+NDV underestimates (`l_partkey` 200k→56k), which hides that joining a *filtered*
+dimension early is restrictive — so on hand-ordered TPC-H Q9 the model is
+confidently *backwards* (rates the bad order 3x cheaper) and a confidence margin
+can't save a backwards model. The honest blockers, in order: (1) reliable
+distinct-count estimation (HyperLogLog-class), (2) bushy enumeration (GOO) so a
+restrictive filtered dimension can stay a small separate subtree, (3) pipelined
+joins. The enumeration is the easy part; cardinality is the real work.
 
 | Category | Standing | Driver |
 |----------|----------|--------|

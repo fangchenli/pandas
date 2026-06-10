@@ -172,6 +172,17 @@ lazy_adaptive_thresholds_doc = """
     Valid values: True, False
 """
 
+lazy_join_reorder_doc = """
+: bool
+    Enable cost-based join reordering in the lazy optimizer (experimental,
+    default False). Reorders maximal inner-join blocks by estimated
+    cardinality. It speeds up badly-ordered multi-join queries, but the
+    sampled NDV cardinality model is not reliable enough to avoid regressing
+    well-ordered many-table joins (it cannot always detect that a filtered
+    dimension restricts a fact table), so it is off by default.
+    Valid values: True, False
+"""
+
 
 def _lazy_threshold_cb(key: str) -> None:
     """Callback to sync pandas options with ThresholdConfig."""
@@ -282,6 +293,12 @@ with cf.config_prefix("compute.lazy"):
         "adaptive_thresholds",
         False,
         lazy_adaptive_thresholds_doc,
+        validator=is_bool,
+    )
+    cf.register_option(
+        "join_reorder",
+        False,
+        lazy_join_reorder_doc,
         validator=is_bool,
     )
 

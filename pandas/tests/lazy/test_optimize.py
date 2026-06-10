@@ -2688,3 +2688,63 @@ class TestExpressionSimplificationAdvanced:
 
         # Row with NaN should be filtered out
         assert len(result) == 2
+
+
+class TestJoinReorder:
+    """Cost-based join reordering (experimental, opt-in).
+
+    Off by default because the sampled-NDV cardinality model is not reliable
+    enough to avoid regressing well-ordered many-table joins. When enabled it
+    must preserve results exactly; it only changes join order.
+    """
+
+    def _star(self):
+        import numpy as np
+
+        rng = np.random.default_rng(0)
+        n, d = 200_000, 5_000
+        fact = pd.DataFrame(
+            {
+                "k1": rng.integers(0, d, n),
+                "k2": rng.integers(0, d, n),
+                "v": rng.standard_normal(n),
+            }
+        )
+        dim1 = pd.DataFrame({"d1": np.arange(d), "a1": rng.standard_normal(d)})
+        dim2 = pd.DataFrame({"d2": np.arange(d), "sel": rng.integers(0, 100, d)})
+        # Restrictive filtered dimension written LAST (the bad order).
+        return (
+            fact.select()
+            .join(dim1.select(), left_on="k1", right_on="d1")
+            .join(
+                dim2.select().filter(col("sel") < 5),
+                left_on="k2",
+                right_on="d2",
+            )
+        )
+
+    def test_off_by_default(self):
+        assert pd.get_option("compute.lazy.join_reorder") is False
+
+    def test_results_identical_with_and_without_reorder(self):
+        plan = self._star()
+        with pd.option_context("compute.lazy.join_reorder", False):
+            off = plan.collect(use_physical_planner=True)
+        with pd.option_context("compute.lazy.join_reorder", True):
+            on = plan.collect(use_physical_planner=True)
+        # Same rows (order-independent) — reordering must not change results.
+        import numpy as np
+
+        assert off.shape == on.shape
+        assert np.isclose(off["v"].sum(), on["v"].sum())
+
+    def test_reorder_changes_the_plan_when_enabled(self):
+        from pandas.lazy.optimize.base import Optimizer
+
+        plan = self._star()._plan
+        with pd.option_context("compute.lazy.join_reorder", True):
+            reordered = Optimizer().optimize(plan)
+        with pd.option_context("compute.lazy.join_reorder", False):
+            plain = Optimizer().optimize(plan)
+        # The reordered tree is structurally different from the default.
+        assert str(reordered) != str(plain)

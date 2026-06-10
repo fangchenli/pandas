@@ -286,6 +286,7 @@ class Optimizer:
             ConversionElimination,
             EngineSelection,
         )
+        from pandas.lazy.optimize.join_reorder import JoinReorder
         from pandas.lazy.optimize.passes import (
             AggregatePushdown,
             CommonSubexpressionElimination,
@@ -299,7 +300,20 @@ class Optimizer:
             SortLimitToTopK,
         )
 
-        return [
+        # Cost-based join reordering is experimental and OFF by default: it
+        # helps badly-ordered multi-join queries, but the sampled-NDV
+        # cardinality model is not reliable enough to avoid regressing
+        # well-ordered many-table joins (see join_reorder.py). Opt in via
+        # ``compute.lazy.join_reorder``.
+        join_reorder_enabled = False
+        try:
+            from pandas import get_option
+
+            join_reorder_enabled = bool(get_option("compute.lazy.join_reorder"))
+        except Exception:
+            pass
+
+        passes = [
             # Phase 1: Normalize expressions
             ConstantFolding(),
             ExpressionSimplification(),
@@ -307,6 +321,12 @@ class Optimizer:
             FilterFusion(),
             PredicatePushdown(),
             AggregatePushdown(),
+        ]
+        if join_reorder_enabled:
+            # After pushdown (relation sizes reflect filters) and before pruning
+            # (join tree still intact). Bails to the original order on ambiguity.
+            passes.append(JoinReorder())
+        passes += [
             # Phase 3: Prune and limit
             ProjectionPruning(),
             LimitPushdown(),
@@ -318,6 +338,7 @@ class Optimizer:
             EngineSelection(),
             ConversionElimination(),
         ]
+        return passes
 
     def optimize(self, plan: LogicalPlan) -> LogicalPlan:
         """
