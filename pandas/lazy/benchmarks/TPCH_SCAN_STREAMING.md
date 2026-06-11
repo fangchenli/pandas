@@ -99,7 +99,7 @@ string_view plan cover the path. The Coiled-benchmark bar ("finishes at
 scale without falling over") is met at this rung; SF-300+ NVMe is the
 next.
 
-## SF-300 on the same box (June 2026) — 20/22, the out-of-core stress rung
+## SF-300 on the same box (June 2026) — 22/22 after root fixes
 
 ~300 GB raw / ~105 GB parquet vs 247 GB RAM. 20/22 completed and validated;
 the heavyweights finished **at the edge of physical memory**: q21 379 s @
@@ -110,7 +110,15 @@ scale (9x at SF-100) as both engines go I/O-bound; **LP beat Polars on q1**
 (45.2 s vs 60.7 s). RSS caveat: numbers include memory-mapped parquet pages
 (q6 "shows" 113 GB — exactly lineitem's file size), true heap is lower.
 
-### Open bugs this rung found (root-caused, reproduce locally)
+> **UPDATE (same session): both open bugs below are FIXED and re-validated
+> at SF-300** — q10 OK (161.5 s, 73.3 GB peak) via overflow-safe composite
+> packing; q15 OK (13.2 s — **2x faster** than its failing run, since the
+> shared subquery now computes once) via ProjectionPruning preserving DAG
+> sharing (shared non-source subtrees prune once against their full
+> schema). Final standing: **22/22 completed and validated at SF-1, SF-3,
+> SF-10, SF-100, and SF-300.**
+
+### Bugs this rung found (all now fixed; trail below kept for the record)
 
 1. **q15 returns empty** — the `total_revenue == mx` float equality breaks
    because `rev` computes twice: subplan sharing reports **0 shared nodes
