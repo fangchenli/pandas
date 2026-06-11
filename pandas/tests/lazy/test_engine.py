@@ -102,8 +102,11 @@ class TestPipelineCompiler:
             for p in graph.pipelines
             if isinstance(p.sink, NodeSink)
         ]
-        # Aggregate and Sort (or TopK if the optimizer fused sort+limit)
-        assert any("Aggregate" in name for name in sink_nodes)
+        # The filter+aggregate fuses onto the kernel node; Sort (or TopK
+        # if the optimizer fused sort+limit) remains a breaker sink.
+        assert any(
+            "Aggregate" in name or "FusedFilterAgg" in name for name in sink_nodes
+        )
         assert any("Sort" in name or "TopK" in name for name in sink_nodes)
         assert isinstance(graph.pipelines[-1].sink, CollectSink)
 

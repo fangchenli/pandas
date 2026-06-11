@@ -5141,8 +5141,9 @@ class _FusedAggSpec:
     def __init__(self):
         self.i64_preds = []  # (col, lo, hi) closed int64 ranges
         self.f64_preds = []  # (col, lo, hi) closed float64 ranges
-        self.aggs = []  # (out_name, kind, col_a, col_b) kinds per kernel
+        self.aggs = []  # (out_name, kind, col_a, col_b, col_c)
         self.mean_outs = {}  # out_name -> (sum_slot, count_slot)
+        self.group_cols = []  # source columns of the group keys (or empty)
 
 
 @dataclass
@@ -5166,6 +5167,154 @@ class PhysicalFusedFilterAgg(PhysicalPlan):
     @property
     def output_schema(self) -> Schema:
         return self.schema
+
+    def _execute_grouped_fused(
+        self,
+        arrays,
+        spec,
+        as_np,
+        i64_cols,
+        il,
+        ih,
+        f64_cols,
+        fl,
+        fh,
+        kinds_arr,
+        agg_a,
+        agg_b,
+        agg_c,
+        n,
+        n_workers,
+        context,
+    ):
+        import numpy as _np
+
+        from pandas._libs.lazy_fused_agg import fused_filter_group_aggs
+
+        # Dense group codes: int64 keys with a small value range, or
+        # 1-byte arrow strings (the data buffer IS the code array — q1's
+        # returnflag/linestatus; dictionary_encode at 18M rows costs
+        # ~194 ms, the buffer view is free).
+        key_codes = []
+        key_decode = []  # ("int", minv) | ("byte",)
+        cards = []
+        for name in spec.group_cols:
+            arr = arrays.get(name)
+            if isinstance(arr, (pa.Array, pa.ChunkedArray)):
+                ca = arr.combine_chunks() if isinstance(arr, pa.ChunkedArray) else arr
+                if (
+                    pa.types.is_string(ca.type)
+                    and ca.null_count == 0
+                    and len(ca.buffers()) >= 3
+                    and ca.buffers()[2] is not None
+                    and ca.buffers()[2].size == len(ca)
+                ):
+                    codes = _np.frombuffer(ca.buffers()[2], dtype=_np.uint8).astype(
+                        _np.int64
+                    )
+                    key_codes.append(codes)
+                    key_decode.append(("byte",))
+                    cards.append(256)
+                    continue
+                if ca.null_count == 0 and pa.types.is_integer(ca.type):
+                    arr = ca.to_numpy(zero_copy_only=False)
+                else:
+                    return self.fallback.execute(context)
+            a = _np.asarray(arr)
+            if a.dtype.kind not in "iu":
+                return self.fallback.execute(context)
+            mn, mx = int(a.min()), int(a.max())
+            card = mx - mn + 1
+            if card > 2_000_000:
+                return self.fallback.execute(context)
+            key_codes.append(a.astype(_np.int64) - mn)
+            key_decode.append(("int", mn))
+            cards.append(card)
+        total_card = 1
+        for c in cards:
+            total_card *= c
+            if total_card > 4_000_000:
+                return self.fallback.execute(context)
+        codes = key_codes[0].copy()
+        for j in range(1, len(key_codes)):
+            codes *= cards[j]
+            codes += key_codes[j]
+        codes = _np.ascontiguousarray(codes)
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        def run(s):
+            return fused_filter_group_aggs(
+                i64_cols,
+                il,
+                ih,
+                f64_cols,
+                fl,
+                fh,
+                kinds_arr,
+                agg_a,
+                agg_b,
+                agg_c,
+                codes,
+                total_card,
+                s[0],
+                s[1],
+            )
+
+        if n < 1_000_000 or n_workers == 1:
+            out, counts = run((0, n))
+        else:
+            bounds = [
+                (i * n // n_workers, (i + 1) * n // n_workers) for i in range(n_workers)
+            ]
+            with ThreadPoolExecutor(n_workers) as ex:
+                parts = list(ex.map(run, bounds))
+            out = parts[0][0]
+            counts = parts[0][1]
+            for po, pc_ in parts[1:]:
+                counts += pc_
+                for k, kind in enumerate(kinds_arr):
+                    if kind in (0, 1, 5, 6):
+                        out[k] += po[k]
+                    elif kind == 3:
+                        out[k] = _np.fmin(out[k], po[k])
+                    elif kind == 4:
+                        out[k] = _np.fmax(out[k], po[k])
+            for k, kind in enumerate(kinds_arr):
+                if kind == 2:
+                    out[k] = counts.astype(_np.float64)
+
+        idx = _np.flatnonzero(counts > 0)
+        if len(idx) == 0:
+            return self.fallback.execute(context)
+        built: dict = {}
+        rem = idx.copy()
+        for j in range(len(spec.group_cols) - 1, -1, -1):
+            cj = rem % cards[j]
+            rem = rem // cards[j]
+            dec = key_decode[j]
+            if dec[0] == "int":
+                built[spec.group_cols[j]] = cj + dec[1]
+            else:
+                built[spec.group_cols[j]] = _np.array(
+                    [chr(b) for b in cj], dtype=object
+                )
+        slots = {}
+        for k, (oname, kind, _a, _b, _c) in enumerate(spec.aggs):
+            slots[oname] = (out[k][idx], kind)
+        for oname, kind, _a, _b, _c in spec.aggs:
+            if oname in spec.mean_outs or oname.startswith("__fused_"):
+                continue
+            vals, knd = slots[oname]
+            built[oname] = vals.astype(_np.int64) if knd == 2 else vals
+        for oname, (s_slot, c_slot) in spec.mean_outs.items():
+            cnt = out[c_slot][idx]
+            built[oname] = _np.where(cnt > 0, out[s_slot][idx] / cnt, _np.nan)
+        result: ArrayDict = {}
+        for name in self.schema.names:
+            if name in built:
+                result[name] = built[name]
+        return result
 
     def execute(self, context: ExecutionContext) -> ArrayDict:
         import numpy as _np
@@ -5212,23 +5361,41 @@ class PhysicalFusedFilterAgg(PhysicalPlan):
             f64_cols.append(_np.ascontiguousarray(a, dtype=_np.float64))
             f64_lo.append(lo)
             f64_hi.append(hi)
-        agg_kinds, agg_a, agg_b = [], [], []
-        for _out, kind, ca, cb in spec.aggs:
-            if kind == 2:
-                agg_a.append(_np.empty(0))
-                agg_b.append(None)
+        agg_kinds, agg_a, agg_b, agg_c = [], [], [], []
+        _f64_memo: dict = {}
+
+        def fetch_f64(name):
+            # Memoized per column: q1 references the same 4 columns from
+            # ~10 agg slots — repeating the isnan pass and the arrow->numpy
+            # copy per slot cost more than the fused kernel itself.
+            if name in _f64_memo:
+                return _f64_memo[name]
+            a, _ = as_np(name)
+            if a is None or a.dtype.kind != "f" or _np.isnan(a).any():
+                res = None
             else:
-                a, _ = as_np(ca)
-                if a is None or a.dtype.kind != "f" or _np.isnan(a).any():
-                    return self.fallback.execute(context)
-                agg_a.append(_np.ascontiguousarray(a, dtype=_np.float64))
-                if cb is not None:
-                    b, _ = as_np(cb)
-                    if b is None or b.dtype.kind != "f" or _np.isnan(b).any():
+                res = _np.ascontiguousarray(a, dtype=_np.float64)
+            _f64_memo[name] = res
+            return res
+
+        for _out, kind, ca, cb, cc in spec.aggs:
+            if kind == 2:
+                agg_a.append(None)
+                agg_b.append(None)
+                agg_c.append(None)
+            else:
+                cols = []
+                for cn in (ca, cb, cc):
+                    if cn is None:
+                        cols.append(None)
+                        continue
+                    f = fetch_f64(cn)
+                    if f is None:
                         return self.fallback.execute(context)
-                    agg_b.append(_np.ascontiguousarray(b, dtype=_np.float64))
-                else:
-                    agg_b.append(None)
+                    cols.append(f)
+                agg_a.append(cols[0])
+                agg_b.append(cols[1])
+                agg_c.append(cols[2])
             agg_kinds.append(kind)
         n = len(next(iter(arrays.values()))) if arrays else 0
         if n == 0:
@@ -5243,6 +5410,32 @@ class PhysicalFusedFilterAgg(PhysicalPlan):
         import os as _os
 
         n_workers = min(8, _os.cpu_count() or 1)
+
+        if spec.group_cols:
+            return self._execute_grouped_fused(
+                arrays,
+                spec,
+                as_np,
+                i64_cols,
+                il,
+                ih,
+                f64_cols,
+                fl,
+                fh,
+                kinds_arr,
+                agg_a,
+                agg_b,
+                agg_c,
+                n,
+                n_workers,
+                context,
+            )
+
+        for k, kind in enumerate(agg_kinds):
+            if agg_a[k] is None and kind != 2:
+                return self.fallback.execute(context)
+            if agg_a[k] is None:
+                agg_a[k] = _np.empty(0)
         if n < 1_000_000 or n_workers == 1:
             out, _ = fused_filter_aggs(
                 i64_cols, il, ih, f64_cols, fl, fh, kinds_arr, agg_a, agg_b, 0, n
@@ -5281,9 +5474,9 @@ class PhysicalFusedFilterAgg(PhysicalPlan):
                     out[k] = _np.nanmax(vals)
         result: ArrayDict = {}
         slots = {}
-        for k, (oname, kind, _a, _b) in enumerate(spec.aggs):
+        for k, (oname, kind, _a, _b, _c) in enumerate(spec.aggs):
             slots[oname] = out[k]
-        for oname, kind, _a, _b in spec.aggs:
+        for oname, kind, _a, _b, _c in spec.aggs:
             if oname in spec.mean_outs:
                 continue
             if oname.startswith("__fused_"):
@@ -6167,7 +6360,7 @@ class PhysicalPlanner:
                     plan = dataclasses.replace(plan, bases=tuple(new_children))
                 else:
                     plan = dataclasses.replace(plan, input=new_children[0])
-        if not (isinstance(plan, PhysicalHashAggregate) and len(plan.group_by) == 0):
+        if not isinstance(plan, PhysicalHashAggregate):
             return plan
         node = plan.input
         if isinstance(node, PhysicalMaterialize):
@@ -6332,6 +6525,14 @@ class PhysicalPlanner:
             else:
                 return None  # limit etc: not fusable
 
+        for g in agg.group_by:
+            g_ir = resolve(g._ir if not isinstance(g._ir, Alias) else g._ir.arg)
+            if isinstance(g_ir, Alias):
+                g_ir = g_ir.arg
+            if not isinstance(g_ir, FieldRef):
+                return None
+            spec.group_cols.append(g_ir.name)
+
         AGGK = {"sum": 0, "count": 2, "min": 3, "max": 4}
         for e in agg.agg_exprs:
             out_name = extract_output_name(e)
@@ -6343,37 +6544,85 @@ class PhysicalPlanner:
             fn = ir.function
             arg = resolve(ir.args[0])
 
-            def classify(a):
-                if isinstance(a, FieldRef):
-                    return (a.name, None)
+            def one_minus(x):
+                # subtract(1, F) or subtract(F-from-lit ...): match 1 - F
                 if (
-                    isinstance(a, Call)
-                    and a.function == "multiply"
-                    and len(a.args) == 2
-                    and isinstance(a.args[0], FieldRef)
-                    and isinstance(a.args[1], FieldRef)
+                    isinstance(x, Call)
+                    and x.function == "subtract"
+                    and len(x.args) == 2
+                    and isinstance(x.args[0], IRLiteral)
+                    and x.args[0].value == 1
+                    and isinstance(x.args[1], FieldRef)
                 ):
-                    return (a.args[0].name, a.args[1].name)
+                    return x.args[1].name
+                return None
+
+            def one_plus(x):
+                if isinstance(x, Call) and x.function == "add" and len(x.args) == 2:
+                    a0, a1 = x.args
+                    if (
+                        isinstance(a0, IRLiteral)
+                        and a0.value == 1
+                        and isinstance(a1, FieldRef)
+                    ):
+                        return a1.name
+                    if (
+                        isinstance(a1, IRLiteral)
+                        and a1.value == 1
+                        and isinstance(a0, FieldRef)
+                    ):
+                        return a0.name
+                return None
+
+            def classify(a):
+                """-> (kind, col_a, col_b, col_c) or None."""
+                if isinstance(a, FieldRef):
+                    return (0, a.name, None, None)
+                if not (isinstance(a, Call) and a.function == "multiply"):
+                    return None
+                if len(a.args) != 2:
+                    return None
+                x, y = a.args
+                if isinstance(x, FieldRef) and isinstance(y, FieldRef):
+                    return (1, x.name, y.name, None)
+                if isinstance(x, FieldRef) and one_minus(y) is not None:
+                    return (5, x.name, one_minus(y), None)
+                if isinstance(y, FieldRef) and one_minus(x) is not None:
+                    return (5, y.name, one_minus(x), None)
+                # (F * (1-F)) * (1+F) in either nesting order
+                inner, outer = (x, y) if isinstance(x, Call) else (y, x)
+                if (
+                    isinstance(inner, Call)
+                    and inner.function == "multiply"
+                    and len(inner.args) == 2
+                ):
+                    sub = classify(inner)
+                    if sub is not None and sub[0] == 5:
+                        cc = one_plus(outer)
+                        if cc is not None:
+                            return (6, sub[1], sub[2], cc)
                 return None
 
             cls = classify(arg)
             if fn == "count":
-                spec.aggs.append((out_name, 2, None, None))
-            elif fn in ("sum", "min", "max"):
+                spec.aggs.append((out_name, 2, None, None, None))
+            elif fn == "sum":
                 if cls is None:
                     return None
-                ca, cb = cls
-                if fn != "sum" and cb is not None:
+                k, ca, cb, cc = cls
+                kind = 1 if k == 1 else (k if k in (5, 6) else 0)
+                spec.aggs.append((out_name, kind, ca, cb, cc))
+            elif fn in ("min", "max"):
+                if cls is None or cls[0] != 0:
                     return None
-                kind = 1 if (fn == "sum" and cb is not None) else AGGK[fn]
-                spec.aggs.append((out_name, kind, ca, cb))
+                spec.aggs.append((out_name, AGGK[fn], cls[1], None, None))
             elif fn == "mean":
-                if cls is None or cls[1] is not None:
+                if cls is None or cls[0] != 0:
                     return None
                 s_slot = len(spec.aggs)
-                spec.aggs.append((f"__fused_sum_{out_name}", 0, cls[0], None))
+                spec.aggs.append((f"__fused_sum_{out_name}", 0, cls[1], None, None))
                 c_slot = len(spec.aggs)
-                spec.aggs.append((f"__fused_cnt_{out_name}", 2, None, None))
+                spec.aggs.append((f"__fused_cnt_{out_name}", 2, None, None, None))
                 spec.mean_outs[out_name] = (s_slot, c_slot)
             else:
                 return None
@@ -6382,6 +6631,14 @@ class PhysicalPlanner:
         for name, (lo, hi) in f64r.items():
             spec.f64_preds.append((name, lo, hi))
         if not spec.aggs:
+            return None
+        if not spec.group_cols and any(a[1] in (5, 6) for a in spec.aggs):
+            return None  # product-minus forms only in the grouped kernel
+        if spec.group_cols and len(spec.aggs) > 4:
+            # Measured (q1, 11 slots x 18M rows): the kernel's per-row
+            # scatter (row[codes[i]] += v) cannot auto-vectorize, and acero's
+            # SIMD grouped aggregation wins past ~4 slots (539 ms kernel vs
+            # ~290 ms acero). Few-slot grouped shapes keep the fused win.
             return None
         return spec
 
