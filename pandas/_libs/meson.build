@@ -88,6 +88,7 @@ libs_sources = {
         'sources': ['join.pyx', _khash_primitive_helper],
         'deps': _khash_primitive_helper_dep,
     },
+    'lazy_fused_agg': {'sources': ['lazy_fused_agg.pyx']},
     'lazy_join': {'sources': ['lazy_join.pyx']},
     'lazy_radix': {'sources': ['lazy_radix.pyx']},
     'lib': {
