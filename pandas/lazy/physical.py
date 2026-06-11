@@ -2171,12 +2171,20 @@ class PhysicalHashAggregate(PhysicalPlan):
                 str_key_bytes = 0
                 for c in group_cols:
                     arr = input_arrays.get(c)
-                    if isinstance(arr, (pa.Array, pa.ChunkedArray)) and (
-                        pa.types.is_string(arr.type)
-                        or pa.types.is_binary(arr.type)
-                        or pa.types.is_large_string(arr.type)
-                    ):
-                        str_key_bytes += arr.nbytes
+                    if isinstance(arr, (pa.Array, pa.ChunkedArray)):
+                        if (
+                            pa.types.is_string(arr.type)
+                            or pa.types.is_binary(arr.type)
+                            or pa.types.is_large_string(arr.type)
+                        ):
+                            str_key_bytes += arr.nbytes
+                    else:
+                        # Post-merge columns arrive as pandas containers
+                        # (ArrowExtensionArray / object) — count any
+                        # string-ish dtype's bytes, not just pa arrays.
+                        dt = str(getattr(arr, "dtype", "")).lower()
+                        if "string" in dt or "object" in dt or "binary" in dt:
+                            str_key_bytes += int(getattr(arr, "nbytes", 0))
                 if str_key_bytes < 1_500_000_000:
                     return self._execute_arrow_table_groupby(
                         input_arrays, group_cols, agg_specs, context
