@@ -5168,28 +5168,10 @@ class PhysicalFusedFilterAgg(PhysicalPlan):
     def output_schema(self) -> Schema:
         return self.schema
 
-    def _execute_grouped_fused(
-        self,
-        arrays,
-        spec,
-        as_np,
-        i64_cols,
-        il,
-        ih,
-        f64_cols,
-        fl,
-        fh,
-        kinds_arr,
-        agg_a,
-        agg_b,
-        agg_c,
-        n,
-        n_workers,
-        context,
-    ):
+    @staticmethod
+    def _derive_group_codes(arrays, spec):
+        """(codes, cards, key_decode, total_card) or None (bail to fallback)."""
         import numpy as _np
-
-        from pandas._libs.lazy_fused_agg import fused_filter_group_aggs
 
         # Dense group codes: int64 keys with a small value range, or
         # 1-byte arrow strings (the data buffer IS the code array — q1's
@@ -5219,14 +5201,14 @@ class PhysicalFusedFilterAgg(PhysicalPlan):
                 if ca.null_count == 0 and pa.types.is_integer(ca.type):
                     arr = ca.to_numpy(zero_copy_only=False)
                 else:
-                    return self.fallback.execute(context)
+                    return None
             a = _np.asarray(arr)
             if a.dtype.kind not in "iu":
-                return self.fallback.execute(context)
+                return None
             mn, mx = int(a.min()), int(a.max())
             card = mx - mn + 1
             if card > 2_000_000:
-                return self.fallback.execute(context)
+                return None
             key_codes.append(a.astype(_np.int64) - mn)
             key_decode.append(("int", mn))
             cards.append(card)
@@ -5234,12 +5216,38 @@ class PhysicalFusedFilterAgg(PhysicalPlan):
         for c in cards:
             total_card *= c
             if total_card > 4_000_000:
-                return self.fallback.execute(context)
+                return None
         codes = key_codes[0].copy()
         for j in range(1, len(key_codes)):
             codes *= cards[j]
             codes += key_codes[j]
         codes = _np.ascontiguousarray(codes)
+        return codes, cards, key_decode, total_card
+
+    def _execute_grouped_fused(
+        self,
+        arrays,
+        spec,
+        group_info,
+        i64_cols,
+        il,
+        ih,
+        f64_cols,
+        fl,
+        fh,
+        kinds_arr,
+        agg_a,
+        agg_b,
+        agg_c,
+        n,
+        n_workers,
+        context,
+    ):
+        import numpy as _np
+
+        from pandas._libs.lazy_fused_agg import fused_filter_group_aggs
+
+        codes, cards, key_decode, total_card = group_info
 
         from concurrent.futures import ThreadPoolExecutor
 
@@ -5323,6 +5331,15 @@ class PhysicalFusedFilterAgg(PhysicalPlan):
 
         arrays = self.scan.execute(context)
         spec = self.spec
+
+        # Grouped: derive group codes FIRST — the cardinality cap is the
+        # common bail (q20's 600k x 30k key space), and bailing after the
+        # predicate/agg fetches wasted ~100 ms of copies per run.
+        group_info = None
+        if spec.group_cols:
+            group_info = self._derive_group_codes(arrays, spec)
+            if group_info is None:
+                return self.fallback.execute(context)
 
         def as_np(name):
             """(int64/float64 view, ns_per_unit) — datetime literals are
@@ -5415,7 +5432,7 @@ class PhysicalFusedFilterAgg(PhysicalPlan):
             return self._execute_grouped_fused(
                 arrays,
                 spec,
-                as_np,
+                group_info,
                 i64_cols,
                 il,
                 ih,
@@ -6634,11 +6651,16 @@ class PhysicalPlanner:
             return None
         if not spec.group_cols and any(a[1] in (5, 6) for a in spec.aggs):
             return None  # product-minus forms only in the grouped kernel
-        if spec.group_cols and len(spec.aggs) > 4:
-            # Measured (q1, 11 slots x 18M rows): the kernel's per-row
-            # scatter (row[codes[i]] += v) cannot auto-vectorize, and acero's
-            # SIMD grouped aggregation wins past ~4 slots (539 ms kernel vs
-            # ~290 ms acero). Few-slot grouped shapes keep the fused win.
+        if spec.group_cols:
+            # GROUPED FUSION IS OFF — measured losses across the board
+            # (controlled on/off at SF-3): q1 1.05x (11-slot per-row
+            # scatter can't auto-vectorize; acero's SIMD grouped agg wins),
+            # q15 1.20x and q20 1.26x (full-column fetch copies + group-code
+            # derivation cost more than the already-fused morsel-parallel
+            # baseline on selective filters). The grouped kernel and
+            # translation stay as tested infrastructure; revisiting needs
+            # zero-copy column access and/or SIMD scatter. Ungrouped
+            # (q6-class) fusion is a clean 0.31x win and stays on.
             return None
         return spec
 

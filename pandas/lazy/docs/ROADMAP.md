@@ -413,7 +413,7 @@ ops.
 > join-feeding materialization residual. N3 (PDEP) is the planned next
 > move.
 
-## Fused-kernel track: v1 SHIPPED (June 2026) — q6 21 ms, beats Polars
+## Fused-kernel track: CLOSED (June 2026) — ungrouped ON (q6 0.29x), grouped measured-off
 
 The question: can a few hand-written fused kernels tackle the
 scan→filter→aggregate hot path that operator-boundary materialization
@@ -422,6 +422,17 @@ ctypes-threaded, q6's real SF-3 columns): **fused predicate+accumulate =
 31.4 ms single-thread, 10.8 ms on 8 threads, bit-exact** — vs 70 ms
 current end-to-end, ~26 ms Polars, ~6 ms bandwidth floor. The fused loop
 beats Polars' engine on this shape.
+
+**Final state**: ungrouped fusion ships (q6 70→~20 ms, 0.29x controlled,
+beats Polars ~26 ms); GROUPED fusion is translation-gated OFF after the
+controlled battery measured losses everywhere it fired — q1 11-slot
+per-row scatter can never auto-vectorize (acero SIMD wins), q15/q20 lose
+to full-column fetch copies + group-code derivation vs already-fused
+morsel-parallel baselines. The grouped kernel + translation remain as
+tested infrastructure; re-opening requires zero-copy column access and/or
+explicit SIMD scatter. The boundary is now a measured fact: fused kernels
+win where the inner loop is mask+streamed-accumulate; they lose where it
+needs gather/scatter.
 
 **v1 landed** (commits 3d88ef7c17 + e277fcd8e6): kernel + planner pass +
 runtime fallback; q6 70→21 ms validated, all 22 green, 1694 tests. Found

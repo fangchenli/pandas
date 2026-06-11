@@ -146,14 +146,14 @@ class TestPhysicalPlanner:
         assert isinstance(sort_input, PhysicalMaterialize)
         assert sort_input.reason == "sort"
 
-        # Materialize's input: the filter+aggregate fuses onto the
-        # single-pass kernel node (PhysicalFusedFilterAgg); its fallback
-        # holds the original aggregate.
+        # Materialize's input: the aggregate (or, if grouped fusion is
+        # ever re-enabled, the fused kernel node carrying it as fallback).
         from pandas.lazy.physical import PhysicalFusedFilterAgg
 
-        fused = sort_input.input
-        assert isinstance(fused, PhysicalFusedFilterAgg)
-        assert isinstance(fused.fallback, PhysicalHashAggregate)
+        agg_node = sort_input.input
+        if isinstance(agg_node, PhysicalFusedFilterAgg):
+            agg_node = agg_node.fallback
+        assert isinstance(agg_node, PhysicalHashAggregate)
 
 
 class TestPhysicalPlanExecution:
