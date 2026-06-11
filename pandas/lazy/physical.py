@@ -1949,6 +1949,59 @@ def groupby_prefers_arrow(
     return all_numeric
 
 
+def _rebatch_fixed(batches, block_rows: int = 2_000_000):
+    """Re-slice a batch stream into EXACT fixed-size blocks.
+
+    Parquet scanner batch boundaries vary run to run (readahead-dependent),
+    so per-batch partial float sums were nondeterministic — measured at
+    SF-300: 1.8M of 3M group sums differed between two identical runs,
+    which broke TPC-H q15's ``total_revenue == max`` equality when its
+    shared subquery was computed twice. Fixed block boundaries make the
+    summation order a pure function of the row stream.
+    """
+    import numpy as np
+
+    buf: list = []
+    rows = 0
+
+    def emit(n):
+        nonlocal buf, rows
+        names = buf[0].keys()
+        merged = {}
+        for name in names:
+            parts = [b[name] for b in buf]
+            if isinstance(parts[0], (pa.Array, pa.ChunkedArray)):
+                chunks = []
+                for p in parts:
+                    chunks.extend(p.chunks if isinstance(p, pa.ChunkedArray) else [p])
+                merged[name] = pa.chunked_array(chunks)
+            else:
+                merged[name] = np.concatenate(parts) if len(parts) > 1 else parts[0]
+        out = {
+            k: v.slice(0, n) if hasattr(v, "slice") else v[:n]
+            for k, v in merged.items()
+        }
+        rest = {
+            k: v.slice(n) if hasattr(v, "slice") else v[n:] for k, v in merged.items()
+        }
+        buf = [rest] if rows - n > 0 else []
+        rows = rows - n
+        return out
+
+    for b in batches:
+        if not b:
+            continue
+        n = len(next(iter(b.values())))
+        if n == 0:
+            continue
+        buf.append(b)
+        rows += n
+        while rows >= block_rows:
+            yield emit(block_rows)
+    if rows:
+        yield emit(rows)
+
+
 @dataclass
 class PhysicalHashAggregate(PhysicalPlan):
     """
@@ -2162,33 +2215,9 @@ class PhysicalHashAggregate(PhysicalPlan):
                         context,
                     )
 
-                # acero's hash_aggregate row table ABORTS (uncatchable C++
-                # std::length_error from vector resize) when the group-key
-                # string payload nears int32 limits — q10 at SF-300 groups a
-                # ~30M-row joined intermediate by 7 customer columns incl.
-                # c_comment/c_address. Route such inputs to the non-acero
-                # path instead of crashing the process.
-                str_key_bytes = 0
-                for c in group_cols:
-                    arr = input_arrays.get(c)
-                    if isinstance(arr, (pa.Array, pa.ChunkedArray)):
-                        if (
-                            pa.types.is_string(arr.type)
-                            or pa.types.is_binary(arr.type)
-                            or pa.types.is_large_string(arr.type)
-                        ):
-                            str_key_bytes += arr.nbytes
-                    else:
-                        # Post-merge columns arrive as pandas containers
-                        # (ArrowExtensionArray / object) — count any
-                        # string-ish dtype's bytes, not just pa arrays.
-                        dt = str(getattr(arr, "dtype", "")).lower()
-                        if "string" in dt or "object" in dt or "binary" in dt:
-                            str_key_bytes += int(getattr(arr, "nbytes", 0))
-                if str_key_bytes < 1_500_000_000:
-                    return self._execute_arrow_table_groupby(
-                        input_arrays, group_cols, agg_specs, context
-                    )
+                return self._execute_arrow_table_groupby(
+                    input_arrays, group_cols, agg_specs, context
+                )
 
         # Note: The NumPy path is vectorized and efficient (using factorize +
         # get_group_index + duplicated + bincount for nunique).
@@ -2371,6 +2400,25 @@ class PhysicalHashAggregate(PhysicalPlan):
 
         return result
 
+    @staticmethod
+    def _string_key_bytes(input_arrays: ArrayDict, group_cols: list[str]) -> int:
+        """Total bytes of string-typed group-key columns, any container."""
+        total = 0
+        for c in group_cols:
+            arr = input_arrays.get(c)
+            if isinstance(arr, (pa.Array, pa.ChunkedArray)):
+                if (
+                    pa.types.is_string(arr.type)
+                    or pa.types.is_binary(arr.type)
+                    or pa.types.is_large_string(arr.type)
+                ):
+                    total += arr.nbytes
+            else:
+                dt = str(getattr(arr, "dtype", "")).lower()
+                if "string" in dt or "object" in dt or "binary" in dt:
+                    total += int(getattr(arr, "nbytes", 0))
+        return total
+
     def _execute_arrow_table_groupby(
         self,
         input_arrays: ArrayDict,
@@ -2381,6 +2429,12 @@ class PhysicalHashAggregate(PhysicalPlan):
         """
         Execute groupby using Arrow's native table group_by.
 
+        Every arrow-groupby route MUST pass through here: acero's
+        hash_aggregate row table ABORTS the process (uncatchable C++
+        std::length_error) when group-key string payload nears int32
+        limits (q10 at SF-300: ~20M rows x 7 customer key columns incl.
+        comments). Such inputs fall back to the pandas groupby path.
+
         This is the preferred path for Arrow data because:
         1. Zero-copy table construction from existing Arrow arrays
         2. Multi-threaded aggregation (except first/last)
@@ -2389,6 +2443,11 @@ class PhysicalHashAggregate(PhysicalPlan):
         """
 
         # Build Arrow table from arrays (excluding index columns)
+        if self._string_key_bytes(input_arrays, group_cols) >= 1_500_000_000:
+            return self._execute_multi_key_groupby(
+                input_arrays, group_cols, agg_specs, "numpy", context
+            )
+
         columns = {k: v for k, v in input_arrays.items() if not is_index_col(k)}
         table = pa.table(columns)
 
@@ -2738,7 +2797,7 @@ class PhysicalHashAggregate(PhysicalPlan):
                 partial_tables, group_cols, agg_specs, mean_aggs, direct_aggs, context
             )
 
-        for batch in self.input.execute_batches(context):
+        for batch in _rebatch_fixed(self.input.execute_batches(context)):
             # Skip empty batches
             first_arr = next(iter(batch.values()))
             if len(first_arr) == 0:
