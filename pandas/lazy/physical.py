@@ -2162,9 +2162,25 @@ class PhysicalHashAggregate(PhysicalPlan):
                         context,
                     )
 
-                return self._execute_arrow_table_groupby(
-                    input_arrays, group_cols, agg_specs, context
-                )
+                # acero's hash_aggregate row table ABORTS (uncatchable C++
+                # std::length_error from vector resize) when the group-key
+                # string payload nears int32 limits — q10 at SF-300 groups a
+                # ~30M-row joined intermediate by 7 customer columns incl.
+                # c_comment/c_address. Route such inputs to the non-acero
+                # path instead of crashing the process.
+                str_key_bytes = 0
+                for c in group_cols:
+                    arr = input_arrays.get(c)
+                    if isinstance(arr, (pa.Array, pa.ChunkedArray)) and (
+                        pa.types.is_string(arr.type)
+                        or pa.types.is_binary(arr.type)
+                        or pa.types.is_large_string(arr.type)
+                    ):
+                        str_key_bytes += arr.nbytes
+                if str_key_bytes < 1_500_000_000:
+                    return self._execute_arrow_table_groupby(
+                        input_arrays, group_cols, agg_specs, context
+                    )
 
         # Note: The NumPy path is vectorized and efficient (using factorize +
         # get_group_index + duplicated + bincount for nunique).
@@ -5851,7 +5867,6 @@ class PhysicalPlanner:
     def _find_shared_subplans(plan: LogicalPlan) -> set[int]:
         """ids of non-source logical nodes referenced by 2+ parents."""
         from pandas.lazy.plan import (
-            Aggregate,
             CSVSource,
             DataFrameSource,
             ParquetSource,
@@ -5877,12 +5892,15 @@ class PhysicalPlanner:
             seen.add(nid)
             if counts.get(nid, 0) >= 2 and not isinstance(
                 node,
-                (DataFrameSource, ParquetSource, CSVSource, Aggregate),
+                (DataFrameSource, ParquetSource, CSVSource),
             ):
-                # Aggregates excluded for now: wrapping q15's shared groupby
-                # made the SURROUNDING graph ~3.5x slower (not the aggregate
-                # itself — probed strict-vs-relaxed identical; root cause in
-                # the restructured pipeline graph still open, see ROADMAP).
+                # Aggregates were once excluded here (q15 anomaly hunt — the
+                # real cause was the childless wrapper hiding its inner from
+                # the fusion post-passes, since fixed). The exclusion later
+                # turned HARMFUL: in scan mode q15's shared root optimizes to
+                # the Aggregate itself, sharing silently failed, `rev` was
+                # computed twice with ULP-different float sums, and the
+                # total_revenue == mx equality returned EMPTY at SF-300.
                 shared.add(nid)
             for child in node.children():
                 collect(child)
