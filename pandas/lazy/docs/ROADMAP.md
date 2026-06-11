@@ -413,6 +413,29 @@ ops.
 > join-feeding materialization residual. N3 (PDEP) is the planned next
 > move.
 
+## N3 — PDEP: DEFERRED (decision, June 2026)
+
+Deliberate call after the scale campaign: the work would not land in
+pandas main at the current stage, so a PDEP now would spend the findings
+on a "no". The findings themselves are the asset, and they are all
+recorded and pushed:
+
+- the validated competitive record (0.22→0.43x geo-mean SF-3; H2O 6/10;
+  22/22 exact at SF-1/3/10/100/300 incl. data > RAM);
+- the gap decomposition and the honest ceiling (~0.6–0.7x): the limit is
+  the *execution substrate* (pyarrow implementation + NumPy whole-array
+  kernels — materialization boundaries, per-operator parallelism, string
+  layout), NOT the plan layer, and not Arrow-the-format (Polars builds on
+  the same spec with its own kernels);
+- nine scale bugs incl. two upstream crash classes (UPSTREAM_ISSUES.md);
+- the string_view contribution plan (STRING_VIEW_CONTRIBUTION_PLAN.md).
+
+What proceeds regardless of the PDEP: the upstream Arrow track (crash
+filings + string_view kernels — they benefit every Arrow-backed pandas
+user). Revisit the PDEP when conditions change: string_view lands in
+pyarrow, community appetite shifts, or the pluggable-execution-backend
+conversation opens.
+
 ## The Next Phase (superseded by the Gap-Closing Campaign above; N1/N2 complete) (planned June 2026, geo-mean at 0.39x)
 
 Three phases, in order — engineering to cross the gate, then re-verify the
