@@ -114,6 +114,14 @@ Three layers:
   `ResizableArrayData` output). **4–8+ person-weeks, separate project; do
   not attempt in v1.**
 
+## Related ammunition: two upstream crash reports
+
+The SF-100/SF-300 runs hit two process-killing Arrow defects on int32-
+offset string data (`take` segfault; acero hash_aggregate abort) — see
+[UPSTREAM_ISSUES.md](UPSTREAM_ISSUES.md). File those alongside step 1:
+they document production pressure on the small-string types from the same
+workloads motivating the view kernels.
+
 ## Sequencing (the plan to execute)
 
 1. **File the missing issues first** (1 day): one for Grouper view keys,
