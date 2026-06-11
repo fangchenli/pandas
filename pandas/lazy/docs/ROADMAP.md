@@ -413,7 +413,7 @@ ops.
 > join-feeding materialization residual. N3 (PDEP) is the planned next
 > move.
 
-## Fused-kernel track: PROBE PASSED (June 2026) — GO
+## Fused-kernel track: v1 SHIPPED (June 2026) — q6 21 ms, beats Polars
 
 The question: can a few hand-written fused kernels tackle the
 scan→filter→aggregate hot path that operator-boundary materialization
@@ -423,7 +423,13 @@ ctypes-threaded, q6's real SF-3 columns): **fused predicate+accumulate =
 current end-to-end, ~26 ms Polars, ~6 ms bandwidth floor. The fused loop
 beats Polars' engine on this shape.
 
-Plan (next session): `lazy_fused_agg.pyx` following the lazy_join
+**v1 landed** (commits 3d88ef7c17 + e277fcd8e6): kernel + planner pass +
+runtime fallback; q6 70→21 ms validated, all 22 green, 1694 tests. Found
+during integration: literal-vs-column predicate typing and ns-vs-us
+datetime bounds — both would have been silent wrong results without the
+validation harness. Remaining increments: the select(agg-exprs) envelope
+(only the frame-level-agg shape matches today), then the grouped q1-class
+variant. Original plan: Plan (next session): `lazy_fused_agg.pyx` following the lazy_join
 pattern (nogil + thread-driven + meson entry) — (1) q6-class
 filter+scalar-reductions; (2) q1-class filter+grouped accumulate
 (per-thread local accumulators for small group counts, merge at end);
