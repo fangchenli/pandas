@@ -383,9 +383,10 @@ crosses ~0.5x or gains plateau, whichever first.
   3. **SF-300 — DONE (June 2026, same box): 22/22 validated after root
      fixes** (was 20/22), q21 at
      249.1 GB peak on 247 GB RAM finished exact; gap to Polars narrows to
-     ~6.6x; LP beat Polars on q1. Two open root-caused bugs (q15 scan-mode
-     sharing + morsel-sum nondeterminism; q10 acero >2 GB string-key
-     abort) — both reproduce locally, see TPCH_SCAN_STREAMING.md.
+     ~6.6x; LP beat Polars on q1. The two root-caused bugs found on this rung
+     (q15 scan-mode sharing + morsel-sum nondeterminism; q10 acero >2 GB
+     string-key abort) were both FIXED and re-validated at SF-300 in the
+     same session — see TPCH_SCAN_STREAMING.md.
      Original plan: **on an NVMe spot instance** — pure out-of-core stress
      where "completes all 22 without OOM" is itself the result (the bar
      Polars failed at Coiled). Expected blockers: ~1.5B-group q18, q21's
@@ -401,6 +402,11 @@ Projected arc if gates hold: 0.40 → ~0.43 (G1) → ~0.45 (G2) → ~0.50 (G3)
 → ~0.55–0.6 (G4), with G5 unlocking the string-bound stragglers beyond
 that. Ceiling stays as analyzed: ~0.6–0.7x pipelines, wins kept on single
 ops.
+
+> **POST-CAMPAIGN UPDATE (June 2026, after the fused-kernel track): S1
+> geo-mean 0.45x** — and **q6 is the first outright TPC-H win: 1.18x over
+> Polars (21.6 vs 25.4 ms), S2 break-even "always"** (the only query where
+> pandas-resident conversion+Polars never catches the lazy engine).
 
 > **CAMPAIGN CLOSE-OUT (June 2026, clean-machine scorecard): S1 geo-mean
 > 0.43x** — campaign start 0.22x, suite 7.5 s vs Polars 4.8 s, all 22

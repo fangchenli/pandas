@@ -358,3 +358,10 @@ result = ldf.collect(use_physical_planner=True)
 | `pandas/lazy/backends/arrow/datetime.py` | Arrow datetime kernels |
 | `pandas/lazy/backends/arrow/groupby.py` | Arrow groupby kernels |
 | `pandas/lazy/backends/arrow/join.py` | Arrow join kernel |
+
+## Cython kernels (`pandas/_libs/`)
+
+| kernel | file | role |
+|---|---|---|
+| single-pass hash join | `lazy_join.pyx` | CSR-grouped open-addressing build + nogil thread-parallel count/fill probe; selective int-key inner joins (single key, or two int keys packed into one int64); feeds `PhysicalHashJoin._try_cython_join` and `PhysicalJoinChain` steps |
+| fused filter+aggregate | `lazy_fused_agg.pyx` | chunk-vectorized single pass: range predicates into an L1-resident 4096-row mask, accumulators consume the masked chunk (sum / sum-of-product / count / min / max, plus grouped variants with `sum(a*(1-b))` forms); ungrouped fusion is ON via `PhysicalFusedFilterAgg` (q6 0.29x controlled, beats Polars); grouped fusion is translation-gated OFF (measured losses — scatter cannot auto-vectorize, fetch copies beat selective baselines) |
