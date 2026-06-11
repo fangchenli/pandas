@@ -653,11 +653,48 @@ class ProjectionPruning(PlanVisitor):
 
     def optimize(self, plan: LogicalPlan) -> LogicalPlan:
         self._visit_memo = {}
+        # Shared-subtree handling: pruning is context-dependent (required
+        # columns flow top-down), so a naive recursion rebuilds a shared
+        # subtree once per parent — destroying the DAG identity that
+        # subplan caching (PhysicalCachedSubplan) depends on. Measured
+        # consequence: q15's shared `rev` computed twice through different
+        # paths with different float summation orders, so its
+        # total_revenue == max equality returned EMPTY at SF-300. Shared
+        # non-source nodes are pruned ONCE against their full output
+        # schema (the safe union of every parent's needs) and memoized by
+        # identity. Sources stay per-parent (a shared scan must still
+        # narrow to each consumer's columns).
+        self._shared_memo: dict[int, LogicalPlan] = {}
+        self._parent_counts: dict[int, int] = {}
+        seen: set[int] = set()
+
+        def walk(n) -> None:
+            nid = id(n)
+            self._parent_counts[nid] = self._parent_counts.get(nid, 0) + 1
+            if nid in seen:
+                return
+            seen.add(nid)
+            for c in n.children():
+                walk(c)
+
+        walk(plan)
         # Start with all output columns as needed
         output_cols = set(plan.resolve_schema().names)
         return self._prune(plan, output_cols)
 
     def _prune(self, plan: LogicalPlan, needed: set[str]) -> LogicalPlan:
+        nid = id(plan)
+        if self._parent_counts.get(nid, 0) >= 2 and not isinstance(
+            plan, (DataFrameSource, ParquetSource, CSVSource)
+        ):
+            cached = self._shared_memo.get(nid)
+            if cached is None:
+                cached = self._prune_impl(plan, set(plan.resolve_schema().names))
+                self._shared_memo[nid] = cached
+            return cached
+        return self._prune_impl(plan, needed)
+
+    def _prune_impl(self, plan: LogicalPlan, needed: set[str]) -> LogicalPlan:
         """Recursively prune the plan."""
 
         if isinstance(plan, DataFrameSource):

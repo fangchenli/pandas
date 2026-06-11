@@ -567,12 +567,34 @@ def _numpy_multi_key_groupby(
 
     # Create composite codes: code0 + code1*n0 + code2*n0*n1 + ...
     # This creates a unique integer for each unique combination
-    composite_codes = np.zeros(n_rows, dtype=np.int64)
-    for codes, mult in zip(all_codes, multipliers, strict=False):
-        composite_codes += codes.astype(np.int64) * mult
+    decoded_keys = None
+    if current_multiplier > 2**62:
+        # The cardinality product overflows int64 (q10 at SF-300: 7 keys
+        # over a ~20M-row intermediate raised "Python int too large to
+        # convert to C long"). Pack Horner-style with periodic
+        # re-densification, and decode group keys by gathering each
+        # original key column at the group's first row instead of div/mod.
+        composite_codes = np.zeros(n_rows, dtype=np.int64)
+        running = 1
+        for codes, uniques in zip(all_codes, all_uniques, strict=False):
+            card = max(1, len(uniques))
+            if running > (2**62) // card:
+                composite_codes, _, n_comp = factorize(composite_codes)
+                composite_codes = composite_codes.astype(np.int64)
+                running = max(1, int(n_comp))
+            composite_codes = composite_codes * card + codes.astype(np.int64)
+            running *= card
+        group_codes, unique_composites, n_groups = factorize(composite_codes)
+        first_idx = np.full(n_groups, n_rows, dtype=np.int64)
+        np.minimum.at(first_idx, group_codes, np.arange(n_rows, dtype=np.int64))
+        decoded_keys = [np.asarray(arr)[first_idx] for arr in key_arrays]
+    else:
+        composite_codes = np.zeros(n_rows, dtype=np.int64)
+        for codes, mult in zip(all_codes, multipliers, strict=False):
+            composite_codes += codes.astype(np.int64) * mult
 
-    # Factorize the composite codes to get contiguous group indices
-    group_codes, unique_composites, n_groups = factorize(composite_codes)
+        # Factorize the composite codes to get contiguous group indices
+        group_codes, unique_composites, n_groups = factorize(composite_codes)
 
     # Aggregate each value array using the group codes
     result_values = []
@@ -614,6 +636,8 @@ def _numpy_multi_key_groupby(
         result_values.append(result)
 
     # Decompose the unique composite codes back to individual key values
+    if decoded_keys is not None:
+        return decoded_keys, result_values
     result_keys = []
     for i, (uniques, mult) in enumerate(zip(all_uniques, multipliers, strict=False)):
         # Extract the code for this key from the composite
