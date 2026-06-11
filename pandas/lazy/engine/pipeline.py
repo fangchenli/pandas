@@ -35,6 +35,7 @@ from pandas.lazy.physical import (
     PhysicalConvert,
     PhysicalCSVScan,
     PhysicalFilter,
+    PhysicalFusedFilterAgg,
     PhysicalFusedPipeline,
     PhysicalHashAggregate,
     PhysicalHashJoin,
@@ -178,6 +179,8 @@ def with_inputs(node: PhysicalPlan, inputs: list[PhysicalPlan]) -> PhysicalPlan:
         return dataclasses.replace(node, left=inputs[0], right=inputs[1])
     if isinstance(node, PhysicalJoinChain):
         return dataclasses.replace(node, bases=tuple(inputs))
+    if isinstance(node, PhysicalFusedFilterAgg):
+        return dataclasses.replace(node, scan=inputs[0])
     if isinstance(node, PhysicalConcat):
         return dataclasses.replace(node, inputs=tuple(inputs))
     return dataclasses.replace(node, input=inputs[0])

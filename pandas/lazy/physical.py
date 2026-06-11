@@ -5132,6 +5132,172 @@ class PhysicalHashJoin(PhysicalPlan):
         return True
 
 
+class _FusedAggSpec:
+    """Plan-time translation of filter+project+aggregate onto the fused
+    Cython kernel (pandas._libs.lazy_fused_agg). Built by
+    PhysicalPlanner._fuse_filter_aggregates; None fields mean untranslatable.
+    """
+
+    def __init__(self):
+        self.i64_preds = []  # (col, lo, hi) closed int64 ranges
+        self.f64_preds = []  # (col, lo, hi) closed float64 ranges
+        self.aggs = []  # (out_name, kind, col_a, col_b) kinds per kernel
+        self.mean_outs = {}  # out_name -> (sum_slot, count_slot)
+
+
+@dataclass
+class PhysicalFusedFilterAgg(PhysicalPlan):
+    """Single-pass fused filter+aggregate over a scan (no group keys).
+
+    The probe behind this: q6's fused C loop ran 10.8 ms on 8 threads vs
+    70 ms through materializing operators (~26 ms Polars). Bails to the
+    original subplan at runtime when inputs are not cleanly numeric
+    (nulls/NaNs would diverge from pandas skip-NaN semantics).
+    """
+
+    scan: PhysicalPlan
+    spec: object
+    fallback: PhysicalPlan
+    schema: Schema
+
+    def children(self) -> list[PhysicalPlan]:
+        return [self.scan]
+
+    @property
+    def output_schema(self) -> Schema:
+        return self.schema
+
+    def execute(self, context: ExecutionContext) -> ArrayDict:
+        import numpy as _np
+
+        from pandas._libs.lazy_fused_agg import fused_filter_aggs
+
+        arrays = self.scan.execute(context)
+        spec = self.spec
+
+        def as_np(name):
+            """(int64/float64 view, ns_per_unit) — datetime literals are
+            baked in NANOSECONDS at plan time; columns may be us/ms/s."""
+            arr = arrays.get(name)
+            if arr is None:
+                return None, 1
+            if isinstance(arr, (pa.Array, pa.ChunkedArray)):
+                if arr.null_count:
+                    return None, 1
+                arr = arr.to_numpy(zero_copy_only=False)
+            arr = _np.asarray(arr)
+            if arr.dtype.kind == "M":
+                unit = _np.datetime_data(arr.dtype)[0]
+                scale = {"ns": 1, "us": 1_000, "ms": 1_000_000, "s": 10**9}.get(unit)
+                if scale is None:
+                    return None, 1
+                return _np.ascontiguousarray(arr).view("int64"), scale
+            return arr, 1
+
+        i64_cols, i64_lo, i64_hi = [], [], []
+        for col, lo, hi in spec.i64_preds:
+            a, scale = as_np(col)
+            if a is None or a.dtype != _np.int64:
+                return self.fallback.execute(context)
+            i64_cols.append(_np.ascontiguousarray(a, dtype=_np.int64))
+            # ns-baked bounds -> column unit; ceil for lo, floor for hi so
+            # the closed range stays exact for whole-unit boundaries.
+            i64_lo.append(-(-lo // scale) if lo > -(2**62) else lo)
+            i64_hi.append(hi // scale if hi < 2**62 else hi)
+        f64_cols, f64_lo, f64_hi = [], [], []
+        for col, lo, hi in spec.f64_preds:
+            a, _ = as_np(col)
+            if a is None or a.dtype.kind != "f":
+                return self.fallback.execute(context)
+            f64_cols.append(_np.ascontiguousarray(a, dtype=_np.float64))
+            f64_lo.append(lo)
+            f64_hi.append(hi)
+        agg_kinds, agg_a, agg_b = [], [], []
+        for _out, kind, ca, cb in spec.aggs:
+            if kind == 2:
+                agg_a.append(_np.empty(0))
+                agg_b.append(None)
+            else:
+                a, _ = as_np(ca)
+                if a is None or a.dtype.kind != "f" or _np.isnan(a).any():
+                    return self.fallback.execute(context)
+                agg_a.append(_np.ascontiguousarray(a, dtype=_np.float64))
+                if cb is not None:
+                    b, _ = as_np(cb)
+                    if b is None or b.dtype.kind != "f" or _np.isnan(b).any():
+                        return self.fallback.execute(context)
+                    agg_b.append(_np.ascontiguousarray(b, dtype=_np.float64))
+                else:
+                    agg_b.append(None)
+            agg_kinds.append(kind)
+        n = len(next(iter(arrays.values()))) if arrays else 0
+        if n == 0:
+            return self.fallback.execute(context)
+        kinds_arr = _np.asarray(agg_kinds, dtype=_np.int64)
+        il = _np.asarray(i64_lo, dtype=_np.int64)
+        ih = _np.asarray(i64_hi, dtype=_np.int64)
+        fl = _np.asarray(f64_lo, dtype=_np.float64)
+        fh = _np.asarray(f64_hi, dtype=_np.float64)
+
+        from concurrent.futures import ThreadPoolExecutor
+        import os as _os
+
+        n_workers = min(8, _os.cpu_count() or 1)
+        if n < 1_000_000 or n_workers == 1:
+            out, _ = fused_filter_aggs(
+                i64_cols, il, ih, f64_cols, fl, fh, kinds_arr, agg_a, agg_b, 0, n
+            )
+        else:
+            bounds = [
+                (i * n // n_workers, (i + 1) * n // n_workers) for i in range(n_workers)
+            ]
+            with ThreadPoolExecutor(n_workers) as ex:
+                parts = list(
+                    ex.map(
+                        lambda s: fused_filter_aggs(
+                            i64_cols,
+                            il,
+                            ih,
+                            f64_cols,
+                            fl,
+                            fh,
+                            kinds_arr,
+                            agg_a,
+                            agg_b,
+                            s[0],
+                            s[1],
+                        ),
+                        bounds,
+                    )
+                )
+            out = _np.zeros(len(agg_kinds))
+            for k, kind in enumerate(agg_kinds):
+                vals = [p[0][k] for p in parts]
+                if kind in (0, 1, 2):
+                    out[k] = _np.nansum(vals)
+                elif kind == 3:
+                    out[k] = _np.nanmin(vals)
+                else:
+                    out[k] = _np.nanmax(vals)
+        result: ArrayDict = {}
+        slots = {}
+        for k, (oname, kind, _a, _b) in enumerate(spec.aggs):
+            slots[oname] = out[k]
+        for oname, kind, _a, _b in spec.aggs:
+            if oname in spec.mean_outs:
+                continue
+            if oname.startswith("__fused_"):
+                continue
+            if kind == 2:
+                result[oname] = np.array([int(slots[oname])], dtype=np.int64)
+            else:
+                result[oname] = np.array([slots[oname]], dtype=np.float64)
+        for oname, (s_slot, c_slot) in spec.mean_outs.items():
+            cnt = out[c_slot]
+            result[oname] = np.array([out[s_slot] / cnt if cnt else float("nan")])
+        return result
+
+
 @dataclass
 class PhysicalCachedSubplan(PhysicalPlan):
     """Execute-once wrapper for a subplan shared by multiple consumers.
@@ -5915,6 +6081,7 @@ class PhysicalPlanner:
             physical_plan = self._apply_fusion(physical_plan)
 
         physical_plan = self._collapse_join_chains(physical_plan)
+        physical_plan = self._fuse_filter_aggregates(physical_plan)
 
         # PhysicalCachedSubplan is childless (the pipeline compiler must
         # treat it as a source), so the tree-walking post-passes above never
@@ -5926,7 +6093,8 @@ class PhysicalPlanner:
             inner = wrapper.inner
             if enable_fusion:
                 inner = self._apply_fusion(inner)
-            wrapper.inner = self._collapse_join_chains(inner)
+            inner = self._collapse_join_chains(inner)
+            wrapper.inner = self._fuse_filter_aggregates(inner)
 
         return physical_plan
 
@@ -5974,6 +6142,248 @@ class PhysicalPlanner:
 
         collect(plan)
         return shared
+
+    def _fuse_filter_aggregates(self, plan: PhysicalPlan) -> PhysicalPlan:
+        """Collapse ungrouped scan->filter/project->aggregate subtrees onto
+        the fused single-pass Cython kernel (PhysicalFusedFilterAgg).
+
+        Conservative: every predicate conjunct must be a numeric/datetime
+        range over a source column and every aggregate must resolve
+        (through the fused projections) to sum/sum-of-product/count/min/
+        max/mean of source columns; anything else leaves the plan
+        untouched. The original subtree rides along as runtime fallback.
+        """
+        children = plan.children()
+        if children:
+            new_children = [self._fuse_filter_aggregates(c) for c in children]
+            if any(n is not o for n, o in zip(new_children, children, strict=True)):
+                if isinstance(plan, PhysicalHashJoin):
+                    plan = dataclasses.replace(
+                        plan, left=new_children[0], right=new_children[1]
+                    )
+                elif isinstance(plan, PhysicalConcat):
+                    plan = dataclasses.replace(plan, inputs=tuple(new_children))
+                elif isinstance(plan, PhysicalJoinChain):
+                    plan = dataclasses.replace(plan, bases=tuple(new_children))
+                else:
+                    plan = dataclasses.replace(plan, input=new_children[0])
+        if not (isinstance(plan, PhysicalHashAggregate) and len(plan.group_by) == 0):
+            return plan
+        node = plan.input
+        if isinstance(node, PhysicalMaterialize):
+            node = node.input
+        if not isinstance(node, PhysicalFusedPipeline):
+            return plan
+        if not isinstance(node.input, PhysicalScan):
+            return plan
+        spec = self._translate_fused_agg(node, plan)
+        if spec is None:
+            return plan
+        return PhysicalFusedFilterAgg(
+            scan=node.input,
+            spec=spec,
+            fallback=plan,
+            schema=plan.output_schema,
+        )
+
+    @staticmethod
+    def _translate_fused_agg(fused, agg):
+        import numpy as _np
+
+        INT_MIN, INT_MAX = -(2**63) + 1, 2**63 - 1
+
+        # Predicate slot (int64 vs float64) follows the COLUMN dtype, not
+        # the literal: `l_quantity < 24` is an int literal over a float64
+        # column — int-range semantics (hi = 23) would silently change the
+        # result, and the runtime dtype check would bail to the fallback.
+        col_kinds: dict = {}
+        try:
+            schema = fused.input.output_schema
+            for name in schema.names:
+                dt = getattr(schema[name], "numpy_dtype", None)
+                if dt is not None:
+                    col_kinds[name] = dt.kind
+        except Exception:
+            pass
+
+        def lit_value(ir):
+            if not isinstance(ir, IRLiteral):
+                return None
+            v = ir.value
+            if hasattr(v, "value") and hasattr(v, "tz"):  # Timestamp
+                return ("i", int(v.value)) if v.tz is None else None
+            if isinstance(v, _np.datetime64):
+                return ("i", int(_np.datetime64(v, "ns").view("int64")))
+            if isinstance(v, (bool,)):
+                return None
+            if isinstance(v, (int, _np.integer)):
+                return ("n", int(v))
+            if isinstance(v, (float, _np.floating)):
+                return ("f", float(v))
+            return None
+
+        env: dict = {}
+
+        def resolve(ir):
+            if isinstance(ir, Alias):
+                return resolve(ir.arg)
+            if isinstance(ir, FieldRef):
+                return env.get(ir.name, ir)
+            if isinstance(ir, Call):
+                return Call(ir.function, tuple(resolve(a) for a in ir.args))
+            return ir
+
+        spec = _FusedAggSpec()
+        i64r: dict = {}
+        f64r: dict = {}
+
+        def add_range(col_ir, op, val):
+            if not isinstance(col_ir, FieldRef):
+                return False
+            kind, v = val
+            name = col_ir.name
+            ck = col_kinds.get(name)
+            if ck == "f" and kind in ("n", "f"):
+                kind = "f"
+            elif ck in ("i", "m", "M") and kind == "n":
+                kind = "i"
+            elif ck is None:
+                return False
+            if kind == "i" or (kind == "n" and op in ("ge", "gt", "le", "lt", "eq")):
+                lo, hi = i64r.get(name, (INT_MIN, INT_MAX))
+                iv = int(v)
+                if op == "ge":
+                    lo = max(lo, iv)
+                elif op == "gt":
+                    lo = max(lo, iv + 1)
+                elif op == "le":
+                    hi = min(hi, iv)
+                elif op == "lt":
+                    hi = min(hi, iv - 1)
+                else:
+                    lo, hi = max(lo, iv), min(hi, iv)
+                i64r[name] = (lo, hi)
+                return True
+            if kind in ("f", "n"):
+                lo, hi = f64r.get(name, (-_np.inf, _np.inf))
+                fv = float(v)
+                if op == "ge":
+                    lo = max(lo, fv)
+                elif op == "gt":
+                    lo = max(lo, _np.nextafter(fv, _np.inf))
+                elif op == "le":
+                    hi = min(hi, fv)
+                elif op == "lt":
+                    hi = min(hi, _np.nextafter(fv, -_np.inf))
+                else:
+                    lo, hi = max(lo, fv), min(hi, fv)
+                f64r[name] = (lo, hi)
+                return True
+            return False
+
+        CMP = {
+            "greater_equal": "ge",
+            "greater": "gt",
+            "less_equal": "le",
+            "less": "lt",
+            "equal": "eq",
+        }
+        FLIP = {"ge": "le", "gt": "lt", "le": "ge", "lt": "gt", "eq": "eq"}
+
+        def conjuncts(ir, out):
+            if isinstance(ir, Call) and ir.function == "and_":
+                for a in ir.args:
+                    conjuncts(a, out)
+            else:
+                out.append(ir)
+
+        for op in fused.operations:
+            if op.op_type == "filter":
+                pred = getattr(op, "predicate", None) or getattr(op, "expr", None)
+                if pred is None:
+                    return None
+                parts: list = []
+                conjuncts(resolve(pred._ir), parts)
+                for c in parts:
+                    if not (isinstance(c, Call) and len(c.args) == 2):
+                        return None
+                    a, b = c.args
+                    cmp = CMP.get(c.function)
+                    if cmp is None:
+                        return None
+                    va, vb = lit_value(a), lit_value(b)
+                    if vb is not None and not isinstance(a, IRLiteral):
+                        if not add_range(a, cmp, vb):
+                            return None
+                    elif va is not None and not isinstance(b, IRLiteral):
+                        if not add_range(b, FLIP[cmp], va):
+                            return None
+                    else:
+                        return None
+            elif op.op_type == "project":
+                new_env = {}
+                for e in op.exprs or ():
+                    ir = e._ir
+                    name = extract_output_name(e)
+                    if isinstance(ir, Alias):
+                        ir = ir.arg
+                    new_env[name] = resolve(ir)
+                env = new_env
+            else:
+                return None  # limit etc: not fusable
+
+        AGGK = {"sum": 0, "count": 2, "min": 3, "max": 4}
+        for e in agg.agg_exprs:
+            out_name = extract_output_name(e)
+            ir = e._ir
+            if isinstance(ir, Alias):
+                ir = ir.arg
+            if not (isinstance(ir, Call) and ir.is_aggregate and ir.args):
+                return None
+            fn = ir.function
+            arg = resolve(ir.args[0])
+
+            def classify(a):
+                if isinstance(a, FieldRef):
+                    return (a.name, None)
+                if (
+                    isinstance(a, Call)
+                    and a.function == "multiply"
+                    and len(a.args) == 2
+                    and isinstance(a.args[0], FieldRef)
+                    and isinstance(a.args[1], FieldRef)
+                ):
+                    return (a.args[0].name, a.args[1].name)
+                return None
+
+            cls = classify(arg)
+            if fn == "count":
+                spec.aggs.append((out_name, 2, None, None))
+            elif fn in ("sum", "min", "max"):
+                if cls is None:
+                    return None
+                ca, cb = cls
+                if fn != "sum" and cb is not None:
+                    return None
+                kind = 1 if (fn == "sum" and cb is not None) else AGGK[fn]
+                spec.aggs.append((out_name, kind, ca, cb))
+            elif fn == "mean":
+                if cls is None or cls[1] is not None:
+                    return None
+                s_slot = len(spec.aggs)
+                spec.aggs.append((f"__fused_sum_{out_name}", 0, cls[0], None))
+                c_slot = len(spec.aggs)
+                spec.aggs.append((f"__fused_cnt_{out_name}", 2, None, None))
+                spec.mean_outs[out_name] = (s_slot, c_slot)
+            else:
+                return None
+        for name, (lo, hi) in i64r.items():
+            spec.i64_preds.append((name, lo, hi))
+        for name, (lo, hi) in f64r.items():
+            spec.f64_preds.append((name, lo, hi))
+        if not spec.aggs:
+            return None
+        return spec
 
     def _collapse_join_chains(self, plan: PhysicalPlan) -> PhysicalPlan:
         """Collapse left-deep trees of eligible inner joins into one
