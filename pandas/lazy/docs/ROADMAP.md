@@ -380,7 +380,12 @@ crosses ~0.5x or gains plateau, whichever first.
      **the headline run,**
      directly comparable to Polars' published numbers (DuckDB 19.7 s,
      Polars-streaming 23.9 s, Polars in-memory 152 s for all 22).
-  3. **SF-300→1000 on an NVMe spot instance** — pure out-of-core stress
+  3. **SF-300 — DONE (June 2026, same box): 20/22 validated**, q21 at
+     249.1 GB peak on 247 GB RAM finished exact; gap to Polars narrows to
+     ~6.6x; LP beat Polars on q1. Two open root-caused bugs (q15 scan-mode
+     sharing + morsel-sum nondeterminism; q10 acero >2 GB string-key
+     abort) — both reproduce locally, see TPCH_SCAN_STREAMING.md.
+     Original plan: **on an NVMe spot instance** — pure out-of-core stress
      where "completes all 22 without OOM" is itself the result (the bar
      Polars failed at Coiled). Expected blockers: ~1.5B-group q18, q21's
      self-join grace partitions, any collect-to-pandas stage. Framing:

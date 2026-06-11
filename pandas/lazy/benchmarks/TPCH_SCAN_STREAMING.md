@@ -98,3 +98,34 @@ known string-layout wall and per-batch overheads — the gap analysis and
 string_view plan cover the path. The Coiled-benchmark bar ("finishes at
 scale without falling over") is met at this rung; SF-300+ NVMe is the
 next.
+
+## SF-300 on the same box (June 2026) — 20/22, the out-of-core stress rung
+
+~300 GB raw / ~105 GB parquet vs 247 GB RAM. 20/22 completed and validated;
+the heavyweights finished **at the edge of physical memory**: q21 379 s @
+**249.1 GB peak**, q18 502 s @ 223 GB, q9 472 s @ 195 GB. No OOM kills.
+Polars: 21/22 (same q3 date-repr validation artifact). Totals (shared-OK
+queries): LP ~3,958 s vs PL ~602 s — **the gap narrows to ~6.6x** at this
+scale (9x at SF-100) as both engines go I/O-bound; **LP beat Polars on q1**
+(45.2 s vs 60.7 s). RSS caveat: numbers include memory-mapped parquet pages
+(q6 "shows" 113 GB — exactly lineitem's file size), true heap is lower.
+
+### Open bugs this rung found (root-caused, reproduce locally)
+
+1. **q15 returns empty** — the `total_revenue == mx` float equality breaks
+   because `rev` computes twice: subplan sharing reports **0 shared nodes
+   in scan mode** (an optimizer pass loses DAG identity over scans — the
+   stale Aggregate exclusion was removed but was not the whole story), and
+   morsel aggregation is **run-to-run nondeterministic** (probe: 1.8M of
+   3M group sums differ between two identical runs — parquet scanner batch
+   boundaries vary). Fix path: restore scan-mode sharing (compute rev
+   once); reproduces locally at SF-1 scan mode (CachedSubplan count = 0).
+2. **q10 aborts** in acero hash_aggregate (`vector::_M_default_append`, an
+   uncatchable C++ length_error) grouping ~20M+ rows by 7 customer columns
+   incl. comments — a >2 GB string-key row-table limit. A byte-gate on
+   group-key strings did not catch it (needs a fresh faulthandler stack;
+   synthesizable locally with a ~2.5 GB-key groupby).
+
+Fixed on this rung (commits on the branch): pd.merge pyarrow-take SEGFAULT
+(string→large_string upcast), 2 GB batch-concat overflow (chunked concat),
+the stale Aggregate sharing exclusion, plus harness fixes.
