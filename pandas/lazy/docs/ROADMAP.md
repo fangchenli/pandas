@@ -413,6 +413,27 @@ ops.
 > join-feeding materialization residual. N3 (PDEP) is the planned next
 > move.
 
+## Fused-kernel track: PROBE PASSED (June 2026) — GO
+
+The question: can a few hand-written fused kernels tackle the
+scan→filter→aggregate hot path that operator-boundary materialization
+makes slow? Probe (standalone C, `-O3 -march=native` auto-vectorized,
+ctypes-threaded, q6's real SF-3 columns): **fused predicate+accumulate =
+31.4 ms single-thread, 10.8 ms on 8 threads, bit-exact** — vs 70 ms
+current end-to-end, ~26 ms Polars, ~6 ms bandwidth floor. The fused loop
+beats Polars' engine on this shape.
+
+Plan (next session): `lazy_fused_agg.pyx` following the lazy_join
+pattern (nogil + thread-driven + meson entry) — (1) q6-class
+filter+scalar-reductions; (2) q1-class filter+grouped accumulate
+(per-thread local accumulators for small group counts, merge at end);
+(3) decisions-layer eligibility gate (numeric predicates + mergeable aggs
++ small group cardinality), existing paths as fallback; controlled
+battery + all-22 validation per the usual discipline. Expected: q6 →
+~parity+, q1 → ~0.9–1.2x, partial gains on q12/q14/q19; geo-mean
+~0.43 → ~0.48–0.52 with no upstream dependency. Auto-vectorization
+sufficed in the probe — no hand intrinsics unless measurement demands.
+
 ## N3 — PDEP: DEFERRED (decision, June 2026)
 
 Deliberate call after the scale campaign: the work would not land in
