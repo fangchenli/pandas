@@ -457,6 +457,48 @@ battery + all-22 validation per the usual discipline. Expected: q6 →
 ~0.43 → ~0.48–0.52 with no upstream dependency. Auto-vectorization
 sufficed in the probe — no hand intrinsics unless measurement demands.
 
+## Materialization experiment: the gap is plumbing, not substrate, at 1–100M (June 2026)
+
+Controlled decomposition of the worst `filter_project` categories — same
+logical shape through whole-array pc / Acero / our fused kernel / our engine
+/ Polars, thread count isolated. Full write-up:
+[MATERIALIZATION_EXPERIMENT.md](MATERIALIZATION_EXPERIMENT.md); harness
+`benchmarks/exp_kernel_fusion.py`. Headlines:
+
+- **Acero morsel-streaming is NOT the free win** (hypothesis disproven): it
+  helps map-only projection (beats Polars on `proj`) but is catastrophic on
+  filter→reduce (filt6 70ms vs 5.6ms pc) because its `FilterNode`
+  physically compacts selected rows before the aggregate.
+- **Polars' power = single-pass mask+accumulate at the memory-bandwidth
+  floor** (filter→sum 8.3ms single-threaded, == 8-threaded; ~80MB/10GBps),
+  never compacting the filtered intermediate. Our hand `fused_filter_aggs`
+  hits the same floor (7.1ms) and beats Polars on the 3-pred count
+  (4.3 vs 12.7) — the substrate is not the binding constraint here.
+- **Our delivered gap is local engine plumbing**: `filter→select(scalar-agg)`
+  routes to the compacting `PhysicalFusedPipeline` (42–49ms) instead of the
+  fused kernel; even when the kernel is selected, a wide-frame agg processes
+  unreferenced columns (52.9ms). Pruned + routed to the kernel:
+  **10.3ms, beating Polars' 8.3ms.** Plan+build is 0.3ms (not the overhead);
+  threading on the fused path works (both earlier-suspected causes
+  disproven).
+- **For "compile kernels in Arrow"**: codegen is a generality/coverage win,
+  not the ceiling-breaker — the hand kernel already matches Polars. The
+  recoverable 1–100M wins are local (route scalar-agg selects to the fused
+  kernel; prune columns into the fused-agg spec). This qualifies the
+  "substrate-bound at 0.45x" conclusion: true at SF-3+ where costs amortize,
+  but ~5x is left in our own path at small-medium scale.
+
+**Fix landed**: route `filter→select(scalar-agg)` to
+`PhysicalFusedFilterAgg` (`physical.py` `_fuse_filter_aggregates` Shape B;
+the ungrouped scalar-agg `select` lowers to a tail reducing-project, not a
+HashAggregate, so it was missed). Column pruning falls out for free. Measured
+controlled on/off at 10M: `select(sum)` 0.21→0.82x, `select(count)`
+0.29→**2.36x**, `select(sum(v1*v2))` 0.32→**1.34x** (last two beat Polars).
+Tracked as three new `filter_project` scorecard rows + guarded by
+`TestScalarAggSelectFusion`; 1699 lazy tests pass, all 22 TPC-H validate.
+Action item (3) (mask-carrying generic pipeline for non-agg reductions) left
+as a note — not needed for the measured categories.
+
 ## N3 — PDEP: DEFERRED (decision, June 2026)
 
 Deliberate call after the scale campaign: the work would not land in

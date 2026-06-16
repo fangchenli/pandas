@@ -270,6 +270,92 @@ def benchmark_filter_project(
         )
     )
 
+    # Filter -> scalar aggregate. The single-pass mask+accumulate shape that
+    # avoids materializing the filtered intermediate (the structural Polars
+    # win; see docs/MATERIALIZATION_EXPERIMENT.md). Routes to the fused
+    # PhysicalFusedFilterAgg kernel rather than the row-compacting pipeline.
+    def lazy_pandas_filter_sum():
+        return (
+            pdf.select()
+            .filter(col("value1") > 0)
+            .select(col("value1").sum().alias("s"))
+            .collect(use_physical_planner=True)
+        )
+
+    def polars_filter_sum():
+        return (
+            pldf.lazy().filter(pl.col("value1") > 0).select(pl.col("value1").sum())
+        ).collect()
+
+    lp_time = benchmark_operation(lazy_pandas_filter_sum)
+    pl_time = benchmark_operation(polars_filter_sum)
+    results.append(
+        BenchmarkResult(
+            category="filter_project",
+            operation="filter(value1 > 0).select(sum)",
+            data_rows=n_rows,
+            lazy_pandas_ms=lp_time,
+            polars_ms=pl_time,
+            speedup=pl_time / lp_time if lp_time > 0 else 0,
+        )
+    )
+
+    def lazy_pandas_filter_count():
+        return (
+            pdf.select()
+            .filter((col("value1") > 0) & (col("int_val") < 500))
+            .select(col("value1").count().alias("n"))
+            .collect(use_physical_planner=True)
+        )
+
+    def polars_filter_count():
+        return (
+            pldf.lazy()
+            .filter((pl.col("value1") > 0) & (pl.col("int_val") < 500))
+            .select(pl.col("value1").count())
+        ).collect()
+
+    lp_time = benchmark_operation(lazy_pandas_filter_count)
+    pl_time = benchmark_operation(polars_filter_count)
+    results.append(
+        BenchmarkResult(
+            category="filter_project",
+            operation="filter(val1>0 AND int_val<500).select(count)",
+            data_rows=n_rows,
+            lazy_pandas_ms=lp_time,
+            polars_ms=pl_time,
+            speedup=pl_time / lp_time if lp_time > 0 else 0,
+        )
+    )
+
+    def lazy_pandas_filter_prodsum():
+        return (
+            pdf.select()
+            .filter(col("value1") > 0)
+            .select((col("value1") * col("value2")).sum().alias("p"))
+            .collect(use_physical_planner=True)
+        )
+
+    def polars_filter_prodsum():
+        return (
+            pldf.lazy()
+            .filter(pl.col("value1") > 0)
+            .select((pl.col("value1") * pl.col("value2")).sum())
+        ).collect()
+
+    lp_time = benchmark_operation(lazy_pandas_filter_prodsum)
+    pl_time = benchmark_operation(polars_filter_prodsum)
+    results.append(
+        BenchmarkResult(
+            category="filter_project",
+            operation="filter(value1 > 0).select(sum(v1*v2))",
+            data_rows=n_rows,
+            lazy_pandas_ms=lp_time,
+            polars_ms=pl_time,
+            speedup=pl_time / lp_time if lp_time > 0 else 0,
+        )
+    )
+
     return results
 
 

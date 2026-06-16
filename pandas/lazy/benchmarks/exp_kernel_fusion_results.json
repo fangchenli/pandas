@@ -1,0 +1,310 @@
+[
+  {
+    "engine": "pc",
+    "threads": 1,
+    "op": "proj",
+    "n": 1000000,
+    "ms": 0.5288750398904085
+  },
+  {
+    "engine": "pc",
+    "threads": 1,
+    "op": "filt_sum",
+    "n": 1000000,
+    "ms": 2.842332934960723
+  },
+  {
+    "engine": "pc",
+    "threads": 1,
+    "op": "filt6",
+    "n": 1000000,
+    "ms": 0.6120420293882489
+  },
+  {
+    "engine": "pc",
+    "threads": 1,
+    "op": "proj",
+    "n": 10000000,
+    "ms": 9.086124948225915
+  },
+  {
+    "engine": "pc",
+    "threads": 1,
+    "op": "filt_sum",
+    "n": 10000000,
+    "ms": 31.83420794084668
+  },
+  {
+    "engine": "pc",
+    "threads": 1,
+    "op": "filt6",
+    "n": 10000000,
+    "ms": 5.610666004940867
+  },
+  {
+    "engine": "acero",
+    "threads": 1,
+    "op": "proj",
+    "n": 1000000,
+    "ms": 0.4783750046044588
+  },
+  {
+    "engine": "acero",
+    "threads": 1,
+    "op": "filt_sum",
+    "n": 1000000,
+    "ms": 8.07416602037847
+  },
+  {
+    "engine": "acero",
+    "threads": 1,
+    "op": "filt6",
+    "n": 1000000,
+    "ms": 6.9651249796152115
+  },
+  {
+    "engine": "acero",
+    "threads": 1,
+    "op": "proj",
+    "n": 10000000,
+    "ms": 5.444167065434158
+  },
+  {
+    "engine": "acero",
+    "threads": 1,
+    "op": "filt_sum",
+    "n": 10000000,
+    "ms": 80.61258296947926
+  },
+  {
+    "engine": "acero",
+    "threads": 1,
+    "op": "filt6",
+    "n": 10000000,
+    "ms": 70.00708288978785
+  },
+  {
+    "engine": "acero",
+    "threads": 8,
+    "op": "proj",
+    "n": 1000000,
+    "ms": 0.6808749167248607
+  },
+  {
+    "engine": "acero",
+    "threads": 8,
+    "op": "filt_sum",
+    "n": 1000000,
+    "ms": 8.402167004533112
+  },
+  {
+    "engine": "acero",
+    "threads": 8,
+    "op": "filt6",
+    "n": 1000000,
+    "ms": 7.297749980352819
+  },
+  {
+    "engine": "acero",
+    "threads": 8,
+    "op": "proj",
+    "n": 10000000,
+    "ms": 6.177040981128812
+  },
+  {
+    "engine": "acero",
+    "threads": 8,
+    "op": "filt_sum",
+    "n": 10000000,
+    "ms": 18.32995901349932
+  },
+  {
+    "engine": "acero",
+    "threads": 8,
+    "op": "filt6",
+    "n": 10000000,
+    "ms": 16.299708979204297
+  },
+  {
+    "engine": "fused",
+    "threads": 1,
+    "op": "filt_sum",
+    "n": 1000000,
+    "ms": 3.508916008286178
+  },
+  {
+    "engine": "fused",
+    "threads": 1,
+    "op": "filt6",
+    "n": 1000000,
+    "ms": 0.6210000719875097
+  },
+  {
+    "engine": "fused",
+    "threads": 1,
+    "op": "filt_sum",
+    "n": 10000000,
+    "ms": 35.409708973020315
+  },
+  {
+    "engine": "fused",
+    "threads": 1,
+    "op": "filt6",
+    "n": 10000000,
+    "ms": 5.862416932359338
+  },
+  {
+    "engine": "fused",
+    "threads": 8,
+    "op": "filt_sum",
+    "n": 1000000,
+    "ms": 1.066792057827115
+  },
+  {
+    "engine": "fused",
+    "threads": 8,
+    "op": "filt6",
+    "n": 1000000,
+    "ms": 0.534375081770122
+  },
+  {
+    "engine": "fused",
+    "threads": 8,
+    "op": "filt_sum",
+    "n": 10000000,
+    "ms": 7.140083005651832
+  },
+  {
+    "engine": "fused",
+    "threads": 8,
+    "op": "filt6",
+    "n": 10000000,
+    "ms": 4.322499968111515
+  },
+  {
+    "engine": "lp",
+    "threads": 1,
+    "op": "proj",
+    "n": 1000000,
+    "ms": 2.0769579568877816
+  },
+  {
+    "engine": "lp",
+    "threads": 1,
+    "op": "filt_sum",
+    "n": 1000000,
+    "ms": 4.962625098414719
+  },
+  {
+    "engine": "lp",
+    "threads": 1,
+    "op": "filt6",
+    "n": 1000000,
+    "ms": 4.247417091391981
+  },
+  {
+    "engine": "lp",
+    "threads": 1,
+    "op": "proj",
+    "n": 10000000,
+    "ms": 18.206333043053746
+  },
+  {
+    "engine": "lp",
+    "threads": 1,
+    "op": "filt_sum",
+    "n": 10000000,
+    "ms": 43.198500061407685
+  },
+  {
+    "engine": "lp",
+    "threads": 1,
+    "op": "filt6",
+    "n": 10000000,
+    "ms": 29.497292009182274
+  },
+  {
+    "engine": "polars",
+    "threads": 1,
+    "op": "proj",
+    "n": 1000000,
+    "ms": 0.42337493505328894
+  },
+  {
+    "engine": "polars",
+    "threads": 1,
+    "op": "filt_sum",
+    "n": 1000000,
+    "ms": 0.5651250248774886
+  },
+  {
+    "engine": "polars",
+    "threads": 1,
+    "op": "filt6",
+    "n": 1000000,
+    "ms": 1.3708750484511256
+  },
+  {
+    "engine": "polars",
+    "threads": 1,
+    "op": "proj",
+    "n": 10000000,
+    "ms": 9.30879102088511
+  },
+  {
+    "engine": "polars",
+    "threads": 1,
+    "op": "filt_sum",
+    "n": 10000000,
+    "ms": 8.346499991603196
+  },
+  {
+    "engine": "polars",
+    "threads": 1,
+    "op": "filt6",
+    "n": 10000000,
+    "ms": 16.195875010453165
+  },
+  {
+    "engine": "polars",
+    "threads": 8,
+    "op": "proj",
+    "n": 1000000,
+    "ms": 0.4387079970911145
+  },
+  {
+    "engine": "polars",
+    "threads": 8,
+    "op": "filt_sum",
+    "n": 1000000,
+    "ms": 0.6118749734014273
+  },
+  {
+    "engine": "polars",
+    "threads": 8,
+    "op": "filt6",
+    "n": 1000000,
+    "ms": 1.206583110615611
+  },
+  {
+    "engine": "polars",
+    "threads": 8,
+    "op": "proj",
+    "n": 10000000,
+    "ms": 9.532624972052872
+  },
+  {
+    "engine": "polars",
+    "threads": 8,
+    "op": "filt_sum",
+    "n": 10000000,
+    "ms": 8.265874930657446
+  },
+  {
+    "engine": "polars",
+    "threads": 8,
+    "op": "filt6",
+    "n": 10000000,
+    "ms": 12.680958956480026
+  }
+]

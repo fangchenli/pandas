@@ -24,6 +24,7 @@ from abc import (
 )
 import dataclasses
 import threading
+from types import SimpleNamespace
 
 # Execute-once caching of shared subplans (see PhysicalPlanner.plan). The
 # q15 regression that kept this off is diagnosed and fixed: the childless
@@ -6377,24 +6378,60 @@ class PhysicalPlanner:
                     plan = dataclasses.replace(plan, bases=tuple(new_children))
                 else:
                     plan = dataclasses.replace(plan, input=new_children[0])
-        if not isinstance(plan, PhysicalHashAggregate):
-            return plan
-        node = plan.input
-        if isinstance(node, PhysicalMaterialize):
-            node = node.input
-        if not isinstance(node, PhysicalFusedPipeline):
-            return plan
-        if not isinstance(node.input, PhysicalScan):
-            return plan
-        spec = self._translate_fused_agg(node, plan)
-        if spec is None:
-            return plan
-        return PhysicalFusedFilterAgg(
-            scan=node.input,
-            spec=spec,
-            fallback=plan,
-            schema=plan.output_schema,
-        )
+
+        # Shape A: scan -> fused(filter/project) -> HashAggregate.
+        if isinstance(plan, PhysicalHashAggregate):
+            node = plan.input
+            if isinstance(node, PhysicalMaterialize):
+                node = node.input
+            if not isinstance(node, PhysicalFusedPipeline):
+                return plan
+            if not isinstance(node.input, PhysicalScan):
+                return plan
+            spec = self._translate_fused_agg(node, plan)
+            if spec is None:
+                return plan
+            return PhysicalFusedFilterAgg(
+                scan=node.input,
+                spec=spec,
+                fallback=plan,
+                schema=plan.output_schema,
+            )
+
+        # Shape B: scan -> fused(filter/project, ..., scalar-agg project).
+        # An ungrouped `select(col.sum())` lowers to a reducing project at
+        # the tail of the fused pipeline rather than a HashAggregate node, so
+        # Shape A misses it and it falls to the row-compacting generic
+        # pipeline (measured 5x slower than the kernel — see
+        # docs/MATERIALIZATION_EXPERIMENT.md). Peel the terminal aggregate
+        # project off, reuse the same translator with a no-group shim.
+        if isinstance(plan, PhysicalFusedPipeline) and isinstance(
+            plan.input, PhysicalScan
+        ):
+            ops = plan.operations
+            if not ops or ops[-1].op_type != "project":
+                return plan
+            term_exprs = list(ops[-1].exprs or ())
+
+            def _is_agg_expr(e):
+                ir = e._ir.arg if isinstance(e._ir, Alias) else e._ir
+                return isinstance(ir, Call) and ir.is_aggregate
+
+            if not term_exprs or not all(_is_agg_expr(e) for e in term_exprs):
+                return plan
+            prefix = dataclasses.replace(plan, operations=ops[:-1])
+            shim = SimpleNamespace(group_by=[], agg_exprs=term_exprs)
+            spec = self._translate_fused_agg(prefix, shim)
+            if spec is None:
+                return plan
+            return PhysicalFusedFilterAgg(
+                scan=plan.input,
+                spec=spec,
+                fallback=plan,
+                schema=plan.output_schema,
+            )
+
+        return plan
 
     @staticmethod
     def _translate_fused_agg(fused, agg):

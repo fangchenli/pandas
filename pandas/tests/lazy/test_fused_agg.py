@@ -60,3 +60,75 @@ class TestFusedFilterAgg:
         phys = float(plan.collect(use_physical_planner=True)["s"].iloc[0])
         eager = float(plan.collect(use_physical_planner=False)["s"].iloc[0])
         assert np.isclose(phys, eager, rtol=1e-12)
+
+
+class TestScalarAggSelectFusion:
+    """Shape B: ungrouped `filter().select(col.agg())` (a reducing project at
+    the tail of the fused pipeline, not a HashAggregate) must reach the fused
+    kernel rather than the row-compacting generic pipeline.
+    See docs/MATERIALIZATION_EXPERIMENT.md.
+    """
+
+    def _frame(self, n=300_000):
+        rng = np.random.default_rng(7)
+        return pd.DataFrame(
+            {
+                "a": rng.standard_normal(n),
+                "b": rng.standard_normal(n),
+                "i": rng.integers(0, 1000, n).astype(np.int64),
+            }
+        )
+
+    def test_select_sum_routes_to_kernel_and_matches(self):
+        df = self._frame()
+        a = df["a"].to_numpy()
+        plan = df.select().filter(col("a") > 0).select(col("a").sum().alias("s"))
+        assert "FusedFilterAgg" in plan.explain(physical=True)
+        got = float(plan.collect(use_physical_planner=True)["s"].iloc[0])
+        assert np.isclose(got, float(a[a > 0].sum()), rtol=1e-12)
+
+    def test_select_count_multi_predicate(self):
+        df = self._frame()
+        a, b, i = (df[c].to_numpy() for c in ("a", "b", "i"))
+        plan = (
+            df.select()
+            .filter((col("a") > 0) & (col("i") < 500) & (col("b") < 0.5))
+            .select(col("a").count().alias("n"))
+        )
+        assert "FusedFilterAgg" in plan.explain(physical=True)
+        got = int(plan.collect(use_physical_planner=True)["n"].iloc[0])
+        assert got == int(((a > 0) & (i < 500) & (b < 0.5)).sum())
+
+    def test_select_mean_and_product_sum(self):
+        df = self._frame()
+        a, b = df["a"].to_numpy(), df["b"].to_numpy()
+        mean_plan = df.select().filter(col("a") > 0).select(col("a").mean().alias("m"))
+        prod_plan = (
+            df.select()
+            .filter(col("a") > 0)
+            .select((col("a") * col("b")).sum().alias("p"))
+        )
+        assert "FusedFilterAgg" in mean_plan.explain(physical=True)
+        assert "FusedFilterAgg" in prod_plan.explain(physical=True)
+        m = float(mean_plan.collect(use_physical_planner=True)["m"].iloc[0])
+        p = float(prod_plan.collect(use_physical_planner=True)["p"].iloc[0])
+        assert np.isclose(m, float(a[a > 0].mean()), rtol=1e-12)
+        assert np.isclose(p, float((a * b)[a > 0].sum()), rtol=1e-9)
+
+    def test_select_agg_no_filter_stays_correct(self):
+        # No filter -> no compaction to eliminate, so this is intentionally
+        # left on the reducing-project path (not rerouted); still correct.
+        df = self._frame()
+        a = df["a"].to_numpy()
+        plan = df.select(col("a").sum().alias("s"))
+        got = float(plan.collect(use_physical_planner=True)["s"].iloc[0])
+        assert np.isclose(got, float(a.sum()), rtol=1e-12)
+
+    def test_mixed_agg_and_passthrough_not_fused(self):
+        # A select mixing an aggregate with a bare column is not an ungrouped
+        # reduction; it must not be rerouted to the scalar-agg kernel.
+        df = self._frame(1000)
+        plan = (
+            df.select().filter(col("a") > 0).select(col("a").sum().alias("s"), col("b"))
+        )
+        assert "FusedFilterAgg" not in plan.explain(physical=True)

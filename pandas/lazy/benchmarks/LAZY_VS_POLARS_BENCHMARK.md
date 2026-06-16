@@ -21,116 +21,122 @@ Lazy pandas timings use the **physical engine** (`collect(use_physical_planner=T
 
 | Category | Avg Speedup | Best LP | Best Polars |
 |----------|-------------|---------|-------------|
-| filter_project | 0.21x | 0.37x | 0.10x |
-| aggregation | 1.08x | 3.06x | 0.35x |
-| string | 2.38x | 5.93x | 0.35x |
-| limit | 0.03x | 0.03x | 0.03x |
-| sort | 0.74x | 1.08x | 0.53x |
-| join | 0.40x | 0.51x | 0.30x |
-| parquet_scan | 0.92x | 1.66x | 0.42x |
-| engine_pipeline | 0.42x | 0.52x | 0.21x |
+| filter_project | 0.53x | 2.29x | 0.10x |
+| aggregation | 1.49x | 4.66x | 0.17x |
+| string | 1.65x | 3.61x | 0.30x |
+| limit | 0.02x | 0.03x | 0.02x |
+| sort | 0.72x | 0.97x | 0.38x |
+| join | 0.38x | 0.55x | 0.29x |
+| parquet_scan | 0.82x | 1.44x | 0.41x |
+| engine_pipeline | 0.44x | 0.59x | 0.18x |
 
 ## Filter Project
 
 | Operation | Rows | Lazy Pandas (ms) | Polars (ms) | Speedup |
 |-----------|------|------------------|-------------|---------|
-| filter(value1 > 0) | 1,000,000 | 19.73 | 3.23 | *0.16x* |
-| filter + select(3 cols) | 1,000,000 | 5.31 | 1.44 | *0.27x* |
-| filter(val1 > 0 AND int_val < 500) | 1,000,000 | 13.78 | 2.71 | *0.20x* |
-| with_columns(value1 + value2) | 1,000,000 | 5.62 | 0.56 | *0.10x* |
-| filter(value1 > 0) | 10,000,000 | 211.24 | 32.09 | *0.15x* |
-| filter + select(3 cols) | 10,000,000 | 41.58 | 15.52 | *0.37x* |
-| filter(val1 > 0 AND int_val < 500) | 10,000,000 | 121.20 | 26.04 | *0.21x* |
-| with_columns(value1 + value2) | 10,000,000 | 47.00 | 10.01 | *0.21x* |
+| filter(value1 > 0) | 1,000,000 | 16.59 | 5.31 | *0.32x* |
+| filter + select(3 cols) | 1,000,000 | 11.95 | 2.17 | *0.18x* |
+| filter(val1 > 0 AND int_val < 500) | 1,000,000 | 15.13 | 4.43 | *0.29x* |
+| with_columns(value1 + value2) | 1,000,000 | 6.97 | 0.72 | *0.10x* |
+| filter(value1 > 0).select(sum) | 1,000,000 | 5.29 | 0.94 | *0.18x* |
+| filter(val1>0 AND int_val<500).select(count) | 1,000,000 | 2.51 | 1.21 | *0.48x* |
+| filter(value1 > 0).select(sum(v1*v2)) | 1,000,000 | 5.57 | 2.83 | *0.51x* |
+| filter(value1 > 0) | 10,000,000 | 87.92 | 34.25 | *0.39x* |
+| filter + select(3 cols) | 10,000,000 | 45.88 | 17.60 | *0.38x* |
+| filter(val1 > 0 AND int_val < 500) | 10,000,000 | 72.90 | 37.20 | *0.51x* |
+| with_columns(value1 + value2) | 10,000,000 | 61.99 | 10.85 | *0.18x* |
+| filter(value1 > 0).select(sum) | 10,000,000 | 12.32 | 9.06 | *0.74x* |
+| filter(val1>0 AND int_val<500).select(count) | 10,000,000 | 6.34 | 14.54 | **2.29x** |
+| filter(value1 > 0).select(sum(v1*v2)) | 10,000,000 | 22.46 | 18.50 | *0.82x* |
 
 ## Aggregation
 
 | Operation | Rows | Lazy Pandas (ms) | Polars (ms) | Speedup |
 |-----------|------|------------------|-------------|---------|
-| groupby(group).sum(value1) | 1,000,000 | 7.01 | 2.43 | *0.35x* |
-| groupby(group).agg(sum, mean, max, count) | 1,000,000 | 12.98 | 10.69 | *0.82x* |
-| groupby(category[100]).sum() | 1,000,000 | 5.83 | 2.13 | *0.37x* |
-| groupby(group).sum(value1) | 10,000,000 | 18.59 | 17.75 | *0.96x* |
-| groupby(group).agg(sum, mean, max, count) | 10,000,000 | 37.87 | 115.90 | **3.06x** |
-| groupby(category[100]).sum() | 10,000,000 | 16.27 | 15.05 | *0.92x* |
+| groupby(group).sum(value1) | 1,000,000 | 16.79 | 2.88 | *0.17x* |
+| groupby(group).agg(sum, mean, max, count) | 1,000,000 | 14.46 | 14.89 | **1.03x** |
+| groupby(category[100]).sum() | 1,000,000 | 7.57 | 4.68 | *0.62x* |
+| groupby(group).sum(value1) | 10,000,000 | 26.89 | 34.79 | **1.29x** |
+| groupby(group).agg(sum, mean, max, count) | 10,000,000 | 50.70 | 236.24 | **4.66x** |
+| groupby(category[100]).sum() | 10,000,000 | 24.87 | 28.34 | **1.14x** |
 
 ## String
 
 | Operation | Rows | Lazy Pandas (ms) | Polars (ms) | Speedup |
 |-----------|------|------------------|-------------|---------|
-| filter(text.contains('foo')) | 1,000,000 | 14.70 | 17.12 | **1.16x** |
-| with_columns(text.lower()) | 1,000,000 | 13.23 | 64.99 | **4.91x** |
-| with_columns(text.len()) | 1,000,000 | 12.92 | 4.49 | *0.35x* |
-| filter(text.contains('foo')) | 10,000,000 | 114.56 | 172.55 | **1.51x** |
-| with_columns(text.lower()) | 10,000,000 | 111.74 | 662.08 | **5.93x** |
-| with_columns(text.len()) | 10,000,000 | 111.39 | 47.03 | *0.42x* |
+| filter(text.contains('foo')) | 1,000,000 | 20.94 | 20.38 | *0.97x* |
+| with_columns(text.lower()) | 1,000,000 | 23.46 | 84.60 | **3.61x** |
+| with_columns(text.len()) | 1,000,000 | 15.72 | 4.70 | *0.30x* |
+| filter(text.contains('foo')) | 10,000,000 | 147.74 | 194.83 | **1.32x** |
+| with_columns(text.lower()) | 10,000,000 | 183.78 | 618.56 | **3.37x** |
+| with_columns(text.len()) | 10,000,000 | 165.06 | 51.72 | *0.31x* |
 
 ## Limit
 
 | Operation | Rows | Lazy Pandas (ms) | Polars (ms) | Speedup |
 |-----------|------|------------------|-------------|---------|
-| head(10) | 1,000,000 | 0.31 | 0.01 | *0.03x* |
-| head(100) | 1,000,000 | 0.29 | 0.01 | *0.03x* |
-| head(1000) | 1,000,000 | 0.29 | 0.01 | *0.03x* |
-| head(10) | 10,000,000 | 0.28 | 0.01 | *0.03x* |
-| head(100) | 10,000,000 | 0.28 | 0.01 | *0.03x* |
-| head(1000) | 10,000,000 | 0.28 | 0.01 | *0.03x* |
+| head(10) | 1,000,000 | 0.34 | 0.01 | *0.03x* |
+| head(100) | 1,000,000 | 0.33 | 0.01 | *0.02x* |
+| head(1000) | 1,000,000 | 0.37 | 0.01 | *0.02x* |
+| head(10) | 10,000,000 | 0.31 | 0.01 | *0.02x* |
+| head(100) | 10,000,000 | 0.29 | 0.01 | *0.02x* |
+| head(1000) | 10,000,000 | 0.30 | 0.01 | *0.02x* |
 
 ## Sort
 
 | Operation | Rows | Lazy Pandas (ms) | Polars (ms) | Speedup |
 |-----------|------|------------------|-------------|---------|
-| sort(value1) | 1,000,000 | 65.27 | 34.73 | *0.53x* |
-| sort(group[str], value1) | 1,000,000 | 113.92 | 82.47 | *0.72x* |
-| sort(int_val, value1) | 1,000,000 | 83.49 | 44.77 | *0.54x* |
-| sort(num_a) [numeric-only] | 1,000,000 | 29.53 | 22.59 | *0.76x* |
-| sort(key_int, num_a) [numeric-only] | 1,000,000 | 46.94 | 33.83 | *0.72x* |
-| sort(value1) | 10,000,000 | 803.28 | 435.54 | *0.54x* |
-| sort(group[str], value1) | 10,000,000 | 1284.24 | 1384.88 | **1.08x** |
-| sort(int_val, value1) | 10,000,000 | 1040.69 | 616.13 | *0.59x* |
-| sort(num_a) [numeric-only] | 10,000,000 | 306.44 | 298.89 | *0.98x* |
-| sort(key_int, num_a) [numeric-only] | 10,000,000 | 549.16 | 489.54 | *0.89x* |
+| sort(value1) | 1,000,000 | 80.44 | 44.35 | *0.55x* |
+| sort(group[str], value1) | 1,000,000 | 187.91 | 168.41 | *0.90x* |
+| sort(int_val, value1) | 1,000,000 | 129.68 | 87.21 | *0.67x* |
+| sort(num_a) [numeric-only] | 1,000,000 | 46.58 | 31.87 | *0.68x* |
+| sort(key_int, num_a) [numeric-only] | 1,000,000 | 73.60 | 48.89 | *0.66x* |
+| sort(value1) | 10,000,000 | 1233.68 | 470.49 | *0.38x* |
+| sort(group[str], value1) | 10,000,000 | 1714.21 | 1659.52 | *0.97x* |
+| sort(int_val, value1) | 10,000,000 | 1267.74 | 673.59 | *0.53x* |
+| sort(num_a) [numeric-only] | 10,000,000 | 337.33 | 311.87 | *0.92x* |
+| sort(key_int, num_a) [numeric-only] | 10,000,000 | 593.35 | 527.54 | *0.89x* |
 
 ## Join
 
 | Operation | Rows | Lazy Pandas (ms) | Polars (ms) | Speedup |
 |-----------|------|------------------|-------------|---------|
-| inner_join(1000000x100000) | 1,000,000 | 87.94 | 34.72 | *0.39x* |
-| left_join(1000000x100000) | 1,000,000 | 87.86 | 44.91 | *0.51x* |
-| inner_join(10000000x1000000) | 10,000,000 | 1769.32 | 539.22 | *0.30x* |
-| left_join(10000000x1000000) | 10,000,000 | 1619.61 | 645.71 | *0.40x* |
+| inner_join(1000000x100000) | 1,000,000 | 248.83 | 73.27 | *0.29x* |
+| left_join(1000000x100000) | 1,000,000 | 176.46 | 96.94 | *0.55x* |
+| inner_join(10000000x1000000) | 10,000,000 | 2157.16 | 668.05 | *0.31x* |
+| left_join(10000000x1000000) | 10,000,000 | 2089.87 | 734.54 | *0.35x* |
 
 ## Parquet Scan
 
 | Operation | Rows | Lazy Pandas (ms) | Polars (ms) | Speedup |
 |-----------|------|------------------|-------------|---------|
-| scan.filter.head(1000) | 2,964,624 | 50.96 | 34.94 | *0.69x* |
-| scan.select(3).filter | 2,964,624 | 18.38 | 7.72 | *0.42x* |
-| glob_scan.head(1000) | 17,787,744 | 6.56 | 10.87 | **1.66x** |
+| scan.filter.head(1000) | 2,964,624 | 64.51 | 39.42 | *0.61x* |
+| scan.select(3).filter | 2,964,624 | 19.19 | 7.87 | *0.41x* |
+| glob_scan.head(1000) | 17,787,744 | 7.41 | 10.70 | **1.44x** |
 
 ## Engine Pipeline
 
 | Operation | Rows | Lazy Pandas (ms) | Polars (ms) | Speedup |
 |-----------|------|------------------|-------------|---------|
-| groupby(category-dtype key).sum | 1,000,000 | 7.12 | 1.50 | *0.21x* |
-| join -> groupby | 1,000,000 | 55.75 | 28.72 | *0.52x* |
-| groupby(category-dtype key).sum | 10,000,000 | 20.77 | 9.09 | *0.44x* |
-| join -> groupby | 10,000,000 | 830.12 | 429.10 | *0.52x* |
+| groupby(category-dtype key).sum | 1,000,000 | 7.52 | 1.32 | *0.18x* |
+| join -> groupby | 1,000,000 | 58.86 | 31.45 | *0.53x* |
+| groupby(category-dtype key).sum | 10,000,000 | 21.44 | 9.73 | *0.45x* |
+| join -> groupby | 10,000,000 | 927.32 | 545.28 | *0.59x* |
 
 ## Key Findings
 
 ### Where Lazy Pandas is Faster
 
-- **with_columns(text.lower())** (string): 5.93x faster
-- **with_columns(text.lower())** (string): 4.91x faster
-- **groupby(group).agg(sum, mean, max, count)** (aggregation): 3.06x faster
-- **glob_scan.head(1000)** (parquet_scan): 1.66x faster
-- **filter(text.contains('foo'))** (string): 1.51x faster
+- **groupby(group).agg(sum, mean, max, count)** (aggregation): 4.66x faster
+- **with_columns(text.lower())** (string): 3.61x faster
+- **with_columns(text.lower())** (string): 3.37x faster
+- **filter(val1>0 AND int_val<500).select(count)** (filter_project): 2.29x faster
+- **glob_scan.head(1000)** (parquet_scan): 1.44x faster
 
 ### Where Polars is Faster
 
-- **head(100)** (limit): 39.96x faster
-- **head(1000)** (limit): 39.11x faster
-- **head(1000)** (limit): 38.82x faster
-- **head(100)** (limit): 38.58x faster
-- **head(10)** (limit): 37.76x faster
+- **head(1000)** (limit): 45.03x faster
+- **head(100)** (limit): 44.59x faster
+- **head(1000)** (limit): 41.88x faster
+- **head(100)** (limit): 41.12x faster
+- **head(10)** (limit): 40.13x faster
