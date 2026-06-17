@@ -8,6 +8,20 @@ landed). Dated performance reports live in `../benchmarks/`.
 
 ## Competitive Standing (vs Polars, June 2026 — engine era)
 
+> **Refreshed 2026-06-16 (post plumbing-harvest session).** SF-3 TPC-H S1
+> geo-mean **~0.42x** (run-to-run 0.42–0.45x; machine loaded), all 22 exact;
+> q6 the lone outright win (1.18x). This session shipped filter→scalar-agg
+> fusion (`filter().select(count)` **2.17x**, `select(sum(v1*v2))` **1.36x**
+> at 10M — now tracked scorecard rows), the narrow-inner-join kernel (1.23x),
+> and an optimizer-dispatch fix (−10% per-collect fixed overhead). These are
+> real but **do not move the TPC-H geo-mean** — it is gated by the
+> join/aggregate-heavy queries (q20 0.16x, q21 0.27x, q10 0.30x, q3 0.38x).
+> Closing those is the next campaign (#1), framed in
+> [FUSION_GAP_DESIGN_SEED.md](FUSION_GAP_DESIGN_SEED.md): locate and close
+> the residual gap in the *already* morsel-driven engine (M1–M6), not a
+> rewrite. Disproven this session (don't repeat): Acero general routing and
+> arrow-across-join (both materialization-boundary losses).
+
 Two benchmarks: the **H2O db-benchmark** (`../benchmarks/H2O_BENCHMARK.md`) is
 the authoritative cross-engine standard (group-by + join, same harness as
 Polars/DuckDB) — there lazy pandas now **supports all 10 group-by and all 5
