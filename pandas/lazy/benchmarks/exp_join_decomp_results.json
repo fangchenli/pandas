@@ -1,0 +1,226 @@
+[
+  {
+    "engine": "pd_merge",
+    "threads": 1,
+    "shape": "exploding",
+    "n": 1000000,
+    "ms": 81.74241706728935
+  },
+  {
+    "engine": "pd_merge",
+    "threads": 1,
+    "shape": "selective",
+    "n": 1000000,
+    "ms": 30.496624996885657
+  },
+  {
+    "engine": "pd_merge",
+    "threads": 1,
+    "shape": "exploding",
+    "n": 10000000,
+    "ms": 1161.6455831099302
+  },
+  {
+    "engine": "pd_merge",
+    "threads": 1,
+    "shape": "selective",
+    "n": 10000000,
+    "ms": 777.7702090097591
+  },
+  {
+    "engine": "cython",
+    "threads": 1,
+    "shape": "exploding",
+    "n": 1000000,
+    "ms": 59.20766608323902
+  },
+  {
+    "engine": "cython",
+    "threads": 1,
+    "shape": "selective",
+    "n": 1000000,
+    "ms": 67.67079094424844
+  },
+  {
+    "engine": "cython",
+    "threads": 1,
+    "shape": "exploding",
+    "n": 10000000,
+    "ms": 1157.1412079501897
+  },
+  {
+    "engine": "cython",
+    "threads": 1,
+    "shape": "selective",
+    "n": 10000000,
+    "ms": 755.487542017363
+  },
+  {
+    "engine": "cython",
+    "threads": 8,
+    "shape": "exploding",
+    "n": 1000000,
+    "ms": 39.51174998655915
+  },
+  {
+    "engine": "cython",
+    "threads": 8,
+    "shape": "selective",
+    "n": 1000000,
+    "ms": 49.110667081549764
+  },
+  {
+    "engine": "cython",
+    "threads": 8,
+    "shape": "exploding",
+    "n": 10000000,
+    "ms": 598.3008330222219
+  },
+  {
+    "engine": "cython",
+    "threads": 8,
+    "shape": "selective",
+    "n": 10000000,
+    "ms": 600.8812920190394
+  },
+  {
+    "engine": "acero",
+    "threads": 1,
+    "shape": "exploding",
+    "n": 1000000,
+    "ms": 81.35283400770277
+  },
+  {
+    "engine": "acero",
+    "threads": 1,
+    "shape": "selective",
+    "n": 1000000,
+    "ms": 79.68454097863287
+  },
+  {
+    "engine": "acero",
+    "threads": 1,
+    "shape": "exploding",
+    "n": 10000000,
+    "ms": 1000.3063749754801
+  },
+  {
+    "engine": "acero",
+    "threads": 1,
+    "shape": "selective",
+    "n": 10000000,
+    "ms": 1025.9806660469621
+  },
+  {
+    "engine": "acero",
+    "threads": 8,
+    "shape": "exploding",
+    "n": 1000000,
+    "ms": 17.36612501554191
+  },
+  {
+    "engine": "acero",
+    "threads": 8,
+    "shape": "selective",
+    "n": 1000000,
+    "ms": 24.197958991862833
+  },
+  {
+    "engine": "acero",
+    "threads": 8,
+    "shape": "exploding",
+    "n": 10000000,
+    "ms": 229.262207983993
+  },
+  {
+    "engine": "acero",
+    "threads": 8,
+    "shape": "selective",
+    "n": 10000000,
+    "ms": 415.92620802111924
+  },
+  {
+    "engine": "lp",
+    "threads": 1,
+    "shape": "exploding",
+    "n": 1000000,
+    "ms": 91.51633293367922
+  },
+  {
+    "engine": "lp",
+    "threads": 1,
+    "shape": "selective",
+    "n": 1000000,
+    "ms": 28.521833010017872
+  },
+  {
+    "engine": "lp",
+    "threads": 1,
+    "shape": "exploding",
+    "n": 10000000,
+    "ms": 1303.0992089770734
+  },
+  {
+    "engine": "lp",
+    "threads": 1,
+    "shape": "selective",
+    "n": 10000000,
+    "ms": 800.4774999571964
+  },
+  {
+    "engine": "polars",
+    "threads": 1,
+    "shape": "exploding",
+    "n": 1000000,
+    "ms": 79.66000004671514
+  },
+  {
+    "engine": "polars",
+    "threads": 1,
+    "shape": "selective",
+    "n": 1000000,
+    "ms": 50.376542028971016
+  },
+  {
+    "engine": "polars",
+    "threads": 1,
+    "shape": "exploding",
+    "n": 10000000,
+    "ms": 1298.7174580339342
+  },
+  {
+    "engine": "polars",
+    "threads": 1,
+    "shape": "selective",
+    "n": 10000000,
+    "ms": 908.2968749571592
+  },
+  {
+    "engine": "polars",
+    "threads": 8,
+    "shape": "exploding",
+    "n": 1000000,
+    "ms": 43.360917014069855
+  },
+  {
+    "engine": "polars",
+    "threads": 8,
+    "shape": "selective",
+    "n": 1000000,
+    "ms": 26.591166970320046
+  },
+  {
+    "engine": "polars",
+    "threads": 8,
+    "shape": "exploding",
+    "n": 10000000,
+    "ms": 760.538584087044
+  },
+  {
+    "engine": "polars",
+    "threads": 8,
+    "shape": "selective",
+    "n": 10000000,
+    "ms": 348.5464589903131
+  }
+]

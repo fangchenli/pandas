@@ -134,3 +134,58 @@ This reorders the priorities honestly:
 Polars**). Now tracked as three `filter_project` rows in `bench_vs_polars.py`
 and guarded by `tests/lazy/test_fused_agg.py::TestScalarAggSelectFusion`. At
 1M the ~1.5ms framework fixed overhead caps the ratio (finding #3, separate).
+
+---
+
+# Part II — the join gap (0.30x), same disease (June 2026)
+
+Follow-on decomposition of the largest single category loss, the inner join
+(`inner_join(10M x 1M)` 0.30x — and the dominant cost in TPC-H). Harness:
+[`benchmarks/exp_join_decomp.py`](../benchmarks/exp_join_decomp.py); raw
+numbers `benchmarks/exp_join_decomp_results.json`. Bench shape is *exploding*:
+left=10M, right=1M, 100k keys → ~100M output rows.
+
+## The matrix (inner join, 10M exploding, ms, best of 5, NCPU=8)
+
+| pd_merge | cyth_1 | cyth_8 | acero_1 | acero_8 | lp (engine) | polars_1 | polars_8 |
+|---|---|---|---|---|---|---|---|
+| 1162 | 1157 | **598** | 1000 | **229** | 1303 | 1299 | 760 |
+
+## Findings
+
+1. **Our engine bails to single-threaded `pd.merge` on every large join.**
+   `_try_cython_join` had a blanket `min(sides) > 500_000 → return None`
+   build bail, so all large joins (the costly ones) used `pd.merge` (1162ms,
+   single-threaded) — that *is* the 0.30x.
+2. **Acero's hash join is fastest in isolation (229ms, 3.3x over Polars) but
+   the win dies at the materialization boundary.** Returning to NumPy
+   (`to_numpy()` on the ~100M-row output) costs ~435ms: acero+round-trip =
+   1044ms ≈ pd.merge 1128ms (1.08x). With arrow output kept, 608ms (1.85x).
+   This *confirms* the earlier H2O conclusion — acero only wins if the
+   pipeline stays Arrow across the join. Same lesson as Part I: the cost is
+   the boundary, not the kernel.
+3. **Our own threaded CSR kernel stays in NumPy and beats both** pd.merge
+   (1.9x) and Polars (1.27x) on the exploding shape — it was just switched
+   off by the cap.
+4. **But it loses on wide payloads.** Payload-width sweep (10M exploding):
+   3 gathered cols 2.33x, 9 cols 1.23x, 21 cols ~break-even — the per-column
+   gather of the exploded output overtakes pd.merge's consolidated block
+   take. A tight interleaved A/B confirmed TPC-H q7/q21 (lineitem joins,
+   moderate payload, high hit) regress ~2-6% if routed onto the kernel.
+
+## Fix landed (conservative, regression-free)
+
+Replace the blanket 500k size bail with payload-width gating in
+`_try_cython_join`: relax the bail **only** for very narrow joins
+(`n_gather <= 4`), where the kernel wins by a large unambiguous margin;
+everything wider keeps the *exact* original gate (500k bail + 0.5
+selectivity). Measured: narrow large inner join (the scorecard's
+`inner_join` shape, n_gather=3) `pd.merge 1251ms → kernel 1017ms` (1.23x,
+min-time), exact vs `pd.merge`; TPC-H q7/q21 preserved within noise (interleaved
+A/B); all 22 validate; guarded by
+`tests/lazy/test_cython_join.py::TestPayloadAwareGate`.
+
+The bigger lever — large joins that aren't narrow — needs the engine to stay
+Arrow across the join (so acero's 1.85x lands without the round-trip), which
+is an architectural change, not a cap tweak. Recorded as the next join
+target.

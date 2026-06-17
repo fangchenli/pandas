@@ -318,3 +318,60 @@ class TestTwoKeyPackedJoin:
             }
         )
         self._check(left, right, on=["a", "b"])
+
+
+class TestPayloadAwareGate:
+    """The build-side bail is relaxed only for very narrow joins
+    (<=4 gathered columns), where the threaded CSR kernel beats pd.merge even
+    at large size; wider large joins keep the original pd.merge path so the
+    validated TPC-H join shapes do not regress.
+    See docs/MATERIALIZATION_EXPERIMENT.md (joins section).
+    """
+
+    def _run(self, left, right, **jkw):
+        """Return (kernel_used, phys, eager). physical.py imports the indexer
+        function-locally, so spying the module attribute catches the call."""
+        import pandas.lazy.backends.numpy.join as J
+
+        calls = []
+        orig = J.inner_join_indexers_i8
+
+        def spy(*a, **k):
+            calls.append(1)
+            return orig(*a, **k)
+
+        J.inner_join_indexers_i8 = spy
+        try:
+            phys = (left.select().join(right.select(), **jkw)).collect(
+                use_physical_planner=True
+            )
+            eager = (left.select().join(right.select(), **jkw)).collect(
+                use_physical_planner=False
+            )
+        finally:
+            J.inner_join_indexers_i8 = orig
+        return bool(calls), phys, eager
+
+    def test_narrow_large_join_uses_kernel_and_matches(self, rng):
+        # Both sides > 500k, only 3 gathered columns -> kernel now engaged
+        # (the old min>500k bail would have sent this to pd.merge).
+        n = 600_000
+        left = pd.DataFrame({"k": np.arange(n), "v": rng.standard_normal(n)})
+        right = pd.DataFrame({"k": np.arange(n), "w": rng.standard_normal(n)})
+        used, phys, eager = self._run(left, right, on="k")
+        assert used  # narrow + large -> kernel
+        tm.assert_frame_equal(phys, eager)
+
+    def test_wide_large_join_stays_on_pd_merge(self, rng):
+        # Both sides > 500k but 11 gathered columns -> wide branch keeps the
+        # original 500k bail, so the kernel is NOT used (preserves TPC-H).
+        n = 600_000
+        left = pd.DataFrame(
+            {"k": np.arange(n), **{f"v{i}": rng.standard_normal(n) for i in range(5)}}
+        )
+        right = pd.DataFrame(
+            {"k": np.arange(n), **{f"w{i}": rng.standard_normal(n) for i in range(5)}}
+        )
+        used, phys, eager = self._run(left, right, on="k")
+        assert not used  # wide + large -> pd.merge preserved
+        tm.assert_frame_equal(phys, eager)

@@ -499,6 +499,21 @@ Tracked as three new `filter_project` scorecard rows + guarded by
 Action item (3) (mask-carrying generic pipeline for non-agg reductions) left
 as a note — not needed for the measured categories.
 
+**Join follow-on (June 2026, MATERIALIZATION_EXPERIMENT.md Part II)**: the
+0.30x inner-join gap is the same disease. The engine bailed every large join
+to single-threaded `pd.merge` (a blanket `min(sides)>500k` cap); acero's
+hash join is fastest in isolation (3.3x over Polars) but the win dies at the
+Arrow→NumPy round-trip (1044ms ≈ pd.merge), confirming the old H2O finding;
+our own threaded CSR kernel stays in NumPy and beats pd.merge 1.9x / Polars
+1.27x on the exploding shape but loses once payloads are wide (3 cols 2.33x,
+9 cols 1.23x, 21 cols break-even; TPC-H q7/q21 regress ~2-6% if routed).
+Fix landed (conservative): relax the size bail only for very narrow joins
+(`n_gather<=4`), keep the exact original gate otherwise — narrow large inner
+join 1.23x, TPC-H preserved, guarded by `TestPayloadAwareGate`. The larger
+lever (non-narrow large joins) needs the pipeline to stay Arrow across the
+join so acero's 1.85x lands without the round-trip — architectural, recorded
+as the next join target.
+
 ## N3 — PDEP: DEFERRED (decision, June 2026)
 
 Deliberate call after the scale campaign: the work would not land in

@@ -4661,17 +4661,26 @@ class PhysicalHashJoin(PhysicalPlan):
 
         from pandas.lazy.backends.numpy.join import inner_join_indexers_i8
 
-        # Selectivity cap: this path wins on selective joins (filtered probes
-        # hitting a fraction of rows — the dominant analytical shape). On
-        # high-hit joins the per-column gather of wide intermediates loses to
-        # pd.merge's consolidated block take (measured: q7 1.85x worse), so
-        # the driver bails after a sampled probe estimate.
-        cap = 0.5
-        # Build-side cap: when even the smaller side is large, the join is a
-        # big⋈big shape whose high hit-rate would bail at the sample screen
-        # anyway — skip before paying the hash build (~30 ms at 1.5M rows).
-        if min(len(lk64), len(rk64)) > 500_000:
-            return None
+        # Payload-width-aware gating (measured, benchmarks/exp_join_decomp.py).
+        # The threaded CSR probe stays in NumPy and beats pd.merge ~1.9-2.3x —
+        # and Polars ~1.3x — on *narrow* large high-fanout joins (3 gathered
+        # columns: 10M exploding 1303->965 ms end-to-end). But the per-column
+        # gather of an exploded *moderate* payload loses to pd.merge's
+        # consolidated block take, and a tight interleaved A/B showed TPC-H
+        # q7/q21 (lineitem joins, moderate payload, high hit) regress ~2-6%
+        # when routed onto the kernel. So relax the size bail ONLY for very
+        # narrow joins where the win is large and unambiguous; everything else
+        # keeps the original behavior exactly (no regression on the validated
+        # workload).
+        n_gather = len(left_cols) + sum(1 for n in right_cols if n not in shared)
+        NARROW_PAYLOAD = 4
+        if n_gather <= NARROW_PAYLOAD:
+            cap = None  # narrow: kernel wins at any size/selectivity
+        else:
+            # Wide: exact original gate (500k size bail + 0.5 selectivity).
+            if min(len(lk64), len(rk64)) > 500_000:
+                return None
+            cap = 0.5
         if len(rk64) <= 4 * len(lk64):
             # Natural direction: build right, probe left → pd.merge order.
             result = inner_join_indexers_i8(lk64, rk64, max_hit_fraction=cap)
