@@ -87,6 +87,51 @@ into the sink (the `can_preaggregate` path) instead of materializing. Measure
 controlled on/off, validate full lazy suite + all-22 TPC-H. Expected: q20
 `qty` ~57→~35ms; helps any `filter→group_by(sum/count/min/max)` query.
 
+## Fusion investigation (filter→groupby) — measured SF-3
+
+Probed the q20 `qty` shape (lineitem→filter(date)→group_by(2-key).sum) at SF-3
+(2.7M filtered rows → 1.6M groups, ~60% unique = very high cardinality).
+
+**Is there a native Arrow way?** Yes — Acero (`source→filter→hash_aggregate`
+streams batches, never fully materialising the filtered intermediate). But
+**measured it does NOT help**: numpy→Acero→numpy = 216ms vs our current
+materialize-then-group = 202ms (Acero slightly *slower*). Acero's per-node
+overhead + FilterNode per-batch compaction eat the streaming benefit —
+consistent with our prior Acero/arrow-across-join findings. **Acero is not the
+fusion path.**
+
+**Where the 92ms gap (202 ours vs 110 Polars) actually is** — isolated the
+grouped-sum on the pre-filtered set:
+
+| path | ms |
+|---|---|
+| our lazy grouped-sum | 139.8 |
+| raw Arrow `group_by` | 132.5 |
+| **Polars grouped-sum** | **92.9** |
+| eager pandas | 244.0 |
+
+So the gap splits ~50/50:
+- **~47ms = group kernel substrate.** We already match Arrow's `group_by`
+  (140≈132) — our routing is correct — but **Arrow's hash-aggregate is itself
+  ~1.5x slower than Polars'** on high cardinality. Closing this needs a
+  Polars-class parallel hash-aggregate kernel (a large build competing with
+  Arrow C++). Not a plumbing win.
+- **~45ms = filter→group materialization.** We compact the 2.7M filtered rows
+  (`Materialize (reason=aggregate)`) then group; Polars fuses, so its filter
+  adds only ~17ms on top of its group. **Root cause:** the in-memory scan has
+  `supports_streaming=False`, so the streaming pre-aggregate path
+  (`_can_stream_aggregation` / `_execute_streaming_aggregation`, which exists
+  for file/Concat sources) is skipped and the engine materializes. Recoverable
+  only by **engine-side morsel pre-aggregation for the in-memory source** (emit
+  filtered morsels that partial-aggregate into the group sink + merge) — Acero
+  does not deliver it.
+
+**Net:** even perfect fusion lands q20 `qty` at ~140–157ms (the Arrow group
+floor + ~17ms fused filter) vs Polars 110ms — i.e. ~0.16x → ~0.22–0.25x. The
+other half stays gated on the Arrow-vs-Polars group-kernel substrate gap. So
+q20 is **~half bounded-engine-fusion, ~half substrate** — neither a clean
+plumbing win; consistent with "substrate-bound ~0.45x."
+
 ## Constraints
 
 - Measurement-first; **measure in the mode the scorecard uses**
