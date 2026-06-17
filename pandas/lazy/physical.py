@@ -1925,6 +1925,76 @@ def _array_is_numeric(arr) -> bool:
     return False
 
 
+# Parallel partitioned grouped-aggregate (docs/PARALLEL_GROUPBY_SCOPE.md).
+# Arrow's Table.group_by is single-threaded but has the best serial hash-agg
+# kernel measured (2.4x Polars' serial). Polars wins high-cardinality group-bys
+# purely by parallelism. So: hash-partition rows by the group key so every group
+# lands wholly in one bucket, run Arrow's group_by on each bucket on its own
+# thread (pyarrow releases the GIL), then concat — no cross-bucket merge. Beats
+# Polars ~1.9x on q20's shape (52 vs 102 ms SF-3) and is bit-exact vs the single
+# Arrow group_by. Module toggle for controlled A/B.
+_PARALLEL_GROUPBY = True
+_PARALLEL_GROUPBY_BUCKETS = 16
+# Below this row count the partition + thread-spinup overhead outweighs the
+# parallel speedup; the single Arrow group_by stays faster.
+_PARALLEL_GROUPBY_MIN_ROWS = 300_000
+# Minimum sampled distinct-key ratio to go parallel: few groups => Arrow's
+# single group_by is already fast and partitioning is pure overhead.
+_PARALLEL_GROUPBY_MIN_RATIO = 0.15
+_GROUPBY_POOL = None
+
+
+def _groupby_pool():
+    """Shared thread pool for per-bucket Arrow group_by (created once)."""
+    global _GROUPBY_POOL
+    if _GROUPBY_POOL is None:
+        from concurrent.futures import ThreadPoolExecutor
+        import os
+
+        _GROUPBY_POOL = ThreadPoolExecutor(
+            max_workers=min(_PARALLEL_GROUPBY_BUCKETS, (os.cpu_count() or 4)),
+            thread_name_prefix="lazy-groupby",
+        )
+    return _GROUPBY_POOL
+
+
+def _partition_key_arrays(table, group_cols: list[str]):
+    """Extract the group-key columns as int64 numpy arrays for partitioning.
+
+    Returns a list of int64 arrays, or None if the keys are not cheaply packable
+    (non-integer/temporal dtype, or any nulls — fall back to single group_by).
+    """
+    arrays = []
+    for c in group_cols:
+        chunked = table.column(c)
+        if chunked.null_count:
+            return None
+        if isinstance(chunked, pa.ChunkedArray):
+            chunked = chunked.combine_chunks()
+        t = chunked.type
+        if not (pa.types.is_integer(t) or pa.types.is_temporal(t)):
+            return None
+        npv = chunked.to_numpy(zero_copy_only=False)
+        if npv.dtype.kind == "M":
+            iv = npv.view(np.int64)
+        else:
+            iv = npv.astype(np.int64, copy=False)
+        arrays.append(iv)
+    return arrays
+
+
+def _combine_partition_keys(key_arrays):
+    """Combine int64 key arrays into one uint64 partition key per row.
+
+    Collisions are harmless: a tuple always maps to one value, so a group never
+    splits across buckets; distinct tuples colliding only co-locate groups.
+    """
+    comb = key_arrays[0].astype(np.uint64)
+    for a in key_arrays[1:]:
+        comb = comb * np.uint64(1000003) + a.astype(np.uint64)
+    return comb
+
+
 def groupby_prefers_arrow(
     relevant_backends: set[str], all_numeric: bool, agg_funcs: set[str]
 ) -> bool:
@@ -2420,6 +2490,79 @@ class PhysicalHashAggregate(PhysicalPlan):
                     total += int(getattr(arr, "nbytes", 0))
         return total
 
+    def _grouped_arrow_table(self, table, group_cols, agg_specs):
+        """Run the Arrow group_by, parallel-partitioned when it pays off.
+
+        Returns the result ``pa.Table`` (group keys + aggregate columns), with
+        identical schema to the single ``group_by`` kernel either way. Falls
+        back to the single kernel on small inputs, non-packable keys, count-
+        distinct (Arrow's is slow; handled by the hybrid path), or any error.
+        """
+
+        def single():
+            return dispatch_kernel("group_by", "arrow", table, group_cols, agg_specs)
+
+        n_rows = table.num_rows
+        _nuniq = {"nunique", "n_unique", "count_distinct"}
+        if (
+            not _PARALLEL_GROUPBY
+            or n_rows < _PARALLEL_GROUPBY_MIN_ROWS
+            or any(f in _nuniq for _, _, f in agg_specs)
+        ):
+            return single()
+
+        key_arrays = _partition_key_arrays(table, group_cols)
+        if key_arrays is None:
+            return single()
+
+        # Cardinality gate FIRST, on a cheap strided sample — before building the
+        # full combined key. Parallel partitioning only pays with many groups;
+        # for few groups Arrow's single group_by is already fast and the full
+        # comb + partition would be pure overhead (the q1 low-card case).
+        n = len(key_arrays[0])
+        step = max(1, n // 8192)
+        samp = _combine_partition_keys([a[::step] for a in key_arrays])
+        if len(np.unique(samp)) / len(samp) < _PARALLEL_GROUPBY_MIN_RATIO:
+            return single()
+
+        try:
+            from pandas._libs.lazy_groupby import partition_by_key
+
+            comb = _combine_partition_keys(key_arrays)
+
+            # Narrow to just the columns group_by touches before the per-bucket
+            # take — otherwise wide (post-join) inputs pay to copy every payload
+            # column into each of the T buckets (the q17/q18 regression).
+            needed = list(dict.fromkeys(group_cols + [c for _, c, _ in agg_specs]))
+            if len(needed) < table.num_columns:
+                table = table.select(needed)
+
+            t_buckets = _PARALLEL_GROUPBY_BUCKETS
+            perm, off = partition_by_key(np.ascontiguousarray(comb), t_buckets)
+            perm_pa = pa.array(perm)
+
+            def _bucket(i):
+                lo = int(off[i])
+                hi = int(off[i + 1])
+                if hi == lo:
+                    return None
+                sub = table.take(perm_pa[lo:hi])
+                return dispatch_kernel("group_by", "arrow", sub, group_cols, agg_specs)
+
+            parts = [
+                p
+                for p in _groupby_pool().map(_bucket, range(t_buckets))
+                if p is not None and p.num_rows
+            ]
+            if not parts:
+                return single()
+            # Groups are disjoint across buckets, so a plain concat is the full
+            # result — no re-aggregation/merge needed.
+            return pa.concat_tables(parts)
+        except Exception:
+            # Any failure (kernel, take, concat) must not change results.
+            return single()
+
     def _execute_arrow_table_groupby(
         self,
         input_arrays: ArrayDict,
@@ -2452,10 +2595,9 @@ class PhysicalHashAggregate(PhysicalPlan):
         columns = {k: v for k, v in input_arrays.items() if not is_index_col(k)}
         table = pa.table(columns)
 
-        # Execute groupby using Arrow's native group_by
-        result_table = dispatch_kernel(
-            "group_by", "arrow", table, group_cols, agg_specs
-        )
+        # Execute groupby using Arrow's native group_by (single-threaded), or the
+        # parallel partitioned path on large high-cardinality inputs.
+        result_table = self._grouped_arrow_table(table, group_cols, agg_specs)
 
         # Convert result table back to ArrayDict
         # Combine chunks for consistency (Table.column returns ChunkedArray)

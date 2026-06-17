@@ -1328,3 +1328,142 @@ class TestCollectDoesNotAliasSource:
         snapshot = res.copy(deep=True)
         src.iloc[:, src.columns.get_loc("a")] = 123.0
         tm.assert_frame_equal(res, snapshot)
+
+
+class TestParallelPartitionedGroupBy:
+    """Regression tests for the parallel partitioned hash-aggregate path
+    (pandas._libs.lazy_groupby + PhysicalHashAggregate._grouped_arrow_table).
+
+    The parallel path hash-partitions rows by group key so each group lands
+    wholly in one bucket, runs Arrow's group_by per bucket on a thread pool,
+    and concatenates. It must be bit-exact vs the single Arrow group_by.
+    """
+
+    def test_partition_by_key_is_valid_partition(self):
+        # Permutation must be a bijection and every key value must land in a
+        # single bucket (else groups split and the concat is wrong).
+        from pandas._libs.lazy_groupby import partition_by_key
+
+        rng = np.random.default_rng(0)
+        keys = rng.integers(0, 5000, size=50_000).astype(np.uint64)
+        for n_buckets in (1, 2, 8, 16, 64):
+            perm, off = partition_by_key(keys, n_buckets)
+            assert off[0] == 0 and off[-1] == len(keys)
+            tm.assert_numpy_array_equal(
+                np.sort(perm), np.arange(len(keys), dtype=np.int64)
+            )
+            bucket_of: dict[int, int] = {}
+            for b in range(n_buckets):
+                for k in np.unique(keys[perm[off[b] : off[b + 1]]]):
+                    assert bucket_of.setdefault(int(k), b) == b
+
+    def test_partition_by_key_rejects_non_power_of_two(self):
+        from pandas._libs.lazy_groupby import partition_by_key
+
+        keys = np.arange(10, dtype=np.uint64)
+        for bad in (0, 3, 7, 100):
+            with pytest.raises(ValueError, match="power of two"):
+                partition_by_key(keys, bad)
+
+    @pytest.mark.parametrize(
+        "agg",
+        [
+            lambda c: c.sum(),
+            lambda c: c.mean(),
+            lambda c: c.min(),
+            lambda c: c.max(),
+            lambda c: c.count(),
+        ],
+    )
+    def test_parallel_matches_single_multikey(self, monkeypatch, agg):
+        # Force the parallel path on small data and assert bit-exact vs single.
+        import pandas.lazy.physical as P
+
+        monkeypatch.setattr(P, "_PARALLEL_GROUPBY_MIN_ROWS", 0)
+        monkeypatch.setattr(P, "_PARALLEL_GROUPBY_MIN_RATIO", 0.0)
+        monkeypatch.setattr(P, "_PARALLEL_GROUPBY_BUCKETS", 8)
+
+        rng = np.random.default_rng(1)
+        n = 20_000
+        df = pd.DataFrame(
+            {
+                "k0": rng.integers(0, 4000, n),
+                "k1": rng.integers(0, 50, n),
+                "v": rng.standard_normal(n),
+            }
+        )
+
+        def run():
+            return (
+                df.select()
+                .group_by("k0", "k1")
+                .agg(agg(col("v")).alias("r"))
+                .collect(use_physical_planner=True)
+                .sort_values(["k0", "k1"])
+                .reset_index(drop=True)
+            )
+
+        on = run()
+        monkeypatch.setattr(P, "_PARALLEL_GROUPBY", False)
+        off = run()
+        tm.assert_frame_equal(on, off)
+
+    def test_parallel_matches_single_datetime_key(self, monkeypatch):
+        # Temporal keys are packed via their int64 view; must stay bit-exact.
+        import pandas.lazy.physical as P
+
+        monkeypatch.setattr(P, "_PARALLEL_GROUPBY_MIN_ROWS", 0)
+        monkeypatch.setattr(P, "_PARALLEL_GROUPBY_MIN_RATIO", 0.0)
+        rng = np.random.default_rng(2)
+        n = 15_000
+        df = pd.DataFrame(
+            {
+                "d": pd.to_datetime("2024-01-01")
+                + pd.to_timedelta(rng.integers(0, 900, n), unit="D"),
+                "v": rng.integers(0, 100, n),
+            }
+        )
+
+        def run():
+            return (
+                df.select()
+                .group_by("d")
+                .agg(col("v").sum().alias("r"))
+                .collect(use_physical_planner=True)
+                .sort_values("d")
+                .reset_index(drop=True)
+            )
+
+        on = run()
+        monkeypatch.setattr(P, "_PARALLEL_GROUPBY", False)
+        tm.assert_frame_equal(on, run())
+
+    def test_string_keys_fall_back_to_single(self, monkeypatch):
+        # Non-packable (string) keys must fall back and still be correct.
+        import pandas.lazy.physical as P
+
+        monkeypatch.setattr(P, "_PARALLEL_GROUPBY_MIN_ROWS", 0)
+        monkeypatch.setattr(P, "_PARALLEL_GROUPBY_MIN_RATIO", 0.0)
+        rng = np.random.default_rng(3)
+        n = 12_000
+        df = pd.DataFrame(
+            {
+                "g": rng.choice(["a", "b", "c", "d"], n),
+                "v": rng.standard_normal(n),
+            }
+        )
+        res = (
+            df.select()
+            .group_by("g")
+            .agg(col("v").sum().alias("r"))
+            .collect(use_physical_planner=True)
+            .sort_values("g")
+            .reset_index(drop=True)
+        )
+        ref = (
+            df.groupby("g", sort=True)["v"]
+            .sum()
+            .reset_index()
+            .rename(columns={"v": "r"})
+        )
+        tm.assert_frame_equal(res, ref, check_dtype=False)
