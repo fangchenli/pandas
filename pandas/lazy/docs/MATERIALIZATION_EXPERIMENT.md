@@ -189,3 +189,51 @@ The bigger lever — large joins that aren't narrow — needs the engine to stay
 Arrow across the join (so acero's 1.85x lands without the round-trip), which
 is an architectural change, not a cap tweak. Recorded as the next join
 target.
+
+---
+
+# Part III — "arrow-across-join" via Acero: DISPROVEN for real queries (June 2026)
+
+Part II's open lever was "keep the pipeline in Arrow across the join so
+acero's 1.85x lands without the round-trip." Probed directly on a real
+join→groupby→topn query (TPC-H q3) with the whole join+filter+aggregate run
+in Acero, converting only the small grouped result back to pandas. Harness:
+[`benchmarks/probe_arrow_across_join.py`](../benchmarks/probe_arrow_across_join.py).
+
+## q3 SF-1 (validated vs DuckDB)
+
+| path | time | note |
+|---|---|---|
+| lp (our engine, pd.merge/NumPy) | **64.6 ms** | what we ship |
+| acero end-to-end (Arrow throughout) | 127.1 ms | 2x **slower** than lp |
+| acero joins only (no agg) | 116.7 ms | the joins alone exceed our whole query |
+| polars | **19.4 ms** | 3x faster than lp, 6x faster than acero |
+
+## Why the thesis fails
+
+- **Acero's join carries high per-node overhead that dominates at realistic
+  (filtered) scale.** The 229ms acero win in Part II was a *single
+  10M×1M exploding join in isolation*; q3's joins operate on filtered inputs
+  in a multi-node plan, where acero's setup cost per join makes the two
+  joins alone (117ms) slower than our entire pd.merge-based query (65ms).
+  The aggregate is only 8% of acero's time — it's the joins.
+- **Even a perfect arrow-across-join would not help**, because the best
+  available join substrate (acero) lands q3 at 127ms — *worse* than what we
+  ship and 6x behind Polars. There is nothing faster to borrow.
+- **Polars' q3 advantage is not the join substrate at all.** It is whole-query
+  fused, parallel execution (filters + joins + hash aggregate compiled
+  together, multi-core), not a faster individual join kernel we can route to.
+
+## Consequence for strategy
+
+The join lever is **not** "swap in a faster join substrate" — that path is a
+dead end (measured). Matching Polars on join-heavy queries would require
+*whole-pipeline operator fusion* across joins and aggregates (the Polars/
+DuckDB architecture), which is a major architectural undertaking, not a
+routing tweak — low ROI relative to the plumbing wins already harvested.
+
+So the ranked next target flips back to **per-collect fixed overhead**
+(breadth: lifts every small-medium query, bounded by the pandas-output
+floor) — the remaining plumbing win that does not require an architectural
+rewrite. The narrow-inner-join kernel fix (Part II) stands as the safe,
+shippable join improvement; broader join parity is parked as architectural.

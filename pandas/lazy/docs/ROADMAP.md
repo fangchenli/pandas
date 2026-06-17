@@ -509,10 +509,20 @@ our own threaded CSR kernel stays in NumPy and beats pd.merge 1.9x / Polars
 9 cols 1.23x, 21 cols break-even; TPC-H q7/q21 regress ~2-6% if routed).
 Fix landed (conservative): relax the size bail only for very narrow joins
 (`n_gather<=4`), keep the exact original gate otherwise — narrow large inner
-join 1.23x, TPC-H preserved, guarded by `TestPayloadAwareGate`. The larger
-lever (non-narrow large joins) needs the pipeline to stay Arrow across the
-join so acero's 1.85x lands without the round-trip — architectural, recorded
-as the next join target.
+join 1.23x, TPC-H preserved, guarded by `TestPayloadAwareGate`.
+
+**"Arrow-across-join" DISPROVEN (Part III, probe_arrow_across_join.py)**: the
+proposed bigger lever — keep the pipeline Arrow across the join so acero's
+1.85x lands — fails on a real query. TPC-H q3 SF-1: lp (pd.merge) 65ms,
+acero end-to-end 127ms (2x *slower*; joins-only 117ms exceed our whole
+query), polars 19ms. Acero's per-join-node overhead dominates at realistic
+filtered scale (the 229ms acero win was a single massive isolated join), and
+even the best join substrate lands q3 *worse* than what we ship — Polars'
+q3 win is whole-query fused parallel execution, not a borrowable join
+kernel. So join parity needs whole-pipeline operator fusion (Polars/DuckDB
+architecture), a major rewrite, not a routing tweak — parked. Next plumbing
+target reverts to per-collect fixed overhead (breadth, bounded by the
+pandas-output floor).
 
 ## N3 — PDEP: DEFERRED (decision, June 2026)
 
