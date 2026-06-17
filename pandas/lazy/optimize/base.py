@@ -18,6 +18,43 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from pandas.lazy.plan import LogicalPlan
 
+# Built once on first dispatch (function-local import keeps the module-load
+# order cycle-free: plan.py imports optimize only function-locally).
+_DISPATCH_TABLE: dict[type, str] | None = None
+
+
+def _dispatch_table() -> dict[type, str]:
+    global _DISPATCH_TABLE
+    if _DISPATCH_TABLE is None:
+        from pandas.lazy.plan import (
+            Aggregate,
+            Convert,
+            DataFrameSource,
+            Distinct,
+            Filter,
+            GroupByHead,
+            Join,
+            Limit,
+            Project,
+            Sort,
+            TopK,
+        )
+
+        _DISPATCH_TABLE = {
+            DataFrameSource: "visit_source",
+            Project: "visit_project",
+            Filter: "visit_filter",
+            Aggregate: "visit_aggregate",
+            Sort: "visit_sort",
+            Limit: "visit_limit",
+            Distinct: "visit_distinct",
+            GroupByHead: "visit_group_by_head",
+            Join: "visit_join",
+            TopK: "visit_topk",
+            Convert: "visit_convert",
+        }
+    return _DISPATCH_TABLE
+
 
 class OptimizationPass(ABC):
     """Base class for optimization passes."""
@@ -98,44 +135,16 @@ class PlanVisitor(OptimizationPass):
         return result
 
     def _dispatch(self, plan: LogicalPlan) -> LogicalPlan:
-        # Import here to avoid circular imports
-        from pandas.lazy.plan import (
-            Aggregate,
-            DataFrameSource,
-            Distinct,
-            Filter,
-            GroupByHead,
-            Join,
-            Limit,
-            Project,
-            Sort,
-            TopK,
-        )
-
-        # Dispatch based on node type
-        if isinstance(plan, DataFrameSource):
-            return self.visit_source(plan)
-        elif isinstance(plan, Project):
-            return self.visit_project(plan)
-        elif isinstance(plan, Filter):
-            return self.visit_filter(plan)
-        elif isinstance(plan, Aggregate):
-            return self.visit_aggregate(plan)
-        elif isinstance(plan, Sort):
-            return self.visit_sort(plan)
-        elif isinstance(plan, Limit):
-            return self.visit_limit(plan)
-        elif isinstance(plan, Distinct):
-            return self.visit_distinct(plan)
-        elif isinstance(plan, GroupByHead):
-            return self.visit_group_by_head(plan)
-        elif isinstance(plan, Join):
-            return self.visit_join(plan)
-        elif isinstance(plan, TopK):
-            return self.visit_topk(plan)
-        else:
-            # Handle Convert and any other node types
-            return self._visit_default(plan)
+        # Exact-type -> visit-method dispatch, built once and cached. All plan
+        # nodes subclass LogicalPlan directly (no inter-node inheritance), so an
+        # exact type() lookup is correct and avoids both the per-call import and
+        # the linear isinstance chain that dominated trivial-query collect()
+        # overhead (see docs/MATERIALIZATION_EXPERIMENT.md Part IV). getattr
+        # resolves the (possibly subclass-overridden) visit_* method at runtime.
+        method = _dispatch_table().get(type(plan))
+        if method is None:
+            return self._visit_default(plan)  # Convert / unknown
+        return getattr(self, method)(plan)
 
     def _visit_default(self, plan: LogicalPlan) -> LogicalPlan:
         """
@@ -159,74 +168,74 @@ class PlanVisitor(OptimizationPass):
 
     def visit_project(self, plan) -> LogicalPlan:
         """Visit a Project node. Default: recurse into input."""
-        from pandas.lazy.plan import Project
-
         new_input = self.visit(plan.input)
         if new_input is not plan.input:
+            from pandas.lazy.plan import Project
+
             return Project(new_input, plan.exprs)
         return plan
 
     def visit_filter(self, plan) -> LogicalPlan:
         """Visit a Filter node. Default: recurse into input."""
-        from pandas.lazy.plan import Filter
-
         new_input = self.visit(plan.input)
         if new_input is not plan.input:
+            from pandas.lazy.plan import Filter
+
             return Filter(new_input, plan.predicate)
         return plan
 
     def visit_aggregate(self, plan) -> LogicalPlan:
         """Visit an Aggregate node. Default: recurse into input."""
-        from pandas.lazy.plan import Aggregate
-
         new_input = self.visit(plan.input)
         if new_input is not plan.input:
+            from pandas.lazy.plan import Aggregate
+
             return Aggregate(new_input, plan.group_by, plan.agg_exprs)
         return plan
 
     def visit_sort(self, plan) -> LogicalPlan:
         """Visit a Sort node. Default: recurse into input."""
-        from pandas.lazy.plan import Sort
-
         new_input = self.visit(plan.input)
         if new_input is not plan.input:
+            from pandas.lazy.plan import Sort
+
             return Sort(new_input, plan.by, plan.descending)
         return plan
 
     def visit_limit(self, plan) -> LogicalPlan:
         """Visit a Limit node. Default: recurse into input."""
-        from pandas.lazy.plan import Limit
-
         new_input = self.visit(plan.input)
         if new_input is not plan.input:
+            from pandas.lazy.plan import Limit
+
             return Limit(new_input, plan.n, plan.offset)
         return plan
 
     def visit_distinct(self, plan) -> LogicalPlan:
         """Visit a Distinct node. Default: recurse into input."""
-        from pandas.lazy.plan import Distinct
-
         new_input = self.visit(plan.input)
         if new_input is not plan.input:
+            from pandas.lazy.plan import Distinct
+
             return Distinct(new_input, plan.subset)
         return plan
 
     def visit_group_by_head(self, plan) -> LogicalPlan:
         """Visit a GroupByHead node. Default: recurse into input."""
-        from pandas.lazy.plan import GroupByHead
-
         new_input = self.visit(plan.input)
         if new_input is not plan.input:
+            from pandas.lazy.plan import GroupByHead
+
             return GroupByHead(new_input, plan.group_by, plan.n)
         return plan
 
     def visit_join(self, plan) -> LogicalPlan:
         """Visit a Join node. Default: recurse into both inputs."""
-        from pandas.lazy.plan import Join
-
         new_left = self.visit(plan.left)
         new_right = self.visit(plan.right)
         if new_left is not plan.left or new_right is not plan.right:
+            from pandas.lazy.plan import Join
+
             return Join(
                 new_left,
                 new_right,
@@ -240,19 +249,19 @@ class PlanVisitor(OptimizationPass):
 
     def visit_topk(self, plan) -> LogicalPlan:
         """Visit a TopK node. Default: recurse into input."""
-        from pandas.lazy.plan import TopK
-
         new_input = self.visit(plan.input)
         if new_input is not plan.input:
+            from pandas.lazy.plan import TopK
+
             return TopK(new_input, plan.k, plan.by, plan.descending)
         return plan
 
     def visit_convert(self, plan) -> LogicalPlan:
         """Visit a Convert node. Default: recurse into input."""
-        from pandas.lazy.plan import Convert
-
         new_input = self.visit(plan.input)
         if new_input is not plan.input:
+            from pandas.lazy.plan import Convert
+
             return Convert(new_input, plan.target_backend)
         return plan
 

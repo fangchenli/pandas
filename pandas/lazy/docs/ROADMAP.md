@@ -524,6 +524,17 @@ architecture), a major rewrite, not a routing tweak — parked. Next plumbing
 target reverts to per-collect fixed overhead (breadth, bounded by the
 pandas-output floor).
 
+**Per-collect overhead probed + partial fix (Part IV)**: fixed cost at 1000
+rows lp 283µs vs polars 23µs (12x). cProfile pinned the optimizer visitor
+dispatch (per-call plan import + isinstance chain), source per-column
+extraction, and output DataFrame construction. Landed: cached
+`type->visit-method` dispatch table + deferred default `visit_*` imports in
+`optimize/base.py` — optimize 117→92µs (-21%), collect 283→256µs (-10%);
+1701 tests + 22 TPC-H green. Floor is high: remaining halves are source
+column-pruning (planner change, deferred) and pandas-output construction
+(structurally irreducible without a non-pandas return type — public API,
+out of scope). Per-collect is a bounded lever, not a Polars-class step.
+
 ## N3 — PDEP: DEFERRED (decision, June 2026)
 
 Deliberate call after the scale campaign: the work would not land in

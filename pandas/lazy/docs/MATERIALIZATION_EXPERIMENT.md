@@ -237,3 +237,55 @@ So the ranked next target flips back to **per-collect fixed overhead**
 floor) — the remaining plumbing win that does not require an architectural
 rewrite. The narrow-inner-join kernel fix (Part II) stands as the safe,
 shippable join improvement; broader join parity is parked as architectural.
+
+---
+
+# Part IV — per-collect fixed overhead (June 2026)
+
+The breadth target from Part III: the fixed cost paid per `collect()`
+regardless of data size, which caps every small-medium query. Profiled on a
+1000-row frame (data cost ≈ 0, so the residual *is* the fixed overhead).
+
+## Baseline (1000 rows, best-of-N, µs)
+
+| phase | time | note |
+|---|---|---|
+| optimize only | 117 | 12 passes over a 3-node plan |
+| optimize + plan | 141 | planning adds ~24 |
+| full collect (lp) | 283 | |
+| polars collect | 23 | 12x faster |
+
+cProfile (self-time) hot spots: the optimizer **visitor dispatch** (a
+per-call `from pandas.lazy.plan import ...` plus a linear `isinstance`
+chain, ~33 dispatches/iter across the 12 passes); **source per-column
+extraction** (`df[col]`/`_ixs`, all columns incl. unneeded ones); and
+**output DataFrame construction** (`arrays_to_dataframe` + `DataFrame.__init__`
++ `Index.__new__`).
+
+## Fix landed (optimizer dispatch)
+
+Replaced the per-call import + isinstance chain in `PlanVisitor._dispatch`
+with a build-once cached `type -> visit-method` table (all plan nodes
+subclass `LogicalPlan` directly, so exact-type lookup is correct), and
+deferred every default `visit_*` import into the reconstruction branch so it
+only fires when a pass actually rewrites that node (not on the common
+unchanged path). Measured: optimize **117 → 92µs (-21%)**, full collect
+**283 → 256µs (-10%)**. 1701 lazy tests pass; all 22 TPC-H validate.
+
+## Honest floor
+
+Per-collect overhead has a high floor and yields ~10% per safe micro-opt,
+not a Polars-class step change. The remaining halves:
+- **Source extraction** still pulls *all* source columns (unneeded ones
+  extracted then dropped) — a column-pruning-at-source win, but at small N
+  it is per-column Python overhead (~µs each), not data movement; needs the
+  scan to carry a needed-columns set (planner change), deferred.
+- **Output DataFrame construction is largely irreducible** — we must return
+  a pandas DataFrame (BlockManager + Index), a cost Polars avoids by
+  returning a Polars frame. This is the structural floor under our
+  small-query ratio; closing it would mean an Arrow/lazy return type, a
+  public-API change out of scope here.
+
+So per-collect is a real but bounded lever: the optimizer-dispatch win is
+banked; the rest is either a planner change (source pruning) or an API
+change (non-pandas return), both larger than their payoff at this stage.
