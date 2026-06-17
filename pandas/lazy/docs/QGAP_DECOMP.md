@@ -132,6 +132,33 @@ other half stays gated on the Arrow-vs-Polars group-kernel substrate gap. So
 q20 is **~half bounded-engine-fusion, ~half substrate** — neither a clean
 plumbing win; consistent with "substrate-bound ~0.45x."
 
+### Engine-side streaming fusion — DISPROVEN for this shape (do not build)
+
+The engine already has a streaming aggregation path
+(`_execute_streaming_aggregation`) that **partial-aggregates each batch then
+merges** — but it's gated on `supports_streaming` (false for the in-memory
+source), which is why q20 materializes. Tested whether forcing that path would
+recover the ~45ms. It does the **opposite**: on q20's high-cardinality shape
+(1.6M groups / 2.7M rows ≈ few rows per group), partial-aggregate + merge =
+**245ms vs a single group_by's 134ms — ~2x SLOWER** (bs=64K and bs=500K both).
+Each batch's partial barely shrinks the data, so the merge is a second
+near-full group_by. **Building engine-side streaming fusion on this path would
+regress q20, not improve it.** It only helps *low*-cardinality groupbys.
+
+The only mechanism that captures the fusion half on high cardinality is a
+**custom fused mask→hash-aggregate kernel** (consume the filter mask + raw
+columns, build the group table in one pass, skipping masked rows — no
+compaction). But that competes head-on with Arrow's `group_by` (which we
+already match at ~132ms and which is itself 1.5x slower than Polars), so it is
+a substrate-class build for a ~45ms / one-query-shape payoff.
+
+**Conclusion: q20 is effectively substrate-bound.** Three fusion mechanisms
+tried and rejected by measurement — Acero (no help), streaming partial-merge
+(regresses), and the only viable one is a substrate-class kernel. No bounded
+engine change captures it. This is the same wall as count-distinct: under the
+correct execution mode, the residual TPC-H gap is the Arrow-vs-Polars kernel
+substrate, not engine plumbing.
+
 ## Constraints
 
 - Measurement-first; **measure in the mode the scorecard uses**
