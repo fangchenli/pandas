@@ -1,5 +1,20 @@
 # Scope: parallel partitioned hash-aggregate kernel (the substrate lever)
 
+> **STATUS: BUILT + shipped (2026-06-17, commit 97602ceec6).** Results matched
+> the scope: isolated kernel **52ms vs Polars 102ms (1.9x)** on q20's shape,
+> bit-exact vs the single Arrow group_by. Controlled per-query A/B (toggle
+> on/off): **q20 -16%, q17 -5%**, q1/q13/q18 within noise — no regressions.
+> All 22 TPC-H validate; 1710 lazy tests pass. `pandas/_libs/lazy_groupby.pyx`
+> (`partition_by_key`) + `PhysicalHashAggregate._grouped_arrow_table`. Two
+> regressions were caught and fixed during the build: wide post-join inputs
+> (narrow to key+value cols before the per-bucket take) and low-cardinality
+> overhead (sample-first distinct-ratio gate, before building the full key).
+> Note: full-query geo-mean impact is modest — the grouped aggregate is one
+> stage among joins/filters in most TPC-H queries — but it is a clean win on
+> grouped-aggregate-heavy work and the first lever measured to *beat* Polars.
+
+
+
 Feasibility-probed June 2026 (SF-3, q20's `qty` shape: 2.7M filtered rows →
 1.6M groups, very high cardinality). This is the **first concrete lever with a
 measured chance to beat Polars** on a core grouped-aggregate hot path.
