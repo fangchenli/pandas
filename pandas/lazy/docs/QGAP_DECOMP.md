@@ -1,93 +1,94 @@
 # #1 campaign — per-operator decomposition of the worst TPC-H queries
 
 Measurement session (June 2026), SF-1, machine loaded. Harness:
-`benchmarks/exp_qgap_decomp.py` (cumulative-prefix timing per stage) +
-isolated kernel microbenchmarks. This **localises** where q20/q21 lose before
-any build — the discipline that kept us from building Acero / arrow-across-join.
+`benchmarks/exp_qgap_decomp.py` + isolated microbenchmarks. Localises where
+q20/q21 lose before any build — the discipline that kept us from building
+Acero / arrow-across-join, and (this session) a count-distinct kernel we
+didn't need.
 
-> **Correction recorded in-line:** an early pass mis-attributed q20 to a numpy
-> groupby kernel that could be routed to Arrow ("Finding A"). That was an
-> apples-to-oranges error (full lazy pipeline incl. filter vs Arrow groupby on
-> pre-filtered rows). **The groupby already runs on Arrow** (`groupby[arrow]`
-> in the physical plan). Finding A is withdrawn. The corrected findings stand
-> below. Probing before building paid off again.
+## METHODOLOGY CORRECTION (read first)
 
-## Headline: the gap is the GROUP-BY AGGREGATE stage, not joins
+An earlier pass measured the lazy side with the **default `.collect()`**, which
+is **eager pandas** (`use_physical_planner=False`). The TPC-H scorecard runs
+`.collect(use_physical_planner=True)`. The two modes differ wildly, and the
+eager numbers sent the investigation down a wrong path (a "count-distinct
+kernel is 4.7x slow" finding that is an artifact). Example, q21 `n_unique`
+groupby, 6M rows:
 
-The seed doc (`FUSION_GAP_DESIGN_SEED.md`) hypothesised joins / cross-breaker
-fusion. **The measurement disproves that.** Both worst queries put their
-dominant cost in a grouped-aggregate stage; the join chains route fine (all
-reach `PhysicalJoinChainSink`, order-free composition) and are cheap
-(forest⋈partsupp = 9ms).
-
-## q20 (0.16x) — diffuse plumbing, no single kernel
-
-Dominant stage is `qty`
-(`filter + group_by(l_partkey,l_suppkey).agg(0.5*sum(l_quantity))`).
-Isolated (SF-1, lineitem 6M → 909K filtered, 543K output groups — very
-high-cardinality):
-
-| component | lazy ms | reference ms |
-|---|---|---|
-| filter + scan only (6M→909K, collect) | ~46 | polars whole query 35 |
-| groupby only (pre-filtered, collect) | ~57 | raw Arrow gb + build DF 31 / polars gb 25 |
-| **qty full (filter+gb+collect)** | **~105** | **polars 35 (3x)** |
-
-The groupby **already routes to Arrow**. Its ~26ms overhead over raw
-`pa.table(...).group_by()` is scan + sink/morsel machinery (output DataFrame
-build is only ~2ms). The filter+scan of 6M rows is ~46ms — alone it exceeds
-Polars' entire query. So q20's 3x is **diffuse**: ~half filter/scan, ~half
-groupby-sink overhead. Harvestable in pieces (~1.3x), but there is no clean
-4x and no wrong-kernel to swap.
-
-## q21 (0.27x) — grouped count-distinct: a real substrate kernel gap
-
-Dominant stages are two `n_unique` group-bys: `nsupp` on full lineitem
-**411ms lp vs 77ms pl (5.3x)** and `late_nsupp` incremental ~300ms vs 22ms.
-Join chain routes fine. Kernel isolation (6M rows, single-key count-distinct):
-
-| path | ms |
+| collect mode | ms |
 |---|---|
-| pandas Cython `nunique` (what we use today, the floor) | ~366 |
-| lazy full (scan+gb+collect) | ~402 |
-| Arrow `hash_count_distinct` | ~448 (slower) |
-| **Polars `n_unique`** | **~77** |
+| default `.collect()` (eager pandas) | ~383 |
+| `.collect(use_physical_planner=True)` (scorecard mode) | **~98** |
+| Polars | ~87 |
 
-We **already use the best pandas/Arrow path**; lazy ≈ the Cython floor. Polars
-is 4.7x faster with a parallel count-distinct kernel that neither pandas nor
-Arrow exposes. This is the single clean, high-value lever in the whole #1 gap.
+**Under the correct mode the n_unique kernel is at ~1.13x — essentially
+parity.** All numbers below are `use_physical_planner=True`.
 
-### Feasibility probe (de-risking, done)
+## Headline: the residual gap is CROSS-OPERATOR FUSION, not any single kernel
 
-Count-distinct is embarrassingly parallel if you hash-partition by group key
-(a group lands wholly in one partition). But a **naive Python-threaded**
-prototype floors at ~247ms (T=8), because:
-- the partition step (boolean-mask gather, T full passes) costs 109–135ms, and
-- the GIL + Python orchestration kill thread scaling (T=4→8 barely helps).
+Individual kernels are at/near Polars parity once measured in the right mode.
+The gap is **materialization between operators** + whole-pipeline parallelism —
+exactly the seed doc's candidate #1, and consistent with the standing
+"substrate-bound ~0.45x" positioning. There is **no single hot kernel to swap
+or build**; the count-distinct kernel idea is withdrawn (already parity).
 
-So parity needs a **nogil Cython kernel**: single-pass radix partition by key
-hash + per-partition factorise/dedup across threads, in the mold of
-`lazy_radix.pyx` / `lazy_join.pyx`. Idealised budget (T=8): ~30ms partition +
-~46ms parallel dedup ≈ ~76ms ≈ Polars. Real, buildable, but a multi-day kernel
-project with parity **likely 2–3x, possibly full** — not a plumbing harvest.
+### q20 (scorecard 0.16x) — filter→groupby is not fused
 
-## Campaign conclusion / recommendation
+Decomp: the gap is concentrated in the `qty` stage
+(`filter(date range) + group_by(l_partkey,l_suppkey).agg(0.5*sum)`); every
+stage after it is cheap (small joins, +5/+6/+11ms). Splitting `qty`:
 
-- **Joins / cross-breaker fusion: not the gap** (seed hypothesis disproven by
-  measurement). Don't build there.
-- **q20-class (grouped sum):** diffuse plumbing (filter/scan + sink overhead),
-  groupby already Arrow. Small harvestable wins only.
-- **q21-class (grouped count-distinct):** the one clean, high-value target — a
-  **parallel count-distinct Cython kernel**. Recurs across the suite (q21 ×2),
-  proven 4.7x headroom, infra precedent exists (lazy_radix/lazy_join). This is
-  the recommended next build, scoped as its own kernel project.
+| piece | lp ms | pl ms |
+|---|---|---|
+| filter only (proj 3 cols, 6M→909K) | ~21 | — |
+| grouped sum, **same data, no filter** | ~194 | ~178 |
+| **qty = filter + grouped sum** | ~57 | **~31** |
 
-## Constraints carried into any build
+The grouped-sum kernel itself is parity (194 vs 178). Polars does filter+gb in
+**one streaming pass** (~31ms ≈ our filter-alone). We **materialize the
+filtered 909K-row intermediate (~21ms) then group it (~36ms)** — the physical
+plan shows a `Materialize (reason=aggregate)` breaker between the fused-filter
+scan pipeline and the hash-aggregate sink. **Lever: stream filtered morsels
+directly into the group-by, eliminating that materialize.**
 
-- Measurement-first; controlled on/off; never ship unexplained regressions;
-  validate full lazy suite + all-22 TPC-H vs DuckDB after every change.
-- Group-by output order: Arrow `group_by` returns hash order, already
-  reconciled in `_execute_arrow_table_groupby`; any new kernel must match the
-  established groupby output contract (tests will gate this).
-- nunique stays off the Arrow path (Arrow count_distinct is slower — verified
-  pyarrow 23); the new kernel replaces the pandas-Cython hybrid path.
+### q21 (scorecard 0.27x) — whole-pipeline diffuse
+
+Full 472ms vs 215ms (~0.46x this run). Reliable per-stage signals:
+n_unique `nsupp` 97 vs 76 (1.27x), `late_nsupp` +28 vs +24 (parity). The
+cumulative-prefix join numbers blow up (438→789→1208ms) but are an **artifact**
+of the method — collecting a join prefix materializes a huge intermediate the
+full query never builds (note the large negative deltas once the downstream
+filter/limit re-enter: full query 472ms << the 1208ms prefix). So q21's ~2.2x
+is **spread thin across many join+groupby stages, each ~1.3x**, compounding —
+Polars fuses the whole pipeline and runs stages in parallel. No single stage
+dominates; no kernel to build.
+
+## Corrected campaign conclusion
+
+1. **Count-distinct kernel: not needed.** n_unique is ~parity under the real
+   execution mode. The "4.7x" was an eager-`.collect()` artifact. Withdrawn.
+2. **Joins: not the gap** (seed hypothesis still disproven; routing is fine).
+3. **The real lever is cross-operator fusion**, principally **filter→groupby
+   streaming fusion** (q20's clean, concentrated case): remove the
+   `Materialize (reason=aggregate)` breaker and feed filtered morsels straight
+   into the hash-aggregate sink. This is a bounded engine change (the engine
+   already has streaming aggregation infra — `can_preaggregate`,
+   `_execute_streaming_aggregation`), targeted at the breaker, not a rewrite.
+4. q21's residual is the broad whole-pipeline-fusion/parallelism gap — the
+   parked architectural item (Polars/DuckDB-style fused engine). Not a
+   single-change win.
+
+## Recommended next step
+
+Investigate **filter→groupby streaming fusion** for q20's shape: why the
+`Materialize (reason=aggregate)` breaker sits between the fused-filter scan
+pipeline and the group-by sink, and whether filtered morsels can pre-aggregate
+into the sink (the `can_preaggregate` path) instead of materializing. Measure
+controlled on/off, validate full lazy suite + all-22 TPC-H. Expected: q20
+`qty` ~57→~35ms; helps any `filter→group_by(sum/count/min/max)` query.
+
+## Constraints
+
+- Measurement-first; **measure in the mode the scorecard uses**
+  (`use_physical_planner=True`); controlled on/off; never ship unexplained
+  regressions; validate full lazy suite + all-22 TPC-H vs DuckDB.

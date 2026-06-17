@@ -6,6 +6,10 @@ per-stage cost. Also dumps the chosen physical plan so we can see which joins
 reached acero (M5) vs fell to single-threaded pd.merge, and where groupby /
 sort / distinct land.
 
+Lazy collects use ``use_physical_planner=True`` — the mode the TPC-H
+benchmark/scorecard actually runs (the default ``.collect()`` is eager pandas
+and gives misleading numbers; an earlier pass mismeasured this).
+
 Read-only measurement; SF-1 by default (disk-safe — no large spill). Run:
 
     python pandas/lazy/benchmarks/exp_qgap_decomp.py --sf 1 --query 21
@@ -129,13 +133,14 @@ def q20_lp_stages(t):
             .sort("s_name")
         )
 
+    c = {"use_physical_planner": True}
     return [
-        ("forest (filter part)", lambda: forest().collect()),
-        ("qty (filter+gb lineitem)", lambda: qty().collect()),
-        ("+ partsupp⋈forest", lambda: target_join1().collect()),
-        ("+ ⋈qty", lambda: target_join2().collect()),
-        ("+ filter+distinct→target", lambda: target().collect()),
-        ("+ supplier⋈nation⋈target+sort", lambda: final().collect()),
+        ("forest (filter part)", lambda: forest().collect(**c)),
+        ("qty (filter+gb lineitem)", lambda: qty().collect(**c)),
+        ("+ partsupp⋈forest", lambda: target_join1().collect(**c)),
+        ("+ ⋈qty", lambda: target_join2().collect(**c)),
+        ("+ filter+distinct→target", lambda: target().collect(**c)),
+        ("+ supplier⋈nation⋈target+sort", lambda: final().collect(**c)),
     ], final
 
 
@@ -262,17 +267,18 @@ def q21_lp_stages(t):
             .limit(100)
         )
 
+    c = {"use_physical_planner": True}
     return [
-        ("nsupp (gb n_unique)", lambda: nsupp().collect()),
-        ("late (filter lineitem)", lambda: late().collect()),
-        ("late_nsupp (gb n_unique)", lambda: late_nsupp().collect()),
-        ("late⋈orders", lambda: j1().collect()),
-        ("+ ⋈nsupp", lambda: j2().collect()),
-        ("+ ⋈late_nsupp", lambda: j3().collect()),
-        ("+ filter nsupp/late_nsupp", lambda: filt().collect()),
-        ("+ ⋈supplier", lambda: j4().collect()),
-        ("+ ⋈nation", lambda: j5().collect()),
-        ("+ gb count+sort+limit", lambda: final().collect()),
+        ("nsupp (gb n_unique)", lambda: nsupp().collect(**c)),
+        ("late (filter lineitem)", lambda: late().collect(**c)),
+        ("late_nsupp (gb n_unique)", lambda: late_nsupp().collect(**c)),
+        ("late⋈orders", lambda: j1().collect(**c)),
+        ("+ ⋈nsupp", lambda: j2().collect(**c)),
+        ("+ ⋈late_nsupp", lambda: j3().collect(**c)),
+        ("+ filter nsupp/late_nsupp", lambda: filt().collect(**c)),
+        ("+ ⋈supplier", lambda: j4().collect(**c)),
+        ("+ ⋈nation", lambda: j5().collect(**c)),
+        ("+ gb count+sort+limit", lambda: final().collect(**c)),
     ], final
 
 
