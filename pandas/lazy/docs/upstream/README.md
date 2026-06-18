@@ -11,10 +11,10 @@ doc** below that a fresh agent can execute end-to-end without prior context.
 
 | Feature | Gap | Status | Priority | Hand-off |
 |---|---|---|---|---|
-| AG4 | Acero string-key hash-agg 3.5–10× slower than dict-encoded | verified, draft ready, non-dup | **1** | `AG4-acero-string-key-hashing.md` |
-| AG1 | `take` segfaults on >2 GB int32-offset string | repro pending | 2 | `AG1-take-segfault.md` |
-| AG2 | `hash_aggregate` SIGABRT on >2 GB string keys | repro pending | 2 | `AG2-hashagg-abort.md` |
-| AG9 | Arrow `string_view` kernel coverage (contribution) | scoped (PR) | 3 | `AG9-string-view-kernels.md` |
+| AG4 | Acero string-key hash-agg 3.5–10× slower than dict-encoded | verified, **non-dup**, draft ready | **1** | `AG4-acero-string-key-hashing.md` |
+| AG1 | `take` segfaults on >2 GB int32-offset string | **dup → comment on #25822** | 2 | `AG1-take-segfault.md` |
+| AG2 | `hash_aggregate` SIGABRT on >2 GB string keys | **non-dup**, repro pending | 2 | `AG2-hashagg-abort.md` |
+| AG9 | Arrow `string_view` kernel coverage (contribution) | **in-flight upstream (#44336)** | 3 | `AG9-string-view-kernels.md` |
 | AG3 | `Table.group_by` parallelism (likely footgun) | verify-first | 4 | `AG3-table-groupby-parallelism.md` |
 | AG5 | Acero `count_distinct` slower than pandas Cython | needs bench | 5 | `AG5-count-distinct.md` |
 | AG6/7/8, E–H | Acero per-node overhead; Arrow↔NumPy boundary tax; Gandiva availability; pd.merge GIL; FT overhead; fused-expr; np.argsort | **not hand-off-ready** (characterization / needs scoping) | — | tracked in `../ARROW_GAPS.md` + `../PERF_CEILING.md` |

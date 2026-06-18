@@ -29,7 +29,9 @@ commits `e4825bbb74`/`6f4a9f4ae3`) — is in **`UPSTREAM_ISSUES.md` → Issue 2*
 
 ## Gates
 - [ ] Standalone repro built + SIGABRT confirmed on latest pyarrow.
-- [ ] Duplicate search recorded.
+- [x] Duplicate search done (2026-06-18) → **non-duplicate** (no existing report
+      of the acero hash_aggregate abort on >2 GB string keys). Re-skim before
+      filing in case something lands.
 - [ ] Human approval.
 
 ## Definition of done

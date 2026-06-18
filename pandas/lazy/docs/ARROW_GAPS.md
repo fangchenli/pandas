@@ -12,15 +12,38 @@ worked-around** (real, we route around it) · **observed**.
 
 | # | Gap | Status | Leverage | Source |
 |---|---|---|---|---|
-| AG1 | `take` **segfaults** on >2 GB int32-offset string data (should raise `ArrowInvalid`) | filed-track | high | upstream/UPSTREAM_ISSUES.md #1 |
-| AG2 | acero `hash_aggregate` **aborts (SIGABRT, uncatchable)** on >2 GB string keys | filed-track | high | upstream/UPSTREAM_ISSUES.md #2 |
+| AG1 | `take` **segfaults** on >2 GB int32-offset string data (should raise `ArrowInvalid`) | **dup → comment on #25822** | high | upstream/UPSTREAM_ISSUES.md #1 |
+| AG2 | acero `hash_aggregate` **aborts (SIGABRT, uncatchable)** on >2 GB string keys | non-dup, repro pending | high | upstream/UPSTREAM_ISSUES.md #2 |
 | AG3 | `Table.group_by()` on a **single Table doesn't parallelize** (no scaling 1→8 cores) | **needs-verification** | high (if real) | PARALLEL_GROUPBY_SCOPE.md |
 | AG4 | acero **raw-string key hashing 3.5–10x slower than dict-encoding** the same keys (and ~3.8x slower than Polars per-thread) | **VERIFIED (standalone)** | med-high | ENGINE_DESIGN.md M4; `benchmarks/bench_arrow_string_groupby.py` |
 | AG5 | acero `count_distinct` **slower than pandas' Cython** on high-cardinality | quantified / worked-around | med | QGAP_DECOMP.md |
 | AG6 | Acero **per-node overhead** — filter→reduce catastrophic, per-join-node overhead at filtered scale | quantified / worked-around | med | MATERIALIZATION_EXPERIMENT.md I & III |
 | AG7 | Acero join/agg wins **die at the Arrow→NumPy round-trip** (boundary tax) | quantified (structural) | high | MATERIALIZATION_EXPERIMENT.md II; PERF_CEILING.md |
 | AG8 | **Gandiva**: optional/often-unshipped pyarrow + **not wired into Acero** (expression codegen unavailable in practice) | observed | low-med | MATERIALIZATION_EXPERIMENT.md F4 (corrected below) |
-| AG9 | `string_view` **kernel coverage** (at-scale/string gains) | planned | high | upstream/STRING_VIEW_CONTRIBUTION_PLAN.md |
+| AG9 | `string_view` **kernel coverage** (at-scale/string gains) | **in-flight upstream (#44336)** | high | upstream/STRING_VIEW_CONTRIBUTION_PLAN.md |
+
+## Upstream duplicate-search results (apache/arrow, 2026-06-18)
+
+Searched issues **and** PRs across many phrasings (`gh api search/issues`):
+
+- **AG9 — already actively in-flight; do NOT file.** Umbrella **#44336 "[C++]
+  Binary View Compute Kernels" (open)** with open PRs **#50164** (view arrays in
+  selection kernels), **#50166** (cast-to-view null buffers), **#48734**
+  (eliminate Array boxing in scalar string kernels) and open sub-issues
+  **#43010** (STRING_VIEW/BINARY_VIEW in array_take/array_filter), **#46128**
+  (cast-to-StringView memory). Contribution = **join this effort** (re-scope to
+  an unaddressed kernel, engage on #44336), not a new issue.
+- **AG1 — effectively a duplicate.** **#25822 (open)** "[C++] Take kernel can't
+  handle ChunkedArrays that don't fit in an Array" is the same root limitation
+  (Take concatenates first, breaks past 2 GB). Our angle (it **segfaults**
+  rather than raising) is best added as a **comment + repro on #25822**, not a
+  new issue. Related open: #33049/#41890/#44164 (concat offset overflow),
+  #46814 (large-data segfault).
+- **AG2 — non-duplicate.** No existing report of the acero `hash_aggregate`
+  SIGABRT on >2 GB string keys.
+- **AG4 — non-duplicate** (issues + PRs). Only DataFusion #27498 (closed, Rust,
+  different angle).
+- **AG3 / AG5 / AG8 — no specific existing issue** (none is file-ready anyway).
 
 ## Two cross-doc contradictions, resolved
 
