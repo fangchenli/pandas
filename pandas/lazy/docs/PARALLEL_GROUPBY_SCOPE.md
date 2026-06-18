@@ -12,6 +12,17 @@
 > Note: full-query geo-mean impact is modest — the grouped aggregate is one
 > stage among joins/filters in most TPC-H queries — but it is a clean win on
 > grouped-aggregate-heavy work and the first lever measured to *beat* Polars.
+>
+> **Reach (SF-3, measured 2026-06-17):** 6 of 22 queries hit the parallel path
+> (q2, q13, q15, q17, q18, q20 — those with high-cardinality, packable-key,
+> non-nunique grouped aggregates). **q17 is the standout: -20% consistently,
+> even on a loaded machine.** The win is *parallelism*, so its size depends on
+> free cores: on an idle/dedicated machine q20's groupby stage drops ~31% and
+> the isolated kernel beats Polars 1.9x; under heavy concurrent load the thread
+> pool contends and gains shrink toward the ~±5% noise floor (q20 measured -3%
+> to -29% across load levels). So this lever pays most on dedicated hardware /
+> at scale (more cores, bigger groupbys), least on a busy laptop. Queries whose
+> groupby is count-distinct (q21) or low-cardinality/small do not fire it.
 
 
 
