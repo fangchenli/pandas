@@ -159,6 +159,39 @@ engine change captures it. This is the same wall as count-distinct: under the
 correct execution mode, the residual TPC-H gap is the Arrow-vs-Polars kernel
 substrate, not engine plumbing.
 
+## Next-tier decomposition (q3, q10) — the lever is the JOIN chain
+
+After the grouped-aggregate kernel shipped, decomposed the next gated queries
+(SF-3, physical planner). Prefix-collect is misleading for joins (carrying all
+columns through the join: q3 raw join-chain collect = 1597ms vs 227ms when
+projected to the groupby's columns vs 180ms full) — so measure with projection
+or by plan inspection, not raw prefixes.
+
+- **q3 (0.38x):** dominated by the 3-table join chain (`PhysicalJoinChain`,
+  M5 order-free composition). Groupby keys are packable but the post-join input
+  is small. Full 180ms vs Polars ~110ms — the gap is the join.
+- **q10 (0.30x):** 4-table join + a **string-key** groupby (c_name, c_phone,
+  n_name, c_address, c_comment) → non-packable, so it does NOT hit the parallel
+  groupby kernel (falls back to single Arrow group_by). Gap = join chain +
+  string groupby.
+
+Join routing today: wide-payload joins use **single-threaded `pd.merge`**;
+`lazy_join`'s CSR hash self-threads only narrow inner joins (n_gather<=4, the
+shipped fix); acero is 2-7x slower (Arrow round-trip). So wide joins are
+single-threaded — the same shape of gap the groupby kernel just closed.
+
+**Candidate next levers (measure before building, as always):**
+1. **Parallel partitioned join** — apply the just-proven partition-parallel
+   trick to wide `pd.merge` joins (partition both sides by key hash so matching
+   keys co-locate, join per partition in parallel, concat). Gates q3/q5/q9/q10.
+   Bigger; overlaps prior parked join work, but the partition kernel is a fresh
+   angle that worked for groupby.
+2. **String-key support in the groupby kernel** — factorize string keys to pack
+   them, letting q10's groupby fire the parallel path. Bounded extension.
+3. **Fuse the filter mask into the partition scatter** — attack q20's remaining
+   ~45ms materialize half; needs a planner change (pass mask to the aggregate
+   instead of materializing the filter first).
+
 ## Constraints
 
 - Measurement-first; **measure in the mode the scorecard uses**
