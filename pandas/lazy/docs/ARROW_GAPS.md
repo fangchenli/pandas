@@ -89,6 +89,11 @@ not "abandoned."
     file-able framing: *acero's hash-aggregate should dictionary-encode (intern)
     string keys internally* — Polars effectively does. Best upstream candidate:
     well-measured, workaround-validated, reproducible, no morsel-nuance confound.
+  - **Duplicate search done (apache/arrow, 2026-06-18):** ~12 query phrasings +
+    manual review of adjacent Grouper issues — **no existing report.** Closest
+    is DataFusion #27498 (Rust, different angle). → **non-duplicate, file-able.**
+    Issue draft + remaining gate (latest-Arrow re-check) in
+    `UPSTREAM_AG4_STRING_HASH.md`. Not yet filed.
 - **AG6 (Acero per-node overhead).** filter→reduce in Acero is *catastrophic*
   (`filt6` 70 ms/1-thread vs raw `pc` 5.6 ms and our fused kernel 4.3 ms);
   per-join-node overhead made acero end-to-end 2x slower than our pd.merge on
