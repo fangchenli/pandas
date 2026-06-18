@@ -67,21 +67,29 @@ whole-pipeline parallelism in native threads.
 - **When it's worth it:** only if "an independent native pandas engine" is a
   strategic goal in itself, not just a benchmark number.
 
-### Path C — Free-threaded Python (3.13+ no-GIL)
-The GIL is what capped the parallel join at ~1.5x. On a free-threaded build,
-`pd.merge` per partition in a thread pool would actually parallelize — the
-partition-parallel join trick (rejected under the GIL) becomes viable, reusing
-the partition kernel we already shipped.
-- **Removes:** tax #3 (and makes Python-orchestrated parallelism real).
-- **Reward:** unlocks parallel joins and parallel multi-operator pipelines
-  *without* a native rewrite — partial gap close (parallelism, not
-  materialization or the boundary).
-- **Effort:** medium-high — needs the whole dep stack free-threading-ready, and
-  re-validating the engine on 3.13t (free-threading was validated at the engine
-  level; the ecosystem is the gate). Concrete next probe: re-run the join GIL
-  test under 3.13t — if 4×`pd.merge` → ~1×/4, build the partition-parallel join.
-- **Best near-term high-effort bet:** it directly converts a *measured* GIL
-  block into headroom and reuses existing kernels.
+### Path C — Free-threaded Python (no-GIL) — TESTED, does NOT unlock joins
+Hypothesis was: the GIL caps the parallel join, so a free-threaded build lets
+`pd.merge` per partition parallelize. **Probed on the existing 3.14t
+free-threaded build (2026-06-17, GIL confirmed off) — the hypothesis fails:**
+- 4× concurrent `pd.merge` = **2.09x/4** (~1.9x effective) — better than the
+  GIL'd 2.75x/4, but `pd.merge` STILL doesn't parallelize cleanly. It has
+  contention *beyond* the GIL (allocator, block/index refcounts, pandas'
+  non-thread-tuned paths).
+- Free-threaded pandas is currently **2.6x slower single-threaded** (1x merge
+  1099ms FT vs 423ms GIL'd 3.11) — the no-GIL refcount/allocator overhead isn't
+  optimized away yet in pandas/numpy. So even perfect parallelism couldn't beat
+  the GIL'd single-threaded baseline today.
+- `DataFrame.iloc`/`concat` are pathologically slow under FT (the partition-
+  parallel merge hit 107s) — FT immaturity.
+- **BUT** the asymmetry is the real lesson: our shipped **groupby kernel still
+  wins 1.9x under FT** (473 vs 914ms) because it's built on Arrow + the nogil
+  partition kernel, which parallelize with or without the GIL. **Operations
+  built on nogil-friendly primitives scale; `pd.merge` doesn't, GIL or not.**
+- **Verdict:** free-threading is NOT the join unlock. To parallelize joins you
+  must replace `pd.merge` as the worker with a nogil/native join (lazy_join
+  already self-threads; or an Arrow-native join kept Arrow end-to-end) — which
+  routes back to Paths A/B/D. Revisit FT later as pandas/numpy reduce its
+  single-thread overhead, but it is not a standalone win now.
 
 ### Path D — Arrow-native end to end (single conversion at collect)
 Keep every operator on Arrow; convert to pandas once, at the final collect.
@@ -109,10 +117,17 @@ when you push the whole plan at once.
 If the goal is **an owned engine that competes on its own terms:** Path B, eyes
 open about the multi-person-year cost.
 
-If the goal is **the best near-term high-effort experiment grounded in what we
-measured:** **Path C (free-threading)** — re-run the join GIL test on 3.13t;
-if the GIL block lifts, the partition-parallel join becomes real and reuses the
-kernel we just shipped. This is the one I'd probe first.
+~~If the goal is the best near-term experiment: Path C (free-threading).~~
+**Path C was probed and rejected** — free-threading does not unlock joins
+(`pd.merge` has sub-GIL contention; FT pandas is 2.6x slower single-threaded
+today). So the realistic ranking is now **A (whole-plan pushdown) for parity at
+bounded effort**, **B (native engine) for an owned engine**, with C parked
+until pandas/numpy shrink their free-threading single-thread overhead.
 
 What none of these are is "a few more kernels." The session proved the residual
-gap is the execution model, so the improvement has to be at that layer.
+gap is the execution model, so the improvement has to be at that layer. The
+free-threading probe sharpened *why*: the parts of the pipeline built on
+nogil-friendly primitives (Arrow ops, our Cython kernels) already parallelize —
+it's the parts that go through pandas' own machinery (`pd.merge`, block
+management, the NumPy round-trip) that don't, and removing those is exactly what
+a native/arrow-native execution layer (A/B/D) does.
