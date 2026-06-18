@@ -1,7 +1,7 @@
 # Upstream AG4: Acero string-key hash-aggregate slowness — issue draft
 
 Ready-to-file draft for ARROW_GAPS.md gap **AG4**, verified by
-`benchmarks/bench_arrow_string_groupby.py`. **Not yet filed** — needs the
+`../../benchmarks/bench_arrow_string_groupby.py`. **Not yet filed** — needs the
 final version gate (below) and your go-ahead (filing is outward-facing).
 
 ## Gate status

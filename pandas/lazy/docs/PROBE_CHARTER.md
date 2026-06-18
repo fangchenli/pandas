@@ -64,8 +64,8 @@ Status: **Q** = quantified with controlled measurement; **U?** = upstreamable;
 | F | **Free-threaded pandas ~2.6x slower single-threaded** today. | Q | CPython/pandas FT input | med | `PERF_CEILING.md` |
 | G | **No core fused-expression evaluation** (numexpr/Gandiva exist, not in core). | scoping | tool gap | low-med | `ENGINE_DIFFERENTIATION.md` |
 | H | **`np.argsort` single-threaded** (motivated `lazy_radix`). | Q | tool/algo | low | `lazy_radix.pyx` |
-| I | **Arrow `string_view` kernel coverage** (at-scale/string gains). | planned | **PR planned** | high | `STRING_VIEW_CONTRIBUTION_PLAN.md` |
-| J | **Arrow crash reports** (process-aborting hash-agg row table). | filed | **filed** | high | `UPSTREAM_ISSUES.md` |
+| I | **Arrow `string_view` kernel coverage** (at-scale/string gains). | planned | **PR planned** | high | `upstream/STRING_VIEW_CONTRIBUTION_PLAN.md` |
+| J | **Arrow crash reports** (process-aborting hash-agg row table). | filed | **filed** | high | `upstream/UPSTREAM_ISSUES.md` |
 | K | **Materialization-between-operators + Arrow↔NumPy boundary tax** — the structural substrate cost. | Q | architectural | high | `PERF_CEILING.md` |
 
 > **Arrow-specific gaps (A, B, C, D, I, J above) are consolidated with full
@@ -80,7 +80,7 @@ Status: **Q** = quantified with controlled measurement; **U?** = upstreamable;
 2. **Highest new candidate:** parallel hash-aggregate (A) — we have a design, a
    working prototype that beats Polars, and bit-exact validation. Best
    evidence-to-impact ratio. → first upstream artifact (plan:
-   `UPSTREAM_PARALLEL_GROUPBY_PLAN.md`), verification-gated, not yet filed.
+   `upstream/UPSTREAM_PARALLEL_GROUPBY_PLAN.md`), verification-gated, not yet filed.
 3. **Document-as-limitation:** Acero (B), count_distinct (C) — issues with
    benchmarks, lower build cost.
 4. **Feed the FT roadmap:** pd.merge GIL contention (E), FT single-thread

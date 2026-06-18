@@ -4,7 +4,7 @@ Canonical list of Arrow/Acero gaps the probe (`PROBE_CHARTER.md`) surfaced,
 gathered from the docs where they were found. This is the **Arrow contribution
 backlog**: each gap has a claim, the measured evidence + source doc, an honest
 status, the upstream framing, and ecosystem leverage. Crash-class defects keep
-their detail in `UPSTREAM_ISSUES.md`; this registry links them, doesn't dupe.
+their detail in `upstream/UPSTREAM_ISSUES.md`; this registry links them, doesn't dupe.
 
 Status legend: **filed-track** (defect, repro pending) · **planned** (PR
 intended) · **needs-verification** (claim not yet airtight) · **quantified /
@@ -12,15 +12,15 @@ worked-around** (real, we route around it) · **observed**.
 
 | # | Gap | Status | Leverage | Source |
 |---|---|---|---|---|
-| AG1 | `take` **segfaults** on >2 GB int32-offset string data (should raise `ArrowInvalid`) | filed-track | high | UPSTREAM_ISSUES.md #1 |
-| AG2 | acero `hash_aggregate` **aborts (SIGABRT, uncatchable)** on >2 GB string keys | filed-track | high | UPSTREAM_ISSUES.md #2 |
+| AG1 | `take` **segfaults** on >2 GB int32-offset string data (should raise `ArrowInvalid`) | filed-track | high | upstream/UPSTREAM_ISSUES.md #1 |
+| AG2 | acero `hash_aggregate` **aborts (SIGABRT, uncatchable)** on >2 GB string keys | filed-track | high | upstream/UPSTREAM_ISSUES.md #2 |
 | AG3 | `Table.group_by()` on a **single Table doesn't parallelize** (no scaling 1→8 cores) | **needs-verification** | high (if real) | PARALLEL_GROUPBY_SCOPE.md |
 | AG4 | acero **raw-string key hashing 3.5–10x slower than dict-encoding** the same keys (and ~3.8x slower than Polars per-thread) | **VERIFIED (standalone)** | med-high | ENGINE_DESIGN.md M4; `benchmarks/bench_arrow_string_groupby.py` |
 | AG5 | acero `count_distinct` **slower than pandas' Cython** on high-cardinality | quantified / worked-around | med | QGAP_DECOMP.md |
 | AG6 | Acero **per-node overhead** — filter→reduce catastrophic, per-join-node overhead at filtered scale | quantified / worked-around | med | MATERIALIZATION_EXPERIMENT.md I & III |
 | AG7 | Acero join/agg wins **die at the Arrow→NumPy round-trip** (boundary tax) | quantified (structural) | high | MATERIALIZATION_EXPERIMENT.md II; PERF_CEILING.md |
 | AG8 | **Gandiva**: optional/often-unshipped pyarrow + **not wired into Acero** (expression codegen unavailable in practice) | observed | low-med | MATERIALIZATION_EXPERIMENT.md F4 (corrected below) |
-| AG9 | `string_view` **kernel coverage** (at-scale/string gains) | planned | high | STRING_VIEW_CONTRIBUTION_PLAN.md |
+| AG9 | `string_view` **kernel coverage** (at-scale/string gains) | planned | high | upstream/STRING_VIEW_CONTRIBUTION_PLAN.md |
 
 ## Two cross-doc contradictions, resolved
 
@@ -42,7 +42,7 @@ input reaches the kernel**:
 **So AG3 is most likely the single-`Table`-convenience footgun, not a missing
 capability** — and the partition-parallel win is essentially "manually split the
 Table into morsels so acero's existing parallelism engages." This is precisely
-`UPSTREAM_PARALLEL_GROUPBY_PLAN.md` **gate 1**, and M4 is strong internal
+`upstream/UPSTREAM_PARALLEL_GROUPBY_PLAN.md` **gate 1**, and M4 is strong internal
 counter-evidence that the broad claim ("Arrow can't parallelize group-by") is
 **wrong**. Open question gate 1 must still settle: does multi-batch streaming
 acero parallelize a **high-cardinality** (~1.6M-group) aggregate, or does the
@@ -93,7 +93,7 @@ not "abandoned."
     manual review of adjacent Grouper issues — **no existing report.** Closest
     is DataFusion #27498 (Rust, different angle). → **non-duplicate, file-able.**
     Issue draft + remaining gate (latest-Arrow re-check) in
-    `UPSTREAM_AG4_STRING_HASH.md`. Not yet filed.
+    `upstream/UPSTREAM_AG4_STRING_HASH.md`. Not yet filed.
 - **AG6 (Acero per-node overhead).** filter→reduce in Acero is *catastrophic*
   (`filt6` 70 ms/1-thread vs raw `pc` 5.6 ms and our fused kernel 4.3 ms);
   per-join-node overhead made acero end-to-end 2x slower than our pd.merge on
@@ -108,7 +108,7 @@ not "abandoned."
 ## Upstream priority (Arrow-specific)
 
 1. **Moving / high-leverage:** AG9 `string_view` PR; AG1/AG2 crash reports
-   (repro scripts pending, per UPSTREAM_ISSUES.md).
+   (repro scripts pending, per upstream/UPSTREAM_ISSUES.md).
 2. **Cleanest new candidate:** **AG4** (string-key hash kernel quality) — well-
    measured, workaround-validated, no morsel confound.
 3. **Verify-then-decide:** **AG3** (parallel group-by) — run gate 1 first; likely

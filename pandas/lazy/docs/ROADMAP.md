@@ -563,8 +563,8 @@ recorded and pushed:
   kernels — materialization boundaries, per-operator parallelism, string
   layout), NOT the plan layer, and not Arrow-the-format (Polars builds on
   the same spec with its own kernels);
-- nine scale bugs incl. two upstream crash classes (UPSTREAM_ISSUES.md);
-- the string_view contribution plan (STRING_VIEW_CONTRIBUTION_PLAN.md).
+- nine scale bugs incl. two upstream crash classes (upstream/UPSTREAM_ISSUES.md);
+- the string_view contribution plan (upstream/STRING_VIEW_CONTRIBUTION_PLAN.md).
 
 What proceeds regardless of the PDEP: the upstream Arrow track (crash
 filings + string_view kernels — they benefit every Arrow-backed pandas
