@@ -6,12 +6,14 @@ Question: build a from-scratch analytical engine (the Path-B / MLIR
 data-centric-compiler thesis from ENGINE_DIFFERENTIATION.md) that is
 *materially* better than Polars/DuckDB on complex multi-join queries?
 
-## Verdict: NO-GO on the MLIR-compiler / from-scratch-engine thesis
+## Verdict: NO-GO on the *speed* thesis (the flexibility thesis is a separate, open question — see pillar 2)
 
 The exciting thesis — "an MLIR query compiler specialized for complex joins,
-with Yannakakis/WCOJ join algorithms, beats Polars/DuckDB by a wide margin" —
-is **not supported by the evidence**. Four verified pillars, each fatal on its
-own:
+with Yannakakis/WCOJ join algorithms, beats Polars/DuckDB *by a wide margin on
+speed*" — is **not supported by the evidence**. (A *different* thesis —
+extensibility / heterogeneous-hardware reach — is where MLIR engines actually
+aim; not evaluated here, see pillar 2.) Four verified pillars against the speed
+thesis, each fatal on its own:
 
 1. **The architectural lever points at the WRONG regime.** The canonical
    apples-to-apples study (Kersten et al., VLDB 2018, same algorithms/data
@@ -21,12 +23,33 @@ own:
    regime that is our bottleneck. Compiling buys us the regime we're already
    fine in and concedes the one we care about. [Kersten VLDB'18; InkFuse 2024]
 
-2. **The marquee MLIR engine has not beaten a parallel vectorized engine.**
-   LingoDB beats DuckDB 3.5x only single-threaded / no-index / SF1, is itself
-   **1.3x slower than HyPer**, and is *still single-threaded* — parallelism and
-   GPU are explicitly unshipped future work. There is no demonstration of an
-   MLIR compiler beating multi-threaded DuckDB/Polars, the engines we must beat.
-   [Jungmair et al., PVLDB vol15 p2389, 2022]
+2. **The marquee MLIR engine has not *demonstrated* it is much faster than a
+   parallel vectorized engine — and its own pitch isn't speed.** (CORRECTED
+   2026-06 after pushback that the original 2022 citation was stale.) The 2022
+   result — 3.5x over DuckDB, but only single-threaded / no-index / SF1, and
+   1.3x *slower* than HyPer — is outdated: LingoDB **added thread-scaling
+   parallelism** in the sub-operators work (Jungmair & Giceva, VLDB 2023), so
+   "still single-threaded" is wrong. However, the updated picture does not
+   rescue the *speed* thesis: (a) no published head-to-head shows
+   multi-threaded LingoDB beating multi-threaded DuckDB/Polars on TPC-H; (b) GPU
+   remains *"ongoing work"* in LingoDB's own VLDB 2025 paper, not shipped with
+   measured wins; (c) LingoDB's 2025 positioning is **extensibility / flexibility
+   / future-proofing across heterogeneous hardware** *"without sacrificing
+   performance"* — i.e. competitive, NOT dominant-on-speed. So the leading MLIR
+   engine doesn't even claim to be much faster than DuckDB; its differentiator
+   is flexibility + one-IR-to-CPU/GPU/PIM. [Jungmair et al., PVLDB 15 p2389,
+   2022; Jungmair & Giceva, *Declarative Sub-Operators*, PVLDB 16 p3461, 2023;
+   Jungmair & Giceva, *Towards Future-Proof Data Processing Systems*, PVLDB 18
+   p3988, 2025]
+
+   **Implication (sharpens, not reverses, the verdict):** a bet justified by
+   "much faster than DuckDB on complex joins" stays NO-GO — even SOTA MLIR
+   engines don't demonstrate it. But a bet justified by "extensible,
+   future-proof, heterogeneous-hardware (CPU+GPU) from one IR" is where the MLIR
+   frontier actually is — a *different value proposition than beating Polars on
+   speed*, and the one that matches the "generic / reusable elsewhere" instinct.
+   Open question we could not settle from public sources: current multi-threaded
+   LingoDB vs DuckDB at SF-10+ (would need to run LingoDB ourselves).
 
 3. **JIT compile latency is a real, expensive, already-solved-by-others
    problem.** Even at TPC-H SF1, query compile time often *exceeded* execution
@@ -85,9 +108,16 @@ for our actual bottleneck (joins), and it's an optimizer pass, not an engine.
 
 ## Recommendation
 
-- **NO-GO** on the multi-year MLIR / from-scratch compiler. Wrong regime, no
-  demonstrated moat, compile-latency tax, and the key ideas are commoditizing
-  into pluggable rewrites.
+- **NO-GO if the goal is "much faster than DuckDB/Polars on complex joins"** via
+  a multi-year MLIR / from-scratch compiler. Wrong regime, no demonstrated moat
+  (even SOTA MLIR engines don't claim speed-dominance), compile-latency tax, and
+  the key speed ideas are commoditizing into pluggable rewrites.
+- **Different question, not settled here:** if the goal were instead an
+  **extensible, future-proof, heterogeneous-hardware (CPU+GPU+PIM) engine from
+  one IR** — LingoDB's actual thesis — the MLIR frontier genuinely points there.
+  That's a flexibility/reach bet, not a speed bet, and would need its own
+  go/no-go against a *different* success metric (and ideally running current
+  multi-threaded LingoDB ourselves, since public sources don't answer it).
 - **Candidate GO (small, owned, on our actual gap):** a predicate-transfer /
   semijoin-reduction optimization pass in the lazy-pandas optimizer, feeding our
   existing execution. Validate with a probe first (does it shrink q3/q9/q21 join
