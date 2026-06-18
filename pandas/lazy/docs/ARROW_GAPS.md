@@ -15,7 +15,7 @@ worked-around** (real, we route around it) · **observed**.
 | AG1 | `take` **segfaults** on >2 GB int32-offset string data (should raise `ArrowInvalid`) | filed-track | high | UPSTREAM_ISSUES.md #1 |
 | AG2 | acero `hash_aggregate` **aborts (SIGABRT, uncatchable)** on >2 GB string keys | filed-track | high | UPSTREAM_ISSUES.md #2 |
 | AG3 | `Table.group_by()` on a **single Table doesn't parallelize** (no scaling 1→8 cores) | **needs-verification** | high (if real) | PARALLEL_GROUPBY_SCOPE.md |
-| AG4 | acero **raw-string key hashing ~3.7x slower than Polars** (67 vs 18 ms @10M; dict keys 13 ms) | quantified / worked-around | med-high | ENGINE_DESIGN.md M4 |
+| AG4 | acero **raw-string key hashing 3.5–10x slower than dict-encoding** the same keys (and ~3.8x slower than Polars per-thread) | **VERIFIED (standalone)** | med-high | ENGINE_DESIGN.md M4; `benchmarks/bench_arrow_string_groupby.py` |
 | AG5 | acero `count_distinct` **slower than pandas' Cython** on high-cardinality | quantified / worked-around | med | QGAP_DECOMP.md |
 | AG6 | Acero **per-node overhead** — filter→reduce catastrophic, per-join-node overhead at filtered scale | quantified / worked-around | med | MATERIALIZATION_EXPERIMENT.md I & III |
 | AG7 | Acero join/agg wins **die at the Arrow→NumPy round-trip** (boundary tax) | quantified (structural) | high | MATERIALIZATION_EXPERIMENT.md II; PERF_CEILING.md |
@@ -50,6 +50,15 @@ shared hash table contend there even when low-cardinality dict-key aggregates
 parallelize cleanly? Until tested, AG3 stays **needs-verification** and must be
 framed as the footgun, not a capability gap.
 
+**Further weakening (2026-06, from the AG4 benchmark):** `Table.group_by()`
+*did* scale with `set_cpu_count` in that benchmark — acero_dict at K=100 went
+44.7 → 10.9 ms going 1→8 cores (~4x), and raw-string K=100 96→392... i.e. the
+convenience API is **not** unconditionally single-threaded. The original
+PARALLEL_GROUPBY_SCOPE no-scaling result (124→133 ms) was a 2-key high-
+cardinality *numeric* case; whether that specific shape fails to parallelize
+(vs. the string/dict cases that clearly do) is now the open question. Net: AG3
+is **weaker than first stated** — likely shape-specific, not a blanket gap.
+
 ### R2 — Gandiva is NOT "moribund" (AG8 correction)
 
 `MATERIALIZATION_EXPERIMENT.md` Finding 4 calls Gandiva "moribund." That is
@@ -64,12 +73,22 @@ not "abandoned."
 
 ## Detail for the non-obvious gaps
 
-- **AG4 (string-key hashing).** acero hashes raw `large_string` group keys ~3.7x
-  slower than Polars (67 vs 18 ms @10M); dictionary-encoding the keys drops it
-  to 13 ms (beats Polars). A genuine **kernel-quality gap** in acero's string
-  hashing, with a clean workaround (dict-encode) we already apply. Among the
-  best-evidenced, least-ambiguous upstream candidates — arguably cleaner than
-  AG3 because there's no morsel-nuance confound.
+- **AG4 (string-key hashing). VERIFIED** by a standalone benchmark
+  (`benchmarks/bench_arrow_string_groupby.py`, 10M rows, pyarrow 23.0.1 /
+  polars 1.37.1, controlled cardinality × thread count):
+  - **raw `large_string` keys are 3.5–10x slower than dict-encoding the same
+    keys** (raw/dict: K=100 8.5x, K=10K 9.5–9.8x, K=1M 3.5–6x) — robust across
+    cardinality and thread count. Correctness identical across methods.
+  - Per-thread (1 core) acero-raw is **3.8x slower than Polars** at K=100
+    (388 vs 102 ms) — reproduces the original ~3.7x claim.
+  - **Dict-encoding makes acero beat Polars** at K=100/10K; **honest residual:**
+    at K=1M Polars' high-card hash still edges acero_dict (342 vs 446 ms multi-
+    thread), so dict-encoding doesn't fully close the gap at extreme cardinality.
+  - **Mechanism hypothesis:** acero re-hashes raw key bytes per row rather than
+    interning; dict-encoding eliminates the repeated hashing. The clean,
+    file-able framing: *acero's hash-aggregate should dictionary-encode (intern)
+    string keys internally* — Polars effectively does. Best upstream candidate:
+    well-measured, workaround-validated, reproducible, no morsel-nuance confound.
 - **AG6 (Acero per-node overhead).** filter→reduce in Acero is *catastrophic*
   (`filt6` 70 ms/1-thread vs raw `pc` 5.6 ms and our fused kernel 4.3 ms);
   per-join-node overhead made acero end-to-end 2x slower than our pd.merge on
