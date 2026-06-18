@@ -68,6 +68,11 @@ Status: **Q** = quantified with controlled measurement; **U?** = upstreamable;
 | J | **Arrow crash reports** (process-aborting hash-agg row table). | filed | **filed** | high | `UPSTREAM_ISSUES.md` |
 | K | **Materialization-between-operators + Arrow↔NumPy boundary tax** — the structural substrate cost. | Q | architectural | high | `PERF_CEILING.md` |
 
+> **Arrow-specific gaps (A, B, C, D, I, J above) are consolidated with full
+> detail, cross-doc contradiction resolutions, and upstream framing in
+> [`ARROW_GAPS.md`](ARROW_GAPS.md) — the canonical Arrow backlog.** This table
+> keeps the cross-substrate view (incl. NumPy/pandas/CPython E–H, K).
+
 ## Prioritization
 
 1. **Already-moving, high-leverage:** string_view PR (I), crash reports (J) —

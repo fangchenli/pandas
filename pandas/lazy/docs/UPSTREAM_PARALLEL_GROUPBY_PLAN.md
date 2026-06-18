@@ -22,7 +22,12 @@ is "no parallel hash-aggregate," and there is measured headroom.
 These are the ways the claim could be **wrong, too broad, or already known**.
 Resolve every one first.
 
-1. **Acero morsel-parallelism nuance (HIGHEST RISK).** Acero parallelizes across
+1. **Acero morsel-parallelism nuance (HIGHEST RISK — and we have internal
+   counter-evidence).** `ENGINE_DESIGN.md` M4 already states *"acero's hash
+   aggregation is already internally multi-threaded"* (it measured acero
+   aggregating dict keys at 13 ms @10M, beating Polars). That strongly suggests
+   the broad claim is **wrong** and AG3 is really the single-`Table` footgun —
+   see `ARROW_GAPS.md` R1. Acero parallelizes across
    *morsels/batches*, and a single in-memory `Table` may be handed to the
    hash-aggregate as effectively one unit → single-threaded. The real question
    is whether a **proper Acero streaming plan** (`Declaration` with a

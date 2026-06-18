@@ -99,8 +99,12 @@ This reorders the priorities honestly:
   ceiling-breaker here.** The fused mask+accumulate kernel already
   matches/beats Polars by hand. Upstream codegen would buy *generality*
   (not hand-writing each filter+agg shape), a coverage/maintenance win — not
-  a perf-ceiling win. Worth proposing eventually; not where the gap is. Note
-  also that Gandiva is moribund and not even built into shipped pyarrow
+  a perf-ceiling win. Worth proposing eventually; not where the gap is.
+  **[CORRECTION — see ARROW_GAPS.md R2: "moribund" is wrong; Gandiva is
+  actively developed (commits through 2026). The real gap is that it's
+  expression-only, often-unshipped in pyarrow wheels, and not wired into Acero
+  — practically unavailable + non-composable, not abandoned.]** Note
+  also that Gandiva is not even built into shipped pyarrow
   (`import pyarrow.gandiva` → `ModuleNotFoundError` on 23.0.1).
 - **The recoverable wins at 1–100M scale are in our engine plumbing**
   (routing + column pruning + avoiding compaction), independent of any
