@@ -181,11 +181,17 @@ shipped fix); acero is 2-7x slower (Arrow round-trip). So wide joins are
 single-threaded — the same shape of gap the groupby kernel just closed.
 
 **Candidate next levers (measure before building, as always):**
-1. **Parallel partitioned join** — apply the just-proven partition-parallel
-   trick to wide `pd.merge` joins (partition both sides by key hash so matching
-   keys co-locate, join per partition in parallel, concat). Gates q3/q5/q9/q10.
-   Bigger; overlaps prior parked join work, but the partition kernel is a fresh
-   angle that worked for groupby.
+1. ~~**Parallel partitioned join**~~ — **PROBED + REJECTED (2026-06-17).** The
+   partition-parallel trick does NOT transfer to joins. GIL test (orders⋈
+   lineitem): 4 concurrent `pd.merge` = 2.75x/4 (~1.5x effective — pd.merge is
+   GIL-bound); 4 concurrent Arrow joins = 3.3x/4 (~1.2x — Arrow's join is
+   *already* internally threaded, so concurrent calls oversubscribe). The
+   two-sided `DataFrame.iloc` partition alone = 728ms (1.7x a whole single
+   merge). The groupby win was *special*: Arrow `group_by` is single-threaded
+   (clean GIL release → 3-4x headroom) AND emits small output. Joins have
+   neither — Arrow's join already parallelizes internally, and its large output
+   triggers the Arrow→NumPy round-trip that killed acero. **Joins remain the
+   parked architectural wall — now measured, not just asserted.**
 2. **String-key support in the groupby kernel** — factorize string keys to pack
    them, letting q10's groupby fire the parallel path. Bounded extension.
 3. **Fuse the filter mask into the partition scatter** — attack q20's remaining
