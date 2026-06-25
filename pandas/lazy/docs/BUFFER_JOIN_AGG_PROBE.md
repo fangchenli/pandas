@@ -163,6 +163,49 @@ Built the fusion as a physical node `PhysicalFusedJoinAgg` + planner rewrite
 **Status:** v1 node + rewrite landed but **DEFAULT-OFF** (`_FUSE_JOIN_AGG=False`)
 as the validated foundation; the reach extensions (1)+(2) are the next step.
 
+### Chain-fusion attempt (2026-06-25) — measured NET-NEGATIVE, reverted
+
+Extended the fused node to a generic `producer` (join *or* `PhysicalJoinChain`),
+adding a `composite_gather_arrow` entry point on the chain (compose, then gather
+only the agg-referenced columns as Arrow off the `_CompositeJoin` indices).
+Correct (all 22 validate) but the A/B (SF-1) was a **net loss (1.32x)**:
+
+| query | shape | OFF→ON |
+|---|---|---|
+| q4 | join-direct | 70→71ms (flat) |
+| **q18** | **chain-direct, high-card string group** | **202→829ms (4.09x SLOWER)** |
+| q21 | chain-direct | 486→444ms (0.91x, marginal) |
+
+Two decisive facts:
+
+1. **The chain-direct cases that fire are the wrong ones.** q18/q21 group by
+   high-cardinality string keys — exactly the HIGHCARD regime the generalization
+   probe flagged as a loss. q18 regressed **4x**: gather-then-regroup off the
+   composite is far worse than the engine's tuned `_CompositeJoin.gather()` +
+   group for a wide high-card string output. The static gate (`int join keys`)
+   does **not** see the group cardinality/dtype, so it fires anyway.
+
+2. **The intended low-card chain targets don't fire at all.** q5/q7/q8/q9/q10
+   put a `Project`/`FusedPipeline` *between* the chain and the aggregate, so the
+   aggregate's input is not directly a `JoinChain` — the rewrite never matches
+   them. Only q18/q21 (direct `Materialize > JoinChain`) match, and both are
+   high-card.
+
+3. **The engine already late-materializes chains.** `PhysicalJoinChain` +
+   `_CompositeJoin` already avoid the intermediate-payload gathers (the bulk of
+   the chain win the probe attributed to "the engine materializes both joins" —
+   that was vs a naive baseline, not the real chain path). The only remaining
+   lever (Arrow-gather + skip the breaker) doesn't beat the tuned path and
+   regresses high-card.
+
+So a worthwhile chain fusion would need **both** a runtime cardinality gate
+(skip high-card → avoid the q18 4x) **and** tail handling (peel the order-
+insensitive `Project`/`FusedPipeline` to reach q5/q7/q8/q9), and even then the
+per-query win is uncertain because the chain already late-materializes. Reverted
+to the default-off join foundation. **Net conclusion: the engine's existing
+JoinChain late-materialization already captures the chain win; the extra fusion
+layer is not a win on the realized TPC-H shapes.**
+
 ## Verdict
 
 **GO on join→agg fusion, scoped to the low-cardinality-final-group regime**
