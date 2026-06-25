@@ -10,8 +10,22 @@ Bottom line up front: **Polars's own *materializing* (in-memory) engine — the
 same execution model as ours — already beats us ~3x. Its streaming engine adds
 only 10–35% on top of that. So a streaming/pipelined engine is NOT where the 3x
 is. The 3x is (1) string/wide-key group-by falling back to single-threaded
-Acero, and (2) per-join data movement — both catchable inside the current
-materializing model, no new engine required.**
+Acero, and (2) per-join data movement.
+
+**FOLLOW-UP (probed, June 2026): neither is a clean *bounded* lever.** Lever (1)
+was over-weighted from cProfile inflation — real group cost ~62ms vs Polars
+~30ms (not 117 vs 35), and every way to close it dead-ends on the string columns
+being expensive to move/hash (naive parallel regresses; the integer-superkey
+skip needs metadata we don't track). Lever (2) was already scoped to
+bounded/architectural last campaign (`JOIN_LEVERS_SCOPE.md`: gather is
+bandwidth-bound, fusion conflicts with chain late-materialization, cascade
+pipelining is the architectural engine). **Net: the 3x vs the materializing
+engine is the *aggregate* of several ~30–50ms parallel-substrate advantages
+(parallel string hashing, fused/cache-local gather, no Python/Arrow↔NumPy
+per-operator boundary), none individually a clean catchable win.** This refines
+— and is consistent with — the standing "substrate-bound" conclusion; it just
+corrects the *mechanism* (distributed substrate taxes within the materializing
+model, NOT a missing streaming engine).**
 
 ## What Polars and DataFusion actually are (architecture study)
 
@@ -63,15 +77,29 @@ the **materializing in-memory engine**. Three-way at SF-3
 From `benchmarks/decomp_inmem_gap.py` (cProfile of our engine vs Polars
 in-memory per-node profile):
 
-1. **String/wide-key group-by → single-threaded Acero (the biggest lever).**
-   `_partition_key_arrays` returns `None` for any non-integer/temporal key, so
-   the parallel partitioned hash-aggregate kernel (the one that "beats Polars
-   1.9x" on integer keys) **never fires on real TPC-H group keys**, which are
-   strings. q10 (7-key string group: `c_name, c_phone, n_name, c_address,
-   c_comment`): **Acero `_group_by` 117ms vs Polars 35ms** (~82ms gap on the
-   group alone). q9 (n_name): 62ms. Polars parallelizes string group-by via key
-   row-encoding + hash partitioning. **This is a kernel-routing gap, not an
-   execution-model gap.**
+1. **String/wide-key group-by → single-threaded Acero.** `_partition_key_arrays`
+   returns `None` for any non-integer/temporal key, so the parallel partitioned
+   hash-aggregate kernel never fires on real TPC-H (string) group keys. **UPDATE
+   (probed, `benchmarks/probe_strkey_groupby.py`) — NOT a clean catchable
+   lever; the cProfile 117ms was inflated.** Clean wall-clock on q10's group
+   input (344k rows, 114k groups): our full 7-key group_by = **~62ms**, Polars =
+   **~30ms** (gap ~32ms, not 82ms). Every attempt to close it dead-ends on the
+   strings being expensive to move/hash:
+   - **Naive parallel REGRESSES (93ms > 62ms).** Partitioning by key requires
+     `take`-ing the wide string columns (incl. long `c_comment`) into each
+     bucket; that gather costs more than the parallelism saves — the same
+     "gather tax" that killed partitioned join.
+   - **The only fast path is to not hash the strings at all:** group by the
+     integer key (`c_custkey`, ~10ms vs 62ms) — but that's correct only if it's
+     a *superkey*, which we don't track, and there is no cheap exact check (the
+     min/max self-check via string aggregation costs ~140ms; the
+     group-then-attach path is ~57ms because the attach `take` of 6 string cols
+     is itself ~47ms).
+   - Polars's ~30ms comes from genuinely parallel string hashing. Matching it
+     needs a from-scratch parallel nogil string-hash aggregate kernel (the AG4
+     string-hash substrate gap + a new aggregate), for a ~32ms/query win on the
+     two queries with high-card string groups (q10, q18). Substrate-kernel
+     class, not a bounded plumbing lever. **PARKED.**
 
 2. **Per-join data-movement tax.** Keys-only build+probe is at parity (218 vs
    219ms), but the *realized* cascade is ~2.5x slower (q5: 338 vs 99ms with a
@@ -81,7 +109,7 @@ in-memory per-node profile):
    column-dict rebuilds — compounded across 5 joins.
 
 3. **Corroboration:** our best ratio (q3, 0.58x) has **no string group-by and
-   fewer joins**; the worst (q10, 0.28x) is dominated by the 117ms string group.
+   fewer joins**; the worst (q10, 0.28x) leans on the string group + gather.
 
 ## Verdict on "build a new engine" (ignoring engineering cost)
 
@@ -89,20 +117,37 @@ We *could* build a DataFusion-style streaming engine (single-core operators +
 `RecordBatch` streams + exchange parallelism over our nogil kernels; no JIT
 needed). **But the measurement says it is the wrong lever:** it recovers at most
 the 10–35% that Polars's streaming engine gains over its own materializing one.
-The 3x is catchable inside the current materializing model:
 
-- **Parallelize string/wide-key group-by** — row-encode/factorize keys to int
-  codes, then route through the existing partitioned kernel. ~80ms/query on the
-  group-heavy queries (q9, q10). Highest-value concrete win.
-- **Cut per-join data movement** — fuse gather into the probe (the *one* fusion
-  that helps), eliminate Arrow↔NumPy round-trips and redundant key conversions
-  per join. Targets the cascade queries (q5, q9).
+**And the catchable-within-the-materializing-model levers turned out NOT to be
+clean bounded wins either** (probed June 2026):
 
-A streaming engine should be revisited only if, after both levers land, a
-residual gap remains that is *demonstrably* the 10–35% pipelining delta.
+- **String/wide-key group-by — PARKED.** Real gap ~32ms/query on two queries;
+  every bounded approach regresses or needs superkey metadata; a true fix is a
+  from-scratch parallel string-hash aggregate kernel (substrate class).
+- **Per-join data movement — bounded/architectural** (`JOIN_LEVERS_SCOPE.md`):
+  gather is memory-bandwidth-bound, fuse-into-probe conflicts with chain
+  late-materialization (helps only single-join queries), cascade pipelining IS
+  the architectural engine.
+
+So the honest end state: the 3x vs the *materializing* Polars engine is the
+aggregate of several ~30–50ms parallel-substrate advantages (parallel string
+hashing, fused/cache-local gather, no per-operator Python/Arrow↔NumPy boundary),
+none individually a clean catchable win. Closing it means either (a) a fleet of
+substrate kernels (parallel string-hash aggregate, fused probe-gather — each a
+real Cython/Arrow project for a per-query tens-of-ms), or (b) the architectural
+fused engine — which only buys the additional 10–35% over the materializing
+model anyway. Under `PROBE_CHARTER.md`, this precise, corrected quantification
+is the deliverable.
+
+A streaming engine remains the wrong first move: it buys only the 10–35%
+pipelining delta, while the larger 3x lives in the parallel-substrate kernels —
+so a substrate-kernel investment dominates an execution-model rewrite on
+reward/effort.
 
 ## Artifacts
 - `benchmarks/three_way_engine_compare.py` — lazy vs Polars in-mem vs streaming.
 - `benchmarks/decomp_inmem_gap.py` — per-operator decomposition vs in-mem.
+- `benchmarks/probe_strkey_groupby.py` — string-key group-by lever (measured
+  non-win: naive parallel regresses; integer-superkey skip needs metadata).
 - Architecture study (Polars `crates/polars-{stream,mem-engine,ops}`;
   DataFusion `datafusion/physical-plan/src/{joins,aggregates,repartition}`).
