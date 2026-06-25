@@ -80,20 +80,22 @@ then what shipped / parked / pending, then the durable lessons.
 - From-scratch MLIR / data-centric-compiler engine (NO-GO, evidence-backed).
 - Gandiva as a differentiator (expression-only).
 
+**Join→agg fusion — RESOLVED, NOT A WIN (June 2026, full log in
+`JOIN_GAP_INVESTIGATION_LOG.md`).** The isolated probe reached Polars parity,
+but against the *real* engine it does not: the engine already late-materializes
+chains (`PhysicalJoinChain`/`_CompositeJoin`) and routes single joins to acero,
+so the buffer-resident fusion has no headroom — the chain extension was
+net-negative (q18 regressed 4x on its high-card string group) and reverted.
+Direct per-operator profiling (`JOIN_KERNEL_PROFILE.md`) then showed the real
+gap: build+probe are **at parity** (218 vs 219ms), and Polars wins by **fusing
+the gather into the probe** (cache-local) and **pipelining the join cascade +
+streaming the group** — an execution-model gap, not a kernel. Bounded kernel
+levers (partitioned join, parallel build, faster gather) all ruled out by
+measurement (`JOIN_LEVERS_SCOPE.md`). `PhysicalFusedJoinAgg` landed default-off
+as a documented foundation. Net: the join gap is the fused-pipelined engine
+(Path A/B), out of scope for the probe.
+
 **Pending (live candidates):**
-- **Join→agg fusion — NEW GO (June 2026, `BUFFER_JOIN_AGG_PROBE.md`).** Probed
-  the `lineitem ⋈ orders → group_by.sum` shape: a buffer-resident narrow
-  join→agg (lazy_join idx → `pc.take` surviving cols → arrow group_by) hits
-  **parity with Polars** (1.00x at SF-3, 18M-row output) using kernels we
-  already own. Disproves the "Arrow↔NumPy round-trip caps joins" wall *for the
-  agg-terminated shape* — the gather is only 18% and scales sub-linearly once
-  you project to the {group key, agg value} that survive the group. Key twist:
-  the **live engine is 2x slower than its own kernels** (678 vs 330ms SF-3)
-  because it materializes the join intermediate between join and group. First
-  deliverable is bounded engine plumbing (fuse join→agg, no new kernel) →
-  0.49x→1.00x on this shape; group is order-insensitive so it dodges the
-  eager-order contract. Caveat: validated on the single 2-table inner join→agg
-  boundary; chains/left-joins/high-card group not yet measured.
 - Predicate transfer at scale — run `bench_predicate_transfer.py --sf 30/100`
   on EC2. GO (build engine-integrated Bloom-filter PT + optimizer pass) iff
   ≥~1.5x at scale; else close it.
