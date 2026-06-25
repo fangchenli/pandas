@@ -11,10 +11,13 @@ then what shipped / parked / pending, then the durable lessons.
   bit-exact; all 22 TPC-H validate; 1710 lazy tests pass). The first lever the
   whole campaign that *beats* Polars on a hot path.
 - **Everything else was rejected or parked by measurement**, not by hand-waving.
-  The residual ~0.45x TPC-H gap is the **execution substrate / whole-pipeline**
-  (joins, materialization between operators, the Arrow↔NumPy boundary), not any
-  individual kernel — individual kernels are at/near parity once measured in the
-  right mode.
+  The residual ~0.45x TPC-H gap was long attributed to the execution model
+  (pipelining/fusion). **June 2026 correction (`ENGINE_GAP_REFRAMING.md`):** that
+  was measured vs Polars's *materializing* engine, which already beats us ~3x;
+  its *streaming* engine adds only 10–35%. The real 3x is (1) string/wide-key
+  group-by falling back to single-threaded Acero (the parallel kernel never fires
+  on string keys) and (2) per-join data movement — both catchable in the current
+  materializing model, **not** a new engine.
 - **One candidate remains, de-risked but unproven at scale:** predicate transfer
   (semijoin reduction). Real algorithm, thin margin at SF-3; an EC2 scale-up
   probe is written and ready to make the go/no-go call.
@@ -80,20 +83,29 @@ then what shipped / parked / pending, then the durable lessons.
 - From-scratch MLIR / data-centric-compiler engine (NO-GO, evidence-backed).
 - Gandiva as a differentiator (expression-only).
 
-**Join→agg fusion — RESOLVED, NOT A WIN (June 2026, full log in
-`JOIN_GAP_INVESTIGATION_LOG.md`).** The isolated probe reached Polars parity,
-but against the *real* engine it does not: the engine already late-materializes
-chains (`PhysicalJoinChain`/`_CompositeJoin`) and routes single joins to acero,
-so the buffer-resident fusion has no headroom — the chain extension was
-net-negative (q18 regressed 4x on its high-card string group) and reverted.
-Direct per-operator profiling (`JOIN_KERNEL_PROFILE.md`) then showed the real
-gap: build+probe are **at parity** (218 vs 219ms), and Polars wins by **fusing
-the gather into the probe** (cache-local) and **pipelining the join cascade +
-streaming the group** — an execution-model gap, not a kernel. Bounded kernel
-levers (partitioned join, parallel build, faster gather) all ruled out by
-measurement (`JOIN_LEVERS_SCOPE.md`). `PhysicalFusedJoinAgg` landed default-off
-as a documented foundation. Net: the join gap is the fused-pipelined engine
-(Path A/B), out of scope for the probe.
+**Engine-gap REFRAMED — the gap is NOT the streaming/execution model
+(June 2026, `ENGINE_GAP_REFRAMING.md`).** An architecture study of Polars +
+DataFusion plus a three-way measurement *corrected* the earlier "execution-model
+gap" conclusion. The earlier numbers were all vs Polars's bare `.collect()` =
+its **materializing in-memory** engine. New finding: that materializing engine
+(our exact model) **already beats us ~3x**, and Polars's *streaming* engine
+(gather-into-probe fusion + cascade pipelining) adds only **10–35%** on top — on
+q8 it regresses. DataFusion seals it: it does indices-then-`take` (no gather
+fusion) and still wins, so **fusion is not the differentiator**. Per-operator
+decomposition (`benchmarks/decomp_inmem_gap.py`) localizes the real 3x to:
+(1) **string/wide-key group-by falling back to single-threaded Acero**
+(`_partition_key_arrays` returns None for non-integer keys → the parallel kernel
+never fires on real TPC-H string group keys; q10 117ms vs 35ms, q9 62ms); and
+(2) **per-join data movement** (key re-conversion + separate gather + Arrow↔NumPy
+round-trips, ~2.5x the cascade despite keys-only parity). **Both are catchable
+in the current materializing model — a new streaming engine is the wrong lever**
+(recovers at most the 10–35%). Live levers: parallelize string-key group-by;
+cut per-join data movement.
+
+*Earlier (now-superseded) framing, kept for the record:* the buffer-resident
+join→agg fusion reached isolated parity but was net-negative on the real suite
+(q18 4x); `JOIN_KERNEL_PROFILE.md` attributed the gap to gather-into-probe
+fusion + cascade pipelining. `PhysicalFusedJoinAgg` remains default-off.
 
 **Pending (live candidates):**
 - Predicate transfer at scale — run `bench_predicate_transfer.py --sf 30/100`
@@ -118,6 +130,11 @@ as a documented foundation. Net: the join gap is the fused-pipelined engine
   whole-pipeline (joins + materialization + boundary).
 
 ## Doc index
+- `ENGINE_GAP_REFRAMING.md` — **(June 2026, read first for the join/agg gap)**
+  architecture study of Polars + DataFusion + three-way measurement; corrects
+  the "execution-model gap" conclusion (materializing engine already 3x;
+  streaming only +10–35%; real gap = string-groupby fallback + per-join data
+  movement).
 - `QGAP_DECOMP.md` — per-operator decomposition; methodology fix; fusion
   rejections; join-chain localization.
 - `PARALLEL_GROUPBY_SCOPE.md` — the shipped kernel: scope, results, reach, load-

@@ -1,5 +1,17 @@
 # Join-gap investigation — complete log of what we tried (June 2026)
 
+> **SUPERSEDED IN PART — see `ENGINE_GAP_REFRAMING.md` (June 2026).** The
+> "execution model (gather-into-probe fusion + cascade pipelining)" conclusion
+> below was measured against Polars's bare `.collect()` = its *materializing
+> in-memory* engine, and mis-attributes the gap. A three-way measurement shows
+> Polars's *materializing* engine (our exact model) already beats us ~3x, while
+> its streaming engine adds only 10–35% on top — so fusion+pipelining is NOT the
+> 3x. DataFusion (which does indices-then-`take`, no gather fusion) confirms
+> fusion is not the differentiator. The real, catchable gap is (1) string/wide-
+> key group-by falling back to single-threaded Acero and (2) per-join data
+> movement. Read `ENGINE_GAP_REFRAMING.md` first; the log below is kept for the
+> record of what was tried.
+
 Chronological record of the join/aggregate-gap investigation, every approach
 and its measured outcome, so nothing is re-tried blind. Detail docs are linked.
 Bottom line up front: **the join gap is the execution model (Polars fuses the
