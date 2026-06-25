@@ -80,7 +80,20 @@ then what shipped / parked / pending, then the durable lessons.
 - From-scratch MLIR / data-centric-compiler engine (NO-GO, evidence-backed).
 - Gandiva as a differentiator (expression-only).
 
-**Pending (one live candidate):**
+**Pending (live candidates):**
+- **Join→agg fusion — NEW GO (June 2026, `BUFFER_JOIN_AGG_PROBE.md`).** Probed
+  the `lineitem ⋈ orders → group_by.sum` shape: a buffer-resident narrow
+  join→agg (lazy_join idx → `pc.take` surviving cols → arrow group_by) hits
+  **parity with Polars** (1.00x at SF-3, 18M-row output) using kernels we
+  already own. Disproves the "Arrow↔NumPy round-trip caps joins" wall *for the
+  agg-terminated shape* — the gather is only 18% and scales sub-linearly once
+  you project to the {group key, agg value} that survive the group. Key twist:
+  the **live engine is 2x slower than its own kernels** (678 vs 330ms SF-3)
+  because it materializes the join intermediate between join and group. First
+  deliverable is bounded engine plumbing (fuse join→agg, no new kernel) →
+  0.49x→1.00x on this shape; group is order-insensitive so it dodges the
+  eager-order contract. Caveat: validated on the single 2-table inner join→agg
+  boundary; chains/left-joins/high-card group not yet measured.
 - Predicate transfer at scale — run `bench_predicate_transfer.py --sf 30/100`
   on EC2. GO (build engine-integrated Bloom-filter PT + optimizer pass) iff
   ≥~1.5x at scale; else close it.
