@@ -123,6 +123,46 @@ parallel kernel is already the better path and fusion adds nothing. The
 high-card-group join queries — **q3 (per-order), q10 (per-customer)** — stay
 gated on the group substrate, a separate (already-characterized) wall.
 
+## Engine integration (v1, 2026-06-25) — foundation built, reach is the wall
+
+Built the fusion as a physical node `PhysicalFusedJoinAgg` + planner rewrite
+(`_fuse_join_aggregates`), toggle `_FUSE_JOIN_AGG`. Key facts learned:
+
+- **Execution is morsel-driven**, so an execute()-level hook on the aggregate
+  can't see the join: at a breaker the join runs in its own pipeline and feeds
+  the aggregate as a `PrecomputedInput`. The fusion therefore must be a
+  **physical-plan rewrite** that replaces `HashAggregate(Materialize(HashJoin))`
+  with one fused node *before* pipeline compilation (mirrors the existing
+  `PhysicalFusedFilterAgg`). The node gathers only the join-output columns off
+  the Cython join indices, then re-runs the original aggregate over the narrow
+  input (reusing backend choice, the cardinality gate / parallel kernel, and
+  formatting). Order-insensitive, so no row-order contract.
+
+- **Correct + regression-free, but reach is tiny.** All 22 TPC-H validate;
+  controlled A/B (SF-1) total 0.96–0.98x with the only firing query **q4**
+  (~0.81–0.93x). The win on the simple synthetic shape is ~15% (200→170ms),
+  far below the probe's 97ms — the probe pre-converted Arrow inputs outside the
+  timed loop and paid no planning/pipeline overhead; the engine's existing
+  acero join-routing + projection-pruning already capture most of the simple
+  case.
+
+- **Why only q4: the aggregate is almost never directly over a bare join.**
+  Measured aggregate-input shapes across all 22:
+  - `Materialize > HashJoin` (direct): q4, q13 — v1 fires.
+  - `… > Project/FusedPipeline > HashJoin`: q12, q14, q16, q19, q22 (a filter/
+    project sits between the join and the group).
+  - `… > JoinChain`: q3, q5, q7, q8, q9, q10, q17, q18, q21 — the multi-join
+    chains where the probe's big win (CHAIN 0.89x / 2.55x-over-engine) lives.
+
+  So realizing the win needs two extensions, both larger than v1: **(1) peel
+  order-insensitive filter/project between the join and the group** (adds the
+  five single-join queries), and **(2) fuse `JoinChain`** (the chain queries —
+  the actual lever, and where `_CompositeJoin` late-materialization already
+  exists to build on).
+
+**Status:** v1 node + rewrite landed but **DEFAULT-OFF** (`_FUSE_JOIN_AGG=False`)
+as the validated foundation; the reach extensions (1)+(2) are the next step.
+
 ## Verdict
 
 **GO on join→agg fusion, scoped to the low-cardinality-final-group regime**

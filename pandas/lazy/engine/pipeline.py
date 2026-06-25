@@ -36,6 +36,7 @@ from pandas.lazy.physical import (
     PhysicalCSVScan,
     PhysicalFilter,
     PhysicalFusedFilterAgg,
+    PhysicalFusedJoinAgg,
     PhysicalFusedPipeline,
     PhysicalHashAggregate,
     PhysicalHashJoin,
@@ -175,7 +176,9 @@ class PrecomputedBatches:
 
 def with_inputs(node: PhysicalPlan, inputs: list[PhysicalPlan]) -> PhysicalPlan:
     """Return a copy of ``node`` with its plan input(s) replaced."""
-    if isinstance(node, (PhysicalHashJoin, PhysicalSortMergeJoin)):
+    if isinstance(
+        node, (PhysicalHashJoin, PhysicalSortMergeJoin, PhysicalFusedJoinAgg)
+    ):
         return dataclasses.replace(node, left=inputs[0], right=inputs[1])
     if isinstance(node, PhysicalJoinChain):
         return dataclasses.replace(node, bases=tuple(inputs))

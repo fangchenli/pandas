@@ -1943,6 +1943,22 @@ _PARALLEL_GROUPBY_MIN_ROWS = 300_000
 _PARALLEL_GROUPBY_MIN_RATIO = 0.15
 _GROUPBY_POOL = None
 
+# Fuse an inner join feeding a hash aggregate: instead of materializing the full
+# join output and re-reading it in the aggregate (the physical plan shows a
+# Materialize breaker between the join and the group), compute the join indices
+# and gather ONLY the columns the aggregate touches (group keys + agg values)
+# straight into the group's Arrow table. Safe because a group is order-
+# insensitive (it reorders rows anyway), so this dodges the eager row-order
+# contract entirely. Probed in docs/BUFFER_JOIN_AGG_PROBE.md: 0.43x->~1.0x vs
+# Polars on the agg-terminated shape, scoped to the low-cardinality final group
+# (high-card falls through to the existing parallel groupby path unchanged).
+# Module toggle for controlled A/B. DEFAULT-OFF: the node is correct and
+# regression-free, but its direct-adjacency match (HashAggregate over a bare
+# inner HashJoin) only fires on q4 of TPC-H — real queries put a filter/project
+# or a JoinChain between the join and the group (see docs/BUFFER_JOIN_AGG_PROBE.md
+# "Engine integration"). Kept as the validated foundation for those extensions.
+_FUSE_JOIN_AGG = False
+
 
 def _groupby_pool():
     """Shared thread pool for per-bucket Arrow group_by (created once)."""
@@ -5661,6 +5677,134 @@ class PhysicalFusedFilterAgg(PhysicalPlan):
 
 
 @dataclass
+class PhysicalFusedJoinAgg(PhysicalPlan):
+    """Inner join feeding a hash aggregate, fused to skip the join's full
+    materialization.
+
+    The plan for ``agg(join(a, b))`` puts a Materialize breaker between the
+    join and the group, so the join's entire output is built and re-read by the
+    aggregate — but the aggregate only ever touches the group keys and the
+    aggregate value columns; the rest of each joined row is built and
+    discarded. This node computes the join indices and gathers ONLY those
+    surviving columns straight off the indices (Arrow ``take``), then runs the
+    unchanged group path on the narrow result.
+
+    Safe because a hash aggregate is order-insensitive — it reorders rows
+    anyway — so there is no eager row-order contract to preserve across the
+    join (unlike a join feeding a sort/limit/plain collect). Probed in
+    docs/BUFFER_JOIN_AGG_PROBE.md: ~0.43x->1.0x vs Polars on the agg-terminated
+    shape; scoped to a low-cardinality final group (high-card falls through to
+    the same parallel-groupby kernel the plain path uses, since the group runs
+    through the identical ``_execute_grouped_aggregation``).
+
+    ``join`` and ``agg`` are the original nodes, kept only for their parameter
+    helpers (key resolution, group execution); ``left``/``right`` are the join
+    sides the pipeline compiler rebinds to precomputed inputs at runtime.
+    ``fallback`` is the original ``agg`` subtree, run if the fused gather turns
+    out inapplicable at runtime (rare given the planner's static gate).
+    """
+
+    left: PhysicalPlan
+    right: PhysicalPlan
+    join: PhysicalPlan
+    agg: PhysicalPlan
+    fallback: PhysicalPlan
+    schema: Schema
+
+    def children(self) -> list[PhysicalPlan]:
+        return [self.left, self.right]
+
+    @property
+    def output_schema(self) -> Schema:
+        return self.schema
+
+    @property
+    def is_pipeline_breaker(self) -> bool:
+        return True
+
+    def _needed_columns(self) -> set[str]:
+        """Every source column the group keys and aggregates reference."""
+        from pandas.lazy.optimize.utils import get_referenced_columns
+
+        needed: set[str] = set()
+        for e in self.agg.group_by:
+            needed |= get_referenced_columns(e)
+        for e in self.agg.agg_exprs:
+            needed |= get_referenced_columns(e)
+        return needed
+
+    def _build_narrow(
+        self,
+        left_arrays: ArrayDict,
+        right_arrays: ArrayDict,
+    ) -> ArrayDict | None:
+        """Join indices + gather of only the referenced columns, as Arrow."""
+        left_cols = {n: a for n, a in left_arrays.items() if not is_index_col(n)}
+        right_cols = {n: a for n, a in right_arrays.items() if not is_index_col(n)}
+
+        resolved = self.join._join_key_arrays_i64(left_cols.get, right_cols.get)
+        if resolved is None:
+            return None
+        lk64, rk64, key_pairs = resolved
+        shared = {rn for ln, rn in key_pairs if ln == rn}
+        if (set(left_cols) & set(right_cols)) - shared:
+            return None  # overlapping payload names would need suffixing
+
+        needed = self._needed_columns()
+        if any(c not in left_cols and c not in right_cols for c in needed):
+            return None
+
+        from pandas.lazy.backends.numpy.join import inner_join_indexers_i8
+
+        if len(rk64) <= 4 * len(lk64):
+            res = inner_join_indexers_i8(lk64, rk64, max_hit_fraction=None)
+            if res is None:
+                return None
+            left_idx, right_idx = res
+        else:
+            # Build on the (smaller) left, probe with the right — no reorder
+            # pass, the downstream group is order-insensitive.
+            res = inner_join_indexers_i8(rk64, lk64, max_hit_fraction=None)
+            if res is None:
+                return None
+            right_idx, left_idx = res
+
+        left_idx_pa = pa.array(left_idx)
+        right_idx_pa = pa.array(right_idx)
+        out: ArrayDict = {}
+        for c in needed:
+            if c in left_cols:
+                src, idx_pa = left_cols[c], left_idx_pa
+            else:
+                src, idx_pa = right_cols[c], right_idx_pa
+            src_pa = (
+                src if isinstance(src, (pa.Array, pa.ChunkedArray)) else pa.array(src)
+            )
+            out[c] = pc.take(src_pa, idx_pa)
+        return out
+
+    def execute(self, context: ExecutionContext) -> ArrayDict:
+        if not _FUSE_JOIN_AGG:
+            return self.fallback.execute(context)
+        left_arrays = self.left.execute(context)
+        right_arrays = self.right.execute(context)
+        narrow = self._build_narrow(left_arrays, right_arrays)
+        if narrow is None:
+            return self.fallback.execute(context)
+        # Re-run the original aggregate over the narrow gathered input so its
+        # FULL logic (computed aggregates, backend choice, cardinality gate /
+        # parallel kernel, index/result formatting) is reused unchanged — the
+        # result is identical to grouping a materialized join, the only
+        # difference is that the discarded payload columns were never gathered.
+        from pandas.lazy.engine.pipeline import PrecomputedInput
+
+        bound = dataclasses.replace(
+            self.agg, input=PrecomputedInput(narrow, schema=None)
+        )
+        return bound.execute(context)
+
+
+@dataclass
 class PhysicalCachedSubplan(PhysicalPlan):
     """Execute-once wrapper for a subplan shared by multiple consumers.
 
@@ -6444,6 +6588,7 @@ class PhysicalPlanner:
 
         physical_plan = self._collapse_join_chains(physical_plan)
         physical_plan = self._fuse_filter_aggregates(physical_plan)
+        physical_plan = self._fuse_join_aggregates(physical_plan)
 
         # PhysicalCachedSubplan is childless (the pipeline compiler must
         # treat it as a source), so the tree-walking post-passes above never
@@ -6456,7 +6601,8 @@ class PhysicalPlanner:
             if enable_fusion:
                 inner = self._apply_fusion(inner)
             inner = self._collapse_join_chains(inner)
-            wrapper.inner = self._fuse_filter_aggregates(inner)
+            inner = self._fuse_filter_aggregates(inner)
+            wrapper.inner = self._fuse_join_aggregates(inner)
 
         return physical_plan
 
@@ -6583,6 +6729,81 @@ class PhysicalPlanner:
             )
 
         return plan
+
+    @staticmethod
+    def _join_keys_integer(join: PhysicalHashJoin) -> bool:
+        """Whether the join's key columns are int (packable by the kernel).
+
+        Static gate so we only build a fused node for joins whose keys the
+        Cython indexer can actually pack — string/datetime-keyed joins would
+        always fall back at runtime (re-running the sides), a regression.
+        """
+        if join.on is not None:
+            lkeys, rkeys = list(join.on), list(join.on)
+        elif join.left_on is not None and join.right_on is not None:
+            lkeys, rkeys = list(join.left_on), list(join.right_on)
+        else:
+            return False
+        if len(lkeys) not in (1, 2) or len(lkeys) != len(rkeys):
+            return False
+        try:
+            ls, rs = join.left.output_schema, join.right.output_schema
+            for sch, keys in ((ls, lkeys), (rs, rkeys)):
+                for k in keys:
+                    dt = getattr(sch[k], "numpy_dtype", None)
+                    if dt is None or dt.kind not in "iu" or dt == np.dtype("uint64"):
+                        return False
+        except (KeyError, AttributeError, TypeError):
+            return False
+        return True
+
+    def _fuse_join_aggregates(self, plan: PhysicalPlan) -> PhysicalPlan:
+        """Collapse ``HashAggregate(Materialize?(inner HashJoin))`` onto a
+        single PhysicalFusedJoinAgg that gathers only the group/agg columns off
+        the join indices, skipping the full-join materialization.
+
+        Static gate: inner join with int keys feeding a non-empty group. The
+        aggregate may be anything (re-run unchanged over the narrow input);
+        runtime ``_build_narrow`` falls back if a referenced column cannot be
+        resolved off one side. See PhysicalFusedJoinAgg /
+        docs/BUFFER_JOIN_AGG_PROBE.md.
+        """
+        if not _FUSE_JOIN_AGG:
+            return plan
+
+        children = plan.children()
+        if children:
+            new_children = [self._fuse_join_aggregates(c) for c in children]
+            if any(n is not o for n, o in zip(new_children, children, strict=True)):
+                if isinstance(plan, (PhysicalHashJoin, PhysicalFusedJoinAgg)):
+                    plan = dataclasses.replace(
+                        plan, left=new_children[0], right=new_children[1]
+                    )
+                elif isinstance(plan, PhysicalConcat):
+                    plan = dataclasses.replace(plan, inputs=tuple(new_children))
+                elif isinstance(plan, PhysicalJoinChain):
+                    plan = dataclasses.replace(plan, bases=tuple(new_children))
+                else:
+                    plan = dataclasses.replace(plan, input=new_children[0])
+
+        if not isinstance(plan, PhysicalHashAggregate) or not plan.group_by:
+            return plan
+        node = plan.input
+        if isinstance(node, PhysicalMaterialize):
+            node = node.input
+        if not isinstance(node, PhysicalHashJoin) or node.how != "inner":
+            return plan
+        if not self._join_keys_integer(node):
+            return plan
+
+        return PhysicalFusedJoinAgg(
+            left=node.left,
+            right=node.right,
+            join=node,
+            agg=plan,
+            fallback=plan,
+            schema=plan.output_schema,
+        )
 
     @staticmethod
     def _translate_fused_agg(fused, agg):
