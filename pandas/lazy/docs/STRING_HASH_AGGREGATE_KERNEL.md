@@ -38,36 +38,54 @@ GIL-released-kernel + `ThreadPoolExecutor` pattern as the existing
    ranges on separate threads (this is the parallelism that buys the win).
 2. `partition_by_key(acc, n_buckets)` — existing counting-sort partition so each
    group lands wholly in one bucket.
-3. `bucket_hash_sum(perm, lo, hi, keyhash, values)` — per-bucket open-addressing
-   hash-aggregate (run per bucket on the ThreadPool), returns each group's
-   representative row index + sum. The driver gathers the actual key columns at
-   the representative rows once at the end (one narrow take, not per bucket —
-   avoids the string-gather tax that sinks the partition+Arrow-group_by route).
+3. `bucket_factorize(perm, lo, hi, h1, h2, codes)` — per-bucket open-addressing
+   factorize keyed by the **128-bit** hash `(h1, h2)` (run per bucket on the
+   ThreadPool). Writes a dense local code per row and returns each group's
+   representative row; the driver offsets local codes by the bucket base and
+   concatenates reps. The actual key columns are then gathered at the rep rows
+   once at the end (one narrow take, not per bucket — avoids the string-gather
+   tax that sinks the partition+Arrow-group_by route).
 
-## Status: VALIDATED PROTOTYPE — not yet production / not yet integrated
+The aggregation itself is **not** in the kernel: the driver builds a
+`[code] + value cols` table and runs the existing `arrow_group_by` on the cheap
+dense int codes (covers every agg func, null semantics, dict decode), then
+replaces the code column with the real keys gathered at the rep rows. This keeps
+the new kernel surface tiny (factorize only) and reuses battle-tested
+aggregation.
 
-What works: correct (bit-identical group sums vs Arrow), reaches Polars parity
-standalone. Kept in `lazy_groupby.pyx` as the validated foundation; **not wired
-into the engine routing**.
+## Status: PRODUCTIONIZED + INTEGRATED (default-on)
 
-Productionization TODO before integration:
-- **Exact key verification.** `bucket_hash_sum` currently groups by the 64-bit
-  `keyhash` directly (no key-equality check). Collision probability at these
-  scales is ~1e-9/query — fine for this probe, NOT acceptable for an engine that
-  must pass exact TPC-H validation reliably. Fix: 128-bit hash key (one extra
-  multiply/byte, collision ~1e-19) or true key comparison against the rep row.
-- **Multi-aggregate** support (count/mean/min/max + multiple aggs), nulls,
-  decimal/temporal keys (q10's `c_acctbal` is decimal — probed as float64 bits).
-- **Engine routing**: extend `_grouped_arrow_table` / `_partition_key_arrays` to
-  route high-card string-key groups here behind a gate, matching output schema
-  (incl. `preserve_index`); validate all-22 TPC-H + the 1710 lazy tests.
+Engine integration (`physical.py`): `_grouped_arrow_table` routes string-keyed
+groups to `_string_hash_grouped_table`, which classifies keys
+(int/temporal/bool/float-bits + string), cardinality-gates on a cheap strided
+sample (so low-card string groups like q1 don't pay), factorizes in parallel,
+aggregates on the codes, and attaches keys at the rep rows. Module toggle
+`_STRING_HASH_GROUPBY` (default True) for A/B.
 
-## Honest end-to-end caveat (decides whether to productionize)
+Exactness: groups by a **128-bit** key hash (two independent FNV-1a/multiplicative
+hashes computed in one byte pass). Collision ~n²/2^128 — below the engine's
+existing float-sum nondeterminism. Float keys are bit-viewed to match Arrow's
+group_by (which treats -0.0/+0.0 as distinct); float keys containing NaN fall
+back (Arrow/pandas NaN-group semantics differ). Decimal keys fall back (a future
+enhancement — q18's `o_totalprice` is decimal, so q18 doesn't yet fire).
+
+Validation: all-22 TPC-H validate vs DuckDB at SF-3 with the path on; 1718 lazy
+tests pass (incl. `TestStringHashGroupBy`). Warm A/B (min of 15): q10 −17%
+(362→300 ms), no regressions (q1 −5%, others neutral; the earlier apparent q1
+regression was cold-start + machine noise).
+
+## Honest end-to-end caveat
 
 The kernel reaches parity on the **group operator**, but the group is only ~1/5
-of the queries that have high-card string groups. q10 is ~365ms (vs Polars-mem
-~105ms); the group is ~30–60ms of that, joins + gather dominate. So a fully
-integrated kernel moves q10 from ~0.28x to ~0.31x, and helps mainly q10/q18.
-It IS a clean substrate win (parity on a hot operator, upstreamable as the AG4
-string-hash gap), but its whole-query impact is modest — consistent with the
-reframing finding that the 3x is distributed across many operators.
+of the queries that have high-card string groups; joins + gather dominate. So
+the realized whole-query win is q10 ≈ −17% (0.28x→~0.37x), and it currently
+helps mainly q10 (q18 blocked on decimal-key support). It IS a clean substrate
+win (parity on a hot operator, upstreamable as the AG4 string-hash gap), but its
+suite-wide impact is modest — consistent with the reframing finding that the 3x
+is distributed across many operators.
+
+## Remaining TODO (not blocking)
+- Decimal128 key support (would let q18 fire).
+- A fused per-bucket sum path (the prototype `bucket_hash_sum` was ~16ms faster
+  than factorize+arrow-agg on the sum-only shape) if the in-engine overhead
+  (arrow-agg-on-codes + attach) proves worth trimming.

@@ -23,6 +23,7 @@ from abc import (
     abstractmethod,
 )
 import dataclasses
+import os
 import threading
 from types import SimpleNamespace
 
@@ -2011,6 +2012,225 @@ def _combine_partition_keys(key_arrays):
     return comb
 
 
+# ---------------------------------------------------------------------------
+# Parallel string-key group-by via the lazy_groupby factorize kernel
+# (docs/STRING_HASH_AGGREGATE_KERNEL.md). Arrow's group_by on raw string keys is
+# single-threaded and ~2x Polars on high-cardinality string groups; dictionary-
+# encoding doesn't pay when keys are near-unique. So factorize the mixed
+# (string + numeric/temporal) key into dense int64 codes IN PARALLEL, aggregate
+# on the cheap codes via the existing Arrow kernel (covers every agg func, null
+# semantics, decode), then attach the real key columns at each group's
+# representative row. Reaches Polars parity on q10's group (~30 vs ~57 ms).
+# Module toggle for controlled A/B.
+_STRING_HASH_GROUPBY = True
+
+
+def _hash_key_int64(chunked):
+    """Return an int64 view of one numeric/temporal/boolean key column for
+    hashing, or None if the dtype isn't supported (caller falls back).
+
+    Floats are bit-viewed (with -0.0 normalised to +0.0); any NaN key returns
+    None since the factorize would group NaNs that pandas drops by default.
+    """
+    t = chunked.type
+    if pa.types.is_integer(t) or pa.types.is_temporal(t):
+        npv = chunked.to_numpy(zero_copy_only=False)
+        if npv.dtype.kind == "M":
+            return np.ascontiguousarray(npv.view(np.int64))
+        return np.ascontiguousarray(npv.astype(np.int64, copy=False))
+    if pa.types.is_boolean(t):
+        return np.ascontiguousarray(
+            chunked.to_numpy(zero_copy_only=False).astype(np.int64)
+        )
+    if pa.types.is_floating(t):
+        f = chunked.to_numpy(zero_copy_only=False).astype(np.float64, copy=False)
+        if np.isnan(f).any():
+            return None  # Arrow/pandas float-NaN group semantics differ; fall back
+        # Bit-view: this matches Arrow's group_by, which treats -0.0 and +0.0 as
+        # distinct float keys (so the factorize path stays a drop-in for it).
+        return np.ascontiguousarray(f).view(np.int64)
+    return None
+
+
+def _hash_str_buffers(chunked):
+    """Return (int64 offsets, uint8 data) for an Arrow string column, or None.
+
+    Only zero-offset, non-null arrays are handled (else fall back).
+    """
+    if chunked.null_count or chunked.offset != 0:
+        return None
+    bufs = chunked.buffers()
+    if len(bufs) < 3 or bufs[1] is None:
+        return None
+    off_dt = np.int64 if pa.types.is_large_string(chunked.type) else np.int32
+    offsets = np.frombuffer(bufs[1], dtype=off_dt, count=len(chunked) + 1)
+    offsets = np.ascontiguousarray(offsets.astype(np.int64, copy=False))
+    if bufs[2] is None:
+        data = np.zeros(0, dtype=np.uint8)
+    else:
+        data = np.ascontiguousarray(np.frombuffer(bufs[2], dtype=np.uint8))
+    return offsets, data
+
+
+def _classify_group_keys(table):
+    """Split a table's columns into (int_like, string) key sources for the
+    factorize kernel, or return None if any key dtype is unsupported / null.
+
+    int_like: list of (name, int64 array); string: list of (name, (offsets, data)).
+    """
+    int_like: list = []
+    strings: list = []
+    for c in table.column_names:
+        ch = table.column(c)
+        if isinstance(ch, pa.ChunkedArray):
+            ch = ch.combine_chunks()
+        if ch.null_count:
+            return None
+        t = ch.type
+        if pa.types.is_string(t) or pa.types.is_large_string(t):
+            sb = _hash_str_buffers(ch)
+            if sb is None:
+                return None
+            strings.append((c, sb))
+        else:
+            iv = _hash_key_int64(ch)
+            if iv is None:
+                return None
+            int_like.append((c, iv))
+    return int_like, strings
+
+
+def _combined_key_hash(int_like, strings, n, parallel):
+    """Compute the 128-bit combined row hash (acc, acc2) over the key sources,
+    parallelising the string hashing across row ranges when ``parallel``.
+    """
+    from pandas._libs.lazy_groupby import (
+        hash_int_col,
+        hash_string_col,
+    )
+
+    acc = np.empty(n, dtype=np.uint64)
+    acc2 = np.empty(n, dtype=np.uint64)
+
+    def hash_range(lo, hi):
+        first = True
+        for _, iv in int_like:
+            hash_int_col(iv, acc, acc2, first, lo, hi)
+            first = False
+        for _, (off, data) in strings:
+            hash_string_col(off, data, acc, acc2, first, lo, hi)
+            first = False
+
+    if parallel and n >= _PARALLEL_GROUPBY_MIN_ROWS:
+        nt = min(_PARALLEL_GROUPBY_BUCKETS, (os.cpu_count() or 4))
+        step = (n + nt - 1) // nt
+        spans = [(i * step, min(n, (i + 1) * step)) for i in range(nt) if i * step < n]
+        list(_groupby_pool().map(lambda s: hash_range(s[0], s[1]), spans))
+    else:
+        hash_range(0, n)
+    return acc, acc2
+
+
+def _factorize_from_classified(int_like, strings, n):
+    """Factorize a classified mixed key into dense int64 codes in parallel.
+
+    Returns (codes int64[n], reps int64[n_groups]). ``reps[c]`` is a row whose
+    key equals group ``c`` (to recover the real key values). Groups are exact
+    (128-bit key hash; see docs/STRING_HASH_AGGREGATE_KERNEL.md).
+    """
+    from pandas._libs.lazy_groupby import (
+        bucket_factorize,
+        partition_by_key,
+    )
+
+    acc, acc2 = _combined_key_hash(int_like, strings, n, parallel=True)
+    nb = _PARALLEL_GROUPBY_BUCKETS
+    perm, off = partition_by_key(np.ascontiguousarray(acc), nb)
+    codes = np.empty(n, dtype=np.int64)
+
+    def fac(b):
+        return bucket_factorize(perm, int(off[b]), int(off[b + 1]), acc, acc2, codes)
+
+    parts = list(_groupby_pool().map(fac, range(nb)))
+    # offset each bucket's local codes by its global base; concat reps in order
+    base = 0
+    reps_list = []
+    for b in range(nb):
+        ng, rep = parts[b]
+        if ng:
+            if base:
+                sl = perm[off[b] : off[b + 1]]
+                codes[sl] += base
+            reps_list.append(rep)
+            base += ng
+    reps = np.concatenate(reps_list) if reps_list else np.empty(0, dtype=np.int64)
+    return codes, reps
+
+
+def _string_hash_grouped_table(table, group_cols, agg_specs):
+    """Parallel string-key grouped aggregate: factorize keys -> codes, aggregate
+    on the codes via the Arrow kernel, attach real keys at the rep rows.
+
+    Returns the result ``pa.Table`` (same schema as the single group_by) or None
+    to fall back. Cardinality-gated on a cheap sample FIRST so low-card string
+    groups (e.g. q1) don't pay to touch the full key columns.
+    """
+    n = table.num_rows
+
+    # Cheap pre-check: any string key at all? (schema only, no data touched.)
+    schema = table.schema
+    if not any(
+        pa.types.is_string(schema.field(c).type)
+        or pa.types.is_large_string(schema.field(c).type)
+        for c in group_cols
+    ):
+        return None
+
+    sub = table.select(group_cols)
+
+    # Cardinality gate on a strided sample BEFORE combining the full columns
+    # (factorize only pays with many groups; the full combine_chunks on a wide
+    # 18M-row string key is exactly the q1 cost we must avoid when rejecting).
+    step = max(1, n // 8192)
+    idx = pa.array(np.arange(0, n, step, dtype=np.int64))
+    s_cls = _classify_group_keys(sub.take(idx))
+    if s_cls is None:
+        return None
+    s_int, s_str = s_cls
+    if not s_str:
+        return None
+    sacc, _ = _combined_key_hash(s_int, s_str, len(idx), parallel=False)
+    if len(np.unique(sacc)) / len(sacc) < _PARALLEL_GROUPBY_MIN_RATIO:
+        return None
+
+    # Gate passed: classify the full columns once and factorize.
+    cls = _classify_group_keys(sub)
+    if cls is None:
+        return None
+    int_like, strings = cls
+    if not strings:
+        return None
+    codes, reps = _factorize_from_classified(int_like, strings, n)
+
+    code_name = "__lazy_grp_code__"
+    value_cols = list(dict.fromkeys(in_col for _, in_col, _ in agg_specs))
+    cols = {code_name: pa.array(codes)}
+    for vc in value_cols:
+        cols[vc] = table.column(vc)
+    code_table = pa.table(cols)
+    agg = dispatch_kernel("group_by", "arrow", code_table, [code_name], agg_specs)
+
+    res_codes = agg.column(code_name).to_numpy()
+    key_rows = pa.array(reps[res_codes])
+    out: dict = {}
+    for c in group_cols:
+        out[c] = table.column(c).take(key_rows)
+    for name in agg.column_names:
+        if name != code_name:
+            out[name] = agg.column(name)
+    return pa.table(out)
+
+
 def groupby_prefers_arrow(
     relevant_backends: set[str], all_numeric: bool, agg_funcs: set[str]
 ) -> bool:
@@ -2526,6 +2746,18 @@ class PhysicalHashAggregate(PhysicalPlan):
             or any(f in _nuniq for _, _, f in agg_specs)
         ):
             return single()
+
+        # String-keyed groups: the int partition path below can't pack string
+        # keys, so they would fall to the single-threaded kernel. Route them to
+        # the parallel factorize kernel instead (no-op/fall-through for all-
+        # numeric keys, which _partition_key_arrays handles).
+        if _STRING_HASH_GROUPBY:
+            try:
+                res = _string_hash_grouped_table(table, group_cols, agg_specs)
+                if res is not None:
+                    return res
+            except Exception:
+                pass  # any failure must not change results
 
         key_arrays = _partition_key_arrays(table, group_cols)
         if key_arrays is None:

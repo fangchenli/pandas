@@ -39,12 +39,37 @@ cnp.import_array()
 # keys (e.g. dense partkeys) modulo a power of two would cluster.
 cdef uint64_t GOLDEN = <uint64_t>0x9E3779B97F4A7C15
 
-# FNV-1a constants for hashing variable-length string key bytes.
+# ---------------------------------------------------------------------------
+# Parallel string-key factorize (docs/STRING_HASH_AGGREGATE_KERNEL.md).
+#
+# Arrow's group_by on raw string keys is single-threaded and ~2x Polars on
+# high-cardinality string groups; dict-encoding doesn't help when keys are
+# near-unique. This factorizes a mixed (string + int/temporal) group key into
+# dense int64 codes IN PARALLEL, so the caller can then aggregate on the cheap
+# integer codes via the existing (Arrow / parallel-partitioned) machinery and
+# attach the real key columns at each group's representative row. The genuinely
+# parallel piece — and the whole measured win — is hashing the string bytes
+# across threads (the row-range params below).
+#
+# Keys are compared by a 128-bit hash (two independent 64-bit hashes). Collision
+# probability is ~n^2 / 2^128 (e.g. ~3e-23 for 1e8 distinct keys) — far below
+# the engine's existing float-sum nondeterminism, so groups are exact in
+# practice. partition_by_key uses only the first hash (collisions there are
+# harmless: they only co-locate distinct groups in a bucket, where the 128-bit
+# compare separates them).
+# ---------------------------------------------------------------------------
+
+# FNV-1a constants for hashing variable-length string key bytes (two seeds for
+# the independent second hash).
 cdef uint64_t FNV_OFFSET = <uint64_t>1469598103934665603
 cdef uint64_t FNV_PRIME = <uint64_t>1099511628211
-# Column-mix multiplier (a large odd prime) to combine per-column hashes into a
-# single row hash: acc = acc * MIX + col_hash.
+cdef uint64_t FNV_OFFSET2 = <uint64_t>14695981039346656037ULL
+cdef uint64_t FNV_PRIME2 = <uint64_t>0x100000001B3
+# Column-mix multipliers (large odd constants) to combine per-column hashes into
+# a single row hash: acc = acc * MIX + col_hash.
 cdef uint64_t MIX = <uint64_t>1000000007
+cdef uint64_t MIX2 = <uint64_t>0x9E3779B185EBCA87ULL
+cdef uint64_t GOLDEN2 = <uint64_t>0xD6E8FEB86659FD93ULL
 
 
 @cython.boundscheck(False)
@@ -53,32 +78,41 @@ def hash_string_col(
     const int64_t[::1] offsets,
     const uint8_t[::1] data,
     uint64_t[::1] acc,
+    uint64_t[::1] acc2,
     bint first,
     Py_ssize_t lo,
     Py_ssize_t hi,
 ):
-    """Fold one Arrow string column's per-row FNV-1a hash into ``acc[lo:hi]``.
+    """Fold one Arrow string column's per-row 128-bit FNV-1a hash into
+    ``(acc, acc2)[lo:hi]``.
 
-    ``offsets`` are int64 (length n+1) into the ``data`` byte buffer. If
-    ``first``, ``acc[i]`` is set to the string hash; otherwise mixed in. The
-    ``[lo, hi)`` row range lets the driver hash disjoint ranges on separate
-    threads (the body is ``nogil``).
+    ``offsets`` are int64 (length n+1) into the ``data`` byte buffer; both
+    hashes are computed in one byte pass. If ``first``, the slots are set;
+    otherwise mixed in. The ``[lo, hi)`` row range lets the driver hash disjoint
+    ranges on separate threads (the body is ``nogil``).
     """
     cdef:
         Py_ssize_t i, j, start, end
-        uint64_t h
+        uint64_t h, h2
+        uint8_t b
     with nogil:
         for i in range(lo, hi):
             start = offsets[i]
             end = offsets[i + 1]
             h = FNV_OFFSET
+            h2 = FNV_OFFSET2
             for j in range(start, end):
-                h ^= data[j]
+                b = data[j]
+                h ^= b
                 h *= FNV_PRIME
+                h2 ^= b
+                h2 *= FNV_PRIME2
             if first:
                 acc[i] = h
+                acc2[i] = h2
             else:
                 acc[i] = acc[i] * MIX + h
+                acc2[i] = acc2[i] * MIX2 + h2
 
 
 @cython.boundscheck(False)
@@ -86,57 +120,59 @@ def hash_string_col(
 def hash_int_col(
     const int64_t[::1] vals,
     uint64_t[::1] acc,
+    uint64_t[::1] acc2,
     bint first,
     Py_ssize_t lo,
     Py_ssize_t hi,
 ):
-    """Fold one int64 key column's mixed hash into ``acc[lo:hi]``."""
+    """Fold one int64 key column's 128-bit mixed hash into ``(acc, acc2)[lo:hi]``."""
     cdef:
         Py_ssize_t i
-        uint64_t h
+        uint64_t h, h2, v
     with nogil:
         for i in range(lo, hi):
-            h = (<uint64_t>vals[i]) * GOLDEN
+            v = <uint64_t>vals[i]
+            h = v * GOLDEN
+            h2 = v * GOLDEN2
             if first:
                 acc[i] = h
+                acc2[i] = h2
             else:
                 acc[i] = acc[i] * MIX + h
+                acc2[i] = acc2[i] * MIX2 + h2
 
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
-def bucket_hash_sum(
+def bucket_factorize(
     const int64_t[::1] perm,
     Py_ssize_t lo,
     Py_ssize_t hi,
-    const uint64_t[::1] keyhash,
-    const double[::1] values,
+    const uint64_t[::1] h1,
+    const uint64_t[::1] h2,
+    int64_t[::1] codes,
 ):
-    """Aggregate ``sum(values)`` per distinct ``keyhash`` over rows
-    ``perm[lo:hi]`` using an open-addressing table.
+    """Factorize the rows ``perm[lo:hi]`` (one partition bucket) by their
+    128-bit key hash ``(h1, h2)`` using an open-addressing table.
 
-    Returns (rep_rows int64[], sums float64[]) — one entry per distinct group in
-    this bucket, ``rep_rows`` being the first row seen for the group (used by the
-    caller to gather the actual key columns).
-
-    PROTOTYPE: groups by the 64-bit ``keyhash`` directly (no key-equality
-    verification). Collisions among distinct keys are astronomically unlikely at
-    these scales but NOT impossible; the production version must verify keys.
+    Writes a LOCAL dense code (0..ng-1) into ``codes[row]`` for each row in the
+    bucket; the caller offsets these by the bucket's global base. Returns
+    (ng, rep_rows int64[ng]) where ``rep_rows[c]`` is the first row seen for
+    local code ``c`` (the caller gathers the real key columns there). Buckets
+    are disjoint by key, so concatenating per-bucket results yields a global
+    factorization with no merge.
     """
     cdef:
         Py_ssize_t m = hi - lo
-        Py_ssize_t i, row, cap, mask, slot, ng
-        uint64_t hv
+        Py_ssize_t i, row, cap, mask, slot, ng, g
+        uint64_t a, b
         cnp.ndarray[int64_t, ndim=1] rep_arr
-        cnp.ndarray[double, ndim=1] sum_arr
         int64_t[::1] rep
-        double[::1] sums
-        # open-addressing slots: -1 = empty
-        cnp.ndarray[int64_t, ndim=1] slot_rep
-        int64_t[::1] sr
+        cnp.ndarray[int64_t, ndim=1] slot_grp
+        int64_t[::1] sg
 
     if m <= 0:
-        return (np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64))
+        return (0, np.empty(0, dtype=np.int64))
 
     # capacity = next power of two >= 2*m (load factor 0.5)
     cap = 1
@@ -145,31 +181,31 @@ def bucket_hash_sum(
     mask = cap - 1
 
     rep_arr = np.empty(m, dtype=np.int64)
-    sum_arr = np.zeros(m, dtype=np.float64)
-    slot_rep = np.full(cap, -1, dtype=np.int64)  # slot -> group index (or -1)
+    slot_grp = np.full(cap, -1, dtype=np.int64)  # slot -> local group id (or -1)
     rep = rep_arr
-    sums = sum_arr
-    sr = slot_rep
+    sg = slot_grp
     ng = 0
 
     with nogil:
         for i in range(lo, hi):
             row = perm[i]
-            hv = keyhash[row]
-            slot = <Py_ssize_t>(hv & <uint64_t>mask)
-            while sr[slot] != -1:
-                if keyhash[rep[sr[slot]]] == hv:
+            a = h1[row]
+            b = h2[row]
+            slot = <Py_ssize_t>(a & <uint64_t>mask)
+            while sg[slot] != -1:
+                g = sg[slot]
+                if h1[rep[g]] == a and h2[rep[g]] == b:
                     break
                 slot = (slot + 1) & mask
-            if sr[slot] == -1:
-                sr[slot] = ng
+            if sg[slot] == -1:
+                sg[slot] = ng
                 rep[ng] = row
-                sums[ng] = values[row]
+                codes[row] = ng
                 ng += 1
             else:
-                sums[sr[slot]] += values[row]
+                codes[row] = sg[slot]
 
-    return (rep_arr[:ng], sum_arr[:ng])
+    return (ng, rep_arr[:ng])
 
 
 @cython.boundscheck(False)

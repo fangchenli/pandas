@@ -1438,8 +1438,9 @@ class TestParallelPartitionedGroupBy:
         monkeypatch.setattr(P, "_PARALLEL_GROUPBY", False)
         tm.assert_frame_equal(on, run())
 
-    def test_string_keys_fall_back_to_single(self, monkeypatch):
-        # Non-packable (string) keys must fall back and still be correct.
+    def test_string_keys_still_correct(self, monkeypatch):
+        # String keys now route to the parallel factorize path (not single);
+        # the result must still match pandas.
         import pandas.lazy.physical as P
 
         monkeypatch.setattr(P, "_PARALLEL_GROUPBY_MIN_ROWS", 0)
@@ -1467,3 +1468,158 @@ class TestParallelPartitionedGroupBy:
             .rename(columns={"v": "r"})
         )
         tm.assert_frame_equal(res, ref, check_dtype=False)
+
+
+class TestStringHashGroupBy:
+    """Regression tests for the parallel string-key factorize group-by
+    (pandas._libs.lazy_groupby.hash_*/bucket_factorize +
+    physical._string_hash_grouped_table). Routes high-cardinality string-keyed
+    groups off the single-threaded Arrow kernel; must be exact vs it.
+    """
+
+    def _force(self, monkeypatch):
+        import pandas.lazy.physical as P
+
+        monkeypatch.setattr(P, "_PARALLEL_GROUPBY_MIN_ROWS", 0)
+        monkeypatch.setattr(P, "_PARALLEL_GROUPBY_MIN_RATIO", 0.0)
+        monkeypatch.setattr(P, "_PARALLEL_GROUPBY_BUCKETS", 8)
+        return P
+
+    @pytest.mark.parametrize(
+        "agg",
+        [
+            lambda c: c.sum(),
+            lambda c: c.mean(),
+            lambda c: c.min(),
+            lambda c: c.max(),
+            lambda c: c.count(),
+        ],
+    )
+    def test_matches_single_string_plus_int(self, monkeypatch, agg):
+        # Mixed (string + int) key, several aggs: factorize path == single path.
+        P = self._force(monkeypatch)
+        rng = np.random.default_rng(10)
+        n = 20_000
+        df = pd.DataFrame(
+            {
+                "s": rng.choice([f"name_{i}" for i in range(900)], n),
+                "k": rng.integers(0, 60, n),
+                "v": rng.standard_normal(n),
+            }
+        )
+
+        def run():
+            return (
+                df.select()
+                .group_by("s", "k")
+                .agg(agg(col("v")).alias("r"))
+                .collect(use_physical_planner=True)
+                .sort_values(["s", "k"])
+                .reset_index(drop=True)
+            )
+
+        on = run()
+        monkeypatch.setattr(P, "_STRING_HASH_GROUPBY", False)
+        off = run()
+        tm.assert_frame_equal(on, off)
+
+    def test_multiple_string_keys_high_card(self, monkeypatch):
+        # Several string keys, near-unique combined key (exercises 128-bit
+        # compare + per-bucket factorize), compared to pandas.
+        self._force(monkeypatch)
+        rng = np.random.default_rng(11)
+        n = 25_000
+        df = pd.DataFrame(
+            {
+                "a": rng.choice([f"a{i}" for i in range(3000)], n),
+                "b": rng.choice([f"longer_value_{i}" for i in range(3000)], n),
+                "v": rng.integers(0, 1000, n).astype("float64"),
+            }
+        )
+        res = (
+            df.select()
+            .group_by("a", "b")
+            .agg(col("v").sum().alias("r"))
+            .collect(use_physical_planner=True)
+            .sort_values(["a", "b"])
+            .reset_index(drop=True)
+        )
+        ref = (
+            df.groupby(["a", "b"], sort=True)["v"]
+            .sum()
+            .reset_index()
+            .rename(columns={"v": "r"})
+        )
+        tm.assert_frame_equal(res, ref, check_dtype=False)
+
+    def test_float_key_with_string(self, monkeypatch):
+        # Float key (bit-viewed, -0.0 normalised) alongside a string key.
+        P = self._force(monkeypatch)
+        rng = np.random.default_rng(12)
+        n = 20_000
+        f = rng.integers(0, 200, n).astype("float64") / 4.0
+        df = pd.DataFrame(
+            {
+                "s": rng.choice([f"g{i}" for i in range(400)], n),
+                "f": f,
+                "v": rng.standard_normal(n),
+            }
+        )
+
+        def run():
+            return (
+                df.select()
+                .group_by("s", "f")
+                .agg(col("v").sum().alias("r"))
+                .collect(use_physical_planner=True)
+                .sort_values(["s", "f"])
+                .reset_index(drop=True)
+            )
+
+        on = run()
+        monkeypatch.setattr(P, "_STRING_HASH_GROUPBY", False)
+        tm.assert_frame_equal(on, run())
+
+    def test_bucket_factorize_induces_correct_partition(self):
+        # The kernel codes must induce exactly the same grouping as a reference
+        # factorization of the full key tuple.
+        import pyarrow as pa
+
+        from pandas._libs.lazy_groupby import (
+            bucket_factorize,
+            hash_int_col,
+            hash_string_col,
+            partition_by_key,
+        )
+
+        rng = np.random.default_rng(13)
+        n = 40_000
+        s = rng.choice([f"k{i}" for i in range(2000)], n)
+        k = rng.integers(0, 30, n).astype(np.int64)
+        arr = pa.array(s)
+        offs = np.frombuffer(arr.buffers()[1], dtype=np.int32, count=n + 1)
+        offs = np.ascontiguousarray(offs.astype(np.int64))
+        data = np.ascontiguousarray(np.frombuffer(arr.buffers()[2], dtype=np.uint8))
+
+        acc = np.empty(n, np.uint64)
+        acc2 = np.empty(n, np.uint64)
+        hash_int_col(np.ascontiguousarray(k), acc, acc2, True, 0, n)
+        hash_string_col(offs, data, acc, acc2, False, 0, n)
+        perm, off = partition_by_key(np.ascontiguousarray(acc), 8)
+        codes = np.empty(n, np.int64)
+        base = 0
+        for b in range(8):
+            ng, _ = bucket_factorize(
+                perm, int(off[b]), int(off[b + 1]), acc, acc2, codes
+            )
+            if ng and base:
+                codes[perm[off[b] : off[b + 1]]] += base
+            base += ng
+
+        ref = pd.DataFrame({"s": s, "k": k}).groupby(["s", "k"], sort=False).ngroup()
+        # same partition: within each kernel-code group, ref code is constant
+        order = np.argsort(codes, kind="stable")
+        cuts = np.flatnonzero(np.diff(codes[order])) + 1
+        for grp in np.split(ref.to_numpy()[order], cuts):
+            assert len(np.unique(grp)) == 1
+        assert codes.max() + 1 == ref.max() + 1
