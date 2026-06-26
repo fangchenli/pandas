@@ -760,6 +760,13 @@ competitive-standing table.
      (ML preprocessing) — argues for a device-resident sub-pipeline, a
      different execution model, not a kernel backend. Revisit only for a
      workload that is both compute-bound *and* chains many such ops.
+  3. **Custom kernels (Pallas / segmented reduction) — also NO-GO, measured
+     June 2026** (`JAX_CUSTOM_KERNEL_PROBE.md`). XLA/Pallas cannot express the
+     group-by's dominant half (factorize/hash-table build); the one
+     XLA-friendly slice (segment-sum) is break-even-to-slower with the np↔jax
+     conversion tax, and its multi-agg fusion win is beaten ~2x by a single-pass
+     Cython scatter kernel (the `lazy_fused_agg` technique). Pallas targets
+     GPU/TPU; CPU is experimental. The actionable lever is Cython, not JAX.
 
 ### API gaps vs Polars LazyFrame
 

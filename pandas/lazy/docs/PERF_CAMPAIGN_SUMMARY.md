@@ -149,3 +149,6 @@ fusion + cascade pipelining. `PhysicalFusedJoinAgg` remains default-off.
 - `ENGINE_GONOGO_MEMO.md` — NO-GO on the MLIR engine (research-spike-backed).
 - `PREDICATE_TRANSFER_PROBE.md` — PT probe; thin at SF-3; scale-up needed.
 - `bench_predicate_transfer.py` — the EC2 go/no-go probe (ready to run).
+- `JAX_CUSTOM_KERNEL_PROBE.md` — NO-GO on JAX custom kernels/Pallas for any hot
+  path on CPU (factorize is outside XLA; segment-reduction win beaten ~2x by a
+  single-pass Cython scatter); extends the ROADMAP JAX decline.
