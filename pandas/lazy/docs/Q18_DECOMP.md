@@ -33,11 +33,22 @@ without summing every one); Polars does the same in ~210 ms.
   the current parallel path's 537 ms** on identical isolated data — no
   improvement. We are already at our substrate's limit for ultra-high-card int
   groups. (Both ~530 ms isolated; Polars ~231 ms.)
-- The ~100 ms in-context residual vs Polars (our 306 ms vs ~210 ms) is Polars's
-  **tuned cache-aware parallel hash-aggregate** (hot/cold grouper, scatter-free
-  partitioned aggregation) — a substrate-class difference, not a swappable
-  kernel. Our partition+take+arrow-group-per-bucket path materialises/concats a
-  4.5M-row intermediate; Polars never does.
+- The ~100 ms in-context residual vs Polars is the **partitioned threaded
+  group-by** in Polars's *in-memory* engine (what bare `.collect()` uses —
+  `crates/polars-core/src/frame/group_by/hashing.rs`,
+  `group_by_threaded_slice`/`_iter`). Verified against source: it partitions by
+  `hash_to_partition` and **each thread scans all rows but inserts only its
+  partition's keys into a thread-local (cache-hot) hashmap — no gather/scatter
+  pass** (source comment: *"the hash-table currently is local to the thread so
+  in hot cache"*). Our `partition_by_key` → per-bucket `take` (gathers 18M rows)
+  → Arrow group_by → concat a 4.5M-row intermediate pays a scatter+concat that
+  Polars's scan-in-place avoids — that extra work is the measured mechanism of
+  the gap.
+  *Provenance:* the ~100 ms split is inference from our own measured take+concat
+  overhead plus reading Polars source; we have **not** profiled Polars's
+  internals on this query. (Note: the cache-aware **hot/cold** grouper with
+  4096-entry eviction is Polars's *streaming* engine, `polars-stream`, which
+  `.collect()` does NOT use — do not attribute it to this measurement.)
 - **Inner→outer redundancy is NOT costly.** The per-order sum is computed twice
   (inner `big` for the HAVING, outer for output), but the outer group is only
   ~1,253 rows, so reusing it would save ~nothing.
@@ -55,7 +66,10 @@ the isolation over-stated the cost ~1.7x and inverted an on/off A/B.
 
 q18 is **substrate-bound**, consistent with `ENGINE_GAP_REFRAMING.md`: the gap
 is distributed, and the high-cardinality group-by is ~1.5x Polars because of the
-tuned parallel hash-aggregate substrate, not a missing kernel. The only levers
-are non-bounded: (a) a from-scratch cache-aware parallel hash-aggregate matching
-Polars's hot/cold grouper, or (b) optimizer scan-sharing for the double lineitem
-scan (small). Neither is a clean kernel swap; no bounded win was found.
+parallel hash-aggregate substrate, not a missing kernel. The only levers are
+non-bounded: (a) a scan-in-place partitioned threaded group-by (per-thread
+cache-local hashmap, no scatter pass) matching Polars's in-memory
+`group_by_threaded_*` — which would require replacing the partition+take+arrow
+path, since Arrow's group_by gives us no scan-in-place primitive; or (b)
+optimizer scan-sharing for the double lineitem scan (small). Neither is a clean
+kernel swap; no bounded win was found.
