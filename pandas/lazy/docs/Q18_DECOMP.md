@@ -77,14 +77,39 @@ Isolated `_grouped_arrow_table` on a fresh Arrow table read the inner group at
 more favorable layout). Trust the in-context wall-clock, not the isolated call —
 the isolation over-stated the cost ~1.7x and inverted an on/off A/B.
 
+## Scan-in-place kernel — replicated Polars, but a net regression integrated
+
+Built a Polars-style scan-in-place fused aggregate to replicate
+`group_by_threaded_*` (`lazy_groupby.scan_partition_agg` + `compute_hash_part`;
+`physical._scan_in_place_grouped_table`): hash the key, then each thread scans
+all rows SEQUENTIALLY and accumulates only its hash-partition into a thread-local
+open-addressing table — no permutation, no data gather. Keyed by 128-bit hash
+(any key type), sum/count/mean over clean (null/NaN-free) value columns; reps
+recover the actual keys.
+
+**In ISOLATION it works and matches Polars:** on q18's inner group (18M→4.5M)
+the lean prototype hit ~252 ms vs our partition+take path ~558 ms (2.2x) and
+Polars ~220 ms — confirming scan-in-place is *the* mechanism.
+
+**Integrated it REGRESSES and was set default-off** (`_SCAN_IN_PLACE_GROUPBY`):
+clean warm A/B (min of 13) showed q18 **+22%**, q1 +38%, q17 **+92%**, q20 +18%.
+Why the isolated win evaporated: (1) in-context the current arrow path is already
+~306 ms (numpy-backed input), not the 558 ms the isolation implied — so the
+baseline it must beat is ~2x better than the probe suggested; (2) the
+production kernel is heavier than the lean probe (128-bit key + multi-agg +
+rep-tracking state) and the Python-orchestrated multi-step path (full
+hash → value extract → scan → assemble → key gather) adds overhead that exceeds
+the benefit. Estimate-based table sizing (avoiding 8x over-zeroing) did not
+rescue it. All-22 validate and 1725 lazy tests pass with it forced on; it's kept
+as a correct, validated foundation, not shipped on.
+
 ## Conclusion
 
 q18 is **substrate-bound**, consistent with `ENGINE_GAP_REFRAMING.md`: the gap
 is distributed, and the high-cardinality group-by is ~1.5x Polars because of the
-parallel hash-aggregate substrate, not a missing kernel. The only levers are
-non-bounded: (a) a scan-in-place partitioned threaded group-by (per-thread
-cache-local hashmap, no scatter pass) matching Polars's in-memory
-`group_by_threaded_*` — which would require replacing the partition+take+arrow
-path, since Arrow's group_by gives us no scan-in-place primitive; or (b)
-optimizer scan-sharing for the double lineitem scan (small). Neither is a clean
-kernel swap; no bounded win was found.
+parallel hash-aggregate substrate. We can *replicate* Polars's scan-in-place
+algorithm and match it in isolation, but **not capture it through our
+Python-orchestrated engine** — the in-context arrow path is already close, and
+the orchestration overhead negates the kernel win. Confirms (now with a built,
+measured attempt) that closing this needs the execution model, not a kernel; the
+double-lineitem-scan optimizer lever remains the only small bounded option.

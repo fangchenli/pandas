@@ -1659,3 +1659,133 @@ class TestStringHashGroupBy:
         for grp in np.split(ref.to_numpy()[order], cuts):
             assert len(np.unique(grp)) == 1
         assert codes.max() + 1 == ref.max() + 1
+
+
+class TestScanInPlaceGroupBy:
+    """Regression tests for the scan-in-place fused aggregate
+    (lazy_groupby.scan_partition_agg + physical._scan_in_place_grouped_table):
+    Polars-style sequential scan into thread-local tables for sum/count/mean
+    over high-card groups. Must match the single Arrow path exactly.
+    """
+
+    def _force(self, monkeypatch):
+        import pandas.lazy.physical as P
+
+        # scan-in-place is default-off (regresses when integrated); force it on
+        # so these correctness tests actually exercise the kernel.
+        monkeypatch.setattr(P, "_SCAN_IN_PLACE_GROUPBY", True)
+        monkeypatch.setattr(P, "_PARALLEL_GROUPBY_MIN_ROWS", 0)
+        monkeypatch.setattr(P, "_PARALLEL_GROUPBY_MIN_RATIO", 0.0)
+        monkeypatch.setattr(P, "_PARALLEL_GROUPBY_BUCKETS", 8)
+        return P
+
+    @pytest.mark.parametrize(
+        "agg",
+        [
+            lambda c: c.sum(),
+            lambda c: c.mean(),
+            lambda c: c.count(),
+        ],
+    )
+    def test_high_card_int_key(self, monkeypatch, agg):
+        # The q18-shape case: single high-card int key. scan-in-place == single.
+        P = self._force(monkeypatch)
+        rng = np.random.default_rng(20)
+        n = 30_000
+        df = pd.DataFrame(
+            {"k": rng.integers(0, 12_000, n), "v": rng.standard_normal(n)}
+        )
+
+        def run():
+            return (
+                df.select()
+                .group_by("k")
+                .agg(agg(col("v")).alias("r"))
+                .collect(use_physical_planner=True)
+                .sort_values("k")
+                .reset_index(drop=True)
+            )
+
+        on = run()
+        monkeypatch.setattr(P, "_SCAN_IN_PLACE_GROUPBY", False)
+        tm.assert_frame_equal(on, run())
+
+    def test_int_value_sum_is_exact(self, monkeypatch):
+        # Integer value columns must sum in int64 (not via float) to match Arrow.
+        P = self._force(monkeypatch)
+        rng = np.random.default_rng(21)
+        n = 30_000
+        df = pd.DataFrame(
+            {
+                "k": rng.integers(0, 9000, n),
+                "v": rng.integers(-(10**6), 10**6, n),  # int64 values
+            }
+        )
+
+        def run():
+            return (
+                df.select()
+                .group_by("k")
+                .agg(col("v").sum().alias("s"), col("v").count().alias("c"))
+                .collect(use_physical_planner=True)
+                .sort_values("k")
+                .reset_index(drop=True)
+            )
+
+        on = run()
+        assert str(on["s"].dtype).startswith("int")  # exact int sum, not float
+        monkeypatch.setattr(P, "_SCAN_IN_PLACE_GROUPBY", False)
+        tm.assert_frame_equal(on, run())
+
+    def test_multi_key_and_multi_agg(self, monkeypatch):
+        # Multiple keys (string + int) and multiple aggs in one group_by.
+        P = self._force(monkeypatch)
+        rng = np.random.default_rng(22)
+        n = 25_000
+        df = pd.DataFrame(
+            {
+                "s": rng.choice([f"g{i}" for i in range(1500)], n),
+                "k": rng.integers(0, 40, n),
+                "v": rng.standard_normal(n),
+            }
+        )
+
+        def run():
+            return (
+                df.select()
+                .group_by("s", "k")
+                .agg(
+                    col("v").sum().alias("vs"),
+                    col("v").mean().alias("vm"),
+                    col("v").count().alias("vc"),
+                )
+                .collect(use_physical_planner=True)
+                .sort_values(["s", "k"])
+                .reset_index(drop=True)
+            )
+
+        on = run()
+        monkeypatch.setattr(P, "_SCAN_IN_PLACE_GROUPBY", False)
+        tm.assert_frame_equal(on, run())
+
+    def test_min_max_falls_back(self, monkeypatch):
+        # min/max aren't handled by scan-in-place; must fall back and stay correct.
+        self._force(monkeypatch)
+        rng = np.random.default_rng(23)
+        n = 20_000
+        df = pd.DataFrame({"k": rng.integers(0, 8000, n), "v": rng.standard_normal(n)})
+        res = (
+            df.select()
+            .group_by("k")
+            .agg(col("v").max().alias("mx"))
+            .collect(use_physical_planner=True)
+            .sort_values("k")
+            .reset_index(drop=True)
+        )
+        ref = (
+            df.groupby("k", sort=True)["v"]
+            .max()
+            .reset_index()
+            .rename(columns={"v": "mx"})
+        )
+        tm.assert_frame_equal(res, ref, check_dtype=False)

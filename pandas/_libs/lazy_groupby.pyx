@@ -33,6 +33,132 @@ cimport numpy as cnp
 
 cnp.import_array()
 
+
+# ---------------------------------------------------------------------------
+# Scan-in-place parallel grouped aggregate (Polars-style; docs/Q18_DECOMP.md).
+# Profiling Polars's in-memory group-by showed it builds per-group state in
+# thread-local hashmaps via a SEQUENTIAL scan — each thread scans all rows and
+# processes only its hash-partition — and never physically gathers the data.
+# Our partition_by_key + per-bucket take/factorize reads via a scattered
+# permutation (random access) and is ~2.2x slower (558 vs 252 ms on q18's inner
+# 18M->4.5M group; Polars ~220 ms). This kernel replicates the sequential
+# scan-in-place design and matches Polars.
+#
+# Keyed by a 128-bit hash (h1, h2) so it handles any key types the driver can
+# hash (int/temporal/float/decimal/string); the group's actual key values are
+# recovered from a representative row index. Aggregates sum/count/mean (sum kept
+# in the value's natural type: float64 sums in ``dvals``, int64 sums in
+# ``ivals``, to match Arrow's output exactly).
+# ---------------------------------------------------------------------------
+
+cdef uint64_t _GOLDEN_P = <uint64_t>0x9E3779B97F4A7C15
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def compute_hash_part(const uint64_t[::1] h1, uint8_t[::1] part, int n_parts):
+    """Assign each row a partition in [0, n_parts) from the high bits of the
+    combined key hash ``h1`` (n_parts a power of two, <= 256). The table slot
+    later uses the low bits of h1, so partition and slot are independent."""
+    cdef:
+        Py_ssize_t n = h1.shape[0]
+        Py_ssize_t i
+        int shift = 64
+        int b = n_parts
+    while b > 1:
+        shift -= 1
+        b >>= 1
+    with nogil:
+        for i in range(n):
+            part[i] = <uint8_t>(h1[i] >> shift)
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def scan_partition_agg(
+    const uint64_t[::1] h1,
+    const uint64_t[::1] h2,
+    const uint8_t[::1] part,
+    int tid,
+    Py_ssize_t cap,
+    const double[:, ::1] dvals,
+    const int64_t[:, ::1] ivals,
+):
+    """One partition of a scan-in-place grouped aggregate.
+
+    Thread ``tid`` scans ALL rows SEQUENTIALLY, processes only rows with
+    ``part[i] == tid``, and accumulates into a thread-local open-addressing table
+    keyed by the 128-bit hash ``(h1, h2)``. ``cap`` (power of two) must exceed 2x
+    the rows in this partition. ``dvals`` is ``n_d x n`` float64 source columns
+    (for float sums); ``ivals`` is ``n_i x n`` int64 source columns (int sums).
+
+    Returns (rep_rows int64[ng], counts int64[ng], dsums float64[ng x n_d],
+    isums int64[ng x n_i]). Groups are disjoint across partitions, so the caller
+    concatenates per-partition results with no merge.
+    """
+    cdef:
+        Py_ssize_t n = h1.shape[0]
+        Py_ssize_t i, slot, ng = 0, g, r
+        Py_ssize_t mask = cap - 1
+        Py_ssize_t n_d = dvals.shape[0]
+        Py_ssize_t n_i = ivals.shape[0]
+        uint64_t a, b
+        uint8_t mytid = <uint8_t>tid
+        cnp.ndarray[uint64_t, ndim=1] sh1 = np.empty(cap, dtype=np.uint64)
+        cnp.ndarray[uint64_t, ndim=1] sh2 = np.empty(cap, dtype=np.uint64)
+        cnp.ndarray[int64_t, ndim=1] sgrp = np.empty(cap, dtype=np.int64)
+        cnp.ndarray[uint8_t, ndim=1] occ = np.zeros(cap, dtype=np.uint8)
+        cnp.ndarray[int64_t, ndim=1] rep_arr = np.empty(cap, dtype=np.int64)
+        cnp.ndarray[int64_t, ndim=1] cnt_arr = np.zeros(cap, dtype=np.int64)
+        cnp.ndarray[double, ndim=2] dacc = np.zeros((cap, n_d), dtype=np.float64)
+        cnp.ndarray[int64_t, ndim=2] iacc = np.zeros((cap, n_i), dtype=np.int64)
+        uint64_t[::1] s1 = sh1
+        uint64_t[::1] s2 = sh2
+        int64_t[::1] sg = sgrp
+        uint8_t[::1] oc = occ
+        int64_t[::1] rep = rep_arr
+        int64_t[::1] cnt = cnt_arr
+        double[:, ::1] da = dacc
+        int64_t[:, ::1] ia = iacc
+
+    cdef:
+        Py_ssize_t limit = (cap * 3) >> 2  # keep load factor <= 0.75
+        int overflow = 0
+    with nogil:
+        for i in range(n):
+            if part[i] != mytid:
+                continue
+            a = h1[i]
+            b = h2[i]
+            slot = <Py_ssize_t>(a & <uint64_t>mask)
+            while oc[slot]:
+                if s1[slot] == a and s2[slot] == b:
+                    break
+                slot = (slot + 1) & mask
+            if not oc[slot]:
+                if ng >= limit:
+                    overflow = 1
+                    break  # cap underestimated; caller falls back
+                oc[slot] = 1
+                s1[slot] = a
+                s2[slot] = b
+                g = ng
+                sg[slot] = g
+                rep[g] = i
+                ng += 1
+            else:
+                g = sg[slot]
+            cnt[g] += 1
+            for r in range(n_d):
+                da[g, r] += dvals[r, i]
+            for r in range(n_i):
+                ia[g, r] += ivals[r, i]
+
+    if overflow:
+        return None
+    return rep_arr[:ng], cnt_arr[:ng], dacc[:ng], iacc[:ng]
+
+
 # Fibonacci hashing multiplier (2^64 / golden ratio), then keep the high bits:
 # high bits of a multiplicative hash are the well-mixed ones, so the bucket is
 # ``(key * GOLDEN) >> (64 - log2(n_buckets))``. Mixing matters because raw group

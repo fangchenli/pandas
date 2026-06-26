@@ -2023,6 +2023,15 @@ def _combine_partition_keys(key_arrays):
 # representative row. Reaches Polars parity on q10's group (~30 vs ~57 ms).
 # Module toggle for controlled A/B.
 _STRING_HASH_GROUPBY = True
+# Scan-in-place fused aggregate (Polars-style sequential scan into thread-local
+# tables, no permutation/gather) for sum/count/mean high-card groups.
+# DEFAULT-OFF: matches Polars in ISOLATION (2.2x our partition+take path on
+# q18's inner group) but REGRESSES when integrated (q18 +22%, q17 +92%) — the
+# in-context arrow path is already much faster than isolated benchmarks imply,
+# and the Python-orchestrated multi-kernel path (hash + value extract + scan +
+# assemble + key gather) adds overhead exceeding the benefit. Kept as a
+# validated, tested foundation; see docs/Q18_DECOMP.md. Module toggle for A/B.
+_SCAN_IN_PLACE_GROUPBY = False
 
 
 def _hash_key_int64(chunked):
@@ -2244,6 +2253,168 @@ def _string_hash_grouped_table(table, group_cols, agg_specs):
     for name in agg.column_names:
         if name != code_name:
             out[name] = agg.column(name)
+    return pa.table(out)
+
+
+# Aggregations the scan-in-place fused kernel handles (sum kept in the value's
+# natural type; mean = sum/count). Others (min/max/n_unique/std/...) fall back.
+_SCAN_IN_PLACE_AGGS = {"sum", "count", "mean"}
+
+
+def _scan_in_place_grouped_table(table, group_cols, agg_specs):
+    """Polars-style scan-in-place grouped aggregate (docs/Q18_DECOMP.md): hash
+    the key, then each thread scans all rows sequentially and accumulates only
+    its hash-partition into a thread-local table — no permutation, no data
+    gather. Matches Polars on ultra-high-card int groups (q18's inner group:
+    ~2.2x our partition+take path).
+
+    Handles sum/count/mean over non-null int64/float64 value columns, any
+    classifiable key. Returns the result ``pa.Table`` (same schema as the single
+    group_by) or None to fall back.
+    """
+    funcs = {f for _, _, f in agg_specs}
+    if not funcs <= _SCAN_IN_PLACE_AGGS:
+        return None
+    n = table.num_rows
+
+    # Value columns must be non-null int64/float64 (else Arrow null/decimal
+    # semantics differ from a plain accumulate — fall back).
+    def _missing(ch):
+        # null/NaN-skipping semantics (count counts non-null; sum/mean skip
+        # NaN/null) differ from our accumulate-every-row kernel, so any null OR
+        # float NaN in a referenced value column => fall back. NaN matters: a
+        # LEFT JOIN fills unmatched numeric columns with NaN (null_count == 0),
+        # e.g. q13's count(o_orderkey).
+        if ch.null_count:
+            return True
+        if pa.types.is_floating(ch.type):
+            return bool(pc.any(pc.is_nan(ch)).as_py())
+        return False
+
+    d_src: dict[str, int] = {}
+    i_src: dict[str, int] = {}
+    d_arrays: list = []
+    i_arrays: list = []
+    for _, in_col, func in agg_specs:
+        if func == "count":
+            ch = table.column(in_col)
+            if isinstance(ch, pa.ChunkedArray):
+                ch = ch.combine_chunks()
+            if _missing(ch):
+                return None
+            continue
+        if func not in ("sum", "mean") or in_col in d_src or in_col in i_src:
+            continue
+        ch = table.column(in_col)
+        if isinstance(ch, pa.ChunkedArray):
+            ch = ch.combine_chunks()
+        if _missing(ch):
+            return None
+        t = ch.type
+        if pa.types.is_floating(t):
+            d_src[in_col] = len(d_arrays)
+            d_arrays.append(
+                np.ascontiguousarray(
+                    ch.to_numpy(zero_copy_only=False).astype(np.float64, copy=False)
+                )
+            )
+        elif pa.types.is_integer(t):
+            i_src[in_col] = len(i_arrays)
+            i_arrays.append(
+                np.ascontiguousarray(
+                    ch.to_numpy(zero_copy_only=False).astype(np.int64, copy=False)
+                )
+            )
+        else:
+            return None
+
+    # Key classification + a cheap strided cardinality gate before touching the
+    # full key columns (so low-card groups don't pay).
+    sub = table.select(group_cols)
+    step = max(1, n // 8192)
+    idx = pa.array(np.arange(0, n, step, dtype=np.int64))
+    s_cls = _classify_group_keys(sub.take(idx))
+    if s_cls is None:
+        return None
+    s_int, s_str = s_cls
+    sacc, _ = _combined_key_hash(s_int, s_str, len(idx), parallel=False)
+    sample_ratio = len(np.unique(sacc)) / len(sacc)
+    if sample_ratio < _PARALLEL_GROUPBY_MIN_RATIO:
+        return None
+    # Estimated total groups, to size the per-thread tables (oversizing them to
+    # 2x rows zeroes ~8x too much memory and erases the win). Pad generously;
+    # the kernel's overflow guard makes an underestimate safe (falls back).
+    est_groups = int(sample_ratio * n)
+
+    cls = _classify_group_keys(sub)
+    if cls is None:
+        return None
+    int_like, strings = cls
+    h1, h2 = _combined_key_hash(int_like, strings, n, parallel=True)
+
+    from pandas._libs.lazy_groupby import (
+        compute_hash_part,
+        scan_partition_agg,
+    )
+
+    nparts = _PARALLEL_GROUPBY_BUCKETS
+    part = np.empty(n, dtype=np.uint8)
+    compute_hash_part(h1, part, nparts)
+    rows_per = np.bincount(part, minlength=nparts)
+
+    dvals = (
+        np.ascontiguousarray(np.stack(d_arrays))
+        if d_arrays
+        else np.empty((0, n), dtype=np.float64)
+    )
+    ivals = (
+        np.ascontiguousarray(np.stack(i_arrays))
+        if i_arrays
+        else np.empty((0, n), dtype=np.int64)
+    )
+
+    # Size each table to ~2x the estimated groups per partition (load factor
+    # 0.5), capped by the partition's row count (a hard upper bound on groups).
+    # 3x pad over the estimate absorbs hash imbalance; the kernel's overflow
+    # guard returns None on an underestimate, triggering a clean fall back.
+    est_per = max(1, est_groups // nparts)
+
+    def _cap(t):
+        target = min(int(rows_per[t]) + 8, 3 * est_per)
+        c = 1
+        while c < 2 * target:
+            c <<= 1
+        return c
+
+    def _run(t):
+        return scan_partition_agg(h1, h2, part, t, _cap(t), dvals, ivals)
+
+    parts = list(_groupby_pool().map(_run, range(nparts)))
+    if any(p is None for p in parts):
+        return None  # a partition overflowed its table — fall back
+    reps = np.concatenate([p[0] for p in parts])
+    counts = np.concatenate([p[1] for p in parts])
+    dsums = np.concatenate([p[2] for p in parts], axis=0)
+    isums = np.concatenate([p[3] for p in parts], axis=0)
+
+    out: dict = {}
+    for c in group_cols:
+        out[c] = table.column(c).take(pa.array(reps))
+    for out_name, in_col, func in agg_specs:
+        if func == "count":
+            out[out_name] = pa.array(counts)
+        elif func == "sum":
+            if in_col in d_src:
+                out[out_name] = pa.array(dsums[:, d_src[in_col]])
+            else:
+                out[out_name] = pa.array(isums[:, i_src[in_col]])
+        else:  # mean
+            s = (
+                dsums[:, d_src[in_col]]
+                if in_col in d_src
+                else isums[:, i_src[in_col]].astype(np.float64)
+            )
+            out[out_name] = pa.array(s / counts)
     return pa.table(out)
 
 
@@ -2762,6 +2933,19 @@ class PhysicalHashAggregate(PhysicalPlan):
             or any(f in _nuniq for _, _, f in agg_specs)
         ):
             return single()
+
+        # Scan-in-place fused aggregate (Polars-style): for sum/count/mean over
+        # high-card groups, scan sequentially into thread-local tables (no
+        # permutation, no data gather) — ~2.2x the partition+take path on
+        # ultra-high-card int groups (docs/Q18_DECOMP.md). Falls through (None)
+        # for unsupported aggs/keys.
+        if _SCAN_IN_PLACE_GROUPBY:
+            try:
+                res = _scan_in_place_grouped_table(table, group_cols, agg_specs)
+                if res is not None:
+                    return res
+            except Exception:
+                pass  # any failure must not change results
 
         # String-keyed groups: the int partition path below can't pack string
         # keys, so they would fall to the single-threaded kernel. Route them to
