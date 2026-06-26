@@ -64,10 +64,12 @@ aggregates on the codes, and attaches keys at the rep rows. Module toggle
 
 Exactness: groups by a **128-bit** key hash (two independent FNV-1a/multiplicative
 hashes computed in one byte pass). Collision ~n²/2^128 — below the engine's
-existing float-sum nondeterminism. Float keys are bit-viewed to match Arrow's
-group_by (which treats -0.0/+0.0 as distinct); float keys containing NaN fall
-back (Arrow/pandas NaN-group semantics differ). Decimal keys fall back (a future
-enhancement — q18's `o_totalprice` is decimal, so q18 doesn't yet fire).
+existing float-sum nondeterminism. Supported key dtypes: int/temporal/bool,
+float (bit-viewed to match Arrow's group_by, which treats -0.0/+0.0 as distinct;
+NaN-float keys fall back since Arrow/pandas NaN-group semantics differ), string,
+and **decimal128/256** (hashed as the raw value bytes viewed as int64 halves —
+equal decimals have equal bytes within a column, matching Arrow). Other dtypes
+fall back.
 
 Validation: all-22 TPC-H validate vs DuckDB at SF-3 with the path on; 1718 lazy
 tests pass (incl. `TestStringHashGroupBy`). Warm A/B (min of 15): q10 −17%
@@ -79,13 +81,20 @@ regression was cold-start + machine noise).
 The kernel reaches parity on the **group operator**, but the group is only ~1/5
 of the queries that have high-card string groups; joins + gather dominate. So
 the realized whole-query win is q10 ≈ −17% (0.28x→~0.37x), and it currently
-helps mainly q10 (q18 blocked on decimal-key support). It IS a clean substrate
-win (parity on a hot operator, upstreamable as the AG4 string-hash gap), but its
-suite-wide impact is modest — consistent with the reframing finding that the 3x
-is distributed across many operators.
+helps mainly q10. It IS a clean substrate win (parity on a hot operator,
+upstreamable as the AG4 string-hash gap), but its suite-wide impact is modest —
+consistent with the reframing finding that the 3x is distributed across many
+operators.
+
+**q18 does NOT benefit (corrects an earlier note).** q18's string+decimal-keyed
+group runs *after* the `sum(qty) > 300` HAVING filter and is only ~1,253 rows —
+gated out by `_PARALLEL_GROUPBY_MIN_ROWS`, so it never reaches this path. It was
+never blocked by the decimal dtype; q18's cost is the 18M-row inner `l_orderkey`
+group (already on the int parallel path) + the joins. Decimal-key support is kept
+as a correctness/coverage generalization, but **no current TPC-H query has a
+large decimal-keyed string group**, so it fires on none of them today.
 
 ## Remaining TODO (not blocking)
-- Decimal128 key support (would let q18 fire).
 - A fused per-bucket sum path (the prototype `bucket_hash_sum` was ~16ms faster
   than factorize+arrow-agg on the sum-only shape) if the in-engine overhead
   (arrow-agg-on-codes + attach) proves worth trimming.

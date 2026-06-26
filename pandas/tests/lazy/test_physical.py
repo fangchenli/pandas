@@ -1580,6 +1580,42 @@ class TestStringHashGroupBy:
         monkeypatch.setattr(P, "_STRING_HASH_GROUPBY", False)
         tm.assert_frame_equal(on, run())
 
+    def test_decimal_key_with_string(self, monkeypatch):
+        # Decimal128 key (hashed as int64 byte-halves) alongside a string key:
+        # factorize path must match the single Arrow path exactly.
+        import decimal
+
+        P = self._force(monkeypatch)
+        rng = np.random.default_rng(14)
+        n = 20_000
+        prices = [
+            decimal.Decimal(f"{v}.{c:02d}")
+            for v, c in zip(
+                rng.integers(0, 400, n), rng.integers(0, 100, n), strict=True
+            )
+        ]
+        df = pd.DataFrame(
+            {
+                "s": rng.choice([f"g{i}" for i in range(300)], n),
+                "p": pd.array(prices, dtype="object"),
+                "v": rng.standard_normal(n),
+            }
+        )
+
+        def run():
+            return (
+                df.select()
+                .group_by("s", "p")
+                .agg(col("v").sum().alias("r"))
+                .collect(use_physical_planner=True)
+                .sort_values(["s", "p"])
+                .reset_index(drop=True)
+            )
+
+        on = run()
+        monkeypatch.setattr(P, "_STRING_HASH_GROUPBY", False)
+        tm.assert_frame_equal(on, run())
+
     def test_bucket_factorize_induces_correct_partition(self):
         # The kernel codes must induce exactly the same grouping as a reference
         # factorization of the full key tuple.

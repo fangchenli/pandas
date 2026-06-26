@@ -2026,29 +2026,45 @@ _STRING_HASH_GROUPBY = True
 
 
 def _hash_key_int64(chunked):
-    """Return an int64 view of one numeric/temporal/boolean key column for
-    hashing, or None if the dtype isn't supported (caller falls back).
+    """Return a list of int64 arrays representing one numeric/temporal/boolean/
+    decimal key column for hashing, or None if the dtype isn't supported.
 
-    Floats are bit-viewed (with -0.0 normalised to +0.0); any NaN key returns
-    None since the factorize would group NaNs that pandas drops by default.
+    Most dtypes yield one array; ``decimal128``/``decimal256`` yield two/four
+    (the raw value bytes viewed as int64 halves — equal decimals have equal
+    bytes, matching Arrow's group_by). Floats are bit-viewed (so -0.0 and +0.0
+    stay distinct, as in Arrow); any NaN float key returns None (Arrow/pandas
+    NaN-group semantics differ, so fall back).
     """
     t = chunked.type
     if pa.types.is_integer(t) or pa.types.is_temporal(t):
         npv = chunked.to_numpy(zero_copy_only=False)
         if npv.dtype.kind == "M":
-            return np.ascontiguousarray(npv.view(np.int64))
-        return np.ascontiguousarray(npv.astype(np.int64, copy=False))
+            return [np.ascontiguousarray(npv.view(np.int64))]
+        return [np.ascontiguousarray(npv.astype(np.int64, copy=False))]
     if pa.types.is_boolean(t):
-        return np.ascontiguousarray(
-            chunked.to_numpy(zero_copy_only=False).astype(np.int64)
-        )
+        return [
+            np.ascontiguousarray(
+                chunked.to_numpy(zero_copy_only=False).astype(np.int64)
+            )
+        ]
     if pa.types.is_floating(t):
         f = chunked.to_numpy(zero_copy_only=False).astype(np.float64, copy=False)
         if np.isnan(f).any():
             return None  # Arrow/pandas float-NaN group semantics differ; fall back
-        # Bit-view: this matches Arrow's group_by, which treats -0.0 and +0.0 as
-        # distinct float keys (so the factorize path stays a drop-in for it).
-        return np.ascontiguousarray(f).view(np.int64)
+        return [np.ascontiguousarray(f).view(np.int64)]
+    if pa.types.is_decimal(t):
+        # A decimal128/256 value is byte_width raw bytes (a two's-complement
+        # scaled integer); equal values have equal bytes within a column (same
+        # scale), so hash the bytes as int64 halves. Requires zero offset.
+        if chunked.offset != 0:
+            return None
+        bufs = chunked.buffers()
+        if len(bufs) < 2 or bufs[1] is None:
+            return None
+        k = t.byte_width // 8  # 2 for decimal128, 4 for decimal256
+        raw = np.frombuffer(bufs[1], dtype=np.int64, count=len(chunked) * k)
+        raw = raw.reshape(len(chunked), k)
+        return [np.ascontiguousarray(raw[:, j]) for j in range(k)]
     return None
 
 
@@ -2093,10 +2109,10 @@ def _classify_group_keys(table):
                 return None
             strings.append((c, sb))
         else:
-            iv = _hash_key_int64(ch)
-            if iv is None:
+            parts = _hash_key_int64(ch)
+            if parts is None:
                 return None
-            int_like.append((c, iv))
+            int_like.extend((c, p) for p in parts)
     return int_like, strings
 
 
