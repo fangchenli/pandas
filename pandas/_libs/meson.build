@@ -97,6 +97,7 @@ libs_sources = {
             'lib.pyx',
             'src/parser/tokenizer.c',
             'src/parser/fast_float_strtod.cpp',
+            'src/parser/pd_strtoi.cpp',
         ],
         'deps': [fast_float_dep],
     },
@@ -113,6 +114,7 @@ libs_sources = {
         'sources': [
             'src/parser/tokenizer.c',
             'src/parser/fast_float_strtod.cpp',
+            'src/parser/pd_strtoi.cpp',
             'src/parser/io.c',
             'src/parser/pd_parser.c',
         ],
@@ -123,6 +125,7 @@ libs_sources = {
             'parsers.pyx',
             'src/parser/tokenizer.c',
             'src/parser/fast_float_strtod.cpp',
+            'src/parser/pd_strtoi.cpp',
             'src/parser/io.c',
         ],
         'deps': [fast_float_dep, _khash_primitive_helper_dep],
