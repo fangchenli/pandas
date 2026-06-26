@@ -36,19 +36,34 @@ without summing every one); Polars does the same in ~210 ms.
 - The ~100 ms in-context residual vs Polars is the **partitioned threaded
   group-by** in Polars's *in-memory* engine (what bare `.collect()` uses —
   `crates/polars-core/src/frame/group_by/hashing.rs`,
-  `group_by_threaded_slice`/`_iter`). Verified against source: it partitions by
-  `hash_to_partition` and **each thread scans all rows but inserts only its
-  partition's keys into a thread-local (cache-hot) hashmap — no gather/scatter
-  pass** (source comment: *"the hash-table currently is local to the thread so
-  in hot cache"*). Our `partition_by_key` → per-bucket `take` (gathers 18M rows)
-  → Arrow group_by → concat a 4.5M-row intermediate pays a scatter+concat that
-  Polars's scan-in-place avoids — that extra work is the measured mechanism of
-  the gap.
-  *Provenance:* the ~100 ms split is inference from our own measured take+concat
-  overhead plus reading Polars source; we have **not** profiled Polars's
-  internals on this query. (Note: the cache-aware **hot/cold** grouper with
-  4096-entry eviction is Polars's *streaming* engine, `polars-stream`, which
-  `.collect()` does NOT use — do not attribute it to this measurement.)
+  `group_by_threaded_slice`/`_iter`): partitions by `hash_to_partition`, each
+  thread scans all rows but inserts only its partition's keys into a thread-local
+  hashmap (source comment: *"the hash-table currently is local to the thread so
+  in hot cache"*). Our `partition_by_key` → per-bucket `take` (**physically
+  gathers 18M rows**) → Arrow group_by → concat a 4.5M-row intermediate pays a
+  scatter+gather+concat that Polars avoids.
+
+  **PROFILED, not inferred (macOS `sample` on the unstripped polars 1.37.1
+  runtime, tight loop over the synthesized 18M→4.5M group at SF-3 scale; self-
+  time by symbol):**
+
+  | Polars frame | self samples | what it is |
+  |---|---|---|
+  | `group_by_threaded_slice` | **32,922** | per-thread hashmap building per-group **index** vectors (GroupsIdx/UnitVec) |
+  | `agg_sum` (Float64) | **~25,000** | the sum, read *through* the group indices |
+  | `__psynch_cvwait` | 17,260 | idle / thread-sync (not work) |
+  | `hashbrown`/foldhash | 2,499 | key hashing |
+  | jemalloc (`_rjem_*`) | ~5,000 | allocation |
+  | `gather` (take `PrimitiveArray`) | **1,024** | **negligible (~1.5% of real work)** |
+
+  This is direct evidence for the mechanism: Polars builds per-group **index**
+  lists in parallel thread-local hashmaps and sums through them; it does **not**
+  physically gather the data (gather is 1,024 samples vs ~58,000 for build+sum).
+  No `HotGrouper`/`PreAgg`/`SpillFrame` frames appear — confirming the cache-aware
+  **hot/cold** grouper (4096-entry eviction) is the *streaming* engine
+  (`polars-stream`) and is NOT used by `.collect()`; do not attribute it here.
+  *Caveat:* profiled a numpy-synthesized reproduction of the inner group (same
+  cardinality), not the literal q18 pipeline, and the sample counts are relative.
 - **Inner→outer redundancy is NOT costly.** The per-order sum is computed twice
   (inner `big` for the HAVING, outer for output), but the outer group is only
   ~1,253 rows, so reusing it would save ~nothing.
