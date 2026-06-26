@@ -137,6 +137,10 @@ fusion + cascade pipelining. `PhysicalFusedJoinAgg` remains default-off.
   movement).
 - `QGAP_DECOMP.md` — per-operator decomposition; methodology fix; fusion
   rejections; join-chain localization.
+- `STRING_HASH_AGGREGATE_KERNEL.md` — parallel string-key factorize group-by
+  (reaches Polars parity on the operator; integrated default-on; q10 −17%).
+- `Q18_DECOMP.md` — q18 blocker = the ultra-high-card int group-by (45%);
+  substrate-bound, factorize-int probed equivalent (no bounded lever).
 - `PARALLEL_GROUPBY_SCOPE.md` — the shipped kernel: scope, results, reach, load-
   dependence.
 - `PERF_CEILING.md` — the three taxes; high-effort paths (A pushdown / B native
