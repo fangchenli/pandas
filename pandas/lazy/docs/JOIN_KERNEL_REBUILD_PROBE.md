@@ -135,12 +135,45 @@ partition overhead dominates when there's little payload to amortize it).
 block (a second pass); acceptable as the opt-in correctness fallback, but it
 needs a gather-into-sorted-slot kernel to be competitive.
 
+## Integration check — the win does NOT survive the column-major engine (June 2026)
+Before wiring, measured the honest round-trip the engine requires: its columns
+are **column-major** (`ArrayDict`) and it returns column-major, but the fast
+fused gather needs **row-major** in and produces row-major out. Adding the
+column→row-major transpose (input) + row-major→column split (output):
+
+| P | block-only (microbench) | + round-trip (engine-real) | pd.merge | polars |
+|---|---|---|---|---|
+| 3 | 230 | 282 | 328 | 194 |
+| 9 | 365 | **573** | 527 | 402 |
+
+The round-trip adds ~208 ms at P=9 — the 365 ms win becomes **573 ms, losing to
+Polars (402) and ~tying pd.merge**. Two compounding problems:
+1. **Layout round-trip tax.** Row-major gather is fast in isolation, but a
+   column-major engine pays a transpose in + split out that ~equals the gather
+   saved. This is `PERF_CEILING.md` tax #2 (the layout/boundary) at the kernel
+   level — the same isolation trap, now nailed with a *built, measured* kernel.
+2. **Mis-targeted side.** The kernel memcpy-gathers the **build (dim)** payload;
+   TPC-H's wide float64 payload (measures) is on the **probe (fact)** side, and
+   dim payloads are mostly strings/ints → the float64-right-payload + unique-
+   build gate would rarely fire on the real suite anyway.
+
+**Decision: do NOT wire it (as-is).** It would be a regression-or-no-op,
+violating the campaign rule against shipping unexplained regressions. Wiring +
+all-22 was not run because the integration cost is *measured* to negate the win
+before execution.
+
 ## Consequence
-Reverses "joins are architectural" — **with the right layout (row-major fused
-memcpy) a hand-written partitioned parallel kernel beats Polars on wide-payload
-fact→dim joins**, the dominant TPC-H shape. The orchestration tax is real but
-beatable when the gather is fused as a contiguous copy (not scalar, not a
-separate vectorized pass). Validated + tested; **not yet wired into the engine**
-(next: route `_try_cython_join`'s wide-payload case through it with a row-major
-output contract, gated + all-22 validation; make ordered-mode reorder cheaper;
-add int64/mixed payload + non-unique-build fallback).
+The kernel **beats Polars in isolation** (block in/out, build-side payload) —
+proving the *kernel* is not the bottleneck. But the win is **stranded by the
+engine's column-major data contract**: every place we speed a join, the
+layout/orchestration boundary eats it. This is the definitive, kernel-level
+confirmation of the standing conclusion — matching Polars on joins requires the
+engine to be **row-major/block-native end-to-end** (carry blocks through joins,
+no per-operator column round-trips), i.e. the Polars/DuckDB architecture, which
+is the already-NO-GO from-scratch engine (`ENGINE_GONOGO_MEMO.md`). The kernel
+is a validated artifact and a clean proof; it is correctly **not shipped**.
+
+Salvage paths (all require more than a kernel): (a) make the engine carry
+row-major blocks across the join so input/output transposes vanish; (b) a
+probe-side fused gather (the fact transpose + output split costs are larger, not
+smaller); (c) keep it for a future block-native execution mode only.
