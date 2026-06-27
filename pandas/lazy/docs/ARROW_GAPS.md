@@ -115,8 +115,12 @@ not "abandoned."
   - **Duplicate search done (apache/arrow, 2026-06-18):** ~12 query phrasings +
     manual review of adjacent Grouper issues — **no existing report.** Closest
     is DataFusion #27498 (Rust, different angle). → **non-duplicate, file-able.**
-    Issue draft + remaining gate (latest-Arrow re-check) in
-    `upstream/UPSTREAM_AG4_STRING_HASH.md`. Not yet filed.
+    Issue draft in `upstream/UPSTREAM_AG4_STRING_HASH.md`. Not yet filed.
+  - **Latest-Arrow gate GREEN (2026-06-26):** re-ran on **pyarrow 24.0.0 /
+    polars 1.42.0** (fresh venv) — gap unchanged from 23.0.1 (1-core raw/dict
+    8.4x/9.5x/4.0x at K=100/10K/1M; 8-core 7.7x/.../5.3x). Not fixed in two
+    releases. Draft refreshed with the 24.0.0 numbers. **Only remaining gate:
+    human approval to file.**
 - **AG6 (Acero per-node overhead).** filter→reduce in Acero is *catastrophic*
   (`filt6` 70 ms/1-thread vs raw `pc` 5.6 ms and our fused kernel 4.3 ms);
   per-join-node overhead made acero end-to-end 2x slower than our pd.merge on

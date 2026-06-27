@@ -41,10 +41,10 @@ python bench_arrow_string_groupby.py                        # real-world
 - [x] Verified (above). [x] Duplicate search done — non-duplicate (closest is
   DataFusion #27498, Rust, different). See `UPSTREAM_AG4_STRING_HASH.md` for the
   searched phrasings.
-- [ ] **DO THIS:** re-run the benchmark on the **latest** pyarrow (playbook §1),
-  confirm the gap persists, and capture the fresh numbers + version for the
-  issue. If it's been fixed, record that in `../ARROW_GAPS.md` AG4 and stop.
-- [ ] Human approval to file.
+- [x] **Latest-Arrow re-check (June 2026):** re-ran on **pyarrow 24.0.0** /
+  polars 1.42.0 (fresh venv). Gap persists, unchanged from 23.0.1
+  (1-core ratios 8.4×/9.5×/4.0× at K=100/10k/1M). Draft numbers refreshed.
+- [ ] **Human approval to file** — the only remaining gate.
 
 ## Deliverable
 The ready issue draft (title, labels, body with the table + repro + hypothesis)

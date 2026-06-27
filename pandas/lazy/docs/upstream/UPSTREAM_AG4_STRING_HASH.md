@@ -13,11 +13,11 @@ final version gate (below) and your go-ahead (filing is outward-facing).
       #41036 benchmark, #41233 num_groups bug). **No existing issue reports
       this gap.** Closest is DataFusion #27498 (Rust; grouping *on* dict data —
       different engine, different angle). → **non-duplicate.**
-- [ ] **Latest-Arrow re-check** — measured on pyarrow 23.0.1 / Arrow C++ 23.
-      Confirm the gap still reproduces on the current release before filing
-      (no closed issue suggests a fix landed, but verify). This is the one
-      remaining gate.
-- [ ] **Your approval to file.**
+- [x] **Latest-Arrow re-check (June 2026)** — re-ran on **pyarrow 24.0.0** /
+      polars 1.42.0 in a fresh venv. **Gap persists, essentially unchanged**
+      across two releases (8.35x/9.54x/4.05x at 1 core vs the 23.0.1
+      8.5x/9.7x/4.0x). Not fixed. Fresh numbers in the table below.
+- [ ] **Your approval to file.** ← only remaining gate.
 
 ## Draft issue
 
@@ -36,20 +36,21 @@ final version gate (below) and your go-ahead (filing is outward-facing).
 > aggregate re-hashing raw key bytes per row rather than interning string keys
 > internally.
 >
-> Measured with pyarrow 23.0.1 on 10M rows, one string key + a float64 `sum`,
-> sweeping cardinality and `pa.set_cpu_count`:
+> Measured with **pyarrow 24.0.0** on 10M rows, one string key + a float64
+> `sum`, sweeping cardinality and `pa.set_cpu_count` (gap is unchanged from
+> 23.0.1):
 >
 > | distinct keys | `group_by` raw `large_string` | `group_by` dict-encoded | ratio |
 > |---|---|---|---|
-> | 100 (1 core) | 388 ms | 46 ms | **8.5×** |
-> | 10,000 (1 core) | 518 ms | 53 ms | **9.7×** |
-> | 1,000,000 (1 core) | 2404 ms | 595 ms | **4.0×** |
-> | 100 (8 cores) | 96 ms | 12 ms | **7.9×** |
-> | 1,000,000 (8 cores) | 2527 ms | 446 ms | **6.2×** |
+> | 100 (1 core) | 369 ms | 44 ms | **8.4×** |
+> | 10,000 (1 core) | 503 ms | 53 ms | **9.5×** |
+> | 1,000,000 (1 core) | 2378 ms | 588 ms | **4.0×** |
+> | 100 (8 cores) | 83 ms | 11 ms | **7.7×** |
+> | 1,000,000 (8 cores) | 2128 ms | 398 ms | **5.3×** |
 >
 > Results are identical across both paths. For reference, Polars grouping the
-> same raw string keys is ~3.8× faster than Acero per-thread at low cardinality
-> (102 ms vs 388 ms, single-threaded), i.e. the raw-string path is also behind a
+> same raw string keys is ~3.7× faster than Acero per-thread at low cardinality
+> (100 ms vs 369 ms, single-threaded), i.e. the raw-string path is also behind a
 > peer engine — so this isn't just "dict-encoding is faster," the raw-string
 > hashing itself appears to leave a large factor on the table.
 >
@@ -70,7 +71,7 @@ final version gate (below) and your go-ahead (filing is outward-facing).
 > ### Component / environment
 >
 > C++ Acero / `arrow::compute::Grouper` (row-table key encoding). pyarrow
-> 23.0.1; [confirm on latest before filing].
+> 24.0.0 (gap also present on 23.0.1).
 >
 > ### Hypothesis (for maintainers to confirm)
 >
