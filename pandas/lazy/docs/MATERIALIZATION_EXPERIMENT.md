@@ -293,3 +293,38 @@ not a Polars-class step change. The remaining halves:
 So per-collect is a real but bounded lever: the optimizer-dispatch win is
 banked; the rest is either a planner change (source pruning) or an API
 change (non-pandas return), both larger than their payoff at this stage.
+
+## Addendum — "JIT-compile a pc chain to remove intermediate materialization?" (June 2026)
+
+Question raised as a candidate upstream item. Measured on **pyarrow 24.0.0**
+(fresh venv, `benchmarks/arrow_fusion_probe.py`), deep compute-bound chain
+`sqrt(exp(a)+sin(b)*cos(c))`, 10M rows (~5 intermediates):
+
+| path | ms | note |
+|---|---|---|
+| whole-array `pyarrow.compute` chain | 197 | materializes each 80 MB intermediate to DRAM |
+| **Acero `project` (morsel-streamed)** | **45** | per-batch cache-resident intermediates — **4.4x**, output == numpy (verified) |
+| numpy (ref) | 215 | materializes |
+| NumExpr (fused, no intermediates) | 40 | the engine already routes fuseable chains here |
+| simple `a+b*c` raw pc vs NumExpr | 8.7 vs 8.9 | bandwidth-bound — **nothing to fuse** |
+
+**Answer: yes it's possible (Gandiva is Arrow's LLVM JIT for exactly this), but
+it's largely unnecessary — Acero already removes most of the tax without any
+JIT.** The intermediate-materialization cost is an artifact of the *whole-array*
+`pyarrow.compute` API; Acero's `project` node streams morsels so the
+intermediates stay cache-resident, capturing 4.4x of the ~5x and landing within
+~12% of NumExpr. A true JIT (Gandiva) would add only that last ~12% on
+compute-bound chains and ~nothing on bandwidth-bound ones (memory-bound). And
+**Gandiva is still not shipped in pyarrow wheels** (`import pyarrow.gandiva` →
+`ModuleNotFoundError` on 23.0.1 **and** 24.0.0 — AG8 refreshed).
+
+**Upstream verdict (record + hand off, do not pursue):** a "JIT-fuse a pc chain"
+contribution is **low value** — Acero already captures it, and our engine
+already fuses via NumExpr. The two narrow residuals are both already tracked and
+neither is chain-JIT: (1) **AG8** — Gandiva unpackaged/not-wired-into-Acero
+(low value now that Acero suffices for map chains); (2) the **higher-value Acero
+gap is filter→reduce compaction** — `FilterNode` physically gathers selected
+rows before a downstream aggregate (`filt6` 70 ms vs raw_pc 5.6 ms above), where
+the right fix is mask/selection-vector push-down to the aggregate, *not*
+expression JIT. That is the real materialization gap worth scoping for the Arrow
+agent. Artifact: `benchmarks/arrow_fusion_probe.py`.

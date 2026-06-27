@@ -94,6 +94,21 @@ used from a normal pyarrow pipeline). See `ENGINE_DIFFERENTIATION.md`. Treat AG8
 as "expression codegen exists but is practically unavailable + non-composable,"
 not "abandoned."
 
+**Refresh (2026-06-26) — and AG8 is now LOW value.** `import pyarrow.gandiva`
+still `ModuleNotFoundError` on **both 23.0.1 and 24.0.0** wheels (unchanged).
+But a measured re-test of the underlying question — *"JIT-compile a pc chain to
+remove intermediate materialization?"* (`benchmarks/arrow_fusion_probe.py`,
+`MATERIALIZATION_EXPERIMENT.md` addendum) — shows **Acero's `project` node
+already removes ~4.4x of the materialization tax on a deep compute chain without
+any JIT** (197→45 ms, within ~12% of NumExpr), because morsel-streaming keeps
+intermediates cache-resident. So chain-JIT/Gandiva would add only the last ~12%
+on compute-bound chains and ~nothing on bandwidth-bound ones. **Do not pursue a
+chain-JIT contribution.** The real remaining materialization gap is **filter→
+reduce compaction** in Acero's `FilterNode` (gathers selected rows before the
+aggregate; `filt6` 70 ms vs raw_pc 5.6 ms) — fix is mask/selection-vector
+push-down to the aggregate, not expression JIT. That is the file-able Acero
+enhancement worth scoping (currently characterization-stage, not hand-off-ready).
+
 ## Detail for the non-obvious gaps
 
 - **AG4 (string-key hashing). VERIFIED** by a standalone benchmark
