@@ -375,3 +375,39 @@ class TestPayloadAwareGate:
         used, phys, eager = self._run(left, right, on="k")
         assert not used  # wide + large -> pd.merge preserved
         tm.assert_frame_equal(phys, eager)
+
+
+class TestPartitionByBucket:
+    """The radix-partition foundation for the partitioned parallel hash join
+    (``pandas/lazy/docs/JOIN_KERNEL_REBUILD_PROBE.md``)."""
+
+    def test_partition_preserves_keys_and_groups(self):
+        from pandas._libs.lazy_join import partition_by_bucket
+
+        rng = np.random.default_rng(0)
+        keys = rng.integers(0, 1000, 50_000).astype(np.int64)
+        for n_buckets in (1, 2, 8, 64):
+            sk, sr, bounds = partition_by_bucket(keys, n_buckets)
+            # row mapping reconstructs the sorted keys exactly
+            tm.assert_numpy_array_equal(keys[sr], sk)
+            # it is a permutation of the input rows
+            tm.assert_numpy_array_equal(
+                np.sort(sr), np.arange(len(keys), dtype=np.int64)
+            )
+            # bounds delimit n_buckets contiguous groups covering all rows
+            assert len(bounds) == n_buckets + 1
+            assert bounds[0] == 0 and bounds[-1] == len(keys)
+            assert np.all(np.diff(bounds) >= 0)
+            # within each bucket, all keys hash to the same bucket id
+            h = (sk.astype(np.uint64) * np.uint64(0x9E3779B97F4A7C15)) >> np.uint64(40)
+            bid = (h & np.uint64(n_buckets - 1)).astype(np.int64)
+            for b in range(n_buckets):
+                seg = bid[bounds[b] : bounds[b + 1]]
+                assert np.all(seg == b)
+
+    def test_partition_empty(self):
+        from pandas._libs.lazy_join import partition_by_bucket
+
+        sk, sr, bounds = partition_by_bucket(np.empty(0, dtype=np.int64), 8)
+        assert len(sk) == 0 and len(sr) == 0
+        tm.assert_numpy_array_equal(bounds, np.zeros(9, dtype=np.int64))

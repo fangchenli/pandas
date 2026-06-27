@@ -231,3 +231,61 @@ def build_join_table_i8(const int64_t[::1] keys):
     with nogil:
         _fill_groups(gids_v, offs_v, cursor_v, rows_v)
     return slot_key, slot_gid, np.asarray(counts), offsets, group_rows
+
+
+# ---------------------------------------------------------------------------
+# Radix partition for the partitioned parallel hash join.
+#
+# A monolithic hash join on a large key set is single-threaded on the build and
+# does two full probe passes (count, fill). Partitioning both sides by key-hash
+# into B cache-resident buckets lets the per-bucket joins run in parallel and
+# keeps each hash table in cache. This is an O(N) counting sort (two passes), the
+# same no-OpenMP pattern as lazy_radix.pyx; the per-bucket joins are driven by a
+# Python thread pool over ``build_join_table_i8`` + ``probe_*_chunk``.
+# ---------------------------------------------------------------------------
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def partition_by_bucket(const int64_t[::1] keys, int64_t n_buckets):
+    """Counting-sort ``keys`` into ``n_buckets`` (power-of-two) hash buckets.
+
+    Returns ``(sorted_keys, sorted_rows, bounds)`` where each bucket ``b`` is the
+    contiguous slice ``[bounds[b], bounds[b+1])`` of ``sorted_keys`` (and the
+    original row index in ``sorted_rows``). ``nogil`` two-pass O(N) counting sort.
+    """
+    cdef Py_ssize_t n = keys.shape[0]
+    bucket_of = np.empty(n, dtype=np.int64)
+    counts = np.zeros(n_buckets, dtype=np.int64)
+    cdef int64_t[::1] bucket_v = bucket_of
+    cdef int64_t[::1] counts_v = counts
+    cdef Py_ssize_t i
+    cdef int64_t b
+    cdef uint64_t mask = <uint64_t>(n_buckets - 1)
+    cdef uint64_t h
+    # histogram first (need offsets before scatter)
+    with nogil:
+        for i in range(n):
+            h = (<uint64_t>keys[i]) * <uint64_t>0x9E3779B97F4A7C15
+            b = <int64_t>((h >> 40) & mask)
+            bucket_v[i] = b
+            counts_v[b] += 1
+    bounds = np.empty(n_buckets + 1, dtype=np.int64)
+    bounds[0] = 0
+    np.cumsum(counts, out=bounds[1:])
+    out_keys = np.empty(n, dtype=np.int64)
+    out_rows = np.empty(n, dtype=np.int64)
+    cursor = np.empty(n_buckets, dtype=np.int64)
+    cdef int64_t[::1] outk_v = out_keys
+    cdef int64_t[::1] outr_v = out_rows
+    cdef int64_t[::1] cursor_v = cursor
+    cdef const int64_t[::1] bounds_v = bounds[:n_buckets]
+    cdef int64_t p
+    with nogil:
+        for i in range(n_buckets):
+            cursor_v[i] = bounds_v[i]
+        for i in range(n):
+            b = bucket_v[i]
+            p = cursor_v[b]
+            cursor_v[b] = p + 1
+            outk_v[p] = keys[i]
+            outr_v[p] = i
+    return out_keys, out_rows, bounds

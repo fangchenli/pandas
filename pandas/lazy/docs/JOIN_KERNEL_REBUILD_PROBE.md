@@ -71,9 +71,45 @@ Options:
 
 This is the decision before building; everything else is measured-ready.
 
+## BUILD + VALIDATE result (June 2026): components win, composition doesn't yet
+Built `partition_by_bucket` (O(N) nogil counting-sort radix partition, in
+`_libs/lazy_join.pyx`) + a partitioned parallel join driver (fast unordered core
++ opt-in `pd.merge`-order reorder). **Correctness verified** vs `inner_join_indexers_i8`:
+ordered output == pd.merge exactly; unordered == pd.merge multiset.
+
+Measured (Python-orchestrated driver, the honest end-to-end):
+
+| | index-gen | full join + gather (P=9) |
+|---|---|---|
+| monolithic (current) | 298 ms | — |
+| **partitioned UNORDERED B=16** | **211 ms** | 541 ms |
+| partitioned ORDERED B=16 | 434 ms | — |
+| pd.merge | — | 507 ms |
+| polars | ~132 (P=1) | **385 ms** |
+
+Partitioned-unordered index-gen beats monolithic (211 vs 298), but **composed
+end-to-end it's only ~pd.merge parity and still behind Polars** (541 vs 385).
+The isolated 128 ms per-bucket number did **not** survive composition. Taxes
+that ate it: (1) the partition counting-sort is **single-threaded** (~83 ms ×2
+sides); (2) **Python orchestration** over 16 bucket tasks + the 16-way
+`concatenate`; (3) the gather is still a **separate pass** (not fused into the
+probe); (4) order preservation via `argsort` costs **+222 ms** (must become an
+O(N) radix reorder).
+
+This is the project's recurring **isolation trap** (cf. the scan-in-place
+groupby regression): nogil kernels win standalone, but Python orchestration
+*between* them is the tax (PERF_CEILING tax #3). The lesson is precise and
+actionable: the win requires a **single fused nogil kernel** — partition +
+per-bucket build + probe + **emit gathered payload in the same pass** — driven by
+one thread pool over buckets, with an O(N) radix reorder for the ordered mode.
+That removes all four taxes at once. Polars's 385 ms is exactly one fused pass;
+our 211 ms index-gen + 323 ms gather = 534 ms is two passes plus orchestration.
+
 ## Consequence
-Reverses "joins are architectural." A large part of the join gap is **kernel
-work we can do** (parallel build, single-pass probe, fused gather), not a
-whole-query-fusion rewrite. The remaining genuinely-architectural piece (Polars
-pipelining the probe stream across a join cascade) is separate and smaller than
-the per-join kernel wins available here.
+Reverses "joins are architectural" **at the component level** — parallel build,
+partitioned probe, and parallel gather are each measured faster than what we
+ship, and a fully-fused single-kernel version is the concrete path to beat
+Polars (target ≤385 ms P=9). But it also re-confirms the **orchestration tax**:
+the win is only realized as *one* fused kernel, not Python-composed pieces. Next
+build: the fused `partitioned_join_gather` Cython kernel + radix reorder.
+`partition_by_bucket` is the validated, correctness-checked foundation.
