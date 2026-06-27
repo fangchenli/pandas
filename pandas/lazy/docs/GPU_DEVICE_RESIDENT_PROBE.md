@@ -15,6 +15,13 @@ H2D transfer, so the payoff needs **device-resident** data across the plan, not
 per-call offload from host-resident frames. This *confirms and quantifies* the
 ROADMAP decline rather than overturning it.
 
+**GH200 update (measured, June 2026):** on Grace-Hopper unified memory the
+per-call transfer tax *is* eliminated at the cuDF-primitive level (q18 inner
+group 268→46 ms with managed memory; pinned H2D 17x PCIe) — but the off-the-shelf
+polars-GPU **suite is unchanged** (0.48x) because the engine doesn't route
+ingestion through the C2C path. The hardware advantage is real but **stranded by
+the software memory model**. See the measured GH200 section below.
+
 ## Hardware (note: not the GH200 we intended)
 RunPod provisioned **x86_64, 128 cores, 1.5 TiB RAM + NVIDIA RTX PRO 6000
 Blackwell (sm_120), 96 GB VRAM, PCIe** (CUDA 12.8 toolkit / driver 580 / cudf
@@ -23,7 +30,7 @@ applies), *not* unified memory — see the GH200 extrapolation at the end. The
 128-core CPU is a strong baseline: Polars-CPU q18 @ SF-3 = 125 ms here vs ~281
 ms on the dev Mac, so GPU is fighting ~2x our local CPU.
 
-Method: `gpu_tpch_driver.py` (scratchpad) reuses `bench_tpch.pl_q*` (the Polars
+Method: `gpu_tpch_driver.py` (`pandas/lazy/benchmarks/`) reuses `bench_tpch.pl_q*` (the Polars
 queries), times each `.collect()` CPU vs GPU, **best-of-5 warm**. GPU uses
 `pl.GPUEngine(raise_on_fail=True)` so silent CPU fallbacks are detected — **all
 22 ran GPU-native at both scales, zero fallbacks.** `pandas->polars` conversion
@@ -104,14 +111,65 @@ async would raise the 22 GB/s and shrink the 53%.
    **quantified ceiling** (2–3x on heavy queries, device-residency worth ~2x of
    that, transfer ~half the per-call cost), not a build.
 
-### GH200 / unified-memory extrapolation (untested)
-This was PCIe. On Grace-Hopper (NVLink-C2C coherent unified memory, ~900 GB/s,
-~40x this PCIe path's measured 22 GB/s), the transfer half of the per-call cost
-~vanishes, so the per-call and device-resident columns converge: the heavy
-queries' 2–3x would hold *without* needing an explicit device-resident plan, and
-several currently-losing mid-weight queries (q1, q7, q10, q11) would likely
-cross to GPU. The light queries stay CPU-favored (compute too small regardless).
-A GH200 rerun of `gpu_tpch_driver.py` would confirm; the harness is ready.
+## GH200 / unified memory — MEASURED (June 2026): real, but stranded by the stack
+Reran on a **Lambda GH200 480GB** (Grace 64-core Neoverse-V2 aarch64 + Hopper
+H200 96 GB HBM3e, NVLink-C2C, `Addressing Mode: ATS`; same cudf 26.6.0 / polars
+1.39.3). The PCIe probe predicted the transfer tax would ~vanish. It does at the
+**primitive** level — but the off-the-shelf engine does **not** capture it.
+
+**Memory-path bandwidth (2.88 GB, `mem_paths.py`) — the C2C link is real:**
+
+| H2D path | time | bandwidth | vs PCIe (22 GB/s) |
+|---|---|---|---|
+| pageable `cp.asarray` (the *default* cuDF ingestion) | 212 ms | **14 GB/s** | **0.6x — worse!** |
+| pinned host → device | 7.6 ms | **381 GB/s** | **17x** |
+| managed, prefetched + resident read | 1.9 ms | **1489 GB/s** | — (HBM-bound) |
+
+**q18 inner group, per-call (`cudf_q18_decomp.py` / `rmm_managed_q18.py`):**
+
+| | ms |
+|---|---|
+| device-resident compute (Hopper HBM3e) | **45** (vs Blackwell 109 = 2.4x) |
+| per-call, **default pageable** | 268 (transfer = 82%) |
+| per-call, **RMM managed memory** | **46** — *equals* device-resident |
+
+So at the cuDF-primitive level the transfer tax is **eliminated** by managed
+memory (268→46 ms): the GPU reaches host data over C2C on-demand instead of a
+slow pageable bulk copy. The PCIe extrapolation is **confirmed**.
+
+**But the full polars-GPU suite is UNCHANGED by managed memory** (SF-30, default
+vs `rmm.reinitialize(managed_memory=True)` A/B on the same box):
+
+| | suite | geo-mean | q18 GPU | q1 GPU (pure transfer-heavy) |
+|---|---|---|---|---|
+| default (pageable) | 0.48x | 0.46x | 1268 ms | 1331 ms |
+| managed (C2C) | 0.49x | 0.46x | 1268 ms | 1325 ms |
+
+Identical to the millisecond. The transfer-heavy q1 (re-ingests all lineitem
+each collect) didn't move — **cudf-polars does not route its host-frame
+ingestion through the managed/C2C path**, so the 17x link sits idle. Off-the-
+shelf polars-GPU on GH200 still *loses* the suite (0.48x — even worse than PCIe
+Blackwell's 0.56x, because the Grace CPU baseline is strong and the default
+pageable copy on Grace is slower than PCIe). Heavy queries still win
+(q13 5.16x, q12 1.96x, q22 1.25x) on compute, not transfer.
+
+**The finding (substrate-class):** GH200's unified memory *hardware* delivers a
+17x ingestion speedup that fully erases the per-call transfer tax — but it is
+**stranded by the software memory model**. Capturing it needs an engine that
+allocates host buffers as pinned/managed end-to-end (a memory-model-aware
+data-ingestion path), not just running existing tooling on better hardware. This
+**reinforces** the central conclusion: the lever is the *execution + memory
+model*, not a kernel and not merely the hardware. Even on ideal silicon, the gap
+is in the stack. (A genuine instrument finding: the substrate improved 17x and
+the engine couldn't see it.)
+
+## Reproduce
+On a CUDA GPU box: `pip install "polars[gpu]" cudf-cu12 pyarrow pandas duckdb`,
+copy `bench_tpch.py` + `gpu_tpch_driver.py`, run
+`python gpu_tpch_driver.py <SF> [q,q,...]`. q18 drill: `python
+cudf_q18_decomp.py`. GH200 memory paths: `mem_paths.py`; managed A/B:
+`rmm_managed_q18.py` and `run_managed.py <SF>` (wraps the driver with an RMM
+managed pool). Scripts in `pandas/lazy/benchmarks/`.
 
 ## Reproduce
 On a CUDA GPU box: `pip install "polars[gpu]" cudf-cu12 pyarrow pandas duckdb`,

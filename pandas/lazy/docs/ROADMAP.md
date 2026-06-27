@@ -780,7 +780,12 @@ competitive-standing table.
      offload. Our q18 wall is a CPU-substrate wall, not fundamental. Still a
      *different engine*, not a kernel backend (the from-scratch GPU engine is
      NO-GO, `ENGINE_GONOGO_MEMO.md`); the value is the quantified ceiling.
-     Untested: GH200/unified-memory, where the transfer half ~vanishes.
+     **GH200/unified-memory now measured too:** the transfer tax *is* erased at
+     the cuDF-primitive level (q18 inner group 268→46 ms with managed memory;
+     pinned H2D 381 GB/s = 17x PCIe), but the off-the-shelf polars-GPU **suite is
+     unchanged** (0.48x) — the engine doesn't route ingestion through the C2C
+     path, so the hardware advantage is *stranded by the software memory model*.
+     Confirms the lever is the execution + memory model, not the hardware.
 
 ### API gaps vs Polars LazyFrame
 
