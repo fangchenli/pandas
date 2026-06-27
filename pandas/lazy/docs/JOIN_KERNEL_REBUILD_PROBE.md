@@ -1,4 +1,13 @@
-# Joins DO yield to kernels — measured rebuild targets (June 2026)
+# Joins DO yield to kernels — and a Rust kernel BEATS Polars (June 2026)
+
+> **TL;DR (final):** the join gap is **not** architectural and **not** the
+> engine's column-major data model — it was the **Cython/no-OpenMP toolchain**
+> (no real threads, no fused SIMD gather). A **Rust (PyO3 + rayon)** fused
+> parallel join+gather operating on numpy/Arrow buffers zero-copy **beats Polars
+> at every payload width** (P=1..21). See "CORRECTION" at the bottom — it
+> supersedes the mid-doc "stranded by the column-major engine" conclusion, which
+> was a row-major/Cython artifact. The Cython kernels below are the measured
+> proof of the Cython ceiling.
 
 Reopens the "joins don't yield / matching Polars on joins is architectural"
 conclusion (`PERF_CEILING.md`, `MATERIALIZATION_EXPERIMENT.md` III). Driven by:
@@ -162,18 +171,42 @@ violating the campaign rule against shipping unexplained regressions. Wiring +
 all-22 was not run because the integration cost is *measured* to negate the win
 before execution.
 
-## Consequence
-The kernel **beats Polars in isolation** (block in/out, build-side payload) —
-proving the *kernel* is not the bottleneck. But the win is **stranded by the
-engine's column-major data contract**: every place we speed a join, the
-layout/orchestration boundary eats it. This is the definitive, kernel-level
-confirmation of the standing conclusion — matching Polars on joins requires the
-engine to be **row-major/block-native end-to-end** (carry blocks through joins,
-no per-operator column round-trips), i.e. the Polars/DuckDB architecture, which
-is the already-NO-GO from-scratch engine (`ENGINE_GONOGO_MEMO.md`). The kernel
-is a validated artifact and a clean proof; it is correctly **not shipped**.
+## CORRECTION — the wall was Cython, not the engine: Rust beats Polars (June 2026)
+The "stranded by the column-major engine" conclusion above was **wrong** — it was
+a *Cython/row-major* artifact, not fundamental. Two mistakes: (1) I chose a
+row-major gather, which forced the transpose round-trip; a **column-major
+vectorized** gather needs none (the earlier `par_rows` column-major `np.take`
+gathered P=9 in 323 ms, already < Polars 402). (2) Cython builds **without
+OpenMP**, so it can't thread internally or fuse a SIMD gather into the probe —
+forcing Python-orchestrated two-pass work. That is the real limiter, and it is
+**not** a property of the engine's data model.
 
-Salvage paths (all require more than a kernel): (a) make the engine carry
-row-major blocks across the join so input/output transposes vanish; (b) a
-probe-side fused gather (the fact transpose + output split costs are larger, not
-smaller); (c) keep it for a future block-native execution mode only.
+Replicated Polars's actual approach — **Rust (PyO3 + rayon) operating on the
+numpy/Arrow numeric buffers directly** (zero-copy; column-major; GIL released;
+fused probe + direct-to-output gather; no index round-trip). Prototype in
+`benchmarks/rust_join_prototype/`. Measured (10M ⋈ 2.5M unique build, 8 cores):
+
+| P | rust unordered | pd.merge | polars |
+|---|---|---|---|
+| 1 | **125** | 293 | 133 |
+| 3 | **179** | 319 | 192 |
+| 9 | **339** | 536 | 395 |
+| 21 | **727** | 927 | 762 |
+
+**The Rust kernel beats Polars at every payload width** (and pd.merge
+everywhere), correct vs pd.merge. Column-major = the engine's native layout, so
+it integrates with **no transpose tax**, and it gathers any side (probe or
+build) by the same column loop — the targeting concern was also row-major-
+specific. The output is numpy columns directly (zero-copy for numeric).
+
+## Consequence (revised)
+Joins are **not** architecture-bound — the bottleneck was the **Cython/no-OpenMP
+toolchain** (no real threads, no fused SIMD gather), exactly as Polars-is-Rust
+implies. A Rust extension brings Polars-class joins into pandas natively and
+**beats Polars across all widths** on numeric data. The remaining cost is a
+*build-system* decision (Rust in pandas's build — significant, since pandas is
+pure-Cython today), and generalization (string/null payload, multi-key,
+non-unique build, probe-side gather — all straightforward in arrow-rs). It is
+bandwidth-bound, so it matches/edges Polars (same tech), not crushes it. The
+`partition_by_bucket`/`join_gather_bucket_rm` Cython artifacts remain as the
+measured proof of the Cython ceiling; the **Rust path is the real lever**.

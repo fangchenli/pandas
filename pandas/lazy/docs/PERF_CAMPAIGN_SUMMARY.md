@@ -148,6 +148,26 @@ accelerator line is closed. The durable asset is the quantified ceiling and the
 unified-memory stranding gap — the live forward thread is the upstream Arrow
 track, not further perf work.
 
+## Joins: a Rust kernel BEATS Polars (June 2026) — the Cython ceiling, lifted
+
+The campaign's standing "joins are architecture-bound" conclusion was **partly a
+Cython artifact**, corrected by building the kernel (`JOIN_KERNEL_REBUILD_PROBE.md`,
+`benchmarks/rust_join_prototype/`):
+- Profiling pinned the join cost: index-gen (single-thread build + 2-pass probe)
+  + a separate gather, both Python-orchestrated. The Cython fused attempts hit
+  the no-OpenMP wall (no real threads; scalar-vs-SIMD gather; row-major transpose
+  tax) and reached only pd.merge parity / lost to Polars.
+- **A Rust (PyO3 + rayon) fused parallel join+gather, column-major on numpy/Arrow
+  buffers (zero-copy, GIL released), beats Polars at every payload width**
+  (P=1..21: 125/179/339/727 ms vs Polars 133/192/395/762; vs pd.merge
+  293/319/536/927). Correct vs pd.merge. First thing in the campaign to beat
+  Polars on a join.
+- **Lesson:** the limiter was the **Cython/no-OpenMP toolchain**, not the engine
+  model — "Polars is Rust" is the point. A Rust accelerator brings Polars-class
+  joins into pandas natively. Open cost: Rust in pandas's build (a real
+  project-level decision); generalization (string/null/multi-key) is
+  straightforward in arrow-rs; it's bandwidth-bound so it matches/edges Polars.
+
 ## Durable lessons
 
 - **Always measure in `use_physical_planner=True`** (the scorecard mode); the
