@@ -153,6 +153,15 @@ enhancement worth scoping (currently characterization-stage, not hand-off-ready)
   ~435 ms → acero+round-trip ≈ pd.merge. Acero only wins if the pipeline **stays
   Arrow across the operator**. Structural Arrow↔NumPy boundary cost; motivates
   zero-copy handoff / arrow-native execution rather than a single kernel fix.
+  **SCOPED + CLOSED (2026-06-26, `upstream/AG7-boundary-tax.md`): NOT an Arrow
+  gap.** Decomposed on pyarrow 24.0.0: clean numeric Arrow→NumPy is **zero-copy
+  (0 ms)**; all the cost is NumPy/pandas **dtype-model mismatch** — strings
+  (159–212 ms = CPython `str` object creation, not Arrow), nulls (no NumPy mask),
+  BlockManager consolidation (a pandas cost). The zero-copy escape exists
+  (`to_pandas(types_mapper=pd.ArrowDtype)` = **0.1 ms**) but only *defers* the tax
+  to the next NumPy consumer. **Do NOT file against Arrow** — Arrow's conversions
+  are already zero-copy where dtype models match. Engine-side ArrowDtype output is
+  the only lever, and whole-pipeline-Arrow is the already-NO-GO rewrite.
 
 ## Upstream priority (Arrow-specific)
 
