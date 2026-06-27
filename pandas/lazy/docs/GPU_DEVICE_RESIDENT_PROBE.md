@@ -163,6 +163,33 @@ model*, not a kernel and not merely the hardware. Even on ideal silicon, the gap
 is in the stack. (A genuine instrument finding: the substrate improved 17x and
 the engine couldn't see it.)
 
+## Hand-off — potential upstream item (RAPIDS, NOT Apache Arrow)
+
+This finding is recorded but **not hand-off-ready**, and it belongs to the
+**RAPIDS / cudf-polars** ecosystem — *not* the Apache Arrow backlog in
+`upstream/` (that track is Arrow-only). Do not file it as an Arrow task.
+
+**Claim (characterization-stage):** on a coherent unified-memory system (GH200),
+off-the-shelf `polars` `engine="gpu"` (cudf-polars) does not exploit the
+NVLink-C2C link for host-frame ingestion — a global `rmm.reinitialize(
+managed_memory=True)` left the SF-30 suite bit-for-bit unchanged, while the same
+managed config cut a direct cuDF q18 group-by from 268→46 ms.
+
+**Two gates before this is file-able (both need a GH200 — none currently up):**
+1. **Rule out config.** The A/B set the *global* RMM resource; it did **not**
+   test passing an explicit managed `memory_resource` to
+   `pl.GPUEngine(memory_resource=...)`. If that captures the win, this is a
+   docs/default-config issue, not a substrate gap — record and stop.
+2. **Duplicate search** on `rapidsai/cudf` + `pola-rs/polars` for managed-memory
+   / unified-memory ingestion on Grace-Hopper before any filing.
+
+If both gates hold, the framing is an **enhancement** (question + the
+268→46 vs unchanged-suite evidence + offer to help), filed against
+`rapidsai/cudf` (cudf-polars) — under the same guardrail as the Arrow track:
+**no issue/PR without explicit human go-ahead.** Repro artifacts:
+`benchmarks/mem_paths.py`, `rmm_managed_q18.py`, `run_managed.py`,
+`gpu_tpch_driver.py`.
+
 ## Reproduce
 On a CUDA GPU box: `pip install "polars[gpu]" cudf-cu12 pyarrow pandas duckdb`,
 copy `bench_tpch.py` + `gpu_tpch_driver.py`, run
