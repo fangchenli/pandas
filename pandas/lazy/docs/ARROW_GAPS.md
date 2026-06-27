@@ -141,6 +141,13 @@ enhancement worth scoping (currently characterization-stage, not hand-off-ready)
   per-join-node overhead made acero end-to-end 2x slower than our pd.merge on
   real q3. Acero helps map-only projection but loses on filtered/reduced
   pipelines — a "when does Acero pay" characterization, not a single bug.
+  **SCOPED + CLOSED (2026-06-26, `upstream/AG6-acero-filter-compaction.md`):** the
+  filter→reduce compaction tax is **largely gone on pyarrow 24.0.0 at the default
+  multithreaded path** — `filt6` acero_8 is now **1.1×** raw_pc (was 2.9×) and
+  simple filter→sum acero_8 *beats* the no-gather masked reduce (0.3×). A
+  single-threaded residual remains (2–5×, cost scales with selectivity = the
+  compaction signature) but single-thread isn't realistic Acero usage. **Verdict:
+  LOW value, do NOT file.** Keep the engine's `fused_filter_aggs` kernel anyway.
 - **AG7 (boundary tax).** Acero's hash join is fastest in isolation (229 ms,
   3.3x over Polars) but the `to_numpy()` round-trip on a ~100M-row output costs
   ~435 ms → acero+round-trip ≈ pd.merge. Acero only wins if the pipeline **stays
