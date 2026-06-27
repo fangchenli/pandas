@@ -82,6 +82,14 @@ then what shipped / parked / pending, then the durable lessons.
 - Free-threading for joins (sub-GIL contention; FT single-thread overhead).
 - From-scratch MLIR / data-centric-compiler engine (NO-GO, evidence-backed).
 - Gandiva as a differentiator (expression-only).
+- **JAX/XLA + Pallas custom kernels** (NO-GO, `JAX_CUSTOM_KERNEL_PROBE.md`):
+  element-wise loses to NumExpr; factorize/hash is outside XLA; the
+  segment-reduction win is beaten ~2x by a single-pass Cython scatter.
+- **GPU acceleration** (NO-GO as an engine lever, `GPU_DEVICE_RESIDENT_PROBE.md`):
+  measured on Blackwell PCIe + GH200 unified memory; loses the suite, wins only
+  heavy aggregate/join queries; even GH200's 17x link is stranded by the
+  host-frame software memory model. The from-scratch heterogeneous engine needed
+  to capture it is already NO-GO.
 
 **Engine-gap REFRAMED — the gap is NOT the streaming/execution model
 (June 2026, `ENGINE_GAP_REFRAMING.md`).** An architecture study of Polars +
@@ -112,10 +120,43 @@ fusion + cascade pipelining. `PhysicalFusedJoinAgg` remains default-off.
   on EC2. GO (build engine-integrated Bloom-filter PT + optimizer pass) iff
   ≥~1.5x at scale; else close it.
 
+## Accelerator line — closed (June 2026)
+
+After the engine NO-GO, the accelerator question was attacked from four angles —
+**JAX-CPU fusion, JAX/Pallas custom kernels, PCIe discrete GPU, GH200
+unified-memory GPU** (`JAX_CUSTOM_KERNEL_PROBE.md`, `GPU_DEVICE_RESIDENT_PROBE.md`).
+All four converged on the same answer, which *is* the finding: **the ceiling is
+an execution-and-memory-model problem, not a kernel or hardware problem.** Each
+accelerator was bottlenecked at the boundaries (data movement, host-resident
+per-op orchestration), never raw compute:
+
+- **JAX-CPU**: the compute-fusion lever is already pulled by NumExpr; the hard
+  part (factorize/hash) is outside the dense-array model; the marginal win is
+  cheaper in Cython.
+- **GPU (PCIe Blackwell)**: wins heavy aggregate/join queries 2–5x (incl. q18,
+  confirming our q18 wall is a *CPU*-substrate wall, not fundamental) but loses
+  the suite — per-call H2D transfer (~53% of cost) + light queries sink it.
+- **GH200 (unified memory)**: the transfer tax is *physically erased* at the
+  cuDF-primitive level (q18 inner group 268→46 ms; pinned H2D 17x PCIe) — yet
+  the off-the-shelf engine suite **doesn't move** (0.48x). The substrate
+  improved 17x and the engine couldn't see it: **the C2C advantage is stranded
+  by the software memory model.** (Caveat: tested via global RMM; explicit
+  `GPUEngine(memory_resource=...)` untested.)
+
+**Net:** more hardware won't help, and a new engine to exploit it is NO-GO. The
+accelerator line is closed. The durable asset is the quantified ceiling and the
+unified-memory stranding gap — the live forward thread is the upstream Arrow
+track, not further perf work.
+
 ## Durable lessons
 
 - **Always measure in `use_physical_planner=True`** (the scorecard mode); the
   eager `.collect()` default misleads by ~4x.
+- **The bottleneck follows the execution model, not the silicon.** Triangulated
+  from CPU fusion, custom kernels, discrete GPU, and coherent-memory GPU — every
+  accelerator stalled at data movement / host-resident orchestration, never
+  compute. Even ideal hardware (GH200) couldn't be exploited by a host-frame
+  engine. Confirms `PERF_CEILING.md`'s three taxes from a new direction.
 - **Measurement-first, controlled on/off, probe before building** caught every
   wrong turn this campaign (Acero, count-distinct, 3 fusion mechanisms, parallel
   join, free-threading, the MLIR engine, naive predicate transfer). The probes
