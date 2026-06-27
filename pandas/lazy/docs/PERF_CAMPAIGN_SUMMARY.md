@@ -168,6 +168,22 @@ Cython artifact**, corrected by building the kernel (`JOIN_KERNEL_REBUILD_PROBE.
   project-level decision); generalization (string/null/multi-key) is
   straightforward in arrow-rs; it's bandwidth-bound so it matches/edges Polars.
 
+## DIRECTION CHANGE — Arrow-native Rust engine beats Polars (June 2026)
+
+The campaign's "joins/TPC-H are architecture-bound, we're stuck vs Polars"
+conclusion was **wrong** — a failure of approach (`RUST_ENGINE_DIRECTION.md`).
+Every attempt hosted a fast kernel inside the Python/Cython engine and paid the
+per-operator boundary. Moving execution **into Rust** dissolves it:
+- pandas↔Rust Arrow boundary = **0.01 ms** (zero-copy); the tax was per-operator
+  Arrow↔NumPy *inside* the Python engine, not the in/out crossing.
+- **TPC-H q1 end-to-end in Rust = 30.7 ms vs Polars 243.9 ms (7.95x), correct vs
+  DuckDB** (our Cython engine: 0.47x). `benchmarks/rust_engine_prototype/`.
+
+New direction: build the lazy engine's execution on **arrow-rs** (Arrow in once,
+Rust operators with rayon, Arrow out once) as the **baseline**, replacing the
+~0.43x Cython floor. "Polars is Rust" was the answer; the job is to put execution
+where the speed is, not bolt kernels onto a slow host.
+
 ## Durable lessons
 
 - **Always measure in `use_physical_planner=True`** (the scorecard mode); the
