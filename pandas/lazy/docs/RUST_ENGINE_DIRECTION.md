@@ -36,12 +36,32 @@ shape (q3) **parity** — always ~2–8x our Cython engine. The point stands:
 **Arrow-native Rust execution, boundary-once, matches/beats Polars** — "be Polars
 under the pandas API," which we have the kernels for.
 
+## General plan→Rust executor — built, correct; fusion is the next layer
+Built a general executor (`benchmarks/rust_engine_prototype/src/engine.rs`): a
+serialized plan (JSON: scan/filter/project/aggregate/sort/limit + an expression
+interpreter) executes over Arrow tables — queries route through it, not a
+hand-written `run_qN`. **Correct vs DuckDB on q1 and q6.** Performance:
+- q6 (filter+project+scalar-sum): **52 ms vs Polars 41 = 0.78x** — fine.
+- q1 (filter+project+group-by+multi-agg): **correct but ~1100 ms = 0.25x** —
+  while the *fused* hand-written `run_q1` is 30 ms (8x Polars).
+
+The gap is **operator fusion**: the naive executor *materializes between
+operators* (copy at filter, 7 arithmetic intermediates at project, re-scan at
+aggregate). Polars and our hand kernel fuse filter+project+aggregate into one
+pass. This is the *same fusion lesson*, now inside the Rust engine — and it is
+**not a wall**: the fused `run_q1` proves fused Rust hits 8x. The translator
+architecture is proven; the next layer is a **fused / morsel-pipelined**
+executor (fuse scan→filter→project→partial-agg per morsel), the actual
+query-engine work Polars/DuckDB do.
+
 ## The direction
 Build the lazy engine's execution in **Rust on arrow-rs**: `LogicalPlan` → Arrow
 in once → execute operators in Rust (rayon, no GIL, hand-tuned hot kernels; port
 Polars' join where useful) → Arrow out once. This becomes the **baseline** the
 project measures from and builds on, replacing the ~0.43x Cython engine as the
-performance floor.
+performance floor. Status: hand-written queries (q1 8x, q3 parity) prove the
+*ceiling*; the general executor proves the *translator*; **operator fusion** is
+the bridge between them.
 
 Path (incremental, each validated vs DuckDB + benched vs Polars):
 1. Operator coverage: joins (the proven fused kernel), high-card group-by, sort,

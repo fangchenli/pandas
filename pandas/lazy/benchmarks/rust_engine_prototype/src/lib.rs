@@ -3,6 +3,8 @@ use arrow::pyarrow::PyArrowType;
 use arrow::record_batch::RecordBatch;
 use pyo3::prelude::*;
 
+mod engine;
+
 /// Round-trip a RecordBatch pandas->Rust->pandas (proves the Arrow C-data
 /// boundary works and measures its cost).
 #[pyfunction]
@@ -27,12 +29,29 @@ fn sum_col(py: Python<'_>, batch: PyArrowType<RecordBatch>, col: usize) -> PyRes
     Ok(s)
 }
 
+
+/// Execute a serialized LogicalPlan (JSON) over named input Arrow tables.
+#[pyfunction]
+fn execute(
+    py: Python<'_>,
+    plan_json: String,
+    tables: std::collections::HashMap<String, PyArrowType<RecordBatch>>,
+) -> PyResult<PyArrowType<RecordBatch>> {
+    let plan: engine::Plan = serde_json::from_str(&plan_json)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let tbls: std::collections::HashMap<String, RecordBatch> =
+        tables.into_iter().map(|(k, v)| (k, v.0)).collect();
+    let out = py.allow_threads(|| engine::execute(&plan, &tbls));
+    Ok(PyArrowType(out))
+}
+
 #[pymodule]
 fn lazy_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(roundtrip, m)?)?;
     m.add_function(wrap_pyfunction!(sum_col, m)?)?;
     m.add_function(wrap_pyfunction!(run_q1, m)?)?;
     m.add_function(wrap_pyfunction!(run_q3, m)?)?;
+    m.add_function(wrap_pyfunction!(execute, m)?)?;
     Ok(())
 }
 
