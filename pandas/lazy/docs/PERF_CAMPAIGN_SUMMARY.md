@@ -152,3 +152,7 @@ fusion + cascade pipelining. `PhysicalFusedJoinAgg` remains default-off.
 - `JAX_CUSTOM_KERNEL_PROBE.md` — NO-GO on JAX custom kernels/Pallas for any hot
   path on CPU (factorize is outside XLA; segment-reduction win beaten ~2x by a
   single-pass Cython scatter); extends the ROADMAP JAX decline.
+- `GPU_DEVICE_RESIDENT_PROBE.md` — first *measured* GPU run (Blackwell PCIe vs
+  128-core CPU, real TPC-H): GPU loses the suite (0.56–0.81x) but cracks heavy
+  aggregate/join queries incl. q18 at 2–3x (grows with scale); transfer = 53% of
+  per-call cost → payoff needs device-residency, a different engine not a kernel.

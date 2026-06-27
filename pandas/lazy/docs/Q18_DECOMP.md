@@ -105,9 +105,14 @@ as a correct, validated foundation, not shipped on.
 
 ## Conclusion
 
-q18 is **substrate-bound**, consistent with `ENGINE_GAP_REFRAMING.md`: the gap
-is distributed, and the high-cardinality group-by is ~1.5x Polars because of the
-parallel hash-aggregate substrate. We can *replicate* Polars's scan-in-place
+q18 is **substrate-bound on CPU**, consistent with `ENGINE_GAP_REFRAMING.md`: the
+gap is distributed, and the high-cardinality group-by is ~1.5x Polars because of
+the parallel hash-aggregate substrate. **Measured corollary (June 2026,
+`GPU_DEVICE_RESIDENT_PROBE.md`): the inner group-by is a *CPU*-substrate wall,
+not fundamental** — on GPU it runs 2x faster than 128-core Polars (SF-30, growing
+with scale) and 7.8x a single-thread CPU device-resident; but ~half the per-call
+GPU cost is H2D transfer, so capturing it needs the device-resident execution
+model (a different engine), not a kernel in the morsel loop. We can *replicate* Polars's scan-in-place
 algorithm and match it in isolation, but **not capture it through our
 Python-orchestrated engine** — the in-context arrow path is already close, and
 the orchestration overhead negates the kernel win. Confirms (now with a built,

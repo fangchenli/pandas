@@ -767,6 +767,20 @@ competitive-standing table.
      conversion tax, and its multi-agg fusion win is beaten ~2x by a single-pass
      Cython scatter kernel (the `lazy_fused_agg` technique). Pallas targets
      GPU/TPU; CPU is experimental. The actionable lever is Cython, not JAX.
+  4. **GPU now *measured* on real TPC-H (June 2026, `GPU_DEVICE_RESIDENT_PROBE.md`)
+     — confirms (1)–(2), doesn't overturn them.** Polars-CPU vs Polars-GPU (cudf)
+     on a Blackwell PCIe GPU vs a 128-core CPU: GPU **loses the suite** (SF-3
+     0.81x, SF-30 0.56x) because per-query H2D transfer + light/transfer-bound
+     queries + one pathology (q19 0.13x) sink it — but it **genuinely cracks the
+     heavy aggregate/join queries, including q18 (our CPU-substrate wall), at
+     2–3x, growing with scale** (q18 1.31x→2.02x SF-3→SF-30; q17→2.06x,
+     q22→3.02x). q18-wall decomposition: device-resident group-by 7.8x a
+     single-thread CPU, but **transfer is 53% of the per-call cost** — so the
+     payoff needs the device-resident execution model (cuDF's), not per-call
+     offload. Our q18 wall is a CPU-substrate wall, not fundamental. Still a
+     *different engine*, not a kernel backend (the from-scratch GPU engine is
+     NO-GO, `ENGINE_GONOGO_MEMO.md`); the value is the quantified ceiling.
+     Untested: GH200/unified-memory, where the transfer half ~vanishes.
 
 ### API gaps vs Polars LazyFrame
 
