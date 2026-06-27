@@ -7,13 +7,16 @@ Arrow, cross the pandas boundary **once**. See
 
 Measured (SF-3, 8 cores):
 - Arrow pandas↔Rust boundary round-trip: **0.01 ms** (zero-copy C-data interface).
-- **TPC-H q1 end-to-end in Rust: 30.7 ms vs Polars 243.9 ms = 7.95x**, correct
-  vs DuckDB. (Our Cython engine: 0.47x of Polars.)
+- **q1** (filter + low-card group-by + multi-agg): **30.7 ms vs Polars 243.9 ms
+  = 7.95x**, correct vs DuckDB. (Cython engine: 0.47x.)
+- **q3** (3 filters + 2 joins + high-card group-by + top-k): **80.9 ms vs Polars
+  77.0 ms = 0.95x (parity)**, correct vs DuckDB. (Cython engine: 0.43x — Rust is
+  2.3x ours.)
 
-q1 is a favorable shape (4 groups → a fused single-pass filter+accumulate beats
-Polars' general machinery); high-cardinality group-by and joins will be closer
-to parity (match, not 8x). The point is the architecture: Arrow-native Rust
-execution, boundary-once, matches/beats Polars.
+Favorable shape → 8x Polars; hard join-heavy shape → parity; always ~2–8x our
+Cython engine. The architecture (Arrow-native Rust, boundary-once) matches/beats
+Polars. Pushing q3 past Polars = swap the HashMap semi-joins for the proven
+partitioned join kernel.
 
 ## Build + run (throwaway; needs Rust toolchain + maturin)
 ```

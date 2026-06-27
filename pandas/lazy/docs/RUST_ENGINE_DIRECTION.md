@@ -24,11 +24,17 @@ wall was self-imposed.
   Arrow, rayon, one boundary crossing): **30.7 ms vs Polars 243.9 ms = 7.95x**,
   **correct vs DuckDB**. Our Cython engine on the same query: 0.47x of Polars.
 
-q1 is a favorable shape (4 groups → a fused single-pass filter+accumulate beats
-Polars' general machinery). High-cardinality group-by and joins will land closer
-to parity (match, not 8x). The point stands: **Arrow-native Rust execution,
-boundary-once, matches/beats Polars** — exactly "be Polars under the pandas API,"
-which we have the kernels for.
+- **TPC-H q3 executed end-to-end in Rust** (3 filters + 2 joins + high-card
+  group-by + top-k — the hard, join-heavy shape where Polars is strong): **80.9
+  ms vs Polars 77.0 ms = 0.95x (parity), correct vs DuckDB.** Our Cython engine:
+  0.43x (200 ms) — so the Rust engine is **2.3x ours** and at Polars parity.
+  (A fast i64 hasher took it 0.87x→0.95x; swapping the HashMap semi-joins for the
+  proven partitioned join kernel would push past Polars.)
+
+So across the spectrum: favorable shape (q1) **8x** Polars; hard join-heavy
+shape (q3) **parity** — always ~2–8x our Cython engine. The point stands:
+**Arrow-native Rust execution, boundary-once, matches/beats Polars** — "be Polars
+under the pandas API," which we have the kernels for.
 
 ## The direction
 Build the lazy engine's execution in **Rust on arrow-rs**: `LogicalPlan` → Arrow

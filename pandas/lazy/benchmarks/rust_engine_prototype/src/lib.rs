@@ -32,6 +32,7 @@ fn lazy_engine_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(roundtrip, m)?)?;
     m.add_function(wrap_pyfunction!(sum_col, m)?)?;
     m.add_function(wrap_pyfunction!(run_q1, m)?)?;
+    m.add_function(wrap_pyfunction!(run_q3, m)?)?;
     Ok(())
 }
 
@@ -40,6 +41,26 @@ use arrow::datatypes::{DataType, Field, Schema};
 use std::sync::Arc;
 use rayon::prelude::*;
 use hashbrown::HashMap;
+
+/// Fast multiply-shift hasher for i64 keys (avalanche), like Polars/FxHash —
+/// the generic hasher dominates large hash-probe scans.
+#[derive(Default, Clone)]
+struct I64Hasher(u64);
+impl std::hash::Hasher for I64Hasher {
+    fn finish(&self) -> u64 { self.0 }
+    fn write(&mut self, _: &[u8]) { unreachable!() }
+    fn write_i64(&mut self, i: i64) { self.0 = (i as u64).wrapping_mul(0x9E3779B97F4A7C15); }
+    fn write_u64(&mut self, i: u64) { self.0 = i.wrapping_mul(0x9E3779B97F4A7C15); }
+    fn write_usize(&mut self, i: usize) { self.0 = (i as u64).wrapping_mul(0x9E3779B97F4A7C15); }
+}
+#[derive(Default, Clone)]
+struct I64Build;
+impl std::hash::BuildHasher for I64Build {
+    type Hasher = I64Hasher;
+    fn build_hasher(&self) -> I64Hasher { I64Hasher(0) }
+}
+type IMap<V> = HashMap<i64, V, I64Build>;
+type ISet = hashbrown::HashSet<i64, I64Build>;
 
 /// TPC-H q1 end-to-end in Rust on Arrow: filter l_shipdate<=cutoff, group by
 /// (returnflag, linestatus), multi-agg, sorted. Columns in order:
@@ -149,4 +170,123 @@ fn run_q1(py: Python<'_>, batch: PyArrowType<RecordBatch>, cutoff: i64) -> PyRes
         Arc::new(avg_disc.finish()), Arc::new(cnt.finish()),
     ]).unwrap();
     Ok(PyArrowType(out))
+}
+
+
+use hashbrown::HashSet;
+
+/// TPC-H q3 end-to-end in Rust: filter customer(mktsegment) -> semijoin orders
+/// (custkey + orderdate<cut) -> join lineitem (orderkey + shipdate>cut),
+/// group by orderkey, sum revenue, top-10 by (revenue desc, orderdate asc).
+/// cust: [c_custkey i64, c_mktsegment utf8]
+/// ord:  [o_orderkey i64, o_custkey i64, o_orderdate i64, o_shippriority i64]
+/// line: [l_orderkey i64, l_extendedprice f64, l_discount f64, l_shipdate i64]
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn run_q3(
+    py: Python<'_>,
+    cust: PyArrowType<RecordBatch>,
+    ord: PyArrowType<RecordBatch>,
+    line: PyArrowType<RecordBatch>,
+    cut: i64,
+    segment: String,
+) -> PyResult<PyArrowType<RecordBatch>> {
+    let cust = cust.0;
+    let ord = ord.0;
+    let line = line.0;
+    let out = py.allow_threads(|| {
+        // 1. customer: custkeys in segment
+        let ck = cust.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        let seg = cust.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+        let mut building: ISet = ISet::default();
+        for i in 0..cust.num_rows() {
+            if seg.value(i) == segment {
+                building.insert(ck.value(i));
+            }
+        }
+        // 2. orders: orderdate<cut & custkey in building -> map orderkey ->(date,prio)
+        let ok = ord.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        let ocust = ord.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+        let odate = ord.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+        let oprio = ord.column(3).as_any().downcast_ref::<Int64Array>().unwrap();
+        let mut orders: IMap<(i64, i64)> = IMap::default();
+        for i in 0..ord.num_rows() {
+            if odate.value(i) < cut && building.contains(&ocust.value(i)) {
+                orders.insert(ok.value(i), (odate.value(i), oprio.value(i)));
+            }
+        }
+        // 3. lineitem: shipdate>cut & orderkey in orders -> sum revenue per orderkey
+        let lok = line.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        let lprice = line.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
+        let ldisc = line.column(2).as_any().downcast_ref::<Float64Array>().unwrap();
+        let lship = line.column(3).as_any().downcast_ref::<Int64Array>().unwrap();
+        let n = line.num_rows();
+        let nthreads = rayon::current_num_threads().max(1);
+        let chunk = n.div_ceil(nthreads);
+        let partials: Vec<IMap<f64>> = (0..nthreads)
+            .into_par_iter()
+            .map(|t| {
+                let lo = t * chunk;
+                let hi = ((t + 1) * chunk).min(n);
+                let mut local: IMap<f64> = IMap::default();
+                for i in lo..hi {
+                    if lship.value(i) > cut {
+                        let k = lok.value(i);
+                        if orders.contains_key(&k) {
+                            let rev = lprice.value(i) * (1.0 - ldisc.value(i));
+                            *local.entry(k).or_insert(0.0) += rev;
+                        }
+                    }
+                }
+                local
+            })
+            .collect();
+        let mut rev: IMap<f64> = IMap::default();
+        for part in partials {
+            for (k, v) in part {
+                *rev.entry(k).or_insert(0.0) += v;
+            }
+        }
+        // 4. assemble + sort (revenue desc, orderdate asc) + top 10
+        let mut rows: Vec<(i64, f64, i64, i64)> = rev
+            .into_iter()
+            .map(|(k, r)| {
+                let (d, p) = orders[&k];
+                (k, r, d, p)
+            })
+            .collect();
+        rows.sort_unstable_by(|a, b| {
+            b.1.partial_cmp(&a.1).unwrap().then(a.2.cmp(&b.2))
+        });
+        rows.truncate(10);
+        rows
+    });
+
+    let mut k_b = Int64Builder::new();
+    let mut r_b = Float64Builder::new();
+    let mut d_b = Int64Builder::new();
+    let mut p_b = Int64Builder::new();
+    for (k, r, d, p) in &out {
+        k_b.append_value(*k);
+        r_b.append_value(*r);
+        d_b.append_value(*d);
+        p_b.append_value(*p);
+    }
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("l_orderkey", DataType::Int64, false),
+        Field::new("revenue", DataType::Float64, false),
+        Field::new("o_orderdate", DataType::Int64, false),
+        Field::new("o_shippriority", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(k_b.finish()),
+            Arc::new(r_b.finish()),
+            Arc::new(d_b.finish()),
+            Arc::new(p_b.finish()),
+        ],
+    )
+    .unwrap();
+    Ok(PyArrowType(batch))
 }

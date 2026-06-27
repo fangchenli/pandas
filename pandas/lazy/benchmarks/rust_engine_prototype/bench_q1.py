@@ -68,3 +68,56 @@ def main(sf: float = 3.0):
 
 if __name__ == "__main__":
     main()
+
+
+def bench_q3(sf: float = 3.0):
+    import polars as pl
+
+    con = B.make_duckdb(sf)
+    t = B.load_tables(con)
+    cut = int(pd.Timestamp("1995-03-15").value)
+
+    def ns(s):
+        return s.values.astype("datetime64[ns]").view("int64")
+
+    cust = pa.RecordBatch.from_arrays(
+        [
+            pa.array(t["customer"]["c_custkey"].to_numpy()),
+            pa.array(t["customer"]["c_mktsegment"], type=pa.string()),
+        ],
+        names=["ck", "seg"],
+    )
+    ordb = pa.RecordBatch.from_arrays(
+        [
+            pa.array(t["orders"]["o_orderkey"].to_numpy()),
+            pa.array(t["orders"]["o_custkey"].to_numpy()),
+            pa.array(ns(t["orders"]["o_orderdate"])),
+            pa.array(t["orders"]["o_shippriority"].to_numpy().astype("int64")),
+        ],
+        names=["ok", "oc", "od", "op"],
+    )
+    line = pa.RecordBatch.from_arrays(
+        [
+            pa.array(t["lineitem"]["l_orderkey"].to_numpy()),
+            pa.array(t["lineitem"]["l_extendedprice"].to_numpy()),
+            pa.array(t["lineitem"]["l_discount"].to_numpy()),
+            pa.array(ns(t["lineitem"]["l_shipdate"])),
+        ],
+        names=["lk", "p", "d", "ls"],
+    )
+    df = E.run_q3(cust, ordb, line, cut, "BUILDING").to_pandas()
+    ref = con.execute("PRAGMA tpch(3)").df()
+    ok = (
+        df["l_orderkey"].to_numpy() == ref["l_orderkey"].to_numpy()
+    ).all() and np.allclose(df["revenue"], ref["revenue"], rtol=1e-6)
+    rust = _best(lambda: E.run_q3(cust, ordb, line, cut, "BUILDING"))
+    lp = _best(lambda: B.lp_q3(t).collect(use_physical_planner=True))
+    plt = {n: pl.from_pandas(d) for n, d in t.items()}
+    pol = _best(lambda: B.pl_q3(plt))
+    print(f"q3 @ SF-{sf}  correct={ok}")
+    print(f"  RUST {rust:.1f} ms | polars {pol:.1f} ms | our-lazy {lp:.1f} ms")
+    print(f"  rust/polars = {pol / rust:.2f}x   our-lazy/polars = {pol / lp:.2f}x")
+
+
+if __name__ == "__main__":
+    bench_q3()
