@@ -199,11 +199,41 @@ it integrates with **no transpose tax**, and it gathers any side (probe or
 build) by the same column loop — the targeting concern was also row-major-
 specific. The output is numpy columns directly (zero-copy for numeric).
 
+## Wired into the engine + all-22 (June 2026): index-only wire REGRESSES
+Generalized the Rust kernel to `join_indices_i64` (general inner, non-unique
+build OK, exact pd.merge order, parallel) and wired it into `_try_cython_join`
+(gated `_RUST_JOIN`): Rust computes the indices, the engine gathers via
+`_take_all_columns`. **All 22 TPC-H validate vs DuckDB with it on** (1733 lazy
+tests pass). But the A/B at SF-3 is a **regression**:
+
+| | geo-mean | suite LP | q18 | q4 | q17 |
+|---|---|---|---|---|---|
+| Rust off (baseline) | **0.43x** | 9289 ms | 811 | 291 | 390 |
+| Rust on (index-only) | 0.41x | 10175 ms | 1227 | 419 | 530 |
+
+**Why:** the Rust index-gen is fast, but the engine then gathers via per-column
+`np.take` — two passes (index materialized to Python, then gathered),
+column-parallel (underutilized for few columns), and **slower than pd.merge's
+consolidated single-pass block take** on wide TPC-H joins. The microbench win
+came from gathering **inside Rust** (one pass, direct output); splitting it into
+Rust-index + Python-`take` throws that away. Set **default-OFF** (opt-in
+`PANDAS_LAZY_RUST_JOIN=1`); not shipped (no regressions).
+
+**The fix (next step):** wire the **fused** Rust kernel — `fused_join_gather`
+gathers numeric payload *inside Rust*, **column-major (no transpose, fits the
+engine)**, returning numpy columns directly. Generalize it to gather BOTH sides'
+numeric columns + return indices for string/other columns (engine gathers those).
+That keeps the gather fused (the actual win) while handling all dtypes. The
+index-only wire is the validated scaffold; the fused-both-sides gather is the
+lever.
+
 ## Consequence (revised)
 Joins are **not** architecture-bound — the bottleneck was the **Cython/no-OpenMP
 toolchain** (no real threads, no fused SIMD gather), exactly as Polars-is-Rust
 implies. A Rust extension brings Polars-class joins into pandas natively and
-**beats Polars across all widths** on numeric data. The remaining cost is a
+**beats Polars across all widths** on numeric data *in isolation* — but capturing
+it end-to-end requires the **fused** gather wire (above), not index-only; the
+engine's own `take` path is the bottleneck the fused kernel must replace. The remaining cost is a
 *build-system* decision (Rust in pandas's build — significant, since pandas is
 pure-Cython today), and generalization (string/null payload, multi-key,
 non-unique build, probe-side gather — all straightforward in arrow-rs). It is

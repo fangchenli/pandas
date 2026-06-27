@@ -329,9 +329,11 @@ class TestPayloadAwareGate:
     """
 
     def _run(self, left, right, **jkw):
-        """Return (kernel_used, phys, eager). physical.py imports the indexer
-        function-locally, so spying the module attribute catches the call."""
+        """Return (fast_path_used, phys, eager). Detects EITHER fast path — the
+        Rust index-gen (preferred when available) or the Cython indexer — since
+        either avoids pd.merge. Spying the module attributes catches the calls."""
         import pandas.lazy.backends.numpy.join as J
+        import pandas.lazy.physical as P
 
         calls = []
         orig = J.inner_join_indexers_i8
@@ -341,6 +343,15 @@ class TestPayloadAwareGate:
             return orig(*a, **k)
 
         J.inner_join_indexers_i8 = spy
+        rust_active = P._RUST_JOIN and P._rust_join is not None
+        if rust_active:
+            orig_r = P._rust_join.join_indices_i64
+
+            def spy_r(*a, **k):
+                calls.append(1)
+                return orig_r(*a, **k)
+
+            P._rust_join.join_indices_i64 = spy_r
         try:
             phys = (left.select().join(right.select(), **jkw)).collect(
                 use_physical_planner=True
@@ -350,6 +361,8 @@ class TestPayloadAwareGate:
             )
         finally:
             J.inner_join_indexers_i8 = orig
+            if rust_active:
+                P._rust_join.join_indices_i64 = orig_r
         return bool(calls), phys, eager
 
     def test_narrow_large_join_uses_kernel_and_matches(self, rng):
@@ -362,9 +375,13 @@ class TestPayloadAwareGate:
         assert used  # narrow + large -> kernel
         tm.assert_frame_equal(phys, eager)
 
-    def test_wide_large_join_stays_on_pd_merge(self, rng):
-        # Both sides > 500k but 11 gathered columns -> wide branch keeps the
-        # original 500k bail, so the kernel is NOT used (preserves TPC-H).
+    def test_wide_large_join_path(self, rng):
+        # Both sides > 500k with wide (10) gathered columns. The Rust fast path
+        # handles wide payloads (real-threaded index-gen + parallel gather), so
+        # it engages when available; without Rust the Cython wide-payload bail
+        # sends it to pd.merge. Either way the result must equal eager.
+        import pandas.lazy.physical as P
+
         n = 600_000
         left = pd.DataFrame(
             {"k": np.arange(n), **{f"v{i}": rng.standard_normal(n) for i in range(5)}}
@@ -373,8 +390,12 @@ class TestPayloadAwareGate:
             {"k": np.arange(n), **{f"w{i}": rng.standard_normal(n) for i in range(5)}}
         )
         used, phys, eager = self._run(left, right, on="k")
-        assert not used  # wide + large -> pd.merge preserved
         tm.assert_frame_equal(phys, eager)
+        rust_active = P._RUST_JOIN and P._rust_join is not None
+        if rust_active:
+            assert used  # Rust handles wide payloads
+        else:
+            assert not used  # Cython wide bail -> pd.merge
 
 
 class TestPartitionByBucket:

@@ -2033,6 +2033,25 @@ _STRING_HASH_GROUPBY = True
 # validated, tested foundation; see docs/Q18_DECOMP.md. Module toggle for A/B.
 _SCAN_IN_PLACE_GROUPBY = False
 
+# Rust (PyO3+rayon) fused index-gen for inner single-int-key joins. The Cython
+# join can't beat Polars (no-OpenMP: no real threads / no fused SIMD gather); a
+# Rust kernel computes the join indices with real threads, then the engine
+# gathers via `_take_all_columns`.
+# DEFAULT-OFF: this *index-only* wire REGRESSES all-22 at SF-3 (geo-mean
+# 0.43x->0.41x; q18 +51%, q4 +44%, q17 +36%) — the Rust index-gen is fast, but
+# the engine's per-column `np.take` gather (two passes, post-materialization) is
+# slower than pd.merge's consolidated single-pass block take on wide TPC-H joins.
+# The Rust *fused* kernel that beats Polars gathers INSIDE Rust (one pass, direct
+# output, column-major, no transpose) — that's the win, and capturing it needs a
+# fused-both-sides numeric-gather wire (next step), not index-only. Kept as a
+# validated foundation (all-22 still validate vs DuckDB with it on). Opt-in:
+# `PANDAS_LAZY_RUST_JOIN=1`. See docs/JOIN_KERNEL_REBUILD_PROBE.md.
+_RUST_JOIN = os.environ.get("PANDAS_LAZY_RUST_JOIN", "0") == "1"
+try:
+    import lazyjoin_rs as _rust_join
+except ImportError:
+    _rust_join = None
+
 
 def _hash_key_int64(chunked):
     """Return a list of int64 arrays representing one numeric/temporal/boolean/
@@ -5248,6 +5267,19 @@ class PhysicalHashJoin(PhysicalPlan):
         shared = {rn for ln, rn in key_pairs if ln == rn}
         if (set(left_cols) & set(right_cols)) - shared:
             return None
+
+        # Rust fast path: real-threaded fused index-gen (beats Cython, which the
+        # no-OpenMP build caps), then the engine gathers every column in parallel
+        # (`_take_all_columns`, all dtypes). General inner join, pd.merge order.
+        if _RUST_JOIN and _rust_join is not None:
+            li = np.ascontiguousarray(lk64)
+            ri_keys = np.ascontiguousarray(rk64)
+            left_idx, right_idx = _rust_join.join_indices_i64(li, ri_keys)
+            out: ArrayDict = {}
+            out.update(_take_all_columns(left_cols, left_idx))
+            right_gather = {n: a for n, a in right_cols.items() if n not in shared}
+            out.update(_take_all_columns(right_gather, right_idx))
+            return out
 
         from pandas.lazy.backends.numpy.join import inner_join_indexers_i8
 
