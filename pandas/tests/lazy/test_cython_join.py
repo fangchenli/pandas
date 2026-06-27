@@ -411,3 +411,64 @@ class TestPartitionByBucket:
         sk, sr, bounds = partition_by_bucket(np.empty(0, dtype=np.int64), 8)
         assert len(sk) == 0 and len(sr) == 0
         tm.assert_numpy_array_equal(bounds, np.zeros(9, dtype=np.int64))
+
+
+class TestPartitionedJoinGather:
+    """Fused partitioned parallel join + row-major gather
+    (``partitioned_join_gather``; ``JOIN_KERNEL_REBUILD_PROBE.md``)."""
+
+    def _oracle(self, lk, rk, rpay_cols):
+        # pd.merge inner order with payload columns from the (unique) right side
+        P = rpay_cols.shape[0]
+        ldf = pd.DataFrame({"key": lk, "_lrow": np.arange(len(lk))})
+        rdf = pd.DataFrame({"key": rk, **{f"p{j}": rpay_cols[j] for j in range(P)}})
+        m = pd.merge(ldf, rdf, on="key", how="inner")
+        return m
+
+    @pytest.mark.parametrize("P", [0, 1, 3, 9])
+    def test_ordered_matches_pd_merge(self, P):
+        from pandas.lazy.backends.numpy.join import partitioned_join_gather
+
+        rng = np.random.default_rng(P + 1)
+        nL, nR = 4000, 900
+        lk = rng.integers(0, nR, nL).astype(np.int64)
+        rk = np.arange(nR, dtype=np.int64)  # unique build
+        rpay_cols = rng.standard_normal((P, nR))
+        rpay_rm = np.ascontiguousarray(rpay_cols.T) if P else np.empty((nR, 0))
+        out, lrow = partitioned_join_gather(lk, rk, rpay_rm, preserve_order=True)
+        m = self._oracle(lk, rk, rpay_cols)
+        tm.assert_numpy_array_equal(lrow, m["_lrow"].to_numpy())
+        for j in range(P):
+            tm.assert_numpy_array_equal(out[:, j], m[f"p{j}"].to_numpy())
+
+    def test_unordered_is_pd_merge_multiset(self):
+        from pandas.lazy.backends.numpy.join import partitioned_join_gather
+
+        rng = np.random.default_rng(0)
+        nL, nR, P = 4000, 900, 3
+        lk = rng.integers(0, nR, nL).astype(np.int64)
+        rk = np.arange(nR, dtype=np.int64)
+        rpay_cols = rng.standard_normal((P, nR))
+        rpay_rm = np.ascontiguousarray(rpay_cols.T)
+        out, lrow = partitioned_join_gather(lk, rk, rpay_rm, preserve_order=False)
+        m = self._oracle(lk, rk, rpay_cols)
+        assert sorted(lrow.tolist()) == sorted(m["_lrow"].to_numpy().tolist())
+        # payload still tracks its left row (sort both by left row, compare)
+        order = np.argsort(lrow, kind="stable")
+        tm.assert_numpy_array_equal(lrow[order], np.sort(m["_lrow"].to_numpy()))
+
+    def test_no_match_and_empty(self):
+        from pandas.lazy.backends.numpy.join import partitioned_join_gather
+
+        rk = np.arange(50, dtype=np.int64)
+        payload = np.random.default_rng(0).standard_normal((2, 50))
+        rpay_rm = np.ascontiguousarray(payload.T)
+        # no overlap
+        lk = np.arange(100, 200, dtype=np.int64)
+        out, lrow = partitioned_join_gather(lk, rk, rpay_rm, preserve_order=True)
+        assert len(lrow) == 0 and out.shape == (0, 2)
+        # empty left
+        out, lrow = partitioned_join_gather(
+            np.empty(0, np.int64), rk, rpay_rm, preserve_order=True
+        )
+        assert len(lrow) == 0

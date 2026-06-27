@@ -29,6 +29,11 @@ from libc.stdint cimport (
     int64_t,
     uint64_t,
 )
+from libc.stdlib cimport (
+    free,
+    malloc,
+)
+from libc.string cimport memcpy
 
 import numpy as np
 
@@ -289,3 +294,83 @@ def partition_by_bucket(const int64_t[::1] keys, int64_t n_buckets):
             outk_v[p] = keys[i]
             outr_v[p] = i
     return out_keys, out_rows, bounds
+
+
+# ---------------------------------------------------------------------------
+# Fused per-partition build + probe + ROW-MAJOR payload gather.
+#
+# Variant of join_gather_bucket_f64 that gathers a row-major payload block
+# ``rpay`` of shape (n_right, P): on each match it memcpy's the matched right
+# row's P contiguous float64s into the output row. Row-major makes the gather
+# one cache-line-friendly copy per match (measured ~2.2x faster than a
+# column-major scalar/np.take gather at high P). The build side is small (dim
+# table), so transposing its columns to a row-major block once is cheap; the
+# output is itself a row-major block (the natural consolidated-block form a
+# pandas-returning engine consumes, as pd.merge does). Unique build assumed.
+# ---------------------------------------------------------------------------
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def join_gather_bucket_rm(
+    const int64_t[::1] lkeys,
+    const int64_t[::1] lrows,
+    Py_ssize_t llo,
+    Py_ssize_t lhi,
+    const int64_t[::1] rkeys,
+    const int64_t[::1] rrows,
+    Py_ssize_t rlo,
+    Py_ssize_t rhi,
+    const double[:, ::1] rpay,
+    double[:, ::1] out,
+    int64_t[::1] out_lrow,
+):
+    """Fused inner-join + row-major gather for one partition. Returns count."""
+    cdef Py_ssize_t nr = rhi - rlo
+    cdef Py_ssize_t P = rpay.shape[1]
+    cdef Py_ssize_t cursor = 0
+    cdef Py_ssize_t i, j
+    cdef int64_t key, lrow, rrow
+    cdef uint64_t slot, mask
+    cdef Py_ssize_t m = 8
+    cdef size_t rowbytes = <size_t>P * sizeof(double)
+    cdef int64_t* slot_key
+    cdef int64_t* slot_row
+    if nr == 0 or lhi <= llo:
+        return 0
+    while m < 2 * nr:
+        m <<= 1
+    with nogil:
+        slot_key = <int64_t*>malloc(m * sizeof(int64_t))
+        slot_row = <int64_t*>malloc(m * sizeof(int64_t))
+        if slot_key == NULL or slot_row == NULL:
+            if slot_key != NULL:
+                free(slot_key)
+            if slot_row != NULL:
+                free(slot_row)
+            with gil:
+                raise MemoryError()
+        mask = <uint64_t>(m - 1)
+        for i in range(m):
+            slot_row[i] = -1
+        for j in range(rlo, rhi):
+            key = rkeys[j]
+            slot = _hash(key) & mask
+            while slot_row[slot] != -1:
+                slot = (slot + 1) & mask
+            slot_key[slot] = key
+            slot_row[slot] = rrows[j]
+        for i in range(llo, lhi):
+            key = lkeys[i]
+            slot = _hash(key) & mask
+            while slot_row[slot] != -1:
+                if slot_key[slot] == key:
+                    lrow = lrows[i]
+                    rrow = slot_row[slot]
+                    if P > 0:
+                        memcpy(&out[cursor, 0], &rpay[rrow, 0], rowbytes)
+                    out_lrow[cursor] = lrow
+                    cursor += 1
+                    break
+                slot = (slot + 1) & mask
+        free(slot_key)
+        free(slot_row)
+    return cursor

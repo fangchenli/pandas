@@ -877,3 +877,91 @@ def inner_join_indexers_i8(
             )
         )
     return out_left, out_right
+
+
+def partitioned_join_gather(
+    left_keys: np.ndarray,
+    right_keys: np.ndarray,
+    right_payload_rm: np.ndarray,
+    n_buckets: int = 16,
+    preserve_order: bool = True,
+):
+    """Fused partitioned parallel inner join + row-major payload gather.
+
+    For an inner join on a single ``int64`` key with a **unique build (right)
+    side** (TPC-H fact→dim joins): radix-partition both sides by key hash, then
+    per partition build a cache-resident hash table on the right keys, probe the
+    left keys, and ``memcpy`` the matched right row's payload directly into the
+    output (fused — no intermediate index array). Beats Polars on wide payloads
+    at SF-3 scale in the unordered mode (see ``JOIN_KERNEL_REBUILD_PROBE.md``).
+
+    ``right_payload_rm`` is the right (dim) payload as a **row-major** block of
+    shape ``(n_right, P)`` float64 (so each match is one contiguous copy).
+    Returns ``(out_payload_rm, out_left_rows)``: the gathered payload as a
+    row-major ``(K, P)`` block and the matched left row indices.
+
+    ``preserve_order=True`` returns rows in exact ``pd.merge`` (left-row) order
+    via an O(N) position map (valid under the unique-build assumption); the
+    ``False`` fast core returns partition order.
+
+    The unique-build assumption is NOT checked here (the engine gates on it /
+    falls back); a non-unique build produces wrong counts.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from pandas._libs.lazy_join import (
+        join_gather_bucket_rm,
+        partition_by_bucket,
+    )
+
+    n_left = len(left_keys)
+    p_cols = right_payload_rm.shape[1]
+    if n_left == 0 or len(right_keys) == 0:
+        return np.empty((0, p_cols), dtype=np.float64), np.empty(0, dtype=np.int64)
+
+    lks, lrs, lb = partition_by_bucket(left_keys, n_buckets)
+    rks, rrs, rb = partition_by_bucket(right_keys, n_buckets)
+
+    def _bucket(b):
+        cap = int(lb[b + 1] - lb[b])
+        if cap == 0 or rb[b + 1] == rb[b]:
+            return None
+        out = np.empty((cap, p_cols), dtype=np.float64)
+        out_lrow = np.empty(cap, dtype=np.int64)
+        cnt = join_gather_bucket_rm(
+            lks,
+            lrs,
+            int(lb[b]),
+            int(lb[b + 1]),
+            rks,
+            rrs,
+            int(rb[b]),
+            int(rb[b + 1]),
+            right_payload_rm,
+            out,
+            out_lrow,
+        )
+        if cnt == 0:
+            return None
+        return out[:cnt], out_lrow[:cnt]
+
+    if n_left < PARALLEL_JOIN_MIN_ROWS:
+        parts = [r for r in map(_bucket, range(n_buckets)) if r is not None]
+    else:
+        n_workers = min(8, n_buckets)
+        with ThreadPoolExecutor(n_workers) as ex:
+            parts = [r for r in ex.map(_bucket, range(n_buckets)) if r is not None]
+
+    if not parts:
+        return np.empty((0, p_cols), dtype=np.float64), np.empty(0, dtype=np.int64)
+    out = np.concatenate([p[0] for p in parts], axis=0)
+    out_lrow = np.concatenate([p[1] for p in parts])
+    if preserve_order:
+        # O(N) stable position map: unique build ⇒ left rows unique in the
+        # output, so ordering by left row reproduces pd.merge inner order.
+        pos = np.full(n_left, -1, dtype=np.int64)
+        pos[out_lrow] = np.arange(len(out_lrow))
+        order = pos[pos >= 0]
+        out = out[order]
+        out_lrow = out_lrow[order]
+    return out, out_lrow

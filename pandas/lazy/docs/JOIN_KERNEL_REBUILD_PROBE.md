@@ -105,11 +105,42 @@ one thread pool over buckets, with an O(N) radix reorder for the ordered mode.
 That removes all four taxes at once. Polars's 385 ms is exactly one fused pass;
 our 211 ms index-gen + 323 ms gather = 534 ms is two passes plus orchestration.
 
+## FUSED KERNEL BUILT — beats Polars on wide payloads (June 2026)
+Built the fused kernel: `join_gather_bucket_rm` (`_libs/lazy_join.pyx`) +
+`partitioned_join_gather` driver (`backends/numpy/join.py`). Per partition it
+builds a cache-resident hash table on the unique right (dim) keys, probes the
+left, and **`memcpy`s the matched right row's payload directly** into a
+**row-major** output block — fused, no index array. Two layout attempts:
+- **Column-major scalar gather** (first try): LOSES — a scalar per-column copy
+  can't match SIMD `np.take` (P=21 1763 ms). Dropped.
+- **Row-major `memcpy`-per-match** (one contiguous cache-line copy/row): WINS.
+  Row-major gather measured ~2.2x faster than column-major at high P; the
+  dim-side transpose to row-major is cheap (small build side, done once).
+
+Validated (`benchmarks/bench_partitioned_join.py`, 10M⋈2.5M unique build,
+best-of-5; correctness vs pd.merge exact for ordered, multiset for unordered):
+
+| P | fused unordered | fused ordered | pd.merge | polars |
+|---|---|---|---|---|
+| 1 | 171 | 277 | 285 | **136** |
+| 3 | 220 | 401 | 326 | **193** |
+| 9 | **308** | 563 | 531 | 397 |
+| 21 | **538** | 963 | 961 | 774 |
+
+**The unordered fast core beats Polars at P≥9 (308 vs 397; 538 vs 774) and
+beats pd.merge at every width** — the first kernel in the campaign to beat
+Polars on a join. At small P Polars still wins (its index-gen is leaner; our
+partition overhead dominates when there's little payload to amortize it).
+**Ordered mode loses** — the O(N) position-map reorder copies the whole output
+block (a second pass); acceptable as the opt-in correctness fallback, but it
+needs a gather-into-sorted-slot kernel to be competitive.
+
 ## Consequence
-Reverses "joins are architectural" **at the component level** — parallel build,
-partitioned probe, and parallel gather are each measured faster than what we
-ship, and a fully-fused single-kernel version is the concrete path to beat
-Polars (target ≤385 ms P=9). But it also re-confirms the **orchestration tax**:
-the win is only realized as *one* fused kernel, not Python-composed pieces. Next
-build: the fused `partitioned_join_gather` Cython kernel + radix reorder.
-`partition_by_bucket` is the validated, correctness-checked foundation.
+Reverses "joins are architectural" — **with the right layout (row-major fused
+memcpy) a hand-written partitioned parallel kernel beats Polars on wide-payload
+fact→dim joins**, the dominant TPC-H shape. The orchestration tax is real but
+beatable when the gather is fused as a contiguous copy (not scalar, not a
+separate vectorized pass). Validated + tested; **not yet wired into the engine**
+(next: route `_try_cython_join`'s wide-payload case through it with a row-major
+output contract, gated + all-22 validation; make ordered-mode reorder cheaper;
+add int64/mixed payload + non-unique-build fallback).
