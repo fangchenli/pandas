@@ -141,6 +141,13 @@ def _expr(node):
                 "a": _expr(node.args[0]),
                 "pat": pat,
             }
+        if f == "str_slice" and len(node.args) == 1:
+            start = node.kwargs.get("start") or 0
+            stop = node.kwargs.get("stop")
+            out = {"t": "slice", "a": _expr(node.args[0]), "start": int(start)}
+            if stop is not None:
+                out["stop"] = int(stop)
+            return out
         raise NotSupported(f"call {f}/{len(node.args)}")
     raise NotSupported(type(node).__name__)
 
@@ -215,9 +222,11 @@ def _go(plan, tables, ctr):
         sub = [str(c) for c in (plan.subset or [])]
         return {"op": "distinct", "subset": sub, "input": _go(plan.input, tables, ctr)}
     if isinstance(plan, Join):
-        if plan.how not in ("inner", "left"):
+        if plan.how not in ("inner", "left", "cross"):
             raise NotSupported(f"join how={plan.how}")
-        if plan.on is not None and len(plan.on) == 1:
+        if plan.how == "cross":
+            lk = rk = ""
+        elif plan.on is not None and len(plan.on) == 1:
             lk = rk = plan.on[0]
         elif plan.left_on and plan.right_on and len(plan.left_on) == 1:
             lk, rk = plan.left_on[0], plan.right_on[0]

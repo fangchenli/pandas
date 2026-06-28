@@ -71,6 +71,7 @@ pub enum Expr {
     Isin { a: Box<Expr>, #[serde(default)] ints: Vec<i64>, #[serde(default)] strs: Vec<String> },
     Case { cases: Vec<(Expr, Expr)>, otherwise: Box<Expr> },
     Str { op: String, a: Box<Expr>, pat: String },
+    Slice { a: Box<Expr>, start: i64, #[serde(default)] stop: Option<i64> },
 }
 
 fn eval(expr: &Expr, b: &RecordBatch) -> ArrayRef {
@@ -158,6 +159,19 @@ fn eval(expr: &Expr, b: &RecordBatch) -> ArrayRef {
                 }
             }).collect();
             Arc::new(arrow::array::BooleanArray::from(out))
+        }
+        Expr::Slice { a, start, stop } => {
+            let x = eval(a, b);
+            let xs = x.as_any().downcast_ref::<StringArray>().unwrap();
+            let mut bld = StringBuilder::new();
+            for i in 0..xs.len() {
+                if xs.is_null(i) { bld.append_null(); continue; }
+                let s = xs.value(i);
+                let st = (*start).max(0) as usize;
+                let en = stop.map(|e| e.max(0) as usize).unwrap_or(s.len()).min(s.len());
+                bld.append_value(s.get(st.min(s.len())..en).unwrap_or(""));
+            }
+            Arc::new(bld.finish())
         }
     }
 }
@@ -322,11 +336,23 @@ fn distinct_exec(b: &RecordBatch, subset: &[String]) -> RecordBatch {
 // Inner equi-join on a single i64 key, exact pd.merge (left-row) order, parallel
 // probe. Output = all left columns + all right columns except the join key.
 fn join_exec(lb: &RecordBatch, rb: &RecordBatch, lkey: &str, rkey: &str, how: &str) -> RecordBatch {
-    let lk = lb.column(lb.schema().index_of(lkey).unwrap())
-        .as_any().downcast_ref::<Int64Array>().unwrap();
-    let rk = rb.column(rb.schema().index_of(rkey).unwrap())
-        .as_any().downcast_ref::<Int64Array>().unwrap();
-    let (li, ri) = if how == "left" { join_indices_left(lk, rk) } else { join_indices(lk, rk) };
+    let (li, ri) = if how == "cross" {
+        // cartesian product: each left row x every right row (right is usually a
+        // 1-row scalar threshold in TPC-H)
+        let (nl, nr) = (lb.num_rows(), rb.num_rows());
+        let mut la = Vec::with_capacity(nl * nr);
+        let mut ra = Vec::with_capacity(nl * nr);
+        for i in 0..nl {
+            for j in 0..nr { la.push(i as i64); ra.push(j as i64); }
+        }
+        (Int64Array::from(la), Int64Array::from(ra))
+    } else {
+        let lk = lb.column(lb.schema().index_of(lkey).unwrap())
+            .as_any().downcast_ref::<Int64Array>().unwrap();
+        let rk = rb.column(rb.schema().index_of(rkey).unwrap())
+            .as_any().downcast_ref::<Int64Array>().unwrap();
+        if how == "left" { join_indices_left(lk, rk) } else { join_indices(lk, rk) }
+    };
     let mut fields: Vec<Field> = Vec::new();
     let mut cols: Vec<ArrayRef> = Vec::new();
     for (i, f) in lb.schema().fields().iter().enumerate() {
@@ -649,7 +675,7 @@ fn apply_ops(mut b: RecordBatch, ops: &[RowOp]) -> RecordBatch {
                 let mut cols: Vec<ArrayRef> = Vec::new();
                 let mut fields: Vec<Field> = Vec::new();
                 for ne in *exprs {
-                    let a = eval(&ne.expr, &b);
+                    let a = broadcast(&eval(&ne.expr, &b), b.num_rows());
                     fields.push(Field::new(&ne.name, a.data_type().clone(), true));
                     cols.push(a);
                 }
