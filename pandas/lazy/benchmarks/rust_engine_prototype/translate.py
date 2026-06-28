@@ -102,7 +102,7 @@ def _expr(node):
                 "l": _expr(node.args[0]),
                 "r": _expr(node.args[1]),
             }
-        if f in ("dt_year", "is_null") and len(node.args) == 1:
+        if f in ("dt_year", "is_null", "invert") and len(node.args) == 1:
             return {"t": "unary", "op": f, "a": _expr(node.args[0])}
         if f == "isin":
             vals = list(node.kwargs.get("values", ()))
@@ -215,7 +215,7 @@ def _go(plan, tables, ctr):
         sub = [str(c) for c in (plan.subset or [])]
         return {"op": "distinct", "subset": sub, "input": _go(plan.input, tables, ctr)}
     if isinstance(plan, Join):
-        if plan.how != "inner":
+        if plan.how not in ("inner", "left"):
             raise NotSupported(f"join how={plan.how}")
         if plan.on is not None and len(plan.on) == 1:
             lk = rk = plan.on[0]
@@ -229,6 +229,7 @@ def _go(plan, tables, ctr):
             "right": _go(plan.right, tables, ctr),
             "left_key": lk,
             "right_key": rk,
+            "how": plan.how,
         }
     raise NotSupported(type(plan).__name__)
 

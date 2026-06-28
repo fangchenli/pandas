@@ -34,6 +34,8 @@ pub enum Plan {
         right: Box<Plan>,
         left_key: String,
         right_key: String,
+        #[serde(default)]
+        how: String,
     },
     Distinct { #[serde(default)] subset: Vec<String>, input: Box<Plan> },
 }
@@ -99,6 +101,10 @@ fn eval(expr: &Expr, b: &RecordBatch) -> ArrayRef {
                 "is_null" => Arc::new(arrow::array::BooleanArray::from(
                     (0..x.len()).map(|i| x.is_null(i)).collect::<Vec<bool>>(),
                 )),
+                "invert" => {
+                    let xb = x.as_any().downcast_ref::<BooleanArray>().unwrap();
+                    Arc::new(compute::not(xb).unwrap())
+                }
                 _ => panic!("unary {op}"),
             }
         }
@@ -139,12 +145,15 @@ fn eval(expr: &Expr, b: &RecordBatch) -> ArrayRef {
         Expr::Str { op, a, pat } => {
             let x = eval(a, b);
             let xs = x.as_any().downcast_ref::<StringArray>().unwrap();
+            // contains is a regex (pandas str.contains default regex=True);
+            // startswith/endswith are literal.
+            let re = if op == "contains" { regex::Regex::new(pat).ok() } else { None };
             let out: Vec<bool> = (0..xs.len()).map(|i| {
                 let s = xs.value(i);
                 match op.as_str() {
                     "startswith" => s.starts_with(pat.as_str()),
                     "endswith" => s.ends_with(pat.as_str()),
-                    "contains" => s.contains(pat.as_str()),
+                    "contains" => re.as_ref().map(|r| r.is_match(s)).unwrap_or(false),
                     _ => false,
                 }
             }).collect();
@@ -278,10 +287,10 @@ pub fn execute(plan: &Plan, tables: &Tables) -> RecordBatch {
             let k = (*n).min(b.num_rows());
             b.slice(0, k)
         }
-        Plan::Join { left, right, left_key, right_key } => {
+        Plan::Join { left, right, left_key, right_key, how } => {
             let lb = execute(left, tables);
             let rb = execute(right, tables);
-            join_exec(&lb, &rb, left_key, right_key)
+            join_exec(&lb, &rb, left_key, right_key, how)
         }
         Plan::Distinct { subset, input } => {
             let b = execute(input, tables);
@@ -312,12 +321,12 @@ fn distinct_exec(b: &RecordBatch, subset: &[String]) -> RecordBatch {
 
 // Inner equi-join on a single i64 key, exact pd.merge (left-row) order, parallel
 // probe. Output = all left columns + all right columns except the join key.
-fn join_exec(lb: &RecordBatch, rb: &RecordBatch, lkey: &str, rkey: &str) -> RecordBatch {
+fn join_exec(lb: &RecordBatch, rb: &RecordBatch, lkey: &str, rkey: &str, how: &str) -> RecordBatch {
     let lk = lb.column(lb.schema().index_of(lkey).unwrap())
         .as_any().downcast_ref::<Int64Array>().unwrap();
     let rk = rb.column(rb.schema().index_of(rkey).unwrap())
         .as_any().downcast_ref::<Int64Array>().unwrap();
-    let (li, ri) = join_indices(lk, rk);
+    let (li, ri) = if how == "left" { join_indices_left(lk, rk) } else { join_indices(lk, rk) };
     let mut fields: Vec<Field> = Vec::new();
     let mut cols: Vec<ArrayRef> = Vec::new();
     for (i, f) in lb.schema().fields().iter().enumerate() {
@@ -385,6 +394,47 @@ fn join_indices(lk: &Int64Array, rk: &Int64Array) -> (Int64Array, Int64Array) {
     (Int64Array::from(la), Int64Array::from(ra))
 }
 
+// Left outer join: every left row appears at least once; unmatched left rows get
+// a NULL right index (take -> null right columns). pd.merge multiset semantics.
+fn join_indices_left(lk: &Int64Array, rk: &Int64Array) -> (Int64Array, Int64Array) {
+    let m = rk.len();
+    let n = lk.len();
+    let mut first: hashbrown::HashMap<i64, u32, BuildI64> = hashbrown::HashMap::default();
+    let mut counts: Vec<i64> = Vec::new();
+    let mut group_of: Vec<u32> = Vec::with_capacity(m);
+    let mut ng: u32 = 0;
+    for j in 0..m {
+        let k = rk.value(j);
+        match first.get(&k) {
+            Some(&g) => { group_of.push(g); counts[g as usize] += 1; }
+            None => { first.insert(k, ng); group_of.push(ng); counts.push(1); ng += 1; }
+        }
+    }
+    let mut offs: Vec<i64> = vec![0; ng as usize + 1];
+    for g in 0..ng as usize { offs[g + 1] = offs[g] + counts[g]; }
+    let mut grows: Vec<i64> = vec![0; m];
+    let mut cur: Vec<i64> = offs[..ng as usize].to_vec();
+    for (j, &g) in group_of.iter().enumerate() {
+        let s = cur[g as usize];
+        grows[s as usize] = j as i64;
+        cur[g as usize] = s + 1;
+    }
+    let mut la: Vec<i64> = Vec::with_capacity(n);
+    let mut ra: Vec<Option<i64>> = Vec::with_capacity(n);
+    for i in 0..n {
+        match first.get(&lk.value(i)) {
+            Some(&g) => {
+                for kk in offs[g as usize]..offs[g as usize + 1] {
+                    la.push(i as i64);
+                    ra.push(Some(grows[kk as usize]));
+                }
+            }
+            None => { la.push(i as i64); ra.push(None); }
+        }
+    }
+    (Int64Array::from(la), Int64Array::from(ra))
+}
+
 // group-by + aggregates. Keys: int64/utf8. Aggs over a single column: sum/mean/
 // count/min/max (numeric f64/i64 cast to f64).
 fn aggregate(b: &RecordBatch, group: &[String], aggs: &[Agg]) -> RecordBatch {
@@ -429,19 +479,21 @@ fn aggregate(b: &RecordBatch, group: &[String], aggs: &[Agg]) -> RecordBatch {
             let kc = b.column(b.schema().index_of(&a.col).unwrap()).clone();
             let mut sets: Vec<hashbrown::HashSet<u64, BuildI64>> =
                 (0..ng).map(|_| hashbrown::HashSet::default()).collect();
-            for i in 0..n { sets[ids[i]].insert(keyhash(&kc, i)); }
+            for i in 0..n { if kc.is_null(i) { continue; } sets[ids[i]].insert(keyhash(&kc, i)); }
             let mut bld = Int64Builder::new();
             for st in &sets { bld.append_value(st.len() as i64); }
             fields.push(Field::new(&a.name, DataType::Int64, true));
             out_cols.push(Arc::new(bld.finish()));
             continue;
         }
-        let vals = to_f64(b.column(b.schema().index_of(&a.col).unwrap()));
+        let acol = b.column(b.schema().index_of(&a.col).unwrap()).clone();
+        let vals = to_f64(&acol);
         let mut sum = vec![0f64; ng];
         let mut cnt = vec![0i64; ng];
         let mut mn = vec![f64::INFINITY; ng];
         let mut mx = vec![f64::NEG_INFINITY; ng];
         for i in 0..n {
+            if acol.is_null(i) { continue; }
             let g = ids[i];
             let v = vals[i];
             sum[g] += v;
@@ -753,7 +805,12 @@ fn fused_join_aggregate(
         _ => return None,
     };
     let (left, right, lkey, rkey) = match join {
-        Plan::Join { left, right, left_key, right_key } => (left, right, left_key, right_key),
+        // only the inner-join fast path is fused here; left/cross fall to naive
+        Plan::Join { left, right, left_key, right_key, how }
+            if how.is_empty() || how == "inner" =>
+        {
+            (left, right, left_key, right_key)
+        }
         _ => return None,
     };
     let (probe_scan, probe_ops) = peel(left, tables)?;
