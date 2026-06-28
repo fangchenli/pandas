@@ -35,6 +35,7 @@ pub enum Plan {
         left_key: String,
         right_key: String,
     },
+    Distinct { #[serde(default)] subset: Vec<String>, input: Box<Plan> },
 }
 
 #[derive(Deserialize)]
@@ -282,7 +283,31 @@ pub fn execute(plan: &Plan, tables: &Tables) -> RecordBatch {
             let rb = execute(right, tables);
             join_exec(&lb, &rb, left_key, right_key)
         }
+        Plan::Distinct { subset, input } => {
+            let b = execute(input, tables);
+            distinct_exec(&b, subset)
+        }
     }
+}
+
+// Keep first occurrence of each distinct (subset) key combination.
+fn distinct_exec(b: &RecordBatch, subset: &[String]) -> RecordBatch {
+    let n = b.num_rows();
+    let cols: Vec<ArrayRef> = if subset.is_empty() {
+        b.columns().to_vec()
+    } else {
+        subset.iter().map(|c| b.column(b.schema().index_of(c).unwrap()).clone()).collect()
+    };
+    let mut seen: hashbrown::HashSet<u64, BuildI64> = hashbrown::HashSet::default();
+    let mut keep: Vec<i64> = Vec::new();
+    for i in 0..n {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for ka in &cols { h = (h ^ keyhash(ka, i)).wrapping_mul(0x0000_0100_0000_01b3); }
+        if seen.insert(h) { keep.push(i as i64); }
+    }
+    let idx = Int64Array::from(keep);
+    let arrs: Vec<ArrayRef> = b.columns().iter().map(|c| compute::take(c, &idx, None).unwrap()).collect();
+    RecordBatch::try_new(b.schema(), arrs).unwrap()
 }
 
 // Inner equi-join on a single i64 key, exact pd.merge (left-row) order, parallel

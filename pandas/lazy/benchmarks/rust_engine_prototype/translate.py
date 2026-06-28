@@ -23,6 +23,7 @@ from pandas.lazy.ir import (
 from pandas.lazy.plan import (
     Aggregate,
     DataFrameSource,
+    Distinct,
     Filter,
     Join,
     Limit,
@@ -210,6 +211,9 @@ def _go(plan, tables, ctr):
         ]
         srt = {"op": "sort", "keys": keys, "input": _go(plan.input, tables, ctr)}
         return {"op": "limit", "n": int(plan.k), "input": srt}
+    if isinstance(plan, Distinct):
+        sub = [str(c) for c in (plan.subset or [])]
+        return {"op": "distinct", "subset": sub, "input": _go(plan.input, tables, ctr)}
     if isinstance(plan, Join):
         if plan.how != "inner":
             raise NotSupported(f"join how={plan.how}")
