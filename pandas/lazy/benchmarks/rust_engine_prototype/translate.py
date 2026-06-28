@@ -28,6 +28,7 @@ from pandas.lazy.plan import (
     Limit,
     Project,
     Sort,
+    TopK,
 )
 
 _BIN = {
@@ -92,14 +93,40 @@ def _expr(node):
     if isinstance(node, Alias):
         return _expr(node.arg)
     if isinstance(node, Call):
-        if node.function not in _BIN or len(node.args) != 2:
-            raise NotSupported(f"call {node.function}/{len(node.args)}")
-        return {
-            "t": "bin",
-            "op": _BIN[node.function],
-            "l": _expr(node.args[0]),
-            "r": _expr(node.args[1]),
-        }
+        f = node.function
+        if f in _BIN and len(node.args) == 2:
+            return {
+                "t": "bin",
+                "op": _BIN[f],
+                "l": _expr(node.args[0]),
+                "r": _expr(node.args[1]),
+            }
+        if f in ("dt_year", "is_null") and len(node.args) == 1:
+            return {"t": "unary", "op": f, "a": _expr(node.args[0])}
+        if f == "isin":
+            vals = list(node.kwargs.get("values", ()))
+            if all(
+                isinstance(v, (int, np.integer)) and not isinstance(v, bool)
+                for v in vals
+            ):
+                return {
+                    "t": "isin",
+                    "a": _expr(node.args[0]),
+                    "ints": [int(v) for v in vals],
+                }
+            return {
+                "t": "isin",
+                "a": _expr(node.args[0]),
+                "strs": [str(v) for v in vals],
+            }
+        if f == "case_when":
+            cases = node.kwargs["cases"]
+            return {
+                "t": "case",
+                "cases": [[_expr(c), _expr(v)] for c, v in cases],
+                "otherwise": _expr(node.kwargs["otherwise"]),
+            }
+        raise NotSupported(f"call {f}/{len(node.args)}")
     raise NotSupported(type(node).__name__)
 
 
@@ -162,6 +189,13 @@ def _go(plan, tables, ctr):
         if plan.offset:
             raise NotSupported("limit offset")
         return {"op": "limit", "n": int(plan.n), "input": _go(plan.input, tables, ctr)}
+    if isinstance(plan, TopK):
+        keys = [
+            {"col": _name_of(_ir(b)), "desc": bool(d)}
+            for b, d in zip(plan.by, plan.descending, strict=False)
+        ]
+        srt = {"op": "sort", "keys": keys, "input": _go(plan.input, tables, ctr)}
+        return {"op": "limit", "n": int(plan.k), "input": srt}
     if isinstance(plan, Join):
         if plan.how != "inner":
             raise NotSupported(f"join how={plan.how}")

@@ -64,6 +64,9 @@ pub enum Expr {
     Litf { v: f64 },
     LitStr { v: String },
     Bin { op: String, l: Box<Expr>, r: Box<Expr> },
+    Unary { op: String, a: Box<Expr> },
+    Isin { a: Box<Expr>, #[serde(default)] ints: Vec<i64>, #[serde(default)] strs: Vec<String> },
+    Case { cases: Vec<(Expr, Expr)>, otherwise: Box<Expr> },
 }
 
 fn eval(expr: &Expr, b: &RecordBatch) -> ArrayRef {
@@ -80,6 +83,66 @@ fn eval(expr: &Expr, b: &RecordBatch) -> ArrayRef {
             let ra = eval(r, b);
             bin(op, &la, &ra)
         }
+        Expr::Unary { op, a } => {
+            let x = eval(a, b);
+            match op.as_str() {
+                "dt_year" => {
+                    let ts = compute::cast(
+                        &x,
+                        &DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, None),
+                    ).unwrap();
+                    let y = compute::date_part(&ts, compute::DatePart::Year).unwrap();
+                    compute::cast(&y, &DataType::Int64).unwrap()
+                }
+                "is_null" => Arc::new(arrow::array::BooleanArray::from(
+                    (0..x.len()).map(|i| x.is_null(i)).collect::<Vec<bool>>(),
+                )),
+                _ => panic!("unary {op}"),
+            }
+        }
+        Expr::Isin { a, ints, strs } => {
+            let x = eval(a, b);
+            let n = x.len();
+            let mut out = Vec::with_capacity(n);
+            if !ints.is_empty() {
+                let set: hashbrown::HashSet<i64, BuildI64> = ints.iter().copied().collect();
+                let xi = x.as_any().downcast_ref::<Int64Array>().unwrap();
+                for i in 0..n { out.push(set.contains(&xi.value(i))); }
+            } else {
+                let set: std::collections::HashSet<&str> = strs.iter().map(|s| s.as_str()).collect();
+                let xs = x.as_any().downcast_ref::<StringArray>().unwrap();
+                for i in 0..n { out.push(set.contains(xs.value(i))); }
+            }
+            Arc::new(arrow::array::BooleanArray::from(out))
+        }
+        Expr::Case { cases, otherwise } => {
+            let mut acc = eval(otherwise, b);
+            for (cond, val) in cases.iter().rev() {
+                let m = eval(cond, b);
+                let mb = m.as_any().downcast_ref::<BooleanArray>().unwrap();
+                let v = eval(val, b);
+                // coerce v and acc to common numeric type if needed
+                let (vc, ac) = if v.data_type() != acc.data_type()
+                    && is_num(v.data_type()) && is_num(acc.data_type()) {
+                    (compute::cast(&v, &DataType::Float64).unwrap(),
+                     compute::cast(&acc, &DataType::Float64).unwrap())
+                } else { (v.clone(), acc.clone()) };
+                // broadcast scalars to full length
+                let vf = broadcast(&vc, b.num_rows());
+                let af = broadcast(&ac, b.num_rows());
+                acc = arrow::compute::kernels::zip::zip(mb, &vf, &af).unwrap();
+            }
+            acc
+        }
+    }
+}
+
+fn broadcast(a: &ArrayRef, n: usize) -> ArrayRef {
+    if a.len() == n { a.clone() }
+    else {
+        // length-1 scalar -> repeat via take
+        let idx = Int64Array::from(vec![0i64; n]);
+        compute::take(a, &idx, None).unwrap()
     }
 }
 
