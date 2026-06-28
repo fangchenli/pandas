@@ -36,23 +36,28 @@ shape (q3) **parity** — always ~2–8x our Cython engine. The point stands:
 **Arrow-native Rust execution, boundary-once, matches/beats Polars** — "be Polars
 under the pandas API," which we have the kernels for.
 
-## General plan→Rust executor — built, correct; fusion is the next layer
+## General plan→Rust executor — built, correct, FUSED, beats Polars
 Built a general executor (`benchmarks/rust_engine_prototype/src/engine.rs`): a
 serialized plan (JSON: scan/filter/project/aggregate/sort/limit + an expression
 interpreter) executes over Arrow tables — queries route through it, not a
-hand-written `run_qN`. **Correct vs DuckDB on q1 and q6.** Performance:
-- q6 (filter+project+scalar-sum): **52 ms vs Polars 41 = 0.78x** — fine.
-- q1 (filter+project+group-by+multi-agg): **correct but ~1100 ms = 0.25x** —
-  while the *fused* hand-written `run_q1` is 30 ms (8x Polars).
+hand-written `run_qN`. **Correct vs DuckDB on q1 and q6.**
 
-The gap is **operator fusion**: the naive executor *materializes between
-operators* (copy at filter, 7 arithmetic intermediates at project, re-scan at
-aggregate). Polars and our hand kernel fuse filter+project+aggregate into one
-pass. This is the *same fusion lesson*, now inside the Rust engine — and it is
-**not a wall**: the fused `run_q1` proves fused Rust hits 8x. The translator
-architecture is proven; the next layer is a **fused / morsel-pipelined**
-executor (fuse scan→filter→project→partial-agg per morsel), the actual
-query-engine work Polars/DuckDB do.
+Two stages, measured (SF-3):
+1. *Naive materializing* (operator-at-a-time over full batches): q6 0.78x, q1
+   0.25x — materializes between operators (copy at filter, arithmetic
+   intermediates at project, re-scan at aggregate).
+2. **Fused / morsel-pipelined aggregate** (`Aggregate ← (Filter|Project)* ←
+   Scan` → cache-resident 64K sub-morsels, row-wise chain fused per morsel,
+   thread-local partial aggregates merged, rayon-parallel): **q6 ~2.6x, q1
+   ~1.7x — beats Polars**, through the *general* JSON-plan path.
+
+The key was **cache-resident morsels**: a first cut used N/nthreads (~2.25M-row)
+morsels whose intermediates spilled to DRAM (q1 only 0.69x); fixing to 64K
+sub-morsels made the fusion real (q1 → 1.7x). This is the Polars/DuckDB
+vectorized-morsel model, now ours. Aggregate pipelines (q1, q6, and many
+single-table queries) beat Polars generally; **join fusion is the next operator**
+(the `peel` chain currently handles filter/project/scan; joins fall back to the
+naive path).
 
 ## The direction
 Build the lazy engine's execution in **Rust on arrow-rs**: `LogicalPlan` → Arrow

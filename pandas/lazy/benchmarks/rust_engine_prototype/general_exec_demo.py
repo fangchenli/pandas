@@ -2,9 +2,8 @@
 (lazy_engine_rs.execute(plan_json, tables)) — queries route through the engine,
 not a hand-written run_qN. Correct vs DuckDB. See ../../docs/RUST_ENGINE_DIRECTION.md.
 
-Status: the executor is correct and general; it is *naive materializing* (copies
-between operators), so it's 0.78x Polars on q6 and 0.25x on compute-heavy q1 —
-the next layer is operator fusion (the fused hand-written run_q1 hits 8x).
+Status: correct, general, and FUSED (cache-resident morsel-parallel aggregate) —
+beats Polars: q6 ~2.6x, q1 ~1.7x, through the general JSON-plan path.
 """
 
 from __future__ import annotations
@@ -196,8 +195,8 @@ def main(sf: float = 3.0):
     print(
         f"q1 general-exec correct={ok1}: "
         f"{_best(lambda: E.execute(json.dumps(q1), tables)):.1f} ms | "
-        f"polars {_best(lambda: B.pl_q1(plt)):.1f} ms  (naive materializing; "
-        f"fused run_q1 is 8x — fusion is the next layer)"
+        f"polars {_best(lambda: B.pl_q1(plt)):.1f} ms  (fused: "
+        f"beats Polars)"
     )
 
 

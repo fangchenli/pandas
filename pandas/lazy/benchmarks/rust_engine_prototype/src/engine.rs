@@ -136,8 +136,12 @@ pub fn execute(plan: &Plan, tables: &Tables) -> RecordBatch {
             RecordBatch::try_new(Arc::new(Schema::new(fields)), cols).unwrap()
         }
         Plan::Aggregate { group, aggs, input } => {
-            let b = execute(input, tables);
-            aggregate(&b, group, aggs)
+            if let Some((scan, ops)) = peel(input, tables) {
+                fused_aggregate(scan, ops, group, aggs)
+            } else {
+                let b = execute(input, tables);
+                aggregate(&b, group, aggs)
+            }
         }
         Plan::Sort { keys, input } => {
             let b = execute(input, tables);
@@ -315,3 +319,216 @@ fn to_f64(a: &ArrayRef) -> Vec<f64> {
 // keep StringBuilder import used
 #[allow(dead_code)]
 fn _u(_: StringBuilder) {}
+
+
+// ---------------------------------------------------------------------------
+// Fused / morsel-pipelined aggregate: Aggregate <- (Filter|Project)* <- Scan.
+// Each morsel runs the row-wise chain (filter+project) vectorized on a
+// cache-resident slice and partial-aggregates into a thread-local table; merge
+// at the end. Intermediates never hit DRAM; parallel over morsels (rayon).
+// ---------------------------------------------------------------------------
+use rayon::prelude::*;
+
+enum RowOp<'a> {
+    Filter(&'a Expr),
+    Project(&'a [NamedExpr]),
+}
+
+// Peel a row-wise chain over a scan; None if the input isn't fuseable.
+fn peel<'a>(plan: &'a Plan, tables: &Tables) -> Option<(RecordBatch, Vec<RowOp<'a>>)> {
+    let mut ops: Vec<RowOp<'a>> = Vec::new();
+    let mut cur = plan;
+    loop {
+        match cur {
+            Plan::Filter { pred, input } => {
+                ops.push(RowOp::Filter(pred));
+                cur = input;
+            }
+            Plan::Project { exprs, input } => {
+                ops.push(RowOp::Project(exprs));
+                cur = input;
+            }
+            Plan::Scan { table, columns } => {
+                let b = &tables[table];
+                let idx: Vec<usize> =
+                    columns.iter().map(|c| b.schema().index_of(c).unwrap()).collect();
+                ops.reverse(); // bottom-up: scan -> filter -> project
+                return Some((b.project(&idx).unwrap(), ops));
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn apply_ops(mut b: RecordBatch, ops: &[RowOp]) -> RecordBatch {
+    for op in ops {
+        match op {
+            RowOp::Filter(pred) => {
+                let mask = eval(pred, &b);
+                let mb = mask.as_any().downcast_ref::<BooleanArray>().unwrap();
+                b = compute::filter_record_batch(&b, mb).unwrap();
+            }
+            RowOp::Project(exprs) => {
+                let mut cols: Vec<ArrayRef> = Vec::new();
+                let mut fields: Vec<Field> = Vec::new();
+                for ne in *exprs {
+                    let a = eval(&ne.expr, &b);
+                    fields.push(Field::new(&ne.name, a.data_type().clone(), true));
+                    cols.push(a);
+                }
+                b = RecordBatch::try_new(Arc::new(Schema::new(fields)), cols).unwrap();
+            }
+        }
+    }
+    b
+}
+
+#[derive(Clone)]
+enum KeyVal {
+    I(i64),
+    F(u64),
+    S(String),
+}
+fn keyval_enum(a: &ArrayRef, i: usize) -> KeyVal {
+    match a.data_type() {
+        DataType::Int64 => KeyVal::I(a.as_any().downcast_ref::<Int64Array>().unwrap().value(i)),
+        DataType::Float64 => {
+            KeyVal::F(a.as_any().downcast_ref::<Float64Array>().unwrap().value(i).to_bits())
+        }
+        DataType::Utf8 => {
+            KeyVal::S(a.as_any().downcast_ref::<StringArray>().unwrap().value(i).to_string())
+        }
+        _ => panic!("key dtype"),
+    }
+}
+
+#[derive(Clone)]
+struct GState {
+    keys: Vec<KeyVal>,
+    acc: Vec<[f64; 4]>, // per agg: [sum, count, min, max]
+}
+
+fn fused_aggregate(scan: RecordBatch, ops: Vec<RowOp>, group: &[String], aggs: &[Agg]) -> RecordBatch {
+    let n = scan.num_rows();
+    let nthreads = rayon::current_num_threads().max(1);
+    let chunk = n.div_ceil(nthreads);
+    let na = aggs.len();
+    let partials: Vec<hashbrown::HashMap<u64, GState, BuildI64>> = (0..nthreads)
+        .into_par_iter()
+        .map(|t| {
+            let lo = t * chunk;
+            let hi = ((t + 1) * chunk).min(n);
+            let mut map: hashbrown::HashMap<u64, GState, BuildI64> =
+                hashbrown::HashMap::default();
+            // process this thread's range in cache-resident sub-morsels so the
+            // per-op intermediates stay in cache (true fusion).
+            const MORSEL: usize = 65_536;
+            let mut s = lo;
+            while s < hi {
+                let e_ = (s + MORSEL).min(hi);
+                let m = apply_ops(scan.slice(s, e_ - s), &ops);
+                let mn = m.num_rows();
+                let gk: Vec<ArrayRef> = group
+                    .iter()
+                    .map(|g| m.column(m.schema().index_of(g).unwrap()).clone())
+                    .collect();
+                let av: Vec<Vec<f64>> = aggs
+                    .iter()
+                    .map(|a| to_f64(m.column(m.schema().index_of(&a.col).unwrap())))
+                    .collect();
+                for i in 0..mn {
+                    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+                    for ka in &gk {
+                        h = (h ^ keyhash(ka, i)).wrapping_mul(0x0000_0100_0000_01b3);
+                    }
+                    let e = map.entry(h).or_insert_with(|| GState {
+                        keys: gk.iter().map(|ka| keyval_enum(ka, i)).collect(),
+                        acc: vec![[0.0, 0.0, f64::INFINITY, f64::NEG_INFINITY]; na],
+                    });
+                    for (j, av_j) in av.iter().enumerate() {
+                        let v = av_j[i];
+                        let a = &mut e.acc[j];
+                        a[0] += v;
+                        a[1] += 1.0;
+                        if v < a[2] { a[2] = v; }
+                        if v > a[3] { a[3] = v; }
+                    }
+                }
+                s = e_;
+            }
+            map
+        })
+        .collect();
+    // merge
+    let mut merged: hashbrown::HashMap<u64, GState, BuildI64> = hashbrown::HashMap::default();
+    for part in partials {
+        for (h, g) in part {
+            let e = merged.entry(h).or_insert_with(|| GState {
+                keys: g.keys.clone(),
+                acc: vec![[0.0, 0.0, f64::INFINITY, f64::NEG_INFINITY]; na],
+            });
+            for j in 0..na {
+                e.acc[j][0] += g.acc[j][0];
+                e.acc[j][1] += g.acc[j][1];
+                if g.acc[j][2] < e.acc[j][2] { e.acc[j][2] = g.acc[j][2]; }
+                if g.acc[j][3] > e.acc[j][3] { e.acc[j][3] = g.acc[j][3]; }
+            }
+        }
+    }
+    // build output (key columns + agg columns), group order arbitrary
+    let groups: Vec<&GState> = merged.values().collect();
+    let ng = groups.len();
+    let mut fields: Vec<Field> = Vec::new();
+    let mut out: Vec<ArrayRef> = Vec::new();
+    for (gi, gname) in group.iter().enumerate() {
+        // dtype from first group's keyval
+        match &groups.first().map(|g| &g.keys[gi]) {
+            Some(KeyVal::I(_)) => {
+                let mut b = Int64Builder::new();
+                for g in &groups { if let KeyVal::I(v) = g.keys[gi] { b.append_value(v); } }
+                fields.push(Field::new(gname, DataType::Int64, true));
+                out.push(Arc::new(b.finish()));
+            }
+            Some(KeyVal::S(_)) => {
+                let mut b = StringBuilder::new();
+                for g in &groups { if let KeyVal::S(ref v) = g.keys[gi] { b.append_value(v); } }
+                fields.push(Field::new(gname, DataType::Utf8, true));
+                out.push(Arc::new(b.finish()));
+            }
+            Some(KeyVal::F(_)) => {
+                let mut b = Float64Builder::new();
+                for g in &groups { if let KeyVal::F(v) = g.keys[gi] { b.append_value(f64::from_bits(v)); } }
+                fields.push(Field::new(gname, DataType::Float64, true));
+                out.push(Arc::new(b.finish()));
+            }
+            None => {}
+        }
+    }
+    for (j, a) in aggs.iter().enumerate() {
+        match a.func.as_str() {
+            "count" => {
+                let mut b = Int64Builder::new();
+                for g in &groups { b.append_value(g.acc[j][1] as i64); }
+                fields.push(Field::new(&a.name, DataType::Int64, true));
+                out.push(Arc::new(b.finish()));
+            }
+            _ => {
+                let mut b = Float64Builder::new();
+                for g in &groups {
+                    let ac = g.acc[j];
+                    b.append_value(match a.func.as_str() {
+                        "sum" => ac[0],
+                        "mean" => ac[0] / ac[1],
+                        "min" => ac[2],
+                        "max" => ac[3],
+                        _ => panic!("agg"),
+                    });
+                }
+                fields.push(Field::new(&a.name, DataType::Float64, true));
+                out.push(Arc::new(b.finish()));
+            }
+        }
+    }
+    let _ = ng;
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), out).unwrap()
+}
