@@ -224,12 +224,23 @@ def _go(plan, tables, ctr):
     if isinstance(plan, Join):
         if plan.how not in ("inner", "left", "cross"):
             raise NotSupported(f"join how={plan.how}")
+        lkeys = rkeys = []
         if plan.how == "cross":
             lk = rk = ""
         elif plan.on is not None and len(plan.on) == 1:
             lk = rk = plan.on[0]
         elif plan.left_on and plan.right_on and len(plan.left_on) == 1:
             lk, rk = plan.left_on[0], plan.right_on[0]
+        elif plan.on is not None and len(plan.on) >= 2:
+            lkeys = rkeys = list(plan.on)
+            lk, rk = lkeys[0], rkeys[0]
+        elif (
+            plan.left_on
+            and plan.right_on
+            and len(plan.left_on) == len(plan.right_on) >= 2
+        ):
+            lkeys, rkeys = list(plan.left_on), list(plan.right_on)
+            lk, rk = lkeys[0], rkeys[0]
         else:
             raise NotSupported("join keys")
         return {
@@ -239,6 +250,8 @@ def _go(plan, tables, ctr):
             "left_key": lk,
             "right_key": rk,
             "how": plan.how,
+            "left_keys": lkeys,
+            "right_keys": rkeys,
         }
     raise NotSupported(type(plan).__name__)
 

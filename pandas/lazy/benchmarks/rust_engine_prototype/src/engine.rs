@@ -36,6 +36,10 @@ pub enum Plan {
         right_key: String,
         #[serde(default)]
         how: String,
+        #[serde(default)]
+        left_keys: Vec<String>,
+        #[serde(default)]
+        right_keys: Vec<String>,
     },
     Distinct { #[serde(default)] subset: Vec<String>, input: Box<Plan> },
 }
@@ -301,10 +305,10 @@ pub fn execute(plan: &Plan, tables: &Tables) -> RecordBatch {
             let k = (*n).min(b.num_rows());
             b.slice(0, k)
         }
-        Plan::Join { left, right, left_key, right_key, how } => {
+        Plan::Join { left, right, left_key, right_key, how, left_keys, right_keys } => {
             let lb = execute(left, tables);
             let rb = execute(right, tables);
-            join_exec(&lb, &rb, left_key, right_key, how)
+            join_exec(&lb, &rb, left_key, right_key, how, left_keys, right_keys)
         }
         Plan::Distinct { subset, input } => {
             let b = execute(input, tables);
@@ -335,7 +339,22 @@ fn distinct_exec(b: &RecordBatch, subset: &[String]) -> RecordBatch {
 
 // Inner equi-join on a single i64 key, exact pd.merge (left-row) order, parallel
 // probe. Output = all left columns + all right columns except the join key.
-fn join_exec(lb: &RecordBatch, rb: &RecordBatch, lkey: &str, rkey: &str, how: &str) -> RecordBatch {
+fn composite_key(b: &RecordBatch, keys: &[String]) -> Int64Array {
+    let arrs: Vec<ArrayRef> = keys.iter()
+        .map(|k| b.column(b.schema().index_of(k).unwrap()).clone()).collect();
+    let n = b.num_rows();
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for ka in &arrs { h = (h ^ keyhash(ka, i)).wrapping_mul(0x0000_0100_0000_01b3); }
+        out.push(h as i64);
+    }
+    Int64Array::from(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn join_exec(lb: &RecordBatch, rb: &RecordBatch, lkey: &str, rkey: &str, how: &str,
+             lkeys: &[String], rkeys: &[String]) -> RecordBatch {
     let (li, ri) = if how == "cross" {
         // cartesian product: each left row x every right row (right is usually a
         // 1-row scalar threshold in TPC-H)
@@ -347,11 +366,22 @@ fn join_exec(lb: &RecordBatch, rb: &RecordBatch, lkey: &str, rkey: &str, how: &s
         }
         (Int64Array::from(la), Int64Array::from(ra))
     } else {
-        let lk = lb.column(lb.schema().index_of(lkey).unwrap())
-            .as_any().downcast_ref::<Int64Array>().unwrap();
-        let rk = rb.column(rb.schema().index_of(rkey).unwrap())
-            .as_any().downcast_ref::<Int64Array>().unwrap();
-        if how == "left" { join_indices_left(lk, rk) } else { join_indices(lk, rk) }
+        // multi-key: fold the key columns into one composite i64 hash (the engine
+        // accepts 64-bit hashing at these cardinalities, as group-by does).
+        let lk_owned: Int64Array = if lkeys.len() >= 2 {
+            composite_key(lb, lkeys)
+        } else {
+            lb.column(lb.schema().index_of(lkey).unwrap())
+                .as_any().downcast_ref::<Int64Array>().unwrap().clone()
+        };
+        let rk_owned: Int64Array = if rkeys.len() >= 2 {
+            composite_key(rb, rkeys)
+        } else {
+            rb.column(rb.schema().index_of(rkey).unwrap())
+                .as_any().downcast_ref::<Int64Array>().unwrap().clone()
+        };
+        if how == "left" { join_indices_left(&lk_owned, &rk_owned) }
+        else { join_indices(&lk_owned, &rk_owned) }
     };
     let mut fields: Vec<Field> = Vec::new();
     let mut cols: Vec<ArrayRef> = Vec::new();
@@ -832,8 +862,8 @@ fn fused_join_aggregate(
     };
     let (left, right, lkey, rkey) = match join {
         // only the inner-join fast path is fused here; left/cross fall to naive
-        Plan::Join { left, right, left_key, right_key, how }
-            if how.is_empty() || how == "inner" =>
+        Plan::Join { left, right, left_key, right_key, how, left_keys, .. }
+            if (how.is_empty() || how == "inner") && left_keys.len() < 2 =>
         {
             (left, right, left_key, right_key)
         }
