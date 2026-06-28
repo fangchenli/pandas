@@ -45,7 +45,7 @@ _BIN = {
     "and_": "and",
     "or_": "or",
 }
-_AGG = {"sum", "mean", "min", "max", "count"}
+_AGG = {"sum", "mean", "min", "max", "count", "n_unique"}
 
 
 # alias a builtin (a custom Exception subclass would trip the errors-location hook)
@@ -125,6 +125,20 @@ def _expr(node):
                 "t": "case",
                 "cases": [[_expr(c), _expr(v)] for c, v in cases],
                 "otherwise": _expr(node.kwargs["otherwise"]),
+            }
+        if (
+            f in ("str_startswith", "str_endswith", "str_contains")
+            and len(node.args) == 2
+        ):
+            pat = node.args[1]
+            pat = pat.value if isinstance(pat, Literal) else None
+            if not isinstance(pat, str):
+                raise NotSupported(f"{f} non-literal pattern")
+            return {
+                "t": "str",
+                "op": f[len("str_") :],
+                "a": _expr(node.args[0]),
+                "pat": pat,
             }
         raise NotSupported(f"call {f}/{len(node.args)}")
     raise NotSupported(type(node).__name__)

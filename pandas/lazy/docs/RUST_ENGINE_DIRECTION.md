@@ -95,6 +95,15 @@ Polars automatically. Reaching all-22 is a **coverage + per-shape fusion grind**
 add the missing operators/exprs, make fusion trigger on more translated shapes
 (q6), fuse multi-joins (q5), fix q17. Mechanical, not architectural.
 
+**Coverage grind (June 2026): 4 → 14/22 translate, 10/22 validated vs DuckDB.**
+Added to the engine + translator: `dt_year` (cast→timestamp→date_part), `is_null`,
+`isin`, `case_when` (zip), `str_startswith/endswith/contains`, `n_unique` (naive
+agg; fused bails), and `TopK`→sort+limit. Validated: q1, q5, q6, q7, q8, q10,
+q12, q16, q19, q21. Remaining (12): **Distinct** (q4/20), **multi-key join**
+(q9), **cross join** (q11/15), **left join** (q13/16/22), and 4 bugs (q3/q14/q17
+exec panics, q18 correctness). All mechanical — operators/variants + bug fixes,
+no architecture change.
+
 ## The direction
 Build the lazy engine's execution in **Rust on arrow-rs**: `LogicalPlan` → Arrow
 in once → execute operators in Rust (rayon, no GIL, hand-tuned hot kernels; port

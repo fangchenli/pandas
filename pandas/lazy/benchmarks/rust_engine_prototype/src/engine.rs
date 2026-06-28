@@ -67,6 +67,7 @@ pub enum Expr {
     Unary { op: String, a: Box<Expr> },
     Isin { a: Box<Expr>, #[serde(default)] ints: Vec<i64>, #[serde(default)] strs: Vec<String> },
     Case { cases: Vec<(Expr, Expr)>, otherwise: Box<Expr> },
+    Str { op: String, a: Box<Expr>, pat: String },
 }
 
 fn eval(expr: &Expr, b: &RecordBatch) -> ArrayRef {
@@ -133,6 +134,20 @@ fn eval(expr: &Expr, b: &RecordBatch) -> ArrayRef {
                 acc = arrow::compute::kernels::zip::zip(mb, &vf, &af).unwrap();
             }
             acc
+        }
+        Expr::Str { op, a, pat } => {
+            let x = eval(a, b);
+            let xs = x.as_any().downcast_ref::<StringArray>().unwrap();
+            let out: Vec<bool> = (0..xs.len()).map(|i| {
+                let s = xs.value(i);
+                match op.as_str() {
+                    "startswith" => s.starts_with(pat.as_str()),
+                    "endswith" => s.ends_with(pat.as_str()),
+                    "contains" => s.contains(pat.as_str()),
+                    _ => false,
+                }
+            }).collect();
+            Arc::new(arrow::array::BooleanArray::from(out))
         }
     }
 }
@@ -223,6 +238,11 @@ pub fn execute(plan: &Plan, tables: &Tables) -> RecordBatch {
             RecordBatch::try_new(Arc::new(Schema::new(fields)), cols).unwrap()
         }
         Plan::Aggregate { group, aggs, input } => {
+            let nuniq = aggs.iter().any(|a| a.func == "n_unique");
+            if nuniq {
+                let b = execute(input, tables);
+                return aggregate(&b, group, aggs);
+            }
             if let Some(rb) = fused_join_aggregate(input, group, aggs, tables) {
                 rb
             } else if let Some((scan, ops)) = peel(input, tables) {
@@ -378,6 +398,17 @@ fn aggregate(b: &RecordBatch, group: &[String], aggs: &[Agg]) -> RecordBatch {
         out_cols.push(col);
     }
     for a in aggs {
+        if a.func == "n_unique" {
+            let kc = b.column(b.schema().index_of(&a.col).unwrap()).clone();
+            let mut sets: Vec<hashbrown::HashSet<u64, BuildI64>> =
+                (0..ng).map(|_| hashbrown::HashSet::default()).collect();
+            for i in 0..n { sets[ids[i]].insert(keyhash(&kc, i)); }
+            let mut bld = Int64Builder::new();
+            for st in &sets { bld.append_value(st.len() as i64); }
+            fields.push(Field::new(&a.name, DataType::Int64, true));
+            out_cols.push(Arc::new(bld.finish()));
+            continue;
+        }
         let vals = to_f64(b.column(b.schema().index_of(&a.col).unwrap()));
         let mut sum = vec![0f64; ng];
         let mut cnt = vec![0i64; ng];
