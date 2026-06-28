@@ -95,14 +95,35 @@ Polars automatically. Reaching all-22 is a **coverage + per-shape fusion grind**
 add the missing operators/exprs, make fusion trigger on more translated shapes
 (q6), fuse multi-joins (q5), fix q17. Mechanical, not architectural.
 
-**Coverage grind (June 2026): 4 → 15/22 translate, 11/22 validated vs DuckDB.**
-Added to the engine + translator: `dt_year` (cast→timestamp→date_part), `is_null`,
-`isin`, `case_when` (zip), `str_startswith/endswith/contains`, `n_unique` (naive
-agg; fused bails), and `TopK`→sort+limit. Validated: q1, q5, q6, q7, q8, q10,
-q12, q16, q19, q21. Remaining (after Distinct, 7 queries + 4 bugs): **multi-key join**
-(q9), **cross join** (q11/15), **left join** (q13/16/22), and 4 bugs (q3/q14/q17
-exec panics, q18 correctness). All mechanical — operators/variants + bug fixes,
-no architecture change.
+**Coverage grind COMPLETE (June 2026): 4 → 22/22 translate, 22/22 validated
+vs DuckDB.** The entire TPC-H suite now compiles from a lazy-pandas
+`LogicalPlan` and executes through the general Arrow-native Rust engine,
+bit-correct against DuckDB. What it took (all mechanical — operators/exprs +
+bug fixes, zero architecture change):
+
+- **Exprs:** `dt_year` (cast→timestamp→date_part), `is_null`, `invert`, `isin`,
+  `case_when` (zip), `str_startswith/endswith` (literal), `str_contains` (real
+  regex via the `regex` crate — it was literal substring, so `special.*requests`
+  on q13 matched 0), `str_slice` (substring).
+- **Operators:** `TopK`→sort+limit, `Distinct` (dedup keep-first), `n_unique`
+  (null-aware), **left outer join** (NULL right-index → null right cols),
+  **cross join** (cartesian; right is a 1-row scalar threshold in TPC-H),
+  **multi-key join** (composite i64 hash of the key columns).
+- **Bug fixes:** Project/apply_ops broadcast bare-literal columns to `num_rows`
+  (the `__g=liti` global-aggregate const-key was length-1 → panic on q14/q17/q22);
+  join_exec keeps the right key column unless its name collides with a left
+  column (q3 groups by `l_orderkey`, which was being dropped); null-aware
+  count/mean/sum/min/max/n_unique (left-join unmatched rows must not count, fixed
+  the missing `c_count=0` bucket on q13); `fused_join_aggregate` bails to naive
+  on `how!=inner` / multi-key (it was silently doing an inner single-key join);
+  `exec_compiled` restores datetimes via the real `Schema` API; the validate
+  harness compares datetimes resolution-agnostically (us vs ns are the same
+  instant — Polars emits us, an arrow-rs engine emits ns).
+
+So the engine is no longer a q1/q3/q6 proof-of-concept: it runs **all 22**
+end-to-end and correct. Per-shape fusion (making every translated query *fast*,
+not just correct) is the remaining performance work — aggregate-heavy queries
+already beat Polars; some multi-join shapes still hit naive paths.
 
 ## The direction
 Build the lazy engine's execution in **Rust on arrow-rs**: `LogicalPlan` → Arrow
