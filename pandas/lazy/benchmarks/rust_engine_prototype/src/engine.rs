@@ -29,6 +29,12 @@ pub enum Plan {
     },
     Sort { keys: Vec<SortKey>, input: Box<Plan> },
     Limit { n: usize, input: Box<Plan> },
+    Join {
+        left: Box<Plan>,
+        right: Box<Plan>,
+        left_key: String,
+        right_key: String,
+    },
 }
 
 #[derive(Deserialize)]
@@ -56,6 +62,7 @@ pub enum Expr {
     Col { name: String },
     Liti { v: i64 },
     Litf { v: f64 },
+    Lits { v: String },
     Bin { op: String, l: Box<Expr>, r: Box<Expr> },
 }
 
@@ -67,6 +74,7 @@ fn eval(expr: &Expr, b: &RecordBatch) -> ArrayRef {
         }
         Expr::Liti { v } => Arc::new(Int64Array::new_scalar(*v).into_inner()),
         Expr::Litf { v } => Arc::new(Float64Array::new_scalar(*v).into_inner()),
+        Expr::Lits { v } => Arc::new(StringArray::from(vec![v.clone()])),
         Expr::Bin { op, l, r } => {
             let la = eval(l, b);
             let ra = eval(r, b);
@@ -168,7 +176,85 @@ pub fn execute(plan: &Plan, tables: &Tables) -> RecordBatch {
             let k = (*n).min(b.num_rows());
             b.slice(0, k)
         }
+        Plan::Join { left, right, left_key, right_key } => {
+            let lb = execute(left, tables);
+            let rb = execute(right, tables);
+            join_exec(&lb, &rb, left_key, right_key)
+        }
     }
+}
+
+// Inner equi-join on a single i64 key, exact pd.merge (left-row) order, parallel
+// probe. Output = all left columns + all right columns except the join key.
+fn join_exec(lb: &RecordBatch, rb: &RecordBatch, lkey: &str, rkey: &str) -> RecordBatch {
+    let lk = lb.column(lb.schema().index_of(lkey).unwrap())
+        .as_any().downcast_ref::<Int64Array>().unwrap();
+    let rk = rb.column(rb.schema().index_of(rkey).unwrap())
+        .as_any().downcast_ref::<Int64Array>().unwrap();
+    let (li, ri) = join_indices(lk, rk);
+    let mut fields: Vec<Field> = Vec::new();
+    let mut cols: Vec<ArrayRef> = Vec::new();
+    for (i, f) in lb.schema().fields().iter().enumerate() {
+        fields.push(f.as_ref().clone());
+        cols.push(compute::take(lb.column(i), &li, None).unwrap());
+    }
+    let rkey_idx = rb.schema().index_of(rkey).unwrap();
+    for (i, f) in rb.schema().fields().iter().enumerate() {
+        if i == rkey_idx { continue; }
+        fields.push(f.as_ref().clone());
+        cols.push(compute::take(rb.column(i), &ri, None).unwrap());
+    }
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), cols).unwrap()
+}
+
+// (left_idx, right_idx) for an inner join, pd.merge order: CSR multimap on the
+// right (right-row order), parallel probe of left chunks concatenated in order.
+fn join_indices(lk: &Int64Array, rk: &Int64Array) -> (Int64Array, Int64Array) {
+    let m = rk.len();
+    let n = lk.len();
+    let mut first: hashbrown::HashMap<i64, u32, BuildI64> = hashbrown::HashMap::default();
+    let mut counts: Vec<i64> = Vec::new();
+    let mut group_of: Vec<u32> = Vec::with_capacity(m);
+    let mut ng: u32 = 0;
+    for j in 0..m {
+        let k = rk.value(j);
+        match first.get(&k) {
+            Some(&g) => { group_of.push(g); counts[g as usize] += 1; }
+            None => { first.insert(k, ng); group_of.push(ng); counts.push(1); ng += 1; }
+        }
+    }
+    let mut offs: Vec<i64> = vec![0; ng as usize + 1];
+    for g in 0..ng as usize { offs[g + 1] = offs[g] + counts[g]; }
+    let mut grows: Vec<i64> = vec![0; m];
+    let mut cur: Vec<i64> = offs[..ng as usize].to_vec();
+    for (j, &g) in group_of.iter().enumerate() {
+        let s = cur[g as usize];
+        grows[s as usize] = j as i64;
+        cur[g as usize] = s + 1;
+    }
+    let nthreads = rayon::current_num_threads().max(1);
+    let chunk = n.div_ceil(nthreads);
+    let spans: Vec<(usize, usize)> = (0..nthreads)
+        .map(|t| (t * chunk, ((t + 1) * chunk).min(n)))
+        .filter(|(a, b)| a < b)
+        .collect();
+    let parts: Vec<(Vec<i64>, Vec<i64>)> = spans.par_iter().map(|&(lo, hi)| {
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        for i in lo..hi {
+            if let Some(&g) = first.get(&lk.value(i)) {
+                for kk in offs[g as usize]..offs[g as usize + 1] {
+                    a.push(i as i64);
+                    b.push(grows[kk as usize]);
+                }
+            }
+        }
+        (a, b)
+    }).collect();
+    let mut la = Vec::new();
+    let mut ra = Vec::new();
+    for (a, b) in &parts { la.extend_from_slice(a); ra.extend_from_slice(b); }
+    (Int64Array::from(la), Int64Array::from(ra))
 }
 
 // group-by + aggregates. Keys: int64/utf8. Aggs over a single column: sum/mean/
