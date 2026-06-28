@@ -1406,8 +1406,11 @@ def validate(lazy_df: pd.DataFrame, ref_df: pd.DataFrame) -> tuple[bool, str]:
         elif pd.api.types.is_datetime64_any_dtype(
             sa
         ) or pd.api.types.is_datetime64_any_dtype(sb):
-            ta = pd.to_datetime(sa).reset_index(drop=True)
-            tb = pd.to_datetime(sb).reset_index(drop=True)
+            # cast to a common resolution: us and ns of the same instant are
+            # equal, but Series.equals is resolution-strict (Polars emits us,
+            # an arrow-rs ns engine emits ns).
+            ta = pd.to_datetime(sa).astype("datetime64[ns]").reset_index(drop=True)
+            tb = pd.to_datetime(sb).astype("datetime64[ns]").reset_index(drop=True)
             if not ta.equals(tb):
                 return False, f"datetime mismatch in {col_a}"
         elif not (

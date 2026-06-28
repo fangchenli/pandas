@@ -246,9 +246,9 @@ def exec_compiled(jp: str, tables: dict, schema=None) -> pd.DataFrame:
     df = E.execute(jp, tables).to_pandas()
     if schema is not None:
         for col in df.columns:
-            dt = schema.get(col) if hasattr(schema, "get") else None
-            sdt = str(getattr(dt, "pandas_dtype", dt) if dt is not None else "")
-            if "datetime" in sdt and pd.api.types.is_integer_dtype(df[col]):
+            dt = schema[col] if col in schema else None
+            is_dt = dt is not None and dt.is_datetime()
+            if is_dt and pd.api.types.is_integer_dtype(df[col]):
                 df[col] = pd.to_datetime(df[col])
     return df
 

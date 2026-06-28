@@ -232,7 +232,7 @@ pub fn execute(plan: &Plan, tables: &Tables) -> RecordBatch {
             let mut cols: Vec<ArrayRef> = Vec::new();
             let mut fields: Vec<Field> = Vec::new();
             for ne in exprs {
-                let a = eval(&ne.expr, &b);
+                let a = broadcast(&eval(&ne.expr, &b), b.num_rows());
                 fields.push(Field::new(&ne.name, a.data_type().clone(), true));
                 cols.push(a);
             }
@@ -324,9 +324,11 @@ fn join_exec(lb: &RecordBatch, rb: &RecordBatch, lkey: &str, rkey: &str) -> Reco
         fields.push(f.as_ref().clone());
         cols.push(compute::take(lb.column(i), &li, None).unwrap());
     }
-    let rkey_idx = rb.schema().index_of(rkey).unwrap();
+    let lsch = lb.schema();
+    let lnames: std::collections::HashSet<&str> =
+        lsch.fields().iter().map(|f| f.name().as_str()).collect();
     for (i, f) in rb.schema().fields().iter().enumerate() {
-        if i == rkey_idx { continue; }
+        if lnames.contains(f.name().as_str()) { continue; }
         fields.push(f.as_ref().clone());
         cols.push(compute::take(rb.column(i), &ri, None).unwrap());
     }
