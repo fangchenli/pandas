@@ -62,7 +62,7 @@ pub enum Expr {
     Col { name: String },
     Liti { v: i64 },
     Litf { v: f64 },
-    Lits { v: String },
+    LitStr { v: String },
     Bin { op: String, l: Box<Expr>, r: Box<Expr> },
 }
 
@@ -74,7 +74,7 @@ fn eval(expr: &Expr, b: &RecordBatch) -> ArrayRef {
         }
         Expr::Liti { v } => Arc::new(Int64Array::new_scalar(*v).into_inner()),
         Expr::Litf { v } => Arc::new(Float64Array::new_scalar(*v).into_inner()),
-        Expr::Lits { v } => Arc::new(StringArray::from(vec![v.clone()])),
+        Expr::LitStr { v } => Arc::new(StringArray::from(vec![v.clone()])),
         Expr::Bin { op, l, r } => {
             let la = eval(l, b);
             let ra = eval(r, b);
@@ -91,9 +91,25 @@ fn datum(a: &ArrayRef) -> Box<dyn arrow::array::Datum + '_> {
     }
 }
 
+fn is_num(d: &DataType) -> bool {
+    matches!(d, DataType::Int64 | DataType::Float64)
+}
+
 fn bin(op: &str, l: &ArrayRef, r: &ArrayRef) -> ArrayRef {
-    let ld = datum(l);
-    let rd = datum(r);
+    // numeric type coercion: int literal vs float column -> both f64
+    let (lc, rc): (ArrayRef, ArrayRef) = if l.data_type() != r.data_type()
+        && is_num(l.data_type())
+        && is_num(r.data_type())
+    {
+        (
+            compute::cast(l, &DataType::Float64).unwrap(),
+            compute::cast(r, &DataType::Float64).unwrap(),
+        )
+    } else {
+        (l.clone(), r.clone())
+    };
+    let ld = datum(&lc);
+    let rd = datum(&rc);
     match op {
         "add" => compute::kernels::numeric::add(&*ld, &*rd).unwrap(),
         "sub" => compute::kernels::numeric::sub(&*ld, &*rd).unwrap(),

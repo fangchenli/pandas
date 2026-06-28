@@ -71,6 +71,30 @@ residual vs Polars is optimization headroom the hand-written run_q3 (0.95x)
 shows is reachable — semijoin instead of a materialized build side, and fewer
 per-morsel gathers.
 
+## LogicalPlan → Rust translator — real queries auto-route (June 2026)
+Built `benchmarks/rust_engine_prototype/translate.py`: walks an optimized
+`LogicalPlan` → the engine's JSON plan + Arrow tables (df→Arrow once, the
+boundary), executes via `lazy_engine_rs.execute`, restores output dtypes from
+the plan schema. Maps the IR (`FieldRef`/`Literal`/`Alias`/`Call`/`Cast`,
+canonical names add/subtract/multiply/divide, less/greater/equal/…, and_/or_,
+sum/mean/min/max/count), hoists non-trivial agg-input expressions into a project,
+and handles inner single-key joins. Unsupported → `NotSupported` (caller falls
+back). Added numeric coercion in the engine (int-literal vs float-column → f64).
+
+**Real lazy queries now auto-route into the Rust engine** (all-22 at SF-3,
+execute-only timing, validated vs DuckDB):
+- **q1 = 1.77x Polars, correct — fully automatic** (plan → Rust, no hand-code).
+- q6 0.59x (translated plan doesn't hit the fused pattern), q5 0.13x (naive
+  multi-join), q17 exec-error.
+- **Coverage 4/22 translate.** The other 18 use ops/exprs not yet built: TopK
+  (q2/3/10/18/21), Distinct (q4/20), case_when (q8/12/14), dt_year (q7/9),
+  cross/left join (q11/15/13), isin (q19), n_unique (q16), is_null (q22).
+
+So the *integration is proven* — the architecture routes real plans and q1 beats
+Polars automatically. Reaching all-22 is a **coverage + per-shape fusion grind**:
+add the missing operators/exprs, make fusion trigger on more translated shapes
+(q6), fuse multi-joins (q5), fix q17. Mechanical, not architectural.
+
 ## The direction
 Build the lazy engine's execution in **Rust on arrow-rs**: `LogicalPlan` → Arrow
 in once → execute operators in Rust (rayon, no GIL, hand-tuned hot kernels; port
