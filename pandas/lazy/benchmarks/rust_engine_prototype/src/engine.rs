@@ -144,7 +144,9 @@ pub fn execute(plan: &Plan, tables: &Tables) -> RecordBatch {
             RecordBatch::try_new(Arc::new(Schema::new(fields)), cols).unwrap()
         }
         Plan::Aggregate { group, aggs, input } => {
-            if let Some((scan, ops)) = peel(input, tables) {
+            if let Some(rb) = fused_join_aggregate(input, group, aggs, tables) {
+                rb
+            } else if let Some((scan, ops)) = peel(input, tables) {
                 fused_aggregate(scan, ops, group, aggs)
             } else {
                 let b = execute(input, tables);
@@ -545,6 +547,155 @@ fn fused_aggregate(scan: RecordBatch, ops: Vec<RowOp>, group: &[String], aggs: &
             map
         })
         .collect();
+    finalize_groups(partials, group, aggs)
+}
+
+
+// ---------------------------------------------------------------------------
+// Fused join+aggregate: Aggregate <- [Project <-] Join(probe-chain, build).
+// Build the hash once on the build side; morsel-probe the probe side and, per
+// cache-resident morsel, gather the joined rows, apply the outer project, and
+// partial-aggregate -- one fused pass over the probe side (the run_q3 shape).
+// ---------------------------------------------------------------------------
+struct JoinBuild {
+    first: hashbrown::HashMap<i64, u32, BuildI64>,
+    offs: Vec<i64>,
+    grows: Vec<i64>,
+}
+impl JoinBuild {
+    fn new(rk: &Int64Array) -> Self {
+        let m = rk.len();
+        let mut first: hashbrown::HashMap<i64, u32, BuildI64> = hashbrown::HashMap::default();
+        let mut counts: Vec<i64> = Vec::new();
+        let mut group_of: Vec<u32> = Vec::with_capacity(m);
+        let mut ng: u32 = 0;
+        for j in 0..m {
+            let k = rk.value(j);
+            match first.get(&k) {
+                Some(&g) => { group_of.push(g); counts[g as usize] += 1; }
+                None => { first.insert(k, ng); group_of.push(ng); counts.push(1); ng += 1; }
+            }
+        }
+        let mut offs = vec![0i64; ng as usize + 1];
+        for g in 0..ng as usize { offs[g + 1] = offs[g] + counts[g]; }
+        let mut grows = vec![0i64; m];
+        let mut cur: Vec<i64> = offs[..ng as usize].to_vec();
+        for (j, &g) in group_of.iter().enumerate() {
+            let s = cur[g as usize];
+            grows[s as usize] = j as i64;
+            cur[g as usize] = s + 1;
+        }
+        JoinBuild { first, offs, grows }
+    }
+    fn probe(&self, lk: &Int64Array) -> (Vec<i64>, Vec<i64>) {
+        let mut pl = Vec::new();
+        let mut bg = Vec::new();
+        for i in 0..lk.len() {
+            if let Some(&g) = self.first.get(&lk.value(i)) {
+                for kk in self.offs[g as usize]..self.offs[g as usize + 1] {
+                    pl.push(i as i64);
+                    bg.push(self.grows[kk as usize]);
+                }
+            }
+        }
+        (pl, bg)
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn fused_join_aggregate(
+    agg_input: &Plan,
+    group: &[String],
+    aggs: &[Agg],
+    tables: &Tables,
+) -> Option<RecordBatch> {
+    // peel optional outer project then a join
+    let (proj, join): (Option<&[NamedExpr]>, &Plan) = match agg_input {
+        Plan::Project { exprs, input } => (Some(exprs), input),
+        Plan::Join { .. } => (None, agg_input),
+        _ => return None,
+    };
+    let (left, right, lkey, rkey) = match join {
+        Plan::Join { left, right, left_key, right_key } => (left, right, left_key, right_key),
+        _ => return None,
+    };
+    let (probe_scan, probe_ops) = peel(left, tables)?;
+    let build = execute(right, tables);
+    let rkey_idx = build.schema().index_of(rkey).unwrap();
+    let jb = JoinBuild::new(build.column(rkey_idx).as_any().downcast_ref::<Int64Array>().unwrap());
+    // joined schema = probe fields + build fields (minus rkey)
+    let na = aggs.len();
+    let n = probe_scan.num_rows();
+    let nthreads = rayon::current_num_threads().max(1);
+    let chunk = n.div_ceil(nthreads);
+    let proj_owned: Option<Vec<RowOp>> = proj.map(|e| vec![RowOp::Project(e)]);
+    let partials: Vec<hashbrown::HashMap<u64, GState, BuildI64>> = (0..nthreads)
+        .into_par_iter()
+        .map(|t| {
+            let mut map: hashbrown::HashMap<u64, GState, BuildI64> = hashbrown::HashMap::default();
+            let lo = t * chunk;
+            let hi = ((t + 1) * chunk).min(n);
+            const MORSEL: usize = 65_536;
+            let mut s = lo;
+            while s < hi {
+                let e_ = (s + MORSEL).min(hi);
+                let pm = apply_ops(probe_scan.slice(s, e_ - s), &probe_ops);
+                let lk = pm.column(pm.schema().index_of(lkey).unwrap())
+                    .as_any().downcast_ref::<Int64Array>().unwrap();
+                let (pl, bg) = jb.probe(lk);
+                if pl.is_empty() { s = e_; continue; }
+                let pidx = Int64Array::from(pl);
+                let bidx = Int64Array::from(bg);
+                // gather joined morsel
+                let mut fields: Vec<Field> = Vec::new();
+                let mut cols: Vec<ArrayRef> = Vec::new();
+                for (i, f) in pm.schema().fields().iter().enumerate() {
+                    fields.push(f.as_ref().clone());
+                    cols.push(compute::take(pm.column(i), &pidx, None).unwrap());
+                }
+                for (i, f) in build.schema().fields().iter().enumerate() {
+                    if i == rkey_idx { continue; }
+                    fields.push(f.as_ref().clone());
+                    cols.push(compute::take(build.column(i), &bidx, None).unwrap());
+                }
+                let mut jm = RecordBatch::try_new(Arc::new(Schema::new(fields)), cols).unwrap();
+                if let Some(ref po) = proj_owned { jm = apply_ops(jm, po); }
+                // partial-aggregate the joined morsel
+                let mn = jm.num_rows();
+                let gk: Vec<ArrayRef> = group.iter()
+                    .map(|g| jm.column(jm.schema().index_of(g).unwrap()).clone()).collect();
+                let av: Vec<Vec<f64>> = aggs.iter()
+                    .map(|a| to_f64(jm.column(jm.schema().index_of(&a.col).unwrap()))).collect();
+                for i in 0..mn {
+                    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+                    for ka in &gk { h = (h ^ keyhash(ka, i)).wrapping_mul(0x0000_0100_0000_01b3); }
+                    let e = map.entry(h).or_insert_with(|| GState {
+                        keys: gk.iter().map(|ka| keyval_enum(ka, i)).collect(),
+                        acc: vec![[0.0, 0.0, f64::INFINITY, f64::NEG_INFINITY]; na],
+                    });
+                    for (j, av_j) in av.iter().enumerate() {
+                        let v = av_j[i];
+                        let a = &mut e.acc[j];
+                        a[0] += v; a[1] += 1.0;
+                        if v < a[2] { a[2] = v; }
+                        if v > a[3] { a[3] = v; }
+                    }
+                }
+                s = e_;
+            }
+            map
+        })
+        .collect();
+    Some(finalize_groups(partials, group, aggs))
+}
+
+
+fn finalize_groups(
+    partials: Vec<hashbrown::HashMap<u64, GState, BuildI64>>,
+    group: &[String],
+    aggs: &[Agg],
+) -> RecordBatch {
+    let na = aggs.len();
     // merge
     let mut merged: hashbrown::HashMap<u64, GState, BuildI64> = hashbrown::HashMap::default();
     for part in partials {

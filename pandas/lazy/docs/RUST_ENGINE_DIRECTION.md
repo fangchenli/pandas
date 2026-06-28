@@ -54,10 +54,22 @@ Two stages, measured (SF-3):
 The key was **cache-resident morsels**: a first cut used N/nthreads (~2.25M-row)
 morsels whose intermediates spilled to DRAM (q1 only 0.69x); fixing to 64K
 sub-morsels made the fusion real (q1 → 1.7x). This is the Polars/DuckDB
-vectorized-morsel model, now ours. Aggregate pipelines (q1, q6, and many
-single-table queries) beat Polars generally; **join fusion is the next operator**
-(the `peel` chain currently handles filter/project/scan; joins fall back to the
-naive path).
+vectorized-morsel model, now ours.
+
+3. **Join operator + join-aggregate fusion** (`Aggregate ← [Project ←] Join`):
+   build the hash once on the build side, then morsel-probe the probe side and,
+   per cache-resident morsel, gather the joined rows + apply the outer project +
+   partial-aggregate — one fused pass (the run_q3 shape, generalized). TPC-H q3
+   (2 joins + high-card group-by + top-k) through the general plan path:
+   **115.9 ms vs Polars 86.2 = 0.74x**, correct vs DuckDB — up from 0.37x
+   (naive join) and **2.7x our Cython engine** (0.43x).
+
+So the full TPC-H operator set (scan/filter/project/join/aggregate/sort/limit)
+now runs through the general plan path: **aggregate-heavy queries beat Polars
+(q1 1.7x, q6 2.6x); the join-heavy q3 is 0.74x** (2.7x our engine). The q3
+residual vs Polars is optimization headroom the hand-written run_q3 (0.95x)
+shows is reachable — semijoin instead of a materialized build side, and fewer
+per-morsel gathers.
 
 ## The direction
 Build the lazy engine's execution in **Rust on arrow-rs**: `LogicalPlan` → Arrow
