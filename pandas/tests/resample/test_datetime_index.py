@@ -2133,6 +2133,23 @@ def test_resample_b_55282(unit):
     tm.assert_series_equal(result, expected)
 
 
+@pytest.mark.parametrize("n", [2, 3, 7, 14])
+def test_resample_multiday_closed_right_43198(n, unit):
+    # GH#43198 multi-day downsampling with closed="right" used to raise
+    # "Values falls before first bin" when no value landed on a bin edge
+    dti = DatetimeIndex(["2013-04-01 22:00:00"]).as_unit(unit)
+    ser = Series([0.0], index=dti)
+
+    result = ser.resample(f"{n}D", closed="right").max()
+
+    exp_dti = DatetimeIndex(
+        [Timestamp("2013-04-01") - n * Day(), Timestamp("2013-04-01")],
+        freq=f"{n}D",
+    ).as_unit(unit)
+    expected = Series([np.nan, 0.0], index=exp_dti)
+    tm.assert_series_equal(result, expected)
+
+
 @td.skip_if_no("pyarrow")
 @pytest.mark.parametrize(
     "tz",
@@ -2165,6 +2182,20 @@ def test_arrow_timestamp_resample_keep_index_name():
     expected.index.name = "index_name"
     result = expected.resample("1D").mean()
     tm.assert_series_equal(result, expected)
+
+
+@td.skip_if_no("pyarrow")
+def test_arrow_timestamp_resample_on_keep_index_name():
+    # GH#59823 resampling on a pyarrow-backed column should keep its name
+    df = DataFrame(
+        {
+            "date": date_range("2020-01-01", periods=5),
+            "metric": np.arange(5, dtype=np.int64),
+        }
+    ).astype({"date": "timestamp[ns][pyarrow]"})
+    result = df.resample("1D", on="date").sum()
+    assert result.index.name == "date"
+    assert result.index.dtype == "timestamp[ns][pyarrow]"
 
 
 def test_resample_unit_second_large_years():
