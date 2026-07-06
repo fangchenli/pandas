@@ -57,6 +57,24 @@ xsimd_dep = dependency('xsimd', version: '>=14.2')
 
 subdir('simd')
 
+# Compile the CSV tokenizer once into a static library shared by every
+# extension that needs it, rather than recompiling it per-extension. This
+# also keeps simd_config_inc (needed only by tokenizer.c) off the include
+# search path of unrelated extensions.
+tokenizer_lib = static_library(
+    'pandas_tokenizer',
+    'src/parser/fast_float_strtod.cpp',
+    'src/parser/pd_strtoi.cpp',
+    'src/parser/tokenizer.c',
+    include_directories: [inc_pd, simd_config_inc],
+    dependencies: [fast_float_dep, py.dependency()],
+)
+
+tokenizer_dep = declare_dependency(
+    link_with: tokenizer_lib,
+    include_directories: [inc_pd],
+)
+
 subdir('tslibs')
 
 libs_sources = {
@@ -96,13 +114,8 @@ libs_sources = {
     'lazy_join': {'sources': ['lazy_join.pyx']},
     'lazy_radix': {'sources': ['lazy_radix.pyx']},
     'lib': {
-        'sources': [
-            'lib.pyx',
-            'src/parser/tokenizer.c',
-            'src/parser/fast_float_strtod.cpp',
-            'src/parser/pd_strtoi.cpp',
-        ],
-        'deps': [fast_float_dep],
+        'sources': ['lib.pyx'],
+        'deps': [tokenizer_dep],
     },
     'missing': {'sources': ['missing.pyx']},
     'pandas_datetime': {
@@ -115,23 +128,17 @@ libs_sources = {
     },
     'pandas_parser': {
         'sources': [
-            'src/parser/tokenizer.c',
-            'src/parser/fast_float_strtod.cpp',
-            'src/parser/pd_strtoi.cpp',
             'src/parser/io.c',
             'src/parser/pd_parser.c',
         ],
-        'deps': [fast_float_dep],
+        'deps': [tokenizer_dep],
     },
     'parsers': {
         'sources': [
             'parsers.pyx',
-            'src/parser/tokenizer.c',
-            'src/parser/fast_float_strtod.cpp',
-            'src/parser/pd_strtoi.cpp',
             'src/parser/io.c',
         ],
-        'deps': [fast_float_dep, _khash_primitive_helper_dep],
+        'deps': [tokenizer_dep, _khash_primitive_helper_dep],
     },
     '_ujson': {
         'sources': [
