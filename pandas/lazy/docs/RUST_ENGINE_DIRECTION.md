@@ -149,3 +149,91 @@ Path (incremental, each validated vs DuckDB + benched vs Polars):
 Rust/C/asm or port Polars' — so "stuck" was never the right conclusion. The job
 was to **stop hosting fast kernels in a slow Python engine** and put the
 execution where the speed is. Boundary-once Arrow-native Rust is that place.
+
+---
+
+## Checkpoint (2026-07-08) — engine shape, honest perf, next lever
+
+Paused here at a clean checkpoint. Branch `lazy-pandas`, all work committed
+(coverage grind `0eb8fcb359`..`cba294db4b`, merged up to `upstream/main`).
+Nothing in flight.
+
+### The shape of the engine (as built)
+`benchmarks/rust_engine_prototype/` — NOT in the pandas build; maturin module
+`lazy_engine_rs` (~1021 lines `engine.rs` + ~12KB `lib.rs` + 281-line
+`translate.py`). It is a **GIL-released, rayon-parallel, tree-walking Arrow
+interpreter** with two fused fast-paths:
+
+- **Boundary (`lib.rs`):** one real entry `execute(plan_json: str, tables:
+  dict[str, RecordBatch]) -> RecordBatch`. Python builds Arrow tables ONCE
+  (`translate.py`), hands JSON plan + tables across the Arrow C-data interface
+  (zero-copy), Rust deserializes (serde) and runs the whole thing under
+  `py.allow_threads` (GIL released). Legacy hand-written `run_q1`/`run_q3`
+  probes still exported but unused by the general path.
+- **Plan IR** (serde `tag="op"`): `Scan | Filter | Project | Aggregate | Sort |
+  Limit | Join | Distinct`. **Expr IR** (`tag="t"`): `Col | Liti | Litf |
+  LitStr | Bin | Unary | Isin | Case | Str | Slice`, tree-walked by `eval()`
+  over arrow-rs compute kernels.
+- **Execution = `execute(plan)` recursive tree-walker, operator-at-a-time.**
+  Most ops MATERIALIZE full output. `Aggregate` is the only smart node — it
+  tries two fusions before falling back:
+  1. `fused_join_aggregate` (`Aggregate ← [Project ←] Join`): build hash once,
+     morsel-probe, per-64K-morsel gather+project+partial-agg in one pass (the q3
+     shape). **Bails to naive on `how != inner` or multi-key.**
+  2. `fused_aggregate` (`Aggregate ← (Filter|Project)* ← Scan`): `peel()`
+     collapses the chain to `RowOp`s; rayon over threads, each in cache-resident
+     `const MORSEL = 65_536` sub-morsels, row-wise chain fused into a thread-local
+     hashbrown partial-agg table, merged at end. Intermediates never hit DRAM.
+     **This is the path that beats Polars.**
+  3. else → naive null-aware `aggregate()` (full re-scan).
+- **Joins (`join_exec`):** keys folded to i64 (single downcast / `composite_key`
+  FNV-fold for multi-key); `join_indices` (inner, rayon-partitioned) /
+  `join_indices_left` (null right-index) / cross (cartesian); then arrow `take`
+  to gather **ALL columns**. This is the slow path.
+
+### Honest performance (general translator path, SF-3, clean/uncontended)
+**Geomean ≈ 0.15x Polars.** Two regimes, and they map exactly onto which
+fast-path a query hits:
+- **Near-parity / wins:** aggregate-bound shapes that hit `fused_aggregate` —
+  q1 0.92x, q6 0.67x, q13 0.59x. (Hand-tuned isolated q1 hit 1.77–8x; the
+  general translated plan doesn't always trigger the best fused pattern.)
+- **Slow:** every multi-join chain — q15 0.01x, q11 0.03x, q2 0.04x, q4 0.04x,
+  q10 0.06x, q3 0.07x, q20 0.08x, q18 0.13x. Single, specific cause:
+  `fused_join_aggregate` fuses only ONE join+agg, so ≥2-join chains fall to
+  `join_exec`'s take-EVERY-column full materialization between operators.
+
+So: **correctness is complete and architectural; the perf residual is one
+scoped, known engineering gap — not a wall.** The thesis ("boundary-once
+Arrow-native Rust matches/beats Polars") is *proven*, but its join half rests on
+a single query (q3 at 0.74–0.95x).
+
+### Recommended next lever (NOT started — gated, not an open grind)
+The realistic ceiling for join-heavy shapes via this engine is **parity, not
+domination** (hand-tuned q3 topped at 0.95x). So the goal of more work is to
+upgrade the finding from "parity on 1 join query" to "parity across the
+join-heavy suite" — stronger, upstreamable evidence — NOT to ship a product.
+
+1. **Projection pushdown through joins (highest ROI, do first).** `join_exec`
+   gathers all columns; most TPC-H join queries need 3–5 downstream. Narrow the
+   `take` to surviving columns — small, isolated change, clean controlled A/B,
+   large payoff on the take-everything cost.
+2. **Chain fusion (only if #1 doesn't close it).** Generalize
+   `fused_join_aggregate` to survive multi-join chains — stream morsels across
+   the join cascade instead of materializing between joins.
+3. **Go/no-go gate:** measure on the 3 worst (q15/q11/q2). If they reach
+   ~0.6–0.9x → bank the strengthened suite-wide finding. **If they wall below
+   parity at a specific operator, THAT wall is the finding** — record it in
+   `ARROW_GAPS.md` and stop. Either outcome is a probe deliverable.
+
+Alternatives considered and rejected: *bank now* (defensible — thesis proven —
+but one cheap step buys a far more credible plank); *open-ended "make all 22
+fast"* (that's product engineering, ceiling is only parity, charter says no).
+
+### Side note — postpython (openteams-ai/postpython), assessed 2026-07-07
+Evaluated for reuse: **nothing to pull in.** It's an AOT compiler for a *typed
+Python subset → C99 shared libraries* (ufuncs / scipy.special reimpl), draft
+spec, no license. Orthogonal to query execution: no join/groupby/aggregate/
+morsel engine anywhere; its `LazyFrame`/`DataFrame` "profile" is unimplemented
+spec prose. Its stable C-ABI array view is NumPy-ufunc-shaped, strictly inferior
+to the Arrow C-data interface we already use. Revisit only if it ever ships a
+real LazyFrame execution backend.
