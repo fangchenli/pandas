@@ -207,6 +207,27 @@ scoped, known engineering gap — not a wall.** The thesis ("boundary-once
 Arrow-native Rust matches/beats Polars") is *proven*, but its join half rests on
 a single query (q3 at 0.74–0.95x).
 
+### Systems-literature survey (2026-07-08) — see `EXECUTION_RESEARCH_SURVEY.md`
+A cited survey of advanced execution techniques confirmed the diagnosis: **our
+0.15x is a data-movement problem, not a code-quality one** (Kersten VLDB'18 —
+compilation's edge is smallest on memory-bound workloads, so **no JIT**). Net new
+actionable items it surfaced: (a) **row-format composite keys**
+(`arrow_row::RowConverter`, already in our dep tree) — a **correctness fix** for
+our collision-unsafe i64-folded multi-key join, do first; (b) "late
+materialization" is the precise name for the join fix (carry row-ids/selection
+through the probe, gather only projected cols, last). Out-of-scope rabbit holes it
+ruled out: WCOJ (wrong shape — TPC-H is acyclic PK-FK), full JIT, radix probe
+(2nd-order). Predicate Transfer (CIDR'24) is the highest-leverage join-specific
+lever, selectivity-gated; we already have `PREDICATE_TRANSFER_PROBE.md`.
+
+**DataFusion decision (2026-07-08): if we take the DataFusion route, LOWER our
+`LogicalPlan` INTO DataFusion** (lazy-pandas = frontend/optimizer; DataFusion =
+execution backend on our exact arrow-rs substrate), NOT lift its operators into
+our interpreter. Our `engine.rs` becomes the reference/probe baseline, not a
+thing we grind to parity. Rationale in `EXECUTION_RESEARCH_SURVEY.md` §5. This
+may replace the hand-rolled chain-fusion grind entirely — decide before the next
+work session.
+
 ### Recommended next lever (NOT started — gated, not an open grind)
 The realistic ceiling for join-heavy shapes via this engine is **parity, not
 domination** (hand-tuned q3 topped at 0.95x). So the goal of more work is to
