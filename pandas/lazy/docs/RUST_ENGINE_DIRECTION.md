@@ -228,6 +228,16 @@ thing we grind to parity. Rationale in `EXECUTION_RESEARCH_SURVEY.md` §5. This
 may replace the hand-rolled chain-fusion grind entirely — decide before the next
 work session.
 
+**RESULT (2026-07-08): 6a built and it hits Polars parity.**
+`benchmarks/translate_datafusion.py` lowers our optimized `LogicalPlan` into a
+DataFusion DataFrame. All 22 queries validate bit-correct vs DuckDB; execute-only
+SF-3 vs Polars = **geomean 0.95x (parity), up from the hand-rolled engine's
+0.15x** — same frontend, DataFusion backend. Beats Polars on 9 queries; sole
+outlier q21 0.14x is a plan-shape issue (giant self-join vs semi/anti). The
+join-heavy gap was never architectural. This retires the chain-fusion grind;
+`engine.rs` is now the reference/probe baseline. Detail + method in
+`EXECUTION_RESEARCH_SURVEY.md` §5 (MEASURED).
+
 **Frontend fork (survey §6):** DataFusion settles the *backend*; the *frontend*
 (how the plan gets built) has two levels. **6a (do first, probe):** lower our
 existing lazy `LogicalPlan` into DataFusion — a small lowering pass, since the

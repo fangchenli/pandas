@@ -195,6 +195,37 @@ pandas API → distributed. So the idea is proven and has well-funded incumbents
 a product here needs a differentiator (the obvious one: true pandas-API compat
 that Ibis doesn't attempt, i.e. exactly FireDucks' hard problem).
 
+### MEASURED (2026-07-08) — 6a built, and it lands at Polars parity
+Built `benchmarks/translate_datafusion.py` (the 6a lowering pass) and ran the
+full suite. **All 22 TPC-H queries lower into DataFusion and validate bit-correct
+vs DuckDB** (SF-0.5 and SF-1). Benchmarked execute-only vs Polars at SF-3
+(boundary paid once via `from_pandas`/registration, like Polars; best-of-5):
+
+**geomean PL/DF = 0.95x — Polars parity — vs the hand-rolled engine's 0.15x.**
+Same lazy-pandas frontend; the only change is the backend. DataFusion *beats*
+Polars on 9 queries (q19 3.69x, q13 2.95x, q12 1.86x, q1 1.62x, q20 1.62x, q22
+1.51x, q17 1.25x, q7 1.11x, q9 1.04x) and is near-parity on most others. Sole
+catastrophic outlier: **q21 0.14x** (5.7s vs 0.8s) — a *frontend plan-shape*
+problem (our q21 lowers to a giant inner self-join on `l_orderkey` where Polars
+uses a semi/anti formulation), NOT a DataFusion execution weakness; it drags the
+naive totals ratio to 0.46 while the outlier-robust geomean stays 0.95.
+
+This is the probe's headline result: **the join-heavy gap vs Polars was never
+architectural.** A mature arrow-rs engine on our exact substrate, driven by our
+own optimized plan, reaches Polars parity — confirming the "buy vs build"
+finding and retiring the hand-rolled chain-fusion grind. What the lowering
+needed (all mechanical): strip pandas schema metadata on registration (it poisons
+DataFusion's `join_selection` optimizer); `substring` (3-arg) not `substr`;
+`F.count(x).distinct().build()` for n_unique; cross join via `join_on` with no
+predicates; and pandas-faithful join suffixing (rename right keys to temps,
+suffix overlapping non-key columns, drop/rename per `on` vs `left_on/right_on`)
+because DataFusion neither auto-suffixes nor reliably coalesces `on=` keys when an
+input is itself a join result. Note: this route makes the `arrow_row` multi-key
+correctness fix **moot** — DataFusion does multi-key joins natively/correctly.
+
+Open follow-up: q21's plan shape (make our optimizer emit a semi/anti-join for
+the correlated-exists pattern instead of a materialized self-join).
+
 ### Decision on the record (2026-07-08)
 - **Now (probe):** 6a — lower the existing `LogicalPlan` into DataFusion. Cheap,
   reuses the frontend, gives the baseline to measure.
