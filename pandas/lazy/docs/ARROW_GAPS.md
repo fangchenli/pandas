@@ -20,7 +20,7 @@ worked-around** (real, we route around it) · **observed**.
 | AG6 | Acero **per-node overhead** — filter→reduce catastrophic, per-join-node overhead at filtered scale | quantified / worked-around | med | MATERIALIZATION_EXPERIMENT.md I & III |
 | AG7 | Acero join/agg wins **die at the Arrow→NumPy round-trip** (boundary tax) | quantified (structural) | high | MATERIALIZATION_EXPERIMENT.md II; PERF_CEILING.md |
 | AG8 | **Gandiva**: optional/often-unshipped pyarrow + **not wired into Acero** (expression codegen unavailable in practice) | observed | low-med | MATERIALIZATION_EXPERIMENT.md F4 (corrected below) |
-| AG9 | `string_view` **kernel coverage** (at-scale/string gains) | **in-flight upstream (#44336; PR #50166 merged 2026-07-01)** | high | upstream/STRING_VIEW_CONTRIBUTION_PLAN.md |
+| AG9 | `string_view` **kernel coverage** (at-scale/string gains) | **active contribution — OUR PR #50224 merged 2026-07-07** (Grouper view keys, GH-50223); #44336 open; #50166 merged | high | upstream/STRING_VIEW_CONTRIBUTION_PLAN.md |
 
 ## Upstream duplicate-search results (apache/arrow, 2026-06-18)
 
@@ -34,7 +34,10 @@ Searched issues **and** PRs across many phrasings (`gh api search/issues`):
   **#46128** (cast-to-StringView memory). Contribution = **join this effort**
   (re-scope to an unaddressed kernel, engage on #44336), not a new issue.
   **Progress (2026-07-08): #50166 merged; #50164/#48734/#43010/#46128 + umbrella
-  still open — effort advancing, not complete.**
+  still open — effort advancing, not complete. OUR PR #50224 (GH-50223,
+  string_view/binary_view keys in the hash-aggregate Grouper) MERGED 2026-07-07 —
+  the AG9 track's first landed contribution; enables view-key group_by, the path
+  around the AG1/AG2 >2 GB int32-offset cliff.**
 - **AG1 — effectively a duplicate.** **#25822 (open)** "[C++] Take kernel can't
   handle ChunkedArrays that don't fit in an Array" is the same root limitation
   (Take concatenates first, breaks past 2 GB). Our angle (it **segfaults**

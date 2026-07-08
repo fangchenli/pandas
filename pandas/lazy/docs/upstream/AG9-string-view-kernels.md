@@ -25,6 +25,17 @@ consumers.
 > progressing but NOT complete — before engaging, re-pull the live set (#50166 is
 > done, don't re-scope around it) and re-check which selection/take/filter view
 > kernels are still unaddressed.
+>
+> **🎉 OUR CONTRIBUTION MERGED (2026-07-08): PR #50224 (GH-50223, "[C++][Compute]
+> Support string_view/binary_view keys in the hash-aggregate Grouper") — authored
+> by fangchenli, merged by pitrou 2026-07-07, xref #44336.** This is the AG9 "join
+> the existing effort" strategy bearing fruit: `Grouper` (behind Acero's
+> hash-aggregate / `Table.group_by`) previously rejected view keys with
+> `NotImplemented: Keys of type string_view`; the PR adds `BinaryViewKeyEncoder`
+> so `group_by` on a view-typed key works. This is exactly the view-native path
+> that sidesteps the AG1/AG2 >2 GB int32-offset cliff for grouped aggregation.
+> **AG9 is now an active in-flight contribution, not just a watch item.** Next
+> unaddressed kernels remain (selection/take/filter view kernels — #50164/#43010).
 
 ## Context & full plan
 `string_view` (German-style strings) is the modern Arrow string layout but its

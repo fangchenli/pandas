@@ -14,7 +14,7 @@ doc** below that a fresh agent can execute end-to-end without prior context.
 | AG4 | Acero string-key hash-agg 3.5–10× slower than dict-encoded | verified, **non-dup**, draft ready | **1** | `AG4-acero-string-key-hashing.md` |
 | AG1 | `take` segfaults on >2 GB int32-offset string | **dup → comment on #25822** | 2 | `AG1-take-segfault.md` |
 | AG2 | `hash_aggregate` SIGABRT on >2 GB string keys | **non-dup**, repro pending | 2 | `AG2-hashagg-abort.md` |
-| AG9 | Arrow `string_view` kernel coverage (contribution) | **in-flight upstream (#44336; PR #50166 merged 2026-07-01)** | 3 | `AG9-string-view-kernels.md` |
+| AG9 | Arrow `string_view` kernel coverage (contribution) | **active contribution — OUR PR #50224 merged 2026-07-07** (Grouper view keys); #44336 open, #50166 merged | 3 | `AG9-string-view-kernels.md` |
 | AG3 | `Table.group_by` parallelism (likely footgun) | verify-first | 4 | `AG3-table-groupby-parallelism.md` |
 | AG5 | Acero `count_distinct` slower than pandas Cython | needs bench | 5 | `AG5-count-distinct.md` |
 | AG10 | **DataFusion** `single_distinct_to_groupby` fires for SQL but not the DataFrame API (~3.9× slower count-distinct) | verified 51.0.0, repro ready | **2** | `AG10-datafusion-singledistinct-dataframe.md` |
