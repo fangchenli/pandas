@@ -201,14 +201,25 @@ full suite. **All 22 TPC-H queries lower into DataFusion and validate bit-correc
 vs DuckDB** (SF-0.5 and SF-1). Benchmarked execute-only vs Polars at SF-3
 (boundary paid once via `from_pandas`/registration, like Polars; best-of-5):
 
-**geomean PL/DF = 0.95x — Polars parity — vs the hand-rolled engine's 0.15x.**
-Same lazy-pandas frontend; the only change is the backend. DataFusion *beats*
-Polars on 9 queries (q19 3.69x, q13 2.95x, q12 1.86x, q1 1.62x, q20 1.62x, q22
-1.51x, q17 1.25x, q7 1.11x, q9 1.04x) and is near-parity on most others. Sole
-catastrophic outlier: **q21 0.14x** (5.7s vs 0.8s) — a *frontend plan-shape*
-problem (our q21 lowers to a giant inner self-join on `l_orderkey` where Polars
-uses a semi/anti formulation), NOT a DataFusion execution weakness; it drags the
-naive totals ratio to 0.46 while the outlier-robust geomean stays 0.95.
+**geomean PL/DF = 1.00x and totals ratio 0.94x — Polars parity — vs the
+hand-rolled engine's 0.15x.** Same lazy-pandas frontend; the only change is the
+backend. DataFusion *beats* Polars on 9 queries (q19 3.89x, q13 2.93x, q22 1.63x,
+q20 1.66x, q12 1.61x, q1 1.60x, q17 1.27x, q7 1.24x, q9 1.22x) and is near-parity
+on most others; the slowest are the small dimension-join queries (q11 0.40x, q15
+0.53x, q2 0.60x) where fixed per-query overhead dominates tiny work.
+
+**The q21 fix (a real DataFusion substrate finding).** q21 first came back at
+**0.14x** (5.7s vs 0.8s). Root cause was NOT the self-join (my first guess) — it
+was **DataFusion's exact `count(DISTINCT)` over a high-cardinality group-by**:
+`count(distinct l_suppkey)` grouped by `l_orderkey` (4.5M groups) took **3.3s**
+vs a plain `count` **235ms** (~14x), and q21 does it twice. The classic rewrite
+**distinct-then-count** (`distinct(groups, col)` → `count(col)` per group) is
+**3.8x faster** on DataFusion (809ms vs 3083ms), bit-identical (4.5M groups both
+ways). Implemented that rewrite in the lowering for the single-`n_unique`
+aggregate case (`_rewrite_n_unique`): **q21 → 0.52x** (1.5s), and the suite
+geomean moved 0.95 → **1.00**, totals 0.46 → **0.94**. Hand-off candidate: an
+upstream DataFusion optimizer rule (count-distinct → distinct-then-count) would
+fix this for everyone — do NOT file without go-ahead.
 
 This is the probe's headline result: **the join-heavy gap vs Polars was never
 architectural.** A mature arrow-rs engine on our exact substrate, driven by our
@@ -223,8 +234,9 @@ because DataFusion neither auto-suffixes nor reliably coalesces `on=` keys when 
 input is itself a join result. Note: this route makes the `arrow_row` multi-key
 correctness fix **moot** — DataFusion does multi-key joins natively/correctly.
 
-Open follow-up: q21's plan shape (make our optimizer emit a semi/anti-join for
-the correlated-exists pattern instead of a materialized self-join).
+Remaining follow-ups: the small dimension-join queries (q11/q15/q2 ~0.4–0.6x)
+are fixed-overhead-bound, not algorithmic; and the `count(DISTINCT)` finding is a
+hand-off candidate for an upstream DataFusion optimizer rule.
 
 ### Decision on the record (2026-07-08)
 - **Now (probe):** 6a — lower the existing `LogicalPlan` into DataFusion. Cheap,

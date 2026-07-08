@@ -231,12 +231,14 @@ work session.
 **RESULT (2026-07-08): 6a built and it hits Polars parity.**
 `benchmarks/translate_datafusion.py` lowers our optimized `LogicalPlan` into a
 DataFusion DataFrame. All 22 queries validate bit-correct vs DuckDB; execute-only
-SF-3 vs Polars = **geomean 0.95x (parity), up from the hand-rolled engine's
-0.15x** — same frontend, DataFusion backend. Beats Polars on 9 queries; sole
-outlier q21 0.14x is a plan-shape issue (giant self-join vs semi/anti). The
-join-heavy gap was never architectural. This retires the chain-fusion grind;
-`engine.rs` is now the reference/probe baseline. Detail + method in
-`EXECUTION_RESEARCH_SURVEY.md` §5 (MEASURED).
+SF-3 vs Polars = **geomean 1.00x / totals 0.94x (parity), up from the hand-rolled
+engine's 0.15x** — same frontend, DataFusion backend. Beats Polars on 9 queries.
+q21 started at 0.14x; root cause was DataFusion's slow exact `count(DISTINCT)`
+over 4.5M groups (~14x a plain count, done twice), NOT the self-join — the
+distinct-then-count rewrite (`_rewrite_n_unique`) took q21 to 0.52x and lifted
+the suite geomean 0.95→1.00. The join-heavy gap was never architectural. This
+retires the chain-fusion grind; `engine.rs` is now the reference/probe baseline.
+Detail + method in `EXECUTION_RESEARCH_SURVEY.md` §5 (MEASURED).
 
 **Frontend fork (survey §6):** DataFusion settles the *backend*; the *frontend*
 (how the plan gets built) has two levels. **6a (do first, probe):** lower our

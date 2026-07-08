@@ -173,6 +173,33 @@ def _agg_expr(node) -> D.Expr:
     return e.alias(name) if name else e
 
 
+def _rewrite_n_unique(df, gnames, agg_nodes):
+    """Work around DataFusion's slow high-cardinality ``count(DISTINCT)``:
+    a lone ``n_unique(col)`` group-by is ~4x faster as distinct-then-count
+    (``distinct(groups, col)`` then ``count(col)`` per group) — measured 3.8x on
+    TPC-H q21's 4.5M-group aggregate. Returns a DataFrame or None (no rewrite).
+
+    Only the single-aggregate FieldRef case is rewritten (what TPC-H uses);
+    mixing distinct with other aggregates needs grouping sets, out of scope."""
+    if len(agg_nodes) != 1:
+        return None
+    node = agg_nodes[0]
+    name = node.name if isinstance(node, Alias) else None
+    call = node.arg if isinstance(node, Alias) else node
+    if not isinstance(call, Call) or call.function != "n_unique":
+        return None
+    arg = call.args[0]
+    if not isinstance(arg, FieldRef):
+        return None
+    cname = arg.name
+    keep = [col(g) for g in gnames] + [col(cname)]
+    distinct = df.select(*keep).distinct()
+    cnt = F.count(col(cname))
+    return distinct.aggregate(
+        [col(g) for g in gnames], [cnt.alias(name) if name else cnt]
+    )
+
+
 def _name_of(node) -> str:
     if isinstance(node, Alias):
         return node.name
@@ -200,8 +227,13 @@ def _lower(plan, ctx: SessionContext, ctr: list) -> D.DataFrame:
 
     if isinstance(plan, Aggregate):
         df = _lower(plan.input, ctx, ctr)
-        groups = [col(_name_of(_ir(g))) for g in plan.group_by]
-        aggs = [_agg_expr(_ir(e)) for e in plan.agg_exprs]
+        gnames = [_name_of(_ir(g)) for g in plan.group_by]
+        agg_nodes = [_ir(e) for e in plan.agg_exprs]
+        rw = _rewrite_n_unique(df, gnames, agg_nodes)
+        if rw is not None:
+            return rw
+        groups = [col(g) for g in gnames]
+        aggs = [_agg_expr(n) for n in agg_nodes]
         return df.aggregate(groups, aggs)
 
     if isinstance(plan, Sort):
