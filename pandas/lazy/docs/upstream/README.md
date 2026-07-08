@@ -17,6 +17,7 @@ doc** below that a fresh agent can execute end-to-end without prior context.
 | AG9 | Arrow `string_view` kernel coverage (contribution) | **in-flight upstream (#44336)** | 3 | `AG9-string-view-kernels.md` |
 | AG3 | `Table.group_by` parallelism (likely footgun) | verify-first | 4 | `AG3-table-groupby-parallelism.md` |
 | AG5 | Acero `count_distinct` slower than pandas Cython | needs bench | 5 | `AG5-count-distinct.md` |
+| AG10 | **DataFusion** `single_distinct_to_groupby` fires for SQL but not the DataFrame API (~3.9× slower count-distinct) | verified 51.0.0, repro ready | **2** | `AG10-datafusion-singledistinct-dataframe.md` |
 | AG6 | Acero filter→reduce compaction tax | **SCOPED → don't file** (resolved multithreaded on 24.0.0) | — | `AG6-acero-filter-compaction.md` |
 | AG7 | Arrow↔NumPy/pandas boundary tax | **SCOPED → not an Arrow gap** (dtype-model mismatch; clean numeric already zero-copy) | — | `AG7-boundary-tax.md` |
 | AG8 | Gandiva expression-JIT unpackaged / not in Acero | **SCOPED → low value** (Acero project already removes the materialization tax; chain-JIT redundant) | — | `../MATERIALIZATION_EXPERIMENT.md` addendum + `../ARROW_GAPS.md` R2 |

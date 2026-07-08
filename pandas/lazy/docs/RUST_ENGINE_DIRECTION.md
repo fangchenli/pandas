@@ -233,12 +233,17 @@ work session.
 DataFusion DataFrame. All 22 queries validate bit-correct vs DuckDB; execute-only
 SF-3 vs Polars = **geomean 1.00x / totals 0.94x (parity), up from the hand-rolled
 engine's 0.15x** — same frontend, DataFusion backend. Beats Polars on 9 queries.
-q21 started at 0.14x; root cause was DataFusion's slow exact `count(DISTINCT)`
-over 4.5M groups (~14x a plain count, done twice), NOT the self-join — the
-distinct-then-count rewrite (`_rewrite_n_unique`) took q21 to 0.52x and lifted
-the suite geomean 0.95→1.00. The join-heavy gap was never architectural. This
-retires the chain-fusion grind; `engine.rs` is now the reference/probe baseline.
-Detail + method in `EXECUTION_RESEARCH_SURVEY.md` §5 (MEASURED).
+q21 started at 0.14x; root cause was DataFusion's `single_distinct_to_groupby`
+optimizer rule firing for SQL but NOT the DataFrame API (identical query: API
+3518ms / one distinct:true aggregate, vs SQL 895ms / nested double-aggregate).
+Our `_rewrite_n_unique` replicates the SQL rewrite → q21 0.52x, suite geomean
+0.95→1.00. Two DataFusion findings surfaced and are handed off:
+`upstream/AG10-datafusion-singledistinct-dataframe.md` (the distinct rule), and
+the small dimension-join queries (q11/q15/q2 ~0.4–0.6x) = DataFusion has no
+common-*subplan* elimination (recomputes reused subtrees; controlled q15 cache
+experiment 37→0.8ms confirms; Polars shares them). The join-heavy gap was never
+architectural. This retires the chain-fusion grind; `engine.rs` is now the
+reference/probe baseline. Detail + method in `EXECUTION_RESEARCH_SURVEY.md` §5.
 
 **Frontend fork (survey §6):** DataFusion settles the *backend*; the *frontend*
 (how the plan gets built) has two levels. **6a (do first, probe):** lower our

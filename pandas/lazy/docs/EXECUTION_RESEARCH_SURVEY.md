@@ -208,18 +208,22 @@ q20 1.66x, q12 1.61x, q1 1.60x, q17 1.27x, q7 1.24x, q9 1.22x) and is near-parit
 on most others; the slowest are the small dimension-join queries (q11 0.40x, q15
 0.53x, q2 0.60x) where fixed per-query overhead dominates tiny work.
 
-**The q21 fix (a real DataFusion substrate finding).** q21 first came back at
-**0.14x** (5.7s vs 0.8s). Root cause was NOT the self-join (my first guess) — it
-was **DataFusion's exact `count(DISTINCT)` over a high-cardinality group-by**:
-`count(distinct l_suppkey)` grouped by `l_orderkey` (4.5M groups) took **3.3s**
-vs a plain `count` **235ms** (~14x), and q21 does it twice. The classic rewrite
-**distinct-then-count** (`distinct(groups, col)` → `count(col)` per group) is
-**3.8x faster** on DataFusion (809ms vs 3083ms), bit-identical (4.5M groups both
-ways). Implemented that rewrite in the lowering for the single-`n_unique`
-aggregate case (`_rewrite_n_unique`): **q21 → 0.52x** (1.5s), and the suite
-geomean moved 0.95 → **1.00**, totals 0.46 → **0.94**. Hand-off candidate: an
-upstream DataFusion optimizer rule (count-distinct → distinct-then-count) would
-fix this for everyone — do NOT file without go-ahead.
+**The q21 fix (a real, sharp DataFusion substrate finding → AG10).** q21 first
+came back at **0.14x** (5.7s vs 0.8s). Root cause was NOT the self-join (my first
+guess) but a high-cardinality `count(DISTINCT)`: `count(distinct l_suppkey)`
+grouped by `l_orderkey` (4.5M groups) took ~3.5s vs a plain `count` ~235ms, done
+twice. Digging further pinned the *actual* cause: **DataFusion's
+`single_distinct_to_groupby` optimizer rule fires for SQL but NOT for the
+DataFrame API.** Same query, both paths (datafusion 51.0.0, SF-3):
+DataFrame-API `count(distinct)` = **3518 ms** (optimized plan = one `Aggregate`
+with `distinct: true`, unrewritten) vs the identical **SQL** = **895 ms**
+(optimized plan = nested double-aggregate, i.e. distinct-then-count applied).
+So the fast path already exists in DataFusion — the DataFrame API just doesn't
+get it. We replicate it manually in the lowering (`_rewrite_n_unique`, the
+distinct-then-count form) for the single-`n_unique` case: **q21 → 0.52x** (1.5s),
+suite geomean 0.95 → **1.00**, totals 0.46 → **0.94**. Filed as a hand-off:
+`upstream/AG10-datafusion-singledistinct-dataframe.md` (target apache/datafusion;
+do NOT file without go-ahead).
 
 This is the probe's headline result: **the join-heavy gap vs Polars was never
 architectural.** A mature arrow-rs engine on our exact substrate, driven by our
@@ -234,9 +238,23 @@ because DataFusion neither auto-suffixes nor reliably coalesces `on=` keys when 
 input is itself a join result. Note: this route makes the `arrow_row` multi-key
 correctness fix **moot** — DataFusion does multi-key joins natively/correctly.
 
-Remaining follow-ups: the small dimension-join queries (q11/q15/q2 ~0.4–0.6x)
-are fixed-overhead-bound, not algorithmic; and the `count(DISTINCT)` finding is a
-hand-off candidate for an upstream DataFusion optimizer rule.
+**The small dimension-join queries (q11/q15/q2 ~0.4–0.6x) — a second DataFusion
+finding: no common-*subplan* elimination.** These queries reference a subtree
+twice: q15's `rev` (lineitem filtered + grouped by suppkey) feeds both the
+supplier join and the global-max threshold; q11's `partsupp⋈supplier⋈nation`
+feeds both the per-part grouping and the global threshold; q2 similarly. Our
+optimized plan keeps these as a shared DAG node, but DataFusion has only
+within-node expression CSE, not cross-branch subplan CSE, so it **recomputes the
+shared subtree**. Controlled experiment (SF-3): hand-building q15 with the shared
+`rev` **`.cache()`d** (computed once) vs not — **37.2 ms → 0.8 ms** for the
+downstream, i.e. the entire cost was the double-computation of `rev`; Polars
+(22 ms) shares it via its optimizer. So the small-multi-join gap is missing
+subplan CSE, not per-query overhead. We can work around it by `.cache()`-ing
+shared DAG nodes in the lowering (prototyped, 22/22 still correct), but the
+fair-benchmark impact is small and eager `.cache()` complicates timing, so it is
+**recorded as a finding, not shipped** in the headline path. Second hand-off
+candidate (apache/datafusion: common-subplan elimination / auto-cache of reused
+plan nodes).
 
 ### Decision on the record (2026-07-08)
 - **Now (probe):** 6a — lower the existing `LogicalPlan` into DataFusion. Cheap,
