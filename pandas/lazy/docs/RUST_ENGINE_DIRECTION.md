@@ -228,6 +228,17 @@ thing we grind to parity. Rationale in `EXECUTION_RESEARCH_SURVEY.md` §5. This
 may replace the hand-rolled chain-fusion grind entirely — decide before the next
 work session.
 
+**Frontend fork (survey §6):** DataFusion settles the *backend*; the *frontend*
+(how the plan gets built) has two levels. **6a (do first, probe):** lower our
+existing lazy `LogicalPlan` into DataFusion — a small lowering pass, since the
+plan already IS "a chain of deferred pandas ops"; reuses the whole frontend.
+**6b (deferred, product pivot):** capture *eager* `import ... as pd` chains and
+trace them into a plan transparently — high value (works on existing pandas code)
+but a FireDucks-sized effort (eager-observation materialization/guards, partial-
+coverage fallback boundary, index semantics, bit-for-bit compat) and already has
+incumbents (FireDucks/Ibis/Modin). Not on the probe path; pursue only if the
+mission flips to "ship a faster pandas."
+
 ### Recommended next lever (NOT started — gated, not an open grind)
 The realistic ceiling for join-heavy shapes via this engine is **parity, not
 domination** (hand-tuned q3 topped at 0.95x). So the goal of more work is to

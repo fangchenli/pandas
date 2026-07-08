@@ -152,6 +152,56 @@ only where we specifically want to probe a gap DataFusion doesn't expose.
 | 10 | Adaptive/permutable compiled machinery | ~0 (no compile latency) | High | Out of scope (keep only #6) |
 | 11 | **Lower `LogicalPlan` into DataFusion** | Delivers #2,#3, join stack | Low (integration) | **Strong buy-vs-build; preferred route** |
 
+## 6. Frontend fork — how does the plan get *built*? (lazy-plan now vs eager-capture later)
+
+The DataFusion decision (§5) settles the **backend** (execution). It leaves open
+the **frontend**: how a chain of pandas ops becomes the plan we lower. Two levels,
+very different in cost. Recording both so the choice is on the record.
+
+### 6a. Lower the existing lazy `LogicalPlan` (what we have) — DO FIRST
+The lazy-pandas `LogicalPlan` already *is* "a chain of (deferred) pandas ops
+compiled into a plan." Our TPC-H queries are exactly that: deferred ops →
+`LogicalPlan` → optimizer → engine. So compiling-a-chain-into-a-plan is already
+done; the only new work is a **lowering pass** `LogicalPlan → DataFusion
+LogicalPlan`/`DataFrame` API (analogous to today's `translate.py`, which lowers
+to our JSON plan). Small, reuses the whole frontend, immediately yields a fair
+Polars-parity baseline to instrument. **This is the probe-appropriate slice.**
+
+### 6b. Capture *eager* pandas (`import ... as pd`) — a separate, much larger pivot
+The ambitious version: don't require the lazy API — **intercept ordinary eager
+`df.merge(...).groupby(...).agg(...)`, trace into a plan behind the scenes, and
+execute on DataFusion.** High value (works on *existing* pandas code, not a new
+API) but this is a product effort, not a probe deliverable. The hard parts:
+
+1. **Eager observation forces materialization.** pandas is eager — users
+   `print(df)`, `if len(df) > 0`, index intermediates, hand them to numpy/sklearn.
+   Every observation must trigger a flush → lazy eval with automatic
+   materialization + guards (a tracing-JIT shape). This is the core engineering.
+2. **Partial coverage → the fallback boundary leaks the win.** A chain accelerates
+   only if *every* op maps to DataFusion. Real pandas code is full of ops with no
+   clean relational form (`apply` with arbitrary Python, `stack`/`unstack`,
+   MultiIndex). One fallback op materializes and pays the boundary; deciding where
+   to cut is most of the work.
+3. **The index.** pandas has a first-class row index; DataFusion (relational)
+   doesn't. Round-tripping index semantics is a real modeling problem.
+4. **Bit-for-bit semantics.** DataFusion's null/type/ordering/overflow edge cases
+   differ from pandas. Exact-compat across the API is what has sunk most
+   "pandas on X" efforts.
+
+**Prior art — validated AND occupied:** FireDucks (NEC) does exactly transparent
+pandas-capture → IR → compiled backend (`import fireducks.pandas as pd`); Ibis
+does the *explicit* dataframe API → many backends incl. DataFusion; Modin does
+pandas API → distributed. So the idea is proven and has well-funded incumbents —
+a product here needs a differentiator (the obvious one: true pandas-API compat
+that Ibis doesn't attempt, i.e. exactly FireDucks' hard problem).
+
+### Decision on the record (2026-07-08)
+- **Now (probe):** 6a — lower the existing `LogicalPlan` into DataFusion. Cheap,
+  reuses the frontend, gives the baseline to measure.
+- **Deferred (product pivot):** 6b — eager-pandas capture. A FireDucks-sized
+  commitment; pursue only if the mission changes from "quantify substrate gaps"
+  to "ship a faster pandas." Not on the probe path.
+
 ## Sources
 - MonetDB/X100 — Boncz, Zukowski, Nes, CIDR 2005 — https://www.cidrdb.org/cidr2005/papers/P19.pdf
 - Neumann, Compiling Efficient Query Plans, VLDB 2011 — http://www.vldb.org/pvldb/vol4/p539-neumann.pdf
