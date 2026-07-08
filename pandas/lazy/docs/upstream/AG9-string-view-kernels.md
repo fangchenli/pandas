@@ -18,6 +18,13 @@ consumers.
 > (STRING_VIEW/BINARY_VIEW in array_take/array_filter), **#46128** (cast-to-
 > StringView memory). The contribution is to **join the existing effort**, not
 > open new work.
+>
+> **UPDATE (2026-07-08): PR #50166 (GH-49740, "cast to view types leaving null
+> variadic buffers") MERGED 2026-07-01.** Umbrella #44336 remains open; #50164
+> and #48734 still open; issues #43010 and #46128 still open. Net: the effort is
+> progressing but NOT complete — before engaging, re-pull the live set (#50166 is
+> done, don't re-scope around it) and re-check which selection/take/filter view
+> kernels are still unaddressed.
 
 ## Context & full plan
 `string_view` (German-style strings) is the modern Arrow string layout but its
@@ -37,6 +44,7 @@ geo-mean) are in **`STRING_VIEW_CONTRIBUTION_PLAN.md`** (this folder).
 ## Gates
 - [x] Duplicate/overlap search done → #44336 + PRs #50164/#50166/#48734, issues
       #43010/#46128. Re-check these are still the live set before engaging.
+      (2026-07-08: #50166 MERGED; #50164/#48734/#43010/#46128 + umbrella still open.)
 - [ ] A specific unaddressed kernel identified (not covered by the open PRs).
 - [ ] Maintainer alignment on #44336.
 - [ ] Human approval before any outward comment/PR.

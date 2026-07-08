@@ -20,7 +20,7 @@ worked-around** (real, we route around it) · **observed**.
 | AG6 | Acero **per-node overhead** — filter→reduce catastrophic, per-join-node overhead at filtered scale | quantified / worked-around | med | MATERIALIZATION_EXPERIMENT.md I & III |
 | AG7 | Acero join/agg wins **die at the Arrow→NumPy round-trip** (boundary tax) | quantified (structural) | high | MATERIALIZATION_EXPERIMENT.md II; PERF_CEILING.md |
 | AG8 | **Gandiva**: optional/often-unshipped pyarrow + **not wired into Acero** (expression codegen unavailable in practice) | observed | low-med | MATERIALIZATION_EXPERIMENT.md F4 (corrected below) |
-| AG9 | `string_view` **kernel coverage** (at-scale/string gains) | **in-flight upstream (#44336)** | high | upstream/STRING_VIEW_CONTRIBUTION_PLAN.md |
+| AG9 | `string_view` **kernel coverage** (at-scale/string gains) | **in-flight upstream (#44336; PR #50166 merged 2026-07-01)** | high | upstream/STRING_VIEW_CONTRIBUTION_PLAN.md |
 
 ## Upstream duplicate-search results (apache/arrow, 2026-06-18)
 
@@ -28,11 +28,13 @@ Searched issues **and** PRs across many phrasings (`gh api search/issues`):
 
 - **AG9 — already actively in-flight; do NOT file.** Umbrella **#44336 "[C++]
   Binary View Compute Kernels" (open)** with open PRs **#50164** (view arrays in
-  selection kernels), **#50166** (cast-to-view null buffers), **#48734**
-  (eliminate Array boxing in scalar string kernels) and open sub-issues
-  **#43010** (STRING_VIEW/BINARY_VIEW in array_take/array_filter), **#46128**
-  (cast-to-StringView memory). Contribution = **join this effort** (re-scope to
-  an unaddressed kernel, engage on #44336), not a new issue.
+  selection kernels), ~~**#50166** (cast-to-view null buffers)~~ **MERGED
+  2026-07-01**, **#48734** (eliminate Array boxing in scalar string kernels) and
+  open sub-issues **#43010** (STRING_VIEW/BINARY_VIEW in array_take/array_filter),
+  **#46128** (cast-to-StringView memory). Contribution = **join this effort**
+  (re-scope to an unaddressed kernel, engage on #44336), not a new issue.
+  **Progress (2026-07-08): #50166 merged; #50164/#48734/#43010/#46128 + umbrella
+  still open — effort advancing, not complete.**
 - **AG1 — effectively a duplicate.** **#25822 (open)** "[C++] Take kernel can't
   handle ChunkedArrays that don't fit in an Array" is the same root limitation
   (Take concatenates first, breaks past 2 GB). Our angle (it **segfaults**
