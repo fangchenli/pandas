@@ -36,6 +36,16 @@ consumers.
 > that sidesteps the AG1/AG2 >2 GB int32-offset cliff for grouped aggregation.
 > **AG9 is now an active in-flight contribution, not just a watch item.** Next
 > unaddressed kernels remain (selection/take/filter view kernels — #50164/#43010).
+>
+> **NEXT KERNEL SCOPED (2026-07-09) → `AG9-next-string-predicate-kernels.md`.**
+> take/filter (#50164/#43010) is already claimed + approved + near-merge by
+> Periecle — do NOT duplicate. Recommended unclaimed next PR: **view support for
+> scalar string predicate kernels** (`match_substring`/`match_like`/`starts_with`/
+> `ends_with`/`find_substring`/`*_length` in `scalar_string_ascii.cc`) — the
+> missing middle of the filter pipeline (post-#50164 you can take/filter view
+> arrays but can't evaluate a string WHERE clause on them), highest TPC-H-LIKE
+> payoff, Medium difficulty. That doc has the full state table, gap map, files,
+> template (#50164), and checklist.
 
 ## Context & full plan
 `string_view` (German-style strings) is the modern Arrow string layout but its
