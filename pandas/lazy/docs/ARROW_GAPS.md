@@ -21,6 +21,7 @@ worked-around** (real, we route around it) · **observed**.
 | AG7 | Acero join/agg wins **die at the Arrow→NumPy round-trip** (boundary tax) | quantified (structural) | high | MATERIALIZATION_EXPERIMENT.md II; PERF_CEILING.md |
 | AG8 | **Gandiva**: optional/often-unshipped pyarrow + **not wired into Acero** (expression codegen unavailable in practice) | observed | low-med | MATERIALIZATION_EXPERIMENT.md F4 (corrected below) |
 | AG9 | `string_view` **kernel coverage** (at-scale/string gains) | **active contribution — OUR PR #50224 merged 2026-07-07** (Grouper view keys, GH-50223); #44336 open; #50166 merged | high | upstream/STRING_VIEW_CONTRIBUTION_PLAN.md |
+| AG12 | Temporal unit **downcast has no floor rounding** — `*_temporal` kernels lack a `duration` kernel; `cast(safe=False)` truncates toward zero, `safe=True` refuses (numpy floors toward −∞) | **dup for gap #1 → #50395 (open)**; gap #2 (rounding-mode on `cast`) no issue | med (correctness, downstream pandas) | upstream/AG12-arrow-temporal-duration-floor.md |
 
 ## Upstream duplicate-search results (apache/arrow, 2026-06-18)
 
@@ -49,6 +50,12 @@ Searched issues **and** PRs across many phrasings (`gh api search/issues`):
 - **AG4 — non-duplicate** (issues + PRs). Only DataFusion #27498 (closed, Rust,
   different angle).
 - **AG3 / AG5 / AG8 — no specific existing issue** (none is file-ready anyway).
+- **AG12 — duplicate for the core gap (2026-07-09).** **#50395 "[C++] Support
+  duration type in floor_temporal/etc" (open,** enhancement, 0 comments, filed
+  2026-07-06) is exactly gap #1 (missing `duration` kernel on the temporal
+  rounding functions). Do NOT file anew — a pandas-consumer data-point comment is
+  the action. Gap #2 (a `RoundMode` on temporal `cast`) has **no** existing
+  issue. See upstream/AG12-arrow-temporal-duration-floor.md.
 
 ## Two cross-doc contradictions, resolved
 
