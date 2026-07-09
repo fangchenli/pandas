@@ -1,6 +1,37 @@
-# Hand-off: AG3 — `Table.group_by` parallelism (VERIFY FIRST — likely a footgun, may not be file-able)
+# Hand-off: AG3 — `Table.group_by` parallelism (RESOLVED — broad claim REFUTED; residual folds into AG5'/#38372)
 
-**For:** a fresh agent. Read `README.md` first. **Priority 4.** ⚠️ This one is
+**For:** a fresh agent. Read `README.md` first. **Priority: closed.**
+
+> **RESOLVED (2026-07-09) — the broad "Table.group_by doesn't parallelize" claim
+> is REFUTED on latest pyarrow 24.0.0; do NOT file it.** Ran the decisive test
+> (`/tmp/ag3_groupby_parallel.py`: single-Table vs many-chunk, int + string keys,
+> low + high cardinality, `set_cpu_count(1,2,4,8)`, 20M rows):
+> | shape | 1→8 core | verdict |
+> |---|---|---|
+> | int key, 1k groups | **82→19 ms = 4.3×**, beats Polars (126ms) | parallelizes great |
+> | int key, 1M groups | 610→517 ms = 1.2× (8 worse than 4) | saturates high-card |
+> | string key, 100k groups | 326→253 ms = 1.3× | saturates high-card |
+>
+> Two hypotheses REFUTED: (1) "Table.group_by is single-threaded" — false, it
+> scales **4.3×** at low cardinality; (2) "a single Table isn't morsel-split so
+> stays serial" (the old reconciliation) — false, **single-chunk and 8-chunk
+> scale identically**; chunking is irrelevant. The old 124→133ms non-scaling
+> (`PARALLEL_GROUPBY_SCOPE.md`) does not reproduce on pyarrow 24 — it was likely a
+> since-improved release and/or a specific 2-key high-card shape.
+>
+> **Residual real finding:** grouped-aggregate parallel scaling **saturates at
+> high cardinality** (1M int ≈1.2×, string ≈1.3×; loses to Polars 379ms at 1M
+> int). This is the **same root as AG5'** (count_distinct is thread-insensitive)
+> — Arrow's grouping hash-table. **CONSOLIDATE: AG3-residual + AG5' → one finding
+> = "Arrow grouped hash-aggregate parallel scaling saturates at high cardinality
+> vs Polars," home = open discussion #38372 (MemoTable→SwissTable).** Attach our
+> data there rather than filing AG3 or AG5' separately. AG3 as a standalone item
+> is CLOSED/shelved.
+
+---
+_Original hand-off (superseded by the resolution above) follows._
+
+**Priority 4.** ⚠️ This one is
 **not confirmed** and may well dissolve on investigation — do the verification
 before assuming there's anything to file.
 

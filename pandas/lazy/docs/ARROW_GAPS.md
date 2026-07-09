@@ -14,7 +14,7 @@ worked-around** (real, we route around it) · **observed**.
 |---|---|---|---|---|
 | AG1 | `take` **segfaults** on >2 GB int32-offset string data (should raise `ArrowInvalid`) | **dup → comment on #25822** | high | upstream/UPSTREAM_ISSUES.md #1 |
 | AG2 | acero `hash_aggregate` **aborts (SIGABRT, uncatchable)** on >2 GB string keys | non-dup, repro pending | high | upstream/UPSTREAM_ISSUES.md #2 |
-| AG3 | `Table.group_by()` on a **single Table doesn't parallelize** (no scaling 1→8 cores) | **needs-verification** | high (if real) | PARALLEL_GROUPBY_SCOPE.md |
+| AG3 | ~~`Table.group_by()` doesn't parallelize~~ **REFUTED (pyarrow 24: 4.3× at low card, chunking irrelevant, 2026-07-09)**; residual high-card-scaling saturation folds into AG5'/#38372 | **resolved/closed** | — | upstream/AG3-table-groupby-parallelism.md |
 | AG4 | acero **raw-string key hashing 3.5–10x slower than dict-encoding** the same keys (and ~3.8x slower than Polars per-thread) | **VERIFIED (standalone)** | med-high | ENGINE_DESIGN.md M4; `benchmarks/bench_arrow_string_groupby.py` |
 | AG5 | ~~acero `count_distinct` slower than pandas~~ **SHELVED** (Acero faster than pandas on pyarrow 24, 2026-07-09) → **AG5': acero count_distinct ~4–5x behind Polars, thread-insensitive** | AG5 shelved; AG5' non-dup (rel. #38372) | med | upstream/AG5-count-distinct.md |
 | AG6 | Acero **per-node overhead** — filter→reduce catastrophic, per-join-node overhead at filtered scale | quantified / worked-around | med | MATERIALIZATION_EXPERIMENT.md I & III |

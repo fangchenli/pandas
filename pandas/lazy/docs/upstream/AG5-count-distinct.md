@@ -27,6 +27,13 @@ standalone-verified like AG4).
 >   (DataFusion count-distinct) — count-distinct is a weak spot across the Arrow
 >   stack; Polars and DataFusion-SQL (distinct-then-count rewrite) are both fast.
 >
+> **CONSOLIDATED with AG3 (2026-07-09):** the AG3 probe found the same root —
+> Arrow grouped `sum` also saturates parallel scaling at high cardinality (1M int
+> ≈1.2×, string ≈1.3×) while low-card scales 4.3×. AG3's broad "no parallelism"
+> claim was refuted; its residual is this same hash-table (MemoTable) high-card
+> ceiling. Treat AG5' + AG3-residual as ONE finding for #38372: "Arrow grouped
+> hash-aggregate parallel scaling saturates at high cardinality vs Polars."
+>
 > **Next step (needs go-ahead):** either comment our data point on #38372, or
 > file a scoped `[C++][Acero] grouped count_distinct does not parallelize / ~4–5×
 > behind Polars` enhancement. NOT the old vs-pandas issue. Re-verify on latest at
