@@ -18,6 +18,8 @@ doc** below that a fresh agent can execute end-to-end without prior context.
 | AG3 | `Table.group_by` parallelism (likely footgun) | verify-first | 4 | `AG3-table-groupby-parallelism.md` |
 | AG5 | Acero `count_distinct` slower than pandas Cython | needs bench | 5 | `AG5-count-distinct.md` |
 | AG10 | **DataFusion** `single_distinct_to_groupby` fires for SQL but not the DataFrame API (~3.9× slower count-distinct) | **FILED #23401 + PR #23403 open** | **2** | `AG10-datafusion-singledistinct-dataframe.md` |
+| AG11 | **DataFusion** cross join (`join_on`, no predicates) fails on tables with schema metadata (keyed joins fixed by #16221; cross path missed) | verified 51.0.0, repro ready | 3 | `AG11-datafusion-crossjoin-metadata.md` |
+| — | **DataFusion** no common-subplan CSE (recomputes reused subtrees; q11/q15/q2) | **tracked upstream — EPIC #22676 + #8777 open; attach data, don't file** | — | EXECUTION_RESEARCH_SURVEY.md §5 |
 | AG6 | Acero filter→reduce compaction tax | **SCOPED → don't file** (resolved multithreaded on 24.0.0) | — | `AG6-acero-filter-compaction.md` |
 | AG7 | Arrow↔NumPy/pandas boundary tax | **SCOPED → not an Arrow gap** (dtype-model mismatch; clean numeric already zero-copy) | — | `AG7-boundary-tax.md` |
 | AG8 | Gandiva expression-JIT unpackaged / not in Acero | **SCOPED → low value** (Acero project already removes the materialization tax; chain-JIT redundant) | — | `../MATERIALIZATION_EXPERIMENT.md` addendum + `../ARROW_GAPS.md` R2 |
