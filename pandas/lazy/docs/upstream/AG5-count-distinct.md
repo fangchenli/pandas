@@ -4,6 +4,34 @@
 isolated benchmark before it's file-able (claim is real but not yet
 standalone-verified like AG4).
 
+> **RESOLVED (2026-07-09) — the vs-pandas premise is SHELVED; a real vs-Polars
+> gap took its place.** Built + ran the isolated benchmark (`/tmp/ag5_countdistinct.py`,
+> also see the standalone shape below) on **latest pyarrow 24.0.0** / pandas 3.0.3 /
+> polars 1.42.1, 10M rows, threads controlled:
+> - **vs pandas: NO GAP — SHELVE.** Acero grouped `count_distinct` is *faster*
+>   than `pandas.groupby().nunique()` at 1 core (acero/pandas = 0.6–0.8×) and
+>   ~parity multi-core. The original "Acero slower than pandas Cython" claim does
+>   NOT hold on latest — it was the eager-vs-physical measurement artifact the
+>   positioning memory already flagged. Do not file the vs-pandas framing.
+> - **vs Polars: REAL, reproducible gap (new AG5').** Acero grouped
+>   `count_distinct` is **~3.8–5.3× slower than Polars at ≥10k groups** (and 3.9×
+>   at 1M groups). Mechanism (measured): Acero's `count_distinct` is
+>   **thread-insensitive** — ~flat 500–600 ms across 1/2/4/8 cores at 10k groups —
+>   while Polars parallelizes. (Earlier 11.9× figure was a noisy run; corrected.)
+> - **Dup-search (apache/arrow):** no issue reports this. Closest open item is
+>   **#38372 "[Discuss][C++] Replace MemoTable with a SwissTable implementation"**
+>   — the grouping/distinct hash-table perf discussion, a natural home to attach
+>   our data point rather than file anew. (#29633 closed = the original kernel
+>   impl.) Not a duplicate.
+> - **Note the cross-ecosystem pattern:** this is the Acero-C++ sibling of AG10
+>   (DataFusion count-distinct) — count-distinct is a weak spot across the Arrow
+>   stack; Polars and DataFusion-SQL (distinct-then-count rewrite) are both fast.
+>
+> **Next step (needs go-ahead):** either comment our data point on #38372, or
+> file a scoped `[C++][Acero] grouped count_distinct does not parallelize / ~4–5×
+> behind Polars` enhancement. NOT the old vs-pandas issue. Re-verify on latest at
+> file time.
+
 ## Goal
 Verify, then (if it holds and is non-duplicate) report that Acero's grouped
 `count_distinct` / `hash_count_distinct` is slower than pandas' Cython

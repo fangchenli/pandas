@@ -16,7 +16,7 @@ doc** below that a fresh agent can execute end-to-end without prior context.
 | AG2 | `hash_aggregate` SIGABRT on >2 GB string keys | **non-dup**, repro pending | 2 | `AG2-hashagg-abort.md` |
 | AG9 | Arrow `string_view` kernel coverage (contribution) | **active contribution — OUR PR #50224 merged 2026-07-07** (Grouper view keys); #44336 open, #50166 merged | 3 | `AG9-string-view-kernels.md` |
 | AG3 | `Table.group_by` parallelism (likely footgun) | verify-first | 4 | `AG3-table-groupby-parallelism.md` |
-| AG5 | Acero `count_distinct` slower than pandas Cython | needs bench | 5 | `AG5-count-distinct.md` |
+| AG5 | ~~Acero `count_distinct` slower than pandas~~ **SHELVED (Acero faster than pandas on pyarrow 24)**; NEW AG5' = Acero count_distinct ~4–5× behind Polars / doesn't parallelize | **resolved 2026-07-09; AG5' non-dup (rel. #38372)** | 4 | `AG5-count-distinct.md` |
 | AG10 | **DataFusion** `single_distinct_to_groupby` fires for SQL but not the DataFrame API (~3.9× slower count-distinct) | **FILED #23401 + PR #23403 open** | **2** | `AG10-datafusion-singledistinct-dataframe.md` |
 | AG11 | **DataFusion** `CrossJoinExec` mismatches schema metadata (right-biased `extend` vs left-biased `build_join_schema`; #16221 missed cross join) | **verified on latest 54.0.0 + root-caused + non-dup — file-ready** | **2** | `AG11-datafusion-crossjoin-metadata.md` |
 | — | **DataFusion** no common-subplan CSE (recomputes reused subtrees; q11/q15/q2) | **tracked upstream — EPIC #22676 + #8777 open; attach data, don't file** | — | EXECUTION_RESEARCH_SURVEY.md §5 |

@@ -43,6 +43,15 @@ rewrote it manually in our lowering (`_rewrite_n_unique` in
 `benchmarks/translate_datafusion.py`); that manual rewrite is exactly what the
 SQL optimizer does for free.
 
+## Scope check (2026-07-09): AG10 is ISOLATED, not a class
+Swept SQL vs DataFrame-API optimized logical plans on datafusion 54.0.0 across 7
+common optimizer rules (single_distinct_to_groupby, eliminate_cross_join,
+replace_distinct_aggregate, eliminate_group_by_constant, multi-distinct,
+filter-pushdown, limit-pushdown). **Only `single_distinct_to_groupby` diverges;
+the other six fire identically for both front-ends.** So this is a narrow,
+targeted matcher bug (the alias wrapper below), NOT a systemic DataFrame-API
+optimizer blind spot — PR #23403 closes it; no family of issues to file.
+
 ## Root cause (CONFIRMED 2026-07-09 via PR #23403)
 The `single_distinct_to_groupby` rule's matcher requires `Aggregate.aggr_expr`
 entries to be a *bare* `Expr::AggregateFunction { distinct: true, .. }`. The SQL
