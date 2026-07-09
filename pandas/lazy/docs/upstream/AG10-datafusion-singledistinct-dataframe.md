@@ -4,6 +4,18 @@
 (NOT `apache/arrow` like AG1–AG9). **Priority: 2** — sharp, reproducible, single
 root cause, likely a small fix.
 
+> **STATUS (2026-07-09): FILED + PR OPEN.** Issue **#23401**
+> ("`single_distinct_to_groupby` not applied to DataFrame API count(DISTINCT)")
+> filed, and **PR #23403** ("fix: apply single_distinct_to_groupby to aliased
+> DataFrame API aggregates", +196/−2, Closes #23401) is open on `main`, authored
+> by fangchenli. **Root cause confirmed and sharper than the hypothesis below:**
+> the two front-ends place the output **alias** differently — SQL keeps
+> `Aggregate.aggr_expr` *bare* (`AggregateFunction{distinct:true}`) so the rule
+> matches, while the DataFrame API wraps it in `Alias(AggregateFunction, "n")`
+> and the rule's matcher doesn't see through the `Alias`. The fix makes the rule
+> look through the alias. Remaining: review, merge. Keep `_rewrite_n_unique` in
+> our lowering until the fix ships in a release we depend on.
+
 ## The finding (one line)
 A grouped `count(DISTINCT col)` built via DataFusion's **Python DataFrame API**
 is **~3.9× slower** than the **identical query written in SQL**, because the
@@ -31,14 +43,15 @@ rewrote it manually in our lowering (`_rewrite_n_unique` in
 `benchmarks/translate_datafusion.py`); that manual rewrite is exactly what the
 SQL optimizer does for free.
 
-## Hypothesis (for maintainers to confirm — state as hypothesis, not fact)
-The `single_distinct_to_groupby` rule's matcher does not recognize the aggregate
-expression shape produced by the DataFrame API's aggregate builder
-(`Expr::AggregateFunction { distinct: true, .. }` via the UDF `count`), whereas
-the SQL planner produces a shape the rule matches. I.e. the two front-ends emit
-logically-equivalent but structurally-different `LogicalPlan`s, and the rule only
-matches one. Whether the divergence is in the builder or the rule's pattern is
-for maintainers to determine.
+## Root cause (CONFIRMED 2026-07-09 via PR #23403)
+The `single_distinct_to_groupby` rule's matcher requires `Aggregate.aggr_expr`
+entries to be a *bare* `Expr::AggregateFunction { distinct: true, .. }`. The SQL
+planner produces exactly that; the **DataFrame API wraps the aggregate in
+`Alias(AggregateFunction, "n")`** (from `.alias(...)`), and the rule doesn't look
+through the `Alias` — so it silently skips the DataFrame-API plan. The fix (PR
+#23403) makes the rule see through the alias. (Original hypothesis — "the rule
+doesn't recognize the builder's shape" — was right in direction; the specific
+mechanism is the alias wrapper.)
 
 ## Standalone repro (pure datafusion, no pandas/lazy deps)
 ```python

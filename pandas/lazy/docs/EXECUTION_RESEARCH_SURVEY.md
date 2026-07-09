@@ -222,8 +222,12 @@ So the fast path already exists in DataFusion — the DataFrame API just doesn't
 get it. We replicate it manually in the lowering (`_rewrite_n_unique`, the
 distinct-then-count form) for the single-`n_unique` case: **q21 → 0.52x** (1.5s),
 suite geomean 0.95 → **1.00**, totals 0.46 → **0.94**. Filed as a hand-off:
-`upstream/AG10-datafusion-singledistinct-dataframe.md` (target apache/datafusion;
-do NOT file without go-ahead).
+`upstream/AG10-datafusion-singledistinct-dataframe.md` (target apache/datafusion).
+**FILED + PR OPEN (2026-07-09): issue #23401 + PR #23403** ("apply
+single_distinct_to_groupby to aliased DataFrame API aggregates"). Root cause
+confirmed sharper than our hypothesis: the DataFrame API wraps the aggregate in
+an `Alias` (from `.alias(...)`) and the rule only matches a *bare*
+`AggregateFunction`, so it skips the aliased plan; the fix looks through the alias.
 
 This is the probe's headline result: **the join-heavy gap vs Polars was never
 architectural.** A mature arrow-rs engine on our exact substrate, driven by our
