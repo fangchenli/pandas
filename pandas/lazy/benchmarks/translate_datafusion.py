@@ -215,7 +215,66 @@ def _name_of(node) -> str:
     raise NotSupported("unnamed expr")
 
 
-def _lower(plan, ctx: SessionContext, ctr: list) -> D.DataFrame:
+def _children(plan) -> list:
+    if isinstance(plan, Join):
+        return [plan.left, plan.right]
+    inp = getattr(plan, "input", None)
+    return [inp] if inp is not None else []
+
+
+def _count_refs(plan, counts: dict | None = None) -> dict:
+    """id(node) -> how many times it is referenced in the plan DAG. Recurse only
+    on first visit so a shared subtree's descendants aren't double-counted."""
+    if counts is None:
+        counts = {}
+    counts[id(plan)] = counts.get(id(plan), 0) + 1
+    if counts[id(plan)] == 1:
+        for c in _children(plan):
+            _count_refs(c, counts)
+    return counts
+
+
+def _fresh_table(ctx, ctr: list, batches: list) -> D.DataFrame:
+    """Register `batches` under a unique name and return a fresh table handle."""
+    nm = f"m{ctr[0]}"
+    ctr[0] += 1
+    ctx.register_record_batches(nm, [batches])
+    return ctx.table(nm)
+
+
+def _lower(plan, ctx, ctr, memo, refs) -> D.DataFrame:
+    """Lower a node. A node referenced >=2 times (a shared subplan) is
+    MATERIALIZED once to Arrow, and *each* reference gets a fresh table over
+    those cached batches. Two reasons, both found by the differential probe:
+
+    1. correctness — DataFusion has no common-subplan CSE, so recomputing a float
+       SUM in two branches can round differently, breaking q15's exact
+       ``total_revenue == max(total_revenue)`` filter (0 rows).
+    2. shared-reference — reusing one DataFrame handle for both refs trips
+       DataFusion's "Projections require unique expression names" when the shared
+       node is self-joined (q2) — the #14147 duplicate-qualified-field limit. A
+       fresh uniquely-named table per reference gives distinct qualifiers over
+       identical values, fixing both."""
+    key = id(plan)
+    if key in memo:
+        cached = memo[key]
+        # a shared node caches its Arrow batches -> a fresh table per reference
+        return _fresh_table(ctx, ctr, cached) if isinstance(cached, list) else cached
+    df = _lower_impl(plan, ctx, ctr, memo, refs)
+    if refs.get(key, 0) >= 2 and not isinstance(plan, DataFrameSource):
+        batches = [b.replace_schema_metadata(None) for b in df.collect()]  # AG11 strip
+        if not batches:
+            # empty result: fabricate one 0-row batch so we still register a table
+            # (avoids the AG13 [[]] empty-partition panic and the reuse error).
+            b = pa.RecordBatch.from_pandas(df.to_pandas(), preserve_index=False)
+            batches = [b.replace_schema_metadata(None)]
+        memo[key] = batches
+        return _fresh_table(ctx, ctr, batches)
+    memo[key] = df
+    return df
+
+
+def _lower_impl(plan, ctx, ctr, memo, refs) -> D.DataFrame:
     if isinstance(plan, DataFrameSource):
         nm = f"t{ctr[0]}"
         ctr[0] += 1
@@ -223,17 +282,19 @@ def _lower(plan, ctx: SessionContext, ctr: list) -> D.DataFrame:
         return ctx.table(nm)
 
     if isinstance(plan, Filter):
-        return _lower(plan.input, ctx, ctr).filter(_expr(_ir(plan.predicate)))
+        return _lower(plan.input, ctx, ctr, memo, refs).filter(
+            _expr(_ir(plan.predicate))
+        )
 
     if isinstance(plan, Project):
         exprs = []
         for e in plan.exprs:
             node = _ir(e)
             exprs.append(_expr(node).alias(_name_of(node)))
-        return _lower(plan.input, ctx, ctr).select(*exprs)
+        return _lower(plan.input, ctx, ctr, memo, refs).select(*exprs)
 
     if isinstance(plan, Aggregate):
-        df = _lower(plan.input, ctx, ctr)
+        df = _lower(plan.input, ctx, ctr, memo, refs)
         gnames = [_name_of(_ir(g)) for g in plan.group_by]
         agg_nodes = [_ir(e) for e in plan.agg_exprs]
         rw = _rewrite_n_unique(df, gnames, agg_nodes)
@@ -244,7 +305,7 @@ def _lower(plan, ctx: SessionContext, ctr: list) -> D.DataFrame:
         return df.aggregate(groups, aggs)
 
     if isinstance(plan, Sort):
-        df = _lower(plan.input, ctx, ctr)
+        df = _lower(plan.input, ctx, ctr, memo, refs)
         keys = [
             # nulls_first=False matches pandas' sort_values(na_position="last"),
             # which places NA last for BOTH directions; DataFusion's DataFrame-API
@@ -256,10 +317,12 @@ def _lower(plan, ctx: SessionContext, ctr: list) -> D.DataFrame:
         return df.sort(*keys)
 
     if isinstance(plan, Limit):
-        return _lower(plan.input, ctx, ctr).limit(int(plan.n), int(plan.offset or 0))
+        return _lower(plan.input, ctx, ctr, memo, refs).limit(
+            int(plan.n), int(plan.offset or 0)
+        )
 
     if isinstance(plan, TopK):
-        df = _lower(plan.input, ctx, ctr)
+        df = _lower(plan.input, ctx, ctr, memo, refs)
         keys = [
             # nulls_first=False matches pandas' sort_values(na_position="last"),
             # which places NA last for BOTH directions; DataFusion's DataFrame-API
@@ -271,11 +334,11 @@ def _lower(plan, ctx: SessionContext, ctr: list) -> D.DataFrame:
         return df.sort(*keys).limit(int(plan.k))
 
     if isinstance(plan, Distinct):
-        return _lower(plan.input, ctx, ctr).distinct()
+        return _lower(plan.input, ctx, ctr, memo, refs).distinct()
 
     if isinstance(plan, Join):
-        left = _lower(plan.left, ctx, ctr)
-        right = _lower(plan.right, ctx, ctr)
+        left = _lower(plan.left, ctx, ctr, memo, refs)
+        right = _lower(plan.right, ctx, ctr, memo, refs)
         how = plan.how
         if how == "cross":
             # DataFusion has no cross method; join_on with no predicates == cross.
@@ -340,5 +403,5 @@ def _ir(e):
 def run(ldf) -> pd.DataFrame:
     plan = ldf._get_optimized_plan()
     ctx = SessionContext()
-    df = _lower(plan, ctx, [0])
+    df = _lower(plan, ctx, [0], {}, _count_refs(plan))
     return df.to_pandas()
