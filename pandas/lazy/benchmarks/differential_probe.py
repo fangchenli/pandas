@@ -15,13 +15,18 @@ matrix *standing*: a fixed workload grid run identically across
 **divergence report**. Every diverging cell is a *candidate finding* — the
 harness flags, a human confirms and roots-cause.
 
-Three divergence classes, most-valuable first:
+Four divergence classes, most-valuable first:
 
-    RESULT  engines disagree on the answer (correctness/bug — highest value; the
-            surface our ad-hoc perf matrices never covered)
+    CRASH   one engine raises/panics where others succeed (found AG13: datafusion
+            register_record_batches panics on an empty table). Loudest signal.
+    RESULT  engines disagree on the answer (correctness/bug, or a pandas->engine
+            lowering hazard — the surface our ad-hoc perf matrices never covered)
     PLAN    datafusion SQL vs DataFrame-API optimized plans differ in operator
             shape (the AG10 class — an optimizer rule fires for one front-end)
     PERF    one engine is >Nx slower on the same cell (the AG3/4/5 class)
+
+CRASH/RESULT come from a degenerate-input edge sweep (empty / all-null / null
+key); PLAN/PERF from the main grouped-aggregate grid.
 
 Self-contained: pyarrow + polars + datafusion + numpy + pandas, synthetic data.
 Run on the *current* releases in a throwaway venv (see ``upstream/README.md`` §1),
@@ -216,6 +221,34 @@ AGGS = {
         sql="count(DISTINCT iv)",
         df=lambda: F.count(col("iv")).distinct().build().alias("out"),
     ),
+    # used by the edge-case (RESULT/CRASH) sweep, not the perf grid
+    "count": AggSpec(
+        "count",
+        "iv",
+        pandas=lambda g: g["iv"].count(),
+        polars=lambda: pl.col("iv").count().alias("out"),
+        acero="count",
+        sql="count(iv)",
+        df=lambda: F.count(col("iv")).alias("out"),
+    ),
+    "mean": AggSpec(
+        "mean",
+        "fv",
+        pandas=lambda g: g["fv"].mean(),
+        polars=lambda: pl.col("fv").mean().alias("out"),
+        acero="mean",
+        sql="avg(fv)",
+        df=lambda: F.avg(col("fv")).alias("out"),
+    ),
+    "min": AggSpec(
+        "min",
+        "fv",
+        pandas=lambda g: g["fv"].min(),
+        polars=lambda: pl.col("fv").min().alias("out"),
+        acero="min",
+        sql="min(fv)",
+        df=lambda: F.min(col("fv")).alias("out"),
+    ),
 }
 
 
@@ -281,7 +314,7 @@ def run_grouped_agg(ds: Dataset, agg: AggSpec):
 # --------------------------------------------------------------------------- #
 @dataclass
 class Finding:
-    kind: str  # RESULT | PLAN | PERF
+    kind: str  # CRASH | RESULT | PLAN | PERF
     workload: str
     detail: str
     severity: float  # sort key (bigger = louder)
@@ -367,6 +400,158 @@ def analyze(
     return findings
 
 
+# --------------------------------------------------------------------------- #
+# Edge-case sweep: degenerate inputs (empty / all-null group / null key) surface
+# the RESULT (semantic-divergence / lowering-hazard) and CRASH (one engine
+# raises or PANICS where others succeed) classes. This is how AG13 (datafusion
+# register_record_batches panics on an empty table) and AG11-class crashes get
+# caught automatically. Tiny crafted tables; each engine wrapped so a crash is a
+# finding, not the end of the run.
+# --------------------------------------------------------------------------- #
+def _safe(fn):
+    """run fn; return ("ok", value) or ("crash", "ExcType: msg"). Catches Rust
+    PanicException (pyo3) too — a panic is the loudest divergence there is."""
+    try:
+        return ("ok", fn())
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as e:
+        return ("crash", f"{type(e).__name__}: {str(e).strip()[:90]}")
+
+
+def _pairs(keys, vals) -> list[tuple[str, str]]:
+    """canonical [(key, out)] as strings, nulls -> 'NULL', sorted. Exact semantic
+    compare for tiny inputs (distinguishes 0.0 from NULL from NaN)."""
+    rows = []
+    for k, v in zip(keys, vals, strict=True):
+        ks = "NULL" if pd.isna(k) else str(k)
+        if pd.isna(v):
+            vs = "NULL"
+        elif isinstance(v, float):
+            vs = repr(round(v, 6))
+        else:
+            vs = str(v)
+        rows.append((ks, vs))
+    return sorted(rows)
+
+
+def run_edge_case(tbl: pa.Table, agg: AggSpec) -> dict[str, tuple[str, object]]:
+    """run one grouped agg over a crafted table on all engines, crash-safe."""
+    results: dict[str, tuple[str, object]] = {}
+
+    def pandas_pairs():
+        ppd = tbl.to_pandas(types_mapper=pd.ArrowDtype)
+        s = agg.pandas(ppd.groupby("k", dropna=True)).reset_index()
+        s.columns = ["k", "out"]
+        return _pairs(s["k"].tolist(), s["out"].tolist())
+
+    def polars_pairs():
+        rp = pl.from_arrow(tbl).group_by("k").agg(agg.polars()).to_pandas()
+        return _pairs(rp["k"].tolist(), rp["out"].tolist())
+
+    def acero_pairs():
+        r = tbl.group_by(["k"]).aggregate([(agg.valcol, agg.acero)])
+        rp = r.to_pandas()
+        return _pairs(rp["k"].tolist(), rp[f"{agg.valcol}_{agg.acero}"].tolist())
+
+    results["pandas"] = _safe(pandas_pairs)
+    results["polars"] = _safe(polars_pairs)
+    results["acero"] = _safe(acero_pairs)
+
+    # datafusion: registration itself can panic (AG13) — share one attempt.
+    def make_ctx():
+        ctx = SessionContext()
+        ctx.register_record_batches(
+            "t", [tbl.replace_schema_metadata(None).to_batches()]
+        )
+        return ctx
+
+    reg = _safe(make_ctx)
+    if reg[0] == "crash":
+        results["datafusion-sql"] = reg
+        results["datafusion-df"] = reg
+    else:
+        ctx = reg[1]
+
+        def dfsql_pairs():
+            b = ctx.sql(f"SELECT k, {agg.sql} AS out FROM t GROUP BY k").collect()
+            rp = pa.Table.from_batches(b).to_pandas()
+            return _pairs(rp["k"].tolist(), rp["out"].tolist())
+
+        def dfdf_pairs():
+            b = ctx.table("t").aggregate([col("k")], [agg.df()]).collect()
+            rp = pa.Table.from_batches(b).to_pandas()
+            return _pairs(rp["k"].tolist(), rp["out"].tolist())
+
+        results["datafusion-sql"] = _safe(dfsql_pairs)
+        results["datafusion-df"] = _safe(dfdf_pairs)
+    return results
+
+
+def analyze_edge(workload: str, results: dict) -> list[Finding]:
+    findings: list[Finding] = []
+    ok = {e: v for e, (s, v) in results.items() if s == "ok"}
+    crashed = {e: m for e, (s, m) in results.items() if s == "crash"}
+    # CRASH — an engine raised/panicked where at least one other succeeded.
+    if crashed and ok:
+        for e, m in crashed.items():
+            findings.append(
+                Finding(
+                    "CRASH",
+                    workload,
+                    f"{e} raised where {sorted(ok)} succeeded — {m}",
+                    2e6,  # a crash outranks a wrong answer
+                )
+            )
+    # RESULT — engines that succeeded disagree with pandas (lowering oracle).
+    # These are pandas-semantics divergences: a lowering hazard, not necessarily
+    # an upstream bug (SQL sum-of-null=NULL vs pandas 0; pandas drops NULL keys).
+    if "pandas" in ok:
+        ref = ok["pandas"]
+        for e, pairs in ok.items():
+            if e == "pandas" or pairs == ref:
+                continue
+            findings.append(
+                Finding(
+                    "RESULT",
+                    workload,
+                    f"{e} vs pandas: {pairs} vs {ref}",
+                    1e6,
+                )
+            )
+    return findings
+
+
+def build_edge_cases() -> list[tuple[str, pa.Table, list[str]]]:
+    """crafted degenerate tables (columns k, fv, iv) + which aggs to probe."""
+    empty = pa.table(
+        {
+            "k": pa.array([], pa.string()),
+            "fv": pa.array([], pa.float64()),
+            "iv": pa.array([], pa.int64()),
+        }
+    )
+    all_null = pa.table(
+        {
+            "k": pa.array(["A", "A", "B", "B"]),
+            "fv": pa.array([None, None, 1.0, 2.0], pa.float64()),
+            "iv": pa.array([None, None, 3, 4], pa.int64()),
+        }
+    )
+    null_key = pa.table(
+        {
+            "k": pa.array(["A", None, None, "B"]),
+            "fv": pa.array([1.0, 2.0, 3.0, 4.0], pa.float64()),
+            "iv": pa.array([1, 2, 3, 4], pa.int64()),
+        }
+    )
+    return [
+        ("empty", empty, ["sum", "count"]),
+        ("all_null_group", all_null, ["sum", "count", "mean", "min"]),
+        ("null_key", null_key, ["sum"]),
+    ]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -425,13 +610,28 @@ def main():
 
         all_findings.extend(analyze(wid, cells, plans, args.perf_threshold))
 
+    # ---- edge-case sweep (RESULT / CRASH surface) --------------------------
+    print()
+    for name, tbl, aggnames in build_edge_cases():
+        for an in aggnames:
+            wid = f"edge/{name}/{an}"
+            if args.only and args.only not in wid:
+                continue
+            results = run_edge_case(tbl, AGGS[an])
+            status = " ".join(
+                f"{e.split('-')[-1]:>3.3}={'OK' if s == 'ok' else 'XX'}"
+                for e, (s, _) in results.items()
+            )
+            print(f"{wid:<40} | {status}")
+            all_findings.extend(analyze_edge(wid, results))
+
     # ---- divergence report -------------------------------------------------
     print("\n" + "=" * 78)
     print(
         "FINDINGS (candidate gaps — each needs human confirm + root-cause + dup-search)"
     )
     print("=" * 78)
-    order = {"RESULT": 0, "PLAN": 1, "PERF": 2}
+    order = {"CRASH": 0, "RESULT": 1, "PLAN": 2, "PERF": 3}
     all_findings.sort(key=lambda f: (order[f.kind], -f.severity))
     if not all_findings:
         print("none above thresholds.")
@@ -439,10 +639,10 @@ def main():
         print(f"[{f.kind:<6}] {f.workload}\n         {f.detail}")
     counts = {
         k: sum(1 for f in all_findings if f.kind == k)
-        for k in ("RESULT", "PLAN", "PERF")
+        for k in ("CRASH", "RESULT", "PLAN", "PERF")
     }
     print(
-        f"\nsummary: {counts['RESULT']} RESULT, "
+        f"\nsummary: {counts['CRASH']} CRASH, {counts['RESULT']} RESULT, "
         f"{counts['PLAN']} PLAN, {counts['PERF']} PERF"
     )
 

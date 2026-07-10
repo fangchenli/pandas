@@ -23,6 +23,13 @@ Each was a manual matrix built once and discarded. This makes the matrix
 
 ## Divergence classes (most-valuable first)
 
+- **CRASH** — one engine **raises or panics** (incl. a Rust `PanicException` from
+  pyo3) on an input the others handle. The loudest divergence; a crash on valid
+  input is almost always an upstream bug. Surfaced by the degenerate-input
+  (empty / all-null / null-key) edge sweep, each engine wrapped so a crash is a
+  *finding*, not the end of the run. This is how **AG13** (datafusion-python
+  `register_record_batches` panics on an empty table) was found, and how an
+  AG11-class crash gets caught automatically.
 - **RESULT** — engines disagree on the *answer*. Highest value (a bug, not an
   enhancement). This is the surface our ad-hoc perf matrices never covered.
   Compares *values*, not dtypes (polars count → `uint32`, pandas → `int64` is
@@ -66,6 +73,25 @@ unprompted** — the proof it would have caught them:
 
 It also flagged pandas as the laggard in several low-cardinality cells (expected;
 pandas is the oracle, not a target).
+
+### First *new* find — the RESULT/CRASH surface paid off immediately (2026-07-09)
+Widening to the degenerate-input edge sweep (`empty` / `all_null_group` /
+`null_key` × sum/count/mean/min) on the same releases produced, on its first run:
+
+- **AG13 (CRASH, new upstream find)** — `datafusion-sql` and `datafusion-df` both
+  **panic** (`PanicException: index out of bounds`) on an **empty table**, where
+  pandas/polars/acero return an empty result. Root-caused to one line in
+  datafusion-python (`register_record_batches` indexes `partitions[0][0]`
+  unchecked); non-dup (sibling of the fixed #575). Hand-off:
+  `upstream/AG13-datafusion-register-empty-panic.md`.
+- **Two RESULT lowering-hazards** (semantics, not upstream bugs): `sum` of an
+  **all-null group** → datafusion + acero return NULL, pandas + polars return
+  `0.0`; **NULL in the group key** → datafusion/acero/polars keep the null group,
+  pandas drops it (`dropna=True`). These are `translate_datafusion.py`
+  correctness hazards — a pandas→engine lowering silently changes the answer —
+  so they're worth tracking even though they're documented SQL-vs-pandas choices,
+  not bugs to file. `count`/`mean`/`min` on the all-null group agreed everywhere
+  (correctly *not* flagged).
 
 ### Two harness weaknesses it caught in *itself* on run 1 (now fixed)
 The instrument's first output was audited before trusting it — and it exposed two
