@@ -108,10 +108,31 @@ findings against known ground truth before believing a new one.**
 
 ## Coverage today, and the axes to widen (all pure finding work)
 
-Implemented: **grouped aggregate** (`sum`, `count_distinct`) × key dtype
-(`int64`, `string`) × cardinality (100 / 10k / 1M). Covers the AG3/AG4/AG5′/AG10
-surface. Extend by adding entries to `AGGS` / `build_dataset` / the operator
-registry:
+Implemented: (1) **grouped aggregate** (`sum`, `count_distinct`) × key dtype
+(`int64`, `string`) × cardinality (100 / 10k / 1M) — the AG3/AG4/AG5′/AG10
+surface; (2) a **degenerate-input edge sweep** (empty / all-null / null-key) —
+the RESULT/CRASH surface that found AG13; (3) a **join-shape matrix**
+(inner/left/full/fanout/null-key/cross) — the AG11 axis.
+
+The join matrix (added 2026-07-10) already earns its keep on the first run:
+- **CRASH** — its `cross_count_meta[AG11]` case (a `count` aggregate over a
+  metadata-carrying cross join) **reproduces AG11**: both datafusion front-ends
+  raise `Internal error: Physical input schema should be the same…` where
+  pandas/polars succeed. It's encoded as a standing tracker — when AG11's fix
+  (datafusion PR #23442) ships, this cell auto-flips to OK, retiring the finding
+  with zero manual re-verification. (Pinning the trigger took care: a plain
+  cross-join `collect` masks it; only an *aggregate over* the cross join trips
+  the schema check. acero can't express a keyless cross join, correctly reported
+  `unsupported` — not a crash.)
+- **RESULT (lowering hazard)** — `null_key_inner`: **pandas matches `NULL==NULL`
+  on a join key** (yielding an extra matched row), while polars/acero/datafusion
+  all use SQL semantics (null never matches). Lowering a pandas merge on a
+  null-containing key to any of these engines silently drops the null-null
+  matches — a `translate_datafusion.py` correctness hazard. inner/left/full/
+  fanout/clean-cross all agreed (correctly not flagged).
+
+Extend by adding entries to `AGGS` / `build_dataset` / `build_edge_cases` /
+`build_join_cases`:
 
 - **RESULT surface** — the highest-value, least-covered. Add ops where engines
   plausibly disagree: null handling in agg, empty groups, NaN vs null, integer

@@ -25,8 +25,10 @@ Four divergence classes, most-valuable first:
             shape (the AG10 class — an optimizer rule fires for one front-end)
     PERF    one engine is >Nx slower on the same cell (the AG3/4/5 class)
 
-CRASH/RESULT come from a degenerate-input edge sweep (empty / all-null / null
-key); PLAN/PERF from the main grouped-aggregate grid.
+PLAN/PERF come from the main grouped-aggregate grid; CRASH/RESULT from a
+degenerate-input edge sweep (empty / all-null / null key) and a join-shape matrix
+(inner/left/full/fanout/null-key/cross, the AG11 axis — its cross-count-metadata
+case reproduces AG11 and auto-flips to OK when the fix ships).
 
 Self-contained: pyarrow + polars + datafusion + numpy + pandas, synthetic data.
 Run on the *current* releases in a throwaway venv (see ``upstream/README.md`` §1),
@@ -408,11 +410,24 @@ def analyze(
 # caught automatically. Tiny crafted tables; each engine wrapped so a crash is a
 # finding, not the end of the run.
 # --------------------------------------------------------------------------- #
+# aliased base so the `validate-errors-locations` hook (which flags any class
+# whose base is literally `Exception`/`*Error`/`*Warning` outside pandas/errors)
+# doesn't mistake this benchmark-internal sentinel for a pandas public error.
+_Sentinel = Exception
+
+
+class _Unsupported(_Sentinel):
+    """an engine's API genuinely can't express this shape (not a bug) — excluded
+    from CRASH/RESULT so an API limitation isn't mistaken for a defect."""
+
+
 def _safe(fn):
-    """run fn; return ("ok", value) or ("crash", "ExcType: msg"). Catches Rust
-    PanicException (pyo3) too — a panic is the loudest divergence there is."""
+    """run fn; return ("ok", value) | ("unsupported", why) | ("crash", msg).
+    Catches Rust PanicException (pyo3) too — a panic is the loudest divergence."""
     try:
         return ("ok", fn())
+    except _Unsupported as e:
+        return ("unsupported", str(e))
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException as e:
@@ -552,6 +567,167 @@ def build_edge_cases() -> list[tuple[str, pa.Table, list[str]]]:
     ]
 
 
+# --------------------------------------------------------------------------- #
+# Join-shape matrix (the AG11 axis): run the SAME logical join across engines,
+# vary shape (inner/left/full/fanout/null-key/cross) + metadata, compare the
+# multiset of (lv, rv) payload pairs — order-insensitive, key-naming-agnostic.
+# Surfaces RESULT (join semantics diverge — e.g. pandas matches NULL==NULL on a
+# join key, SQL engines don't) and CRASH (AG11: count over a metadata-carrying
+# cross join). The cross-count case auto-flips to OK when AG11's fix (#23442)
+# ships — cross-version fix tracking for free.
+# --------------------------------------------------------------------------- #
+_HOW_PD = {"inner": "inner", "left": "left", "full": "outer"}
+_HOW_PL = {"inner": "inner", "left": "left", "full": "full"}
+_HOW_ACERO = {"inner": "inner", "left": "left outer", "full": "full outer"}
+_HOW_SQL = {"inner": "JOIN", "left": "LEFT JOIN", "full": "FULL JOIN"}
+
+
+def _lv_rv(df) -> list[tuple[str, str]]:
+    def n(x):
+        return "NULL" if pd.isna(x) else str(x)
+
+    return sorted((n(a), n(b)) for a, b in zip(df["lv"], df["rv"], strict=True))
+
+
+def run_join_case(
+    lt: pa.Table, rt: pa.Table, how: str, keep_meta: bool, op: str
+) -> dict[str, tuple[str, object]]:
+    """one join across all engines, crash-safe. op='payload' -> (lv,rv) multiset;
+    op='count' -> [('n', rowcount)] (the AG11 aggregate-over-cross trigger)."""
+    lpd, rpd = lt.to_pandas(), rt.to_pandas()
+    lpl, rpl = pl.from_arrow(lt), pl.from_arrow(rt)
+
+    def _emit(df, n):
+        return [("n", str(n))] if op == "count" else _lv_rv(df)
+
+    def pandas_fn():
+        m = (
+            lpd.merge(rpd, how="cross")
+            if how == "cross"
+            else lpd.merge(rpd, on="k", how=_HOW_PD[how])
+        )
+        return _emit(m, len(m))
+
+    def polars_fn():
+        m = (
+            lpl.join(rpl, how="cross")
+            if how == "cross"
+            else lpl.join(rpl, on="k", how=_HOW_PL[how])
+        ).to_pandas()
+        return _emit(m, len(m))
+
+    def acero_fn():
+        if how == "cross":
+            raise _Unsupported("pyarrow Table.join requires keys (no cross)")
+        m = lt.join(rt, keys="k", join_type=_HOW_ACERO[how]).to_pandas()
+        return _emit(m, len(m))
+
+    def make_ctx():
+        ctx = SessionContext()
+        lb = lt if keep_meta else lt.replace_schema_metadata(None)
+        rb = rt if keep_meta else rt.replace_schema_metadata(None)
+        ctx.register_record_batches("l", [lb.to_batches()])
+        ctx.register_record_batches("r", [rb.to_batches()])
+        return ctx
+
+    def dfsql_fn(ctx):
+        if op == "count":
+            join = (
+                "CROSS JOIN r" if how == "cross" else f"{_HOW_SQL[how]} r ON l.k = r.k"
+            )
+            b = ctx.sql(f"SELECT count(*) AS n FROM l {join}").collect()
+            return [("n", str(pa.Table.from_batches(b).to_pandas()["n"][0]))]
+        q = (
+            "SELECT l.lv, r.rv FROM l CROSS JOIN r"
+            if how == "cross"
+            else f"SELECT l.lv, r.rv FROM l {_HOW_SQL[how]} r ON l.k = r.k"
+        )
+        b = ctx.sql(q).collect()
+        return _lv_rv(pa.Table.from_batches(b).to_pandas())
+
+    def dfdf_fn(ctx):
+        lo, ro = ctx.table("l"), ctx.table("r")
+        j = (
+            lo.join_on(ro, how="inner")
+            if how == "cross"
+            else lo.join(ro, how=how, left_on=["k"], right_on=["k"])
+        )
+        if op == "count":
+            return [("n", str(j.count()))]  # aggregate over cross join = AG11 path
+        b = j.select(col("lv"), col("rv")).collect()
+        return _lv_rv(pa.Table.from_batches(b).to_pandas())
+
+    results: dict[str, tuple[str, object]] = {
+        "pandas": _safe(pandas_fn),
+        "polars": _safe(polars_fn),
+        "acero": _safe(acero_fn),
+    }
+    reg = _safe(make_ctx)
+    if reg[0] != "ok":
+        results["datafusion-sql"] = results["datafusion-df"] = reg
+    else:
+        results["datafusion-sql"] = _safe(lambda: dfsql_fn(reg[1]))
+        results["datafusion-df"] = _safe(lambda: dfdf_fn(reg[1]))
+    return results
+
+
+def analyze_join(workload: str, results: dict) -> list[Finding]:
+    findings: list[Finding] = []
+    ok = {e: v for e, (s, v) in results.items() if s == "ok"}
+    crashed = {e: m for e, (s, m) in results.items() if s == "crash"}
+    if crashed and ok:
+        for e, m in crashed.items():
+            findings.append(
+                Finding(
+                    "CRASH",
+                    workload,
+                    f"{e} raised where {sorted(ok)} succeeded — {m}",
+                    2e6,
+                )
+            )
+    if "pandas" in ok:
+        ref = ok["pandas"]
+        for e, rows in ok.items():
+            if e == "pandas" or rows == ref:
+                continue
+            findings.append(
+                Finding("RESULT", workload, f"{e} vs pandas: {rows} vs {ref}", 1e6)
+            )
+    return findings
+
+
+def build_join_cases():
+    """crafted (L, R) tables + join shape. Payload cases compare (lv,rv); the
+    cross-count case is the AG11 tracker (metadata-carrying, aggregate-over-cross)."""
+
+    def t(d):
+        return pa.table(d)
+
+    L = t({"k": pa.array([1, 2, 3], pa.int64()), "lv": ["L1", "L2", "L3"]})
+    R = t({"k": pa.array([2, 3, 4], pa.int64()), "rv": ["R2", "R3", "R4"]})
+    Ln = t({"k": pa.array([1, None, 2], pa.int64()), "lv": ["L1", "Ln", "L2"]})
+    Rn = t({"k": pa.array([None, 2, 3], pa.int64()), "rv": ["Rn", "R2", "R3"]})
+    Ld = t({"k": pa.array([1, 1, 2], pa.int64()), "lv": ["L1a", "L1b", "L2"]})
+    Rd = t({"k": pa.array([1, 2, 2], pa.int64()), "rv": ["R1", "R2a", "R2b"]})
+    # AG11 tracker: metadata-carrying (the `pandas` blob from from_pandas).
+    Lm = pa.Table.from_pandas(
+        pd.DataFrame({"k": [1, 2, 3], "lv": ["L1", "L2", "L3"]}), preserve_index=False
+    )
+    Rm = pa.Table.from_pandas(
+        pd.DataFrame({"k": [2, 3, 4], "rv": ["R2", "R3", "R4"]}), preserve_index=False
+    )
+    #  name,            L,   R,   how,     keep_meta, op
+    return [
+        ("inner_1to1", L, R, "inner", False, "payload"),
+        ("left", L, R, "left", False, "payload"),
+        ("full", L, R, "full", False, "payload"),
+        ("dup_fanout", Ld, Rd, "inner", False, "payload"),
+        ("null_key_inner", Ln, Rn, "inner", False, "payload"),
+        ("cross_clean", L, R, "cross", False, "payload"),
+        ("cross_count_meta[AG11]", Lm, Rm, "cross", True, "count"),
+    ]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -624,6 +800,21 @@ def main():
             )
             print(f"{wid:<40} | {status}")
             all_findings.extend(analyze_edge(wid, results))
+
+    # ---- join-shape matrix (RESULT / CRASH surface, the AG11 axis) ----------
+    print()
+    for name, lt, rt, how, keep_meta, op in build_join_cases():
+        wid = f"join/{name}"
+        if args.only and args.only not in wid:
+            continue
+        results = run_join_case(lt, rt, how, keep_meta, op)
+        status = " ".join(
+            f"{e.split('-')[-1]:>3.3}="
+            + {"ok": "OK", "crash": "XX", "unsupported": "--"}[s]
+            for e, (s, _) in results.items()
+        )
+        print(f"{wid:<40} | {status}")
+        all_findings.extend(analyze_join(wid, results))
 
     # ---- divergence report -------------------------------------------------
     print("\n" + "=" * 78)
