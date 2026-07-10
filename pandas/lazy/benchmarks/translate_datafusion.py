@@ -163,6 +163,13 @@ def _agg_expr(node) -> D.Expr:
     inner = _expr(call.args[0])
     func = call.function
     e = {
+        # KNOWN SEMANTIC GAP (differential_probe edge sweep ``all_null_group/sum``):
+        # pandas sum of an all-null group is 0 (skipna, min_count=0); DataFusion
+        # returns NULL. The pandas-faithful coalesce(sum, 0) can't be expressed
+        # inside DataFusion's aggregate() (a scalar fn wrapping an aggregate is
+        # rejected — it'd need a post-aggregate projection), and all-null measure
+        # groups don't occur in TPC-H, so we keep the plain sum. (mean/min/max of
+        # an all-null group are NaN in both, and count is 0 in both — no gap.)
         "sum": lambda: F.sum(inner),
         "mean": lambda: F.avg(inner),
         "min": lambda: F.min(inner),
@@ -239,7 +246,11 @@ def _lower(plan, ctx: SessionContext, ctr: list) -> D.DataFrame:
     if isinstance(plan, Sort):
         df = _lower(plan.input, ctx, ctr)
         keys = [
-            col(_name_of(_ir(b))).sort(ascending=not bool(d))
+            # nulls_first=False matches pandas' sort_values(na_position="last"),
+            # which places NA last for BOTH directions; DataFusion's DataFrame-API
+            # default is nulls-first, so pass it explicitly (differential_probe
+            # sort matrix: pandas NA-last vs datafusion-df NA-first).
+            col(_name_of(_ir(b))).sort(ascending=not bool(d), nulls_first=False)
             for b, d in zip(plan.by, plan.descending, strict=False)
         ]
         return df.sort(*keys)
@@ -250,7 +261,11 @@ def _lower(plan, ctx: SessionContext, ctr: list) -> D.DataFrame:
     if isinstance(plan, TopK):
         df = _lower(plan.input, ctx, ctr)
         keys = [
-            col(_name_of(_ir(b))).sort(ascending=not bool(d))
+            # nulls_first=False matches pandas' sort_values(na_position="last"),
+            # which places NA last for BOTH directions; DataFusion's DataFrame-API
+            # default is nulls-first, so pass it explicitly (differential_probe
+            # sort matrix: pandas NA-last vs datafusion-df NA-first).
+            col(_name_of(_ir(b))).sort(ascending=not bool(d), nulls_first=False)
             for b, d in zip(plan.by, plan.descending, strict=False)
         ]
         return df.sort(*keys).limit(int(plan.k))
@@ -275,7 +290,14 @@ def _join(left, right, plan) -> D.DataFrame:
     columns and its ``on=`` coalesce is unreliable when an input is itself a
     join result, so we do it explicitly: rename the right keys to temps (so we
     can drop/rename them deterministically), suffix overlapping non-key columns
-    the way ``pd.merge`` does, then join on the temp keys."""
+    the way ``pd.merge`` does, then join on the temp keys.
+
+    KNOWN SEMANTIC GAP (differential_probe join matrix ``null_key_inner``): when a
+    join key contains NULLs, ``pd.merge`` matches NULL==NULL (nulls join to each
+    other) but DataFusion uses SQL semantics (NULL never matches), so null-keyed
+    rows are dropped. Not worked around here — a cheap fix (coalesce keys to a
+    sentinel) is fragile and TPC-H join keys are non-null. Callers relying on
+    pandas null-key matching must not lower via this path."""
     how = plan.how
     lnames = left.schema().names
     rnames = right.schema().names
