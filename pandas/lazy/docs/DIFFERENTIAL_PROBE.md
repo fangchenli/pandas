@@ -129,7 +129,18 @@ The join matrix (added 2026-07-10) already earns its keep on the first run:
   all use SQL semantics (null never matches). Lowering a pandas merge on a
   null-containing key to any of these engines silently drops the null-null
   matches — a `translate_datafusion.py` correctness hazard. inner/left/full/
-  fanout/clean-cross all agreed (correctly not flagged).
+  fanout/clean-cross/semi/anti all agreed (correctly not flagged).
+- **CRASH (self-join, tracked upstream)** — `self_join`: **datafusion-df raises
+  `Schema contains duplicate qualified field name t.k`** joining a table to
+  itself, where pandas/polars/acero/datafusion-**sql** all succeed. This is the
+  exact q16/q21 lowering issue (why `translate_datafusion.py._join` renames the
+  right keys to temporaries). Already tracked upstream — **open #14147** (+
+  regression #14112) — so *attach data, don't file*; the cell is a standing
+  fix-tracker that flips to OK when #14147 lands.
+
+Both `cross_count_meta[AG11]` and `self_join` double as **cross-version
+regression/fix trackers**: re-run on a new datafusion release and a cell flipping
+CRASH→OK is the fix landing, OK→CRASH a regression.
 
 Extend by adding entries to `AGGS` / `build_dataset` / `build_edge_cases` /
 `build_join_cases`:

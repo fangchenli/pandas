@@ -27,8 +27,10 @@ Four divergence classes, most-valuable first:
 
 PLAN/PERF come from the main grouped-aggregate grid; CRASH/RESULT from a
 degenerate-input edge sweep (empty / all-null / null key) and a join-shape matrix
-(inner/left/full/fanout/null-key/cross, the AG11 axis — its cross-count-metadata
-case reproduces AG11 and auto-flips to OK when the fix ships).
+(inner/left/full/fanout/null-key/cross/semi/anti/self, the AG11 axis). Two join
+cells are standing fix-trackers that auto-flip to OK when the upstream fix ships:
+cross-count-metadata reproduces AG11 (datafusion PR #23442), and self-join
+reproduces the datafusion-df duplicate-qualified-field limitation (open #14147).
 
 Self-contained: pyarrow + polars + datafusion + numpy + pandas, synthetic data.
 Run on the *current* releases in a throwaway venv (see ``upstream/README.md`` §1),
@@ -569,31 +571,57 @@ def build_edge_cases() -> list[tuple[str, pa.Table, list[str]]]:
 
 # --------------------------------------------------------------------------- #
 # Join-shape matrix (the AG11 axis): run the SAME logical join across engines,
-# vary shape (inner/left/full/fanout/null-key/cross) + metadata, compare the
-# multiset of (lv, rv) payload pairs — order-insensitive, key-naming-agnostic.
-# Surfaces RESULT (join semantics diverge — e.g. pandas matches NULL==NULL on a
-# join key, SQL engines don't) and CRASH (AG11: count over a metadata-carrying
-# cross join). The cross-count case auto-flips to OK when AG11's fix (#23442)
-# ships — cross-version fix tracking for free.
+# vary shape (inner/left/full/fanout/null-key/cross/semi/anti/self) + metadata,
+# compare the output multiset (payload pairs / left-only / self-pairs) — order-
+# insensitive, key-naming-agnostic. Surfaces RESULT (join semantics diverge —
+# e.g. pandas matches NULL==NULL on a join key, SQL engines don't) and CRASH
+# (AG11: count over a metadata-carrying cross join; df-df self-join duplicate
+# fields). The cross-count case auto-flips to OK when AG11's fix (#23442) ships.
 # --------------------------------------------------------------------------- #
 _HOW_PD = {"inner": "inner", "left": "left", "full": "outer"}
-_HOW_PL = {"inner": "inner", "left": "left", "full": "full"}
-_HOW_ACERO = {"inner": "inner", "left": "left outer", "full": "full outer"}
+_HOW_PL = {
+    "inner": "inner",
+    "left": "left",
+    "full": "full",
+    "semi": "semi",
+    "anti": "anti",
+}
+_HOW_ACERO = {
+    "inner": "inner",
+    "left": "left outer",
+    "full": "full outer",
+    "semi": "left semi",
+    "anti": "left anti",
+}
 _HOW_SQL = {"inner": "JOIN", "left": "LEFT JOIN", "full": "FULL JOIN"}
 
 
-def _lv_rv(df) -> list[tuple[str, str]]:
-    def n(x):
-        return "NULL" if pd.isna(x) else str(x)
+def _n(x):
+    return "NULL" if pd.isna(x) else str(x)
 
-    return sorted((n(a), n(b)) for a, b in zip(df["lv"], df["rv"], strict=True))
+
+def _lv_rv(df) -> list[tuple[str, str]]:
+    return sorted((_n(a), _n(b)) for a, b in zip(df["lv"], df["rv"], strict=True))
+
+
+def _left_only(df) -> list[tuple[str]]:
+    """semi/anti output = left rows only, keyed on the lv payload."""
+    return sorted((_n(v),) for v in df["lv"])
+
+
+def _self_pairs(df) -> list[tuple[str, str]]:
+    """self-join output: the two payload columns by POSITION (names collide —
+    lv_x/lv_y, lv/lv_right, or duplicate lv/lv — so index, don't name)."""
+    payload = [i for i, c in enumerate(df.columns) if c != "k"][:2]
+    sub = df.iloc[:, payload]
+    return sorted((_n(sub.iloc[i, 0]), _n(sub.iloc[i, 1])) for i in range(len(sub)))
 
 
 def run_join_case(
     lt: pa.Table, rt: pa.Table, how: str, keep_meta: bool, op: str
 ) -> dict[str, tuple[str, object]]:
-    """one join across all engines, crash-safe. op='payload' -> (lv,rv) multiset;
-    op='count' -> [('n', rowcount)] (the AG11 aggregate-over-cross trigger)."""
+    """one join across all engines, crash-safe. how in inner/left/full/cross/
+    semi/anti/self; op='count' triggers the AG11 aggregate-over-cross path."""
     lpd, rpd = lt.to_pandas(), rt.to_pandas()
     lpl, rpl = pl.from_arrow(lt), pl.from_arrow(rt)
 
@@ -601,6 +629,11 @@ def run_join_case(
         return [("n", str(n))] if op == "count" else _lv_rv(df)
 
     def pandas_fn():
+        if how == "self":
+            return _self_pairs(lpd.merge(lpd, on="k"))
+        if how in ("semi", "anti"):
+            mask = lpd["k"].isin(rpd["k"])
+            return _left_only(lpd[mask if how == "semi" else ~mask])
         m = (
             lpd.merge(rpd, how="cross")
             if how == "cross"
@@ -609,6 +642,10 @@ def run_join_case(
         return _emit(m, len(m))
 
     def polars_fn():
+        if how == "self":
+            return _self_pairs(lpl.join(lpl, on="k", how="inner").to_pandas())
+        if how in ("semi", "anti"):
+            return _left_only(lpl.join(rpl, on="k", how=_HOW_PL[how]).to_pandas())
         m = (
             lpl.join(rpl, how="cross")
             if how == "cross"
@@ -619,8 +656,10 @@ def run_join_case(
     def acero_fn():
         if how == "cross":
             raise _Unsupported("pyarrow Table.join requires keys (no cross)")
+        if how == "self":
+            return _self_pairs(lt.join(lt, keys="k", join_type="inner").to_pandas())
         m = lt.join(rt, keys="k", join_type=_HOW_ACERO[how]).to_pandas()
-        return _emit(m, len(m))
+        return _left_only(m) if how in ("semi", "anti") else _emit(m, len(m))
 
     def make_ctx():
         ctx = SessionContext()
@@ -628,9 +667,22 @@ def run_join_case(
         rb = rt if keep_meta else rt.replace_schema_metadata(None)
         ctx.register_record_batches("l", [lb.to_batches()])
         ctx.register_record_batches("r", [rb.to_batches()])
+        if how == "self":
+            ctx.register_record_batches("t", [lb.to_batches()])
         return ctx
 
     def dfsql_fn(ctx):
+        if how == "self":
+            b = ctx.sql(
+                "SELECT a.lv AS la, b.lv AS lb FROM t a JOIN t b ON a.k = b.k"
+            ).collect()
+            return _self_pairs(pa.Table.from_batches(b).to_pandas())
+        if how in ("semi", "anti"):
+            ex = "EXISTS" if how == "semi" else "NOT EXISTS"
+            b = ctx.sql(
+                f"SELECT l.lv FROM l WHERE {ex} (SELECT 1 FROM r WHERE r.k = l.k)"
+            ).collect()
+            return _left_only(pa.Table.from_batches(b).to_pandas())
         if op == "count":
             join = (
                 "CROSS JOIN r" if how == "cross" else f"{_HOW_SQL[how]} r ON l.k = r.k"
@@ -646,7 +698,20 @@ def run_join_case(
         return _lv_rv(pa.Table.from_batches(b).to_pandas())
 
     def dfdf_fn(ctx):
+        if how == "self":
+            # join a table to itself via the DataFrame API — the q16 lowering
+            # hazard (duplicate qualified fields); may raise -> a CRASH finding.
+            t = ctx.table("t")
+            b = t.join(t, how="inner", left_on=["k"], right_on=["k"]).collect()
+            return _self_pairs(pa.Table.from_batches(b).to_pandas())
         lo, ro = ctx.table("l"), ctx.table("r")
+        if how in ("semi", "anti"):
+            b = (
+                lo.join(ro, how=how, left_on=["k"], right_on=["k"])
+                .select(col("lv"))
+                .collect()
+            )
+            return _left_only(pa.Table.from_batches(b).to_pandas())
         j = (
             lo.join_on(ro, how="inner")
             if how == "cross"
@@ -709,6 +774,7 @@ def build_join_cases():
     Rn = t({"k": pa.array([None, 2, 3], pa.int64()), "rv": ["Rn", "R2", "R3"]})
     Ld = t({"k": pa.array([1, 1, 2], pa.int64()), "lv": ["L1a", "L1b", "L2"]})
     Rd = t({"k": pa.array([1, 2, 2], pa.int64()), "rv": ["R1", "R2a", "R2b"]})
+    Ts = t({"k": pa.array([1, 1, 2], pa.int64()), "lv": ["A", "B", "C"]})  # self-join
     # AG11 tracker: metadata-carrying (the `pandas` blob from from_pandas).
     Lm = pa.Table.from_pandas(
         pd.DataFrame({"k": [1, 2, 3], "lv": ["L1", "L2", "L3"]}), preserve_index=False
@@ -723,6 +789,9 @@ def build_join_cases():
         ("full", L, R, "full", False, "payload"),
         ("dup_fanout", Ld, Rd, "inner", False, "payload"),
         ("null_key_inner", Ln, Rn, "inner", False, "payload"),
+        ("semi", L, R, "semi", False, "payload"),
+        ("anti", L, R, "anti", False, "payload"),
+        ("self_join", Ts, Ts, "self", False, "payload"),
         ("cross_clean", L, R, "cross", False, "payload"),
         ("cross_count_meta[AG11]", Lm, Rm, "cross", True, "count"),
     ]
