@@ -4,12 +4,20 @@
 **Priority: 2** — root cause pinned to one line; repro verified on latest; not a
 duplicate. Ready to file pending human go-ahead.
 
-> **STATUS (2026-07-09): VERIFIED ON LATEST + ROOT-CAUSED + DUP-SEARCHED — file-ready.**
-> Confirmed two independent ways: (1) **executed** the repro on datafusion
-> **54.0.0** (the latest PyPI release, 2026-06-29) — pure cross join over
-> metadata-carrying tables fails; (2) **source-read** the offending code, byte-
-> identical at tags 51.0.0, 54.0.0, and `main`. **Not fixed.** Not a duplicate
-> (see §Dup-search). Remaining gate: human approval to file.
+> **STATUS (2026-07-10): FILED + PR OPEN.** Issue **#23434** filed and **PR
+> #23442** ("fix: align CrossJoinExec schema metadata merge with the logical
+> plan", +36/−19, Closes #23434, by fangchenli) is open on `apache/datafusion`
+> `main`. The fix aligns `CrossJoinExec::new`'s metadata merge with the
+> join-type-aware (left-biased for inner) selection used by `build_join_schema`,
+> exactly as recommended below. Remaining: review, merge. Keep the
+> `replace_schema_metadata(None)` workaround in `translate_datafusion.py` until
+> the fix ships in a release we depend on.
+>
+> _History (2026-07-09): VERIFIED ON LATEST + ROOT-CAUSED + DUP-SEARCHED — was
+> file-ready. Confirmed two ways: (1) executed the repro on datafusion 54.0.0 —
+> pure cross join over metadata-carrying tables fails; (2) source-read the
+> offending code, byte-identical at tags 51.0.0, 54.0.0, and `main`. Non-dup
+> (see §Dup-search)._
 
 ## The finding (one line)
 A **pure cross join** (`DataFrame.join_on(other, how="inner")` with no predicates
@@ -116,7 +124,7 @@ schema should be the same`, `CrossJoinExec metadata`, `join schema metadata`.
 - [x] **Duplicate search recorded** — not a dup; #15754 is a different path,
       #19049/#21127 is the per-operator precedent.
 - [x] **Standalone repro** — above, pure datafusion.
-- [ ] **Human approval before filing** (outward-facing; guardrail).
+- [x] **Human approval + filed** — issue #23434 + PR #23442 open (2026-07-10).
 
 ## Definition of done
 Filed (with #) referencing #15754/#16221 + #21127, or shelved if fixed on a newer
