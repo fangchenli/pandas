@@ -7,6 +7,14 @@ doc** below that a fresh agent can execute end-to-end without prior context.
 
 **Read this playbook first**, then open the hand-off for your feature.
 
+> **Finding new gaps:** the standing discovery instrument is
+> `../DIFFERENTIAL_PROBE.md` (`../../benchmarks/differential_probe.py`) — a fixed
+> workload grid run across `{pandas, polars, acero, datafusion-sql,
+> datafusion-df}` that emits RESULT/PLAN/PERF divergences as candidate findings.
+> It rediscovered AG10/AG4/AG5′ from scratch. Run it on each new release to
+> generate the next backlog rows (and auto-retire fixed ones) instead of finding
+> by accident.
+
 ## Backlog index
 
 | Feature | Gap | Status | Priority | Hand-off |
