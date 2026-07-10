@@ -130,6 +130,21 @@ release). Add a family = add a `(types, kernels, reference)` row to
 `COVERAGE_FAMILIES`; next families to add: temporal-unit casts (the AG12 floor
 axis) and decimal arithmetic.
 
+(5) a **sort-order matrix** — order a column with null/NaN and compare the
+resulting *sequence* (order matters). First run on latest exposes five distinct
+null-placement conventions: pandas + acero sort NA **last** always; polars sorts
+NA **first** always; datafusion-**sql** sorts NA last for ASC but **first** for
+DESC (SQL "nulls high"); datafusion-**df** sorts NA **first** always. Two
+takeaways: (a) **datafusion's DataFrame API default (nulls-first) disagrees with
+its own SQL default (nulls-last-for-ASC)** — a front-end inconsistency, an AG10
+sibling; (b) lowering a pandas sort (NA always last) to any of these silently
+moves the missing values in order-sensitive output — a `translate_datafusion.py`
+hazard. (NaN-vs-null *aggregation* was probed too but doesn't encode cleanly: the
+edge harness's ArrowDtype pandas oracle propagates NaN as `<NA>`, masking the
+numpy-backed skipna divergence; noted, not added. Temporal downcast was probed
+and is mostly consistent — every engine floors via its trunc/floor function and
+rejects overflow — so not added.)
+
 The join matrix (added 2026-07-10) already earns its keep on the first run:
 - **CRASH** — its `cross_count_meta[AG11]` case (a `count` aggregate over a
   metadata-carrying cross join) **reproduces AG11**: both datafusion front-ends
@@ -159,7 +174,7 @@ regression/fix trackers**: re-run on a new datafusion release and a cell flippin
 CRASH→OK is the fix landing, OK→CRASH a regression.
 
 Extend by adding entries to `AGGS` / `build_dataset` / `build_edge_cases` /
-`build_join_cases`:
+`build_join_cases` / `build_sort_cases` / `COVERAGE_FAMILIES`:
 
 - **RESULT surface** — the highest-value, least-covered. Add ops where engines
   plausibly disagree: null handling in agg, empty groups, NaN vs null, integer

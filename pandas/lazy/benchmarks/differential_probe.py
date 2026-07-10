@@ -29,8 +29,9 @@ Five divergence classes, most-valuable first:
 
 Sources: the grouped-aggregate grid (PLAN/PERF); a degenerate-input edge sweep —
 empty / all-null / null key (CRASH/RESULT); a join-shape matrix — inner/left/full/
-fanout/null-key/cross/semi/anti/self, the AG11 axis (CRASH/RESULT); and a kernel
-type-coverage matrix — kernel x input-type, the AG9/AG12 axis (COVERAGE). Several
+fanout/null-key/cross/semi/anti/self, the AG11 axis (CRASH/RESULT); a kernel
+type-coverage matrix — kernel x input-type, the AG9/AG12 axis (COVERAGE); and a
+sort-order matrix — null/NaN placement across engines (RESULT). Several
 cells are standing fix-trackers that auto-flip when the upstream fix ships:
 cross-count-metadata reproduces AG11 (datafusion PR #23442), self-join reproduces
 the datafusion-df duplicate-qualified-field limit (open #14147), and each
@@ -803,6 +804,112 @@ def build_join_cases():
 
 
 # --------------------------------------------------------------------------- #
+# Sort-order matrix: ORDER a column with null + NaN and compare the resulting
+# SEQUENCE across engines (order matters — list equality, not multiset). The
+# position of missing values is a notorious cross-engine divergence and a
+# pandas-lowering hazard: pandas sorts na last, polars sorts null first, SQL
+# engines vary, and datafusion's DataFrame API default can differ from its SQL
+# default. RESULT class. Missing values normalized to 'NA' (position is the signal;
+# a numpy-backed pandas float column can't hold a distinct null anyway).
+# --------------------------------------------------------------------------- #
+def _seq(vals) -> list[str]:
+    return [
+        "NA" if v is None or (isinstance(v, float) and v != v) else str(v) for v in vals
+    ]
+
+
+def run_sort_case(tbl: pa.Table, ascending: bool) -> dict[str, tuple[str, object]]:
+    """sort the single column 'v' on each engine (engine-default null placement),
+    native null-preserving extraction, crash-safe."""
+
+    def pandas_fn():
+        s = tbl.to_pandas()["v"].sort_values(ascending=ascending, na_position="last")
+        return _seq(s.tolist())
+
+    def polars_fn():
+        return _seq(
+            pl.from_arrow(tbl).sort("v", descending=not ascending)["v"].to_list()
+        )
+
+    def acero_fn():
+        order = "ascending" if ascending else "descending"
+        idx = pc.sort_indices(tbl, sort_keys=[("v", order)])
+        return _seq(pc.take(tbl["v"], idx).to_pylist())
+
+    def make_ctx():
+        ctx = SessionContext()
+        ctx.register_record_batches(
+            "t", [tbl.replace_schema_metadata(None).to_batches()]
+        )
+        return ctx
+
+    def dfsql_fn(ctx):
+        d = "ASC" if ascending else "DESC"
+        b = ctx.sql(f"SELECT v FROM t ORDER BY v {d}").collect()
+        return _seq(pa.Table.from_batches(b).column("v").to_pylist())
+
+    def dfdf_fn(ctx):
+        # engine-default null placement (no nulls_first override) — may differ
+        # from the SQL default, which is itself a front-end divergence.
+        b = ctx.table("t").sort(col("v").sort(ascending=ascending)).collect()
+        return _seq(pa.Table.from_batches(b).column("v").to_pylist())
+
+    results: dict[str, tuple[str, object]] = {
+        "pandas": _safe(pandas_fn),
+        "polars": _safe(polars_fn),
+        "acero": _safe(acero_fn),
+    }
+    reg = _safe(make_ctx)
+    if reg[0] != "ok":
+        results["datafusion-sql"] = results["datafusion-df"] = reg
+    else:
+        results["datafusion-sql"] = _safe(lambda: dfsql_fn(reg[1]))
+        results["datafusion-df"] = _safe(lambda: dfdf_fn(reg[1]))
+    return results
+
+
+def analyze_sort(workload: str, results: dict) -> list[Finding]:
+    findings: list[Finding] = []
+    ok = {e: v for e, (s, v) in results.items() if s == "ok"}
+    crashed = {e: m for e, (s, m) in results.items() if s == "crash"}
+    if crashed and ok:
+        for e, m in crashed.items():
+            findings.append(
+                Finding(
+                    "CRASH",
+                    workload,
+                    f"{e} raised where {sorted(ok)} succeeded — {m}",
+                    2e6,
+                )
+            )
+    if "pandas" in ok:
+        ref = ok["pandas"]
+        for e, seq in ok.items():
+            if e == "pandas" or seq == ref:
+                continue
+            findings.append(
+                Finding("RESULT", workload, f"{e} vs pandas: {seq} vs {ref}", 1e6)
+            )
+    return findings
+
+
+def build_sort_cases():
+    """crafted single-column ('v') tables + sort direction."""
+
+    def t(arr):
+        return pa.table({"v": arr})
+
+    nan = float("nan")
+    f_mix = t(pa.array([3.0, nan, 1.0, None, 2.0], pa.float64()))  # null + NaN
+    i_null = t(pa.array([3, None, 1, 2], pa.int64()))  # null only (isolates position)
+    return [
+        ("asc_int_null", i_null, True),
+        ("desc_int_null", i_null, False),
+        ("asc_float_nan_null", f_mix, True),
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # Kernel type-coverage matrix (the AG9/AG12 axis): an Arrow compute kernel that
 # works on one type but is NotImplemented on a SIBLING type (which peers handle)
 # is a coverage gap. kernel x input-type -> ok / NotImpl. Emits COVERAGE findings
@@ -1000,6 +1107,20 @@ def main():
         )
         print(f"{wid:<40} | {status}")
         all_findings.extend(analyze_join(wid, results))
+
+    # ---- sort-order matrix (RESULT surface: null/NaN placement) -------------
+    print()
+    for name, tbl, ascending in build_sort_cases():
+        wid = f"sort/{name}"
+        if args.only and args.only not in wid:
+            continue
+        results = run_sort_case(tbl, ascending)
+        status = " ".join(
+            f"{e.split('-')[-1]:>3.3}={'OK' if s == 'ok' else 'XX'}"
+            for e, (s, _) in results.items()
+        )
+        print(f"{wid:<40} | {status}")
+        all_findings.extend(analyze_sort(wid, results))
 
     # ---- kernel type-coverage matrix (COVERAGE surface, the AG9/AG12 axis) --
     print()
