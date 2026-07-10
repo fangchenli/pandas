@@ -39,6 +39,9 @@ Each was a manual matrix built once and discarded. This makes the matrix
   AG10 class: an optimizer rule fires for one front-end only. Gated to structural
   nodes — a lone Projection/alias delta is benign builder noise and is **not**
   flagged.
+- **COVERAGE** — an Arrow compute kernel works on one type but is
+  `NotImplemented` on a **sibling** type that peers handle (the AG9/AG12 class).
+  `kernel × input-type → ok / NotImpl`, findings summarized per sibling type.
 - **PERF** — one engine is >Nx slower on the same cell (default 3×). The AG3/AG4/
   AG5′ class. Reports the overall spread plus two named axes we specifically hunt:
   `acero-vs-polars` and `df-api-vs-sql`.
@@ -112,7 +115,20 @@ Implemented: (1) **grouped aggregate** (`sum`, `count_distinct`) × key dtype
 (`int64`, `string`) × cardinality (100 / 10k / 1M) — the AG3/AG4/AG5′/AG10
 surface; (2) a **degenerate-input edge sweep** (empty / all-null / null-key) —
 the RESULT/CRASH surface that found AG13; (3) a **join-shape matrix**
-(inner/left/full/fanout/null-key/cross) — the AG11 axis.
+(inner/left/full/fanout/null-key/cross/semi/anti/self) — the AG11 axis; (4) a
+**kernel type-coverage matrix** — the AG9/AG12 axis.
+
+The coverage matrix (added 2026-07-10) quantifies the AG9 gap on its first run:
+of 17 scalar string kernels (`utf8_length`, `match_substring`, `starts_with`,
+`match_like`, `find_substring`, `replace_substring`, …), **all 17 work on
+`string`/`large_string` but are `NotImplemented` on both `string_view` and
+`dict<string>`** on pyarrow 24.0.0. This is exactly the AG9 area (tracked under
+umbrella #44336) — the matrix turns "view kernels lag" into the precise 17-kernel
+list AG9-next needs to scope its PR, and each cell auto-flips `NotImpl→ok` as a
+view-kernel sub-PR lands (so re-running measures #44336's progress release over
+release). Add a family = add a `(types, kernels, reference)` row to
+`COVERAGE_FAMILIES`; next families to add: temporal-unit casts (the AG12 floor
+axis) and decimal arithmetic.
 
 The join matrix (added 2026-07-10) already earns its keep on the first run:
 - **CRASH** — its `cross_count_meta[AG11]` case (a `count` aggregate over a

@@ -15,22 +15,26 @@ matrix *standing*: a fixed workload grid run identically across
 **divergence report**. Every diverging cell is a *candidate finding* — the
 harness flags, a human confirms and roots-cause.
 
-Four divergence classes, most-valuable first:
+Five divergence classes, most-valuable first:
 
-    CRASH   one engine raises/panics where others succeed (found AG13: datafusion
-            register_record_batches panics on an empty table). Loudest signal.
-    RESULT  engines disagree on the answer (correctness/bug, or a pandas->engine
-            lowering hazard — the surface our ad-hoc perf matrices never covered)
-    PLAN    datafusion SQL vs DataFrame-API optimized plans differ in operator
-            shape (the AG10 class — an optimizer rule fires for one front-end)
-    PERF    one engine is >Nx slower on the same cell (the AG3/4/5 class)
+    CRASH    one engine raises/panics where others succeed (found AG13: datafusion
+             register_record_batches panics on an empty table). Loudest signal.
+    RESULT   engines disagree on the answer (correctness/bug, or a pandas->engine
+             lowering hazard — the surface our ad-hoc perf matrices never covered)
+    PLAN     datafusion SQL vs DataFrame-API optimized plans differ in operator
+             shape (the AG10 class — an optimizer rule fires for one front-end)
+    COVERAGE an arrow-compute kernel works on one type but is NotImplemented on a
+             sibling type (the AG9 class — string_view/dict lag string kernels)
+    PERF     one engine is >Nx slower on the same cell (the AG3/4/5 class)
 
-PLAN/PERF come from the main grouped-aggregate grid; CRASH/RESULT from a
-degenerate-input edge sweep (empty / all-null / null key) and a join-shape matrix
-(inner/left/full/fanout/null-key/cross/semi/anti/self, the AG11 axis). Two join
-cells are standing fix-trackers that auto-flip to OK when the upstream fix ships:
-cross-count-metadata reproduces AG11 (datafusion PR #23442), and self-join
-reproduces the datafusion-df duplicate-qualified-field limitation (open #14147).
+Sources: the grouped-aggregate grid (PLAN/PERF); a degenerate-input edge sweep —
+empty / all-null / null key (CRASH/RESULT); a join-shape matrix — inner/left/full/
+fanout/null-key/cross/semi/anti/self, the AG11 axis (CRASH/RESULT); and a kernel
+type-coverage matrix — kernel x input-type, the AG9/AG12 axis (COVERAGE). Several
+cells are standing fix-trackers that auto-flip when the upstream fix ships:
+cross-count-metadata reproduces AG11 (datafusion PR #23442), self-join reproduces
+the datafusion-df duplicate-qualified-field limit (open #14147), and each
+COVERAGE cell flips NotImpl->ok as arrow #44336 view-kernel sub-PRs land.
 
 Self-contained: pyarrow + polars + datafusion + numpy + pandas, synthetic data.
 Run on the *current* releases in a throwaway venv (see ``upstream/README.md`` §1),
@@ -66,6 +70,7 @@ from datafusion import (
 import numpy as np
 import polars as pl
 import pyarrow as pa
+import pyarrow.compute as pc
 
 import pandas as pd
 
@@ -797,6 +802,117 @@ def build_join_cases():
     ]
 
 
+# --------------------------------------------------------------------------- #
+# Kernel type-coverage matrix (the AG9/AG12 axis): an Arrow compute kernel that
+# works on one type but is NotImplemented on a SIBLING type (which peers handle)
+# is a coverage gap. kernel x input-type -> ok / NotImpl. Emits COVERAGE findings
+# summarized per sibling type, and doubles as a release-over-release tracker — a
+# cell flipping NotImpl->ok is a kernel gaining support (e.g. as arrow #44336
+# view-kernel sub-PRs land). Add a family = add a (types, kernels, reference) row.
+# --------------------------------------------------------------------------- #
+_STR_DATA = ["alpha", "beta", "gamma", "alpha", None]
+
+
+def _string_layout_types() -> dict[str, pa.Array]:
+    base = pa.array(_STR_DATA, pa.string())
+    return {
+        "string": base,
+        "large_string": pa.array(_STR_DATA, pa.large_string()),
+        "string_view": pa.array(_STR_DATA, pa.string_view()),
+        "dict<string>": base.dictionary_encode(),
+    }
+
+
+_STRING_KERNELS = [
+    ("utf8_length", lambda a: pc.utf8_length(a)),
+    ("utf8_upper", lambda a: pc.utf8_upper(a)),
+    ("utf8_lower", lambda a: pc.utf8_lower(a)),
+    ("utf8_reverse", lambda a: pc.utf8_reverse(a)),
+    ("utf8_slice_codeunits", lambda a: pc.utf8_slice_codeunits(a, 1, 3)),
+    ("utf8_capitalize", lambda a: pc.utf8_capitalize(a)),
+    ("utf8_trim_whitespace", lambda a: pc.utf8_trim_whitespace(a)),
+    ("utf8_is_alpha", lambda a: pc.utf8_is_alpha(a)),
+    ("match_substring", lambda a: pc.match_substring(a, pattern="a")),
+    ("match_substring_regex", lambda a: pc.match_substring_regex(a, pattern="a.")),
+    ("match_like", lambda a: pc.match_like(a, pattern="a%")),
+    ("starts_with", lambda a: pc.starts_with(a, pattern="a")),
+    ("ends_with", lambda a: pc.ends_with(a, pattern="a")),
+    ("find_substring", lambda a: pc.find_substring(a, pattern="a")),
+    ("count_substring", lambda a: pc.count_substring(a, pattern="a")),
+    (
+        "replace_substring",
+        lambda a: pc.replace_substring(a, pattern="a", replacement="X"),
+    ),
+    ("split_pattern", lambda a: pc.split_pattern(a, pattern="a")),
+]
+
+
+@dataclass
+class CoverageFamily:
+    """a sibling type-family + kernels to sweep for coverage gaps."""
+
+    name: str
+    reference: str  # the type expected to work (the baseline sibling)
+    tracked: str  # upstream note where the gap already lives
+    types_fn: object  # () -> {type_label: pa.Array}
+    kernels: list
+
+
+COVERAGE_FAMILIES = [
+    CoverageFamily(
+        "string_layout",
+        "string",
+        "arrow #44336 (Binary View Compute Kernels umbrella)",
+        _string_layout_types,
+        _STRING_KERNELS,
+    ),
+]
+
+
+def run_coverage(fam: CoverageFamily) -> dict[str, dict[str, str]]:
+    """kernel -> {type_label: 'ok' | 'NotImpl' | '<ExcType>'}."""
+    types = fam.types_fn()
+    matrix: dict[str, dict[str, str]] = {}
+    for kname, fn in fam.kernels:
+        row: dict[str, str] = {}
+        for tname, arr in types.items():
+            try:
+                fn(arr)
+                row[tname] = "ok"
+            except pa.lib.ArrowNotImplementedError:
+                row[tname] = "NotImpl"
+            except Exception as e:
+                row[tname] = type(e).__name__
+        matrix[kname] = row
+    return matrix
+
+
+def analyze_coverage(fam: CoverageFamily, matrix: dict) -> list[Finding]:
+    """one summarized COVERAGE finding per sibling type with a gap."""
+    findings: list[Finding] = []
+    types = list(next(iter(matrix.values())).keys())
+    for t in types:
+        if t == fam.reference:
+            continue
+        gap = [
+            k
+            for k, row in matrix.items()
+            if row[fam.reference] == "ok" and row[t] != "ok"
+        ]
+        if gap:
+            findings.append(
+                Finding(
+                    "COVERAGE",
+                    f"coverage/{fam.name}",
+                    f"{len(gap)}/{len(matrix)} kernels ok on '{fam.reference}' but "
+                    f"NotImplemented on '{t}' (tracked: {fam.tracked}): "
+                    f"{', '.join(gap)}",
+                    float(len(gap)),
+                )
+            )
+    return findings
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -885,25 +1001,41 @@ def main():
         print(f"{wid:<40} | {status}")
         all_findings.extend(analyze_join(wid, results))
 
+    # ---- kernel type-coverage matrix (COVERAGE surface, the AG9/AG12 axis) --
+    print()
+    for fam in COVERAGE_FAMILIES:
+        wid = f"coverage/{fam.name}"
+        if args.only and args.only not in wid:
+            continue
+        matrix = run_coverage(fam)
+        types = list(next(iter(matrix.values())).keys())
+        summ = " ".join(
+            f"{t.split('<')[0]}={sum(1 for r in matrix.values() if r[t] == 'ok')}"
+            f"/{len(matrix)}"
+            for t in types
+        )
+        print(f"{wid:<40} | {summ}")
+        all_findings.extend(analyze_coverage(fam, matrix))
+
     # ---- divergence report -------------------------------------------------
     print("\n" + "=" * 78)
     print(
         "FINDINGS (candidate gaps — each needs human confirm + root-cause + dup-search)"
     )
     print("=" * 78)
-    order = {"CRASH": 0, "RESULT": 1, "PLAN": 2, "PERF": 3}
+    order = {"CRASH": 0, "RESULT": 1, "PLAN": 2, "COVERAGE": 3, "PERF": 4}
     all_findings.sort(key=lambda f: (order[f.kind], -f.severity))
     if not all_findings:
         print("none above thresholds.")
     for f in all_findings:
-        print(f"[{f.kind:<6}] {f.workload}\n         {f.detail}")
+        print(f"[{f.kind:<8}] {f.workload}\n         {f.detail}")
     counts = {
         k: sum(1 for f in all_findings if f.kind == k)
-        for k in ("CRASH", "RESULT", "PLAN", "PERF")
+        for k in ("CRASH", "RESULT", "PLAN", "COVERAGE", "PERF")
     }
     print(
         f"\nsummary: {counts['CRASH']} CRASH, {counts['RESULT']} RESULT, "
-        f"{counts['PLAN']} PLAN, {counts['PERF']} PERF"
+        f"{counts['PLAN']} PLAN, {counts['COVERAGE']} COVERAGE, {counts['PERF']} PERF"
     )
 
 

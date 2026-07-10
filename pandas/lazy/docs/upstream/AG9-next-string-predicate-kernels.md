@@ -7,6 +7,17 @@ the AG9 view-kernel track after our #50224 (grouper keys) merged 2026-07-07.
 Scoped by research on 2026-07-09; **re-verify the live state before coding** (the
 landscape moves).
 
+> **QUANTIFIED by the differential probe (2026-07-10, `../DIFFERENTIAL_PROBE.md`
+> COVERAGE class).** The kernel type-coverage matrix confirms on pyarrow 24.0.0
+> that **all 17 tested scalar string kernels** (`utf8_length`, `utf8_upper/lower`,
+> `utf8_reverse`, `utf8_slice_codeunits`, `utf8_capitalize`, `utf8_trim_whitespace`,
+> `utf8_is_alpha`, `match_substring`, `match_substring_regex`, `match_like`,
+> `starts_with`, `ends_with`, `find_substring`, `count_substring`,
+> `replace_substring`, `split_pattern`) work on `string`/`large_string` but are
+> `NotImplemented` on `string_view` (and on `dict<string>`). That's the exact
+> unclaimed target list below, now measured — and the probe re-runs each release
+> to track which flip to `ok` as sub-PRs land. Run it to re-scope before coding.
+
 ## BOTTOM LINE
 Add `STRING_VIEW`/`BINARY_VIEW` support to the **scalar string predicate /
 measurement** kernels in `scalar_string_ascii.cc` (+ `scalar_string_utf8.cc`):
