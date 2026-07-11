@@ -104,7 +104,11 @@ def _call(node: Call) -> D.Expr:
             "add": lambda: left + right,
             "subtract": lambda: left - right,
             "multiply": lambda: left * right,
-            "divide": lambda: left / right,
+            # pandas `/` is ALWAYS true (float) division (7 / 2 == 3.5); DataFusion
+            # `/` on two integers truncates (== 3). Cast an operand to float64 so
+            # the lowering matches pandas. (found via the DuckDB-vs-DataFusion
+            # differential scout; TPC-H misses it — its divisions are on floats.)
+            "divide": lambda: left.cast(pa.float64()) / right,
             "less": lambda: left < right,
             "less_equal": lambda: left <= right,
             "greater": lambda: left > right,
