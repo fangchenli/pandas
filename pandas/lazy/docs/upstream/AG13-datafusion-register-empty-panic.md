@@ -6,13 +6,18 @@
 repro is three lines, verified on latest, non-duplicate. File-ready pending human
 go-ahead.
 
-> **STATUS (2026-07-09): FOUND BY THE DIFFERENTIAL PROBE + ROOT-CAUSED + DUP-SEARCHED
-> — file-ready.** This is the differential probe's (`../DIFFERENTIAL_PROBE.md`)
-> first *new* find: widening to the RESULT/robustness surface immediately surfaced
-> it via the degenerate-input (empty table) sweep. Verified two ways: (1)
-> **executed** on datafusion 54.0.0 / pyarrow 24.0.0 (panics); (2) **source-read**
-> the offending line, **byte-identical at tag 54.0.0 and `main`** — not fixed.
-> Distinct from the fixed #575 (see §Dup-search). Remaining gate: human approval.
+> **STATUS (2026-07-11): FILED + PR OPEN.** Issue **#1626**
+> ("`register_record_batches` panics ("index out of bounds") on an empty
+> partition") and fix **PR #1627** ("fix: no panic on empty partition in
+> register_record_batches") are open on `apache/datafusion-python`, by fangchenli.
+> Remaining: review, merge. Keep the empty-frame guard in our lowering until the
+> fix ships in a release we depend on.
+>
+> _History (2026-07-09): FOUND BY THE DIFFERENTIAL PROBE (`../DIFFERENTIAL_PROBE.md`)
+> — its first new find, via the degenerate-input (empty table) edge sweep. Verified
+> two ways: executed on datafusion 54.0.0 / pyarrow 24.0.0 (panics); source-read
+> the offending line, byte-identical at tag 54.0.0 and `main`. Distinct from the
+> fixed #575 (see §Dup-search)._
 
 ## The finding (one line)
 `SessionContext.register_record_batches(name, partitions)` **panics** (a Rust
@@ -113,9 +118,11 @@ bounds`, `register_record_batches empty`, `panic empty pyarrow table`.
 - [x] **Duplicate search recorded** — not a dup; #575/#613 is a different method
       (`from_arrow_table`) + trigger (0 rows), already fixed; this method unfixed.
 - [x] **Standalone repro** — above, three lines, pure datafusion + pyarrow.
-- [ ] **Human approval before filing** (outward-facing; guardrail).
+- [x] **Human approval + filed** — issue #1626 + fix PR #1627 open on
+      apache/datafusion-python (2026-07-11).
 
 ## Definition of done
-Filed (with #) referencing #575/#613, or shelved if fixed on a newer release,
-recorded here + in `README.md` + `../ARROW_GAPS.md`. Keep the empty-frame guard in
-`translate_datafusion.py` / `differential_probe.py` regardless.
+**FILED** — issue #1626 + PR #1627 open (referencing the #575/#613 precedent).
+Remaining: review/merge upstream. Keep the empty-frame guard in
+`differential_probe.py` regardless (and note `translate_datafusion.py` isn't
+vulnerable — it registers via `from_pandas`, a single 0-row batch, not `[[]]`).
