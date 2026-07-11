@@ -13,37 +13,53 @@ latest-version re-check + dup-search refresh.
 
 ## The finding (one line)
 For `np.dtypes.StringDType(na_object=…)` — whose defining feature is missing-value
-support — the `np.strings` ufuncs have **four mutually-inconsistent NA
-behaviors**, and the case-transform ops raise a **broken, internals-leaking
-error** on NA.
+support — the `np.strings` ufuncs have **no coherent NA policy**: across the full
+~43-op surface they split into **five** behaviors, and **12 ops error on NA in
+three *different* message styles** (one of which is a broken internals leak).
 
-## Evidence (numpy 2.5.1) — the NA-behavior matrix
+## Evidence (numpy 2.5.1) — the full NA-behavior matrix (all ~43 `np.strings` ops)
 ```python
 import numpy as np
 a = np.array(["alpha", np.nan, "gamma"], dtype=np.dtypes.StringDType(na_object=np.nan))
 ```
-| behavior | ops | what happens on the NA element |
-|---|---|---|
-| **PROPAGATE-NA** (the sensible/pandas-like result) | `add`, `multiply`, `replace`, `strip`, `lstrip`, `ljust`, `zfill` | NA in → NA out |
-| **CLEAN-ERR** | `str_len`, `find`, `rfind`, `count`, `index` | raises, e.g. `ValueError: 'find' not supported for null values that are not strings` |
-| **LEAKY-ERR** (a bug) | `upper`, `lower`, `capitalize`, `swapcase`, `title` | raises `TypeError: descriptor 'upper' for 'str' objects doesn't apply to a 'float' object` |
-| **NA-as-value** | `isalpha`, `isdigit`, `startswith`, `endswith`, `equal` | returns a `bool` for the NA slot (no propagation) |
+| behavior | # | ops | NA element result |
+|---|---|---|---|
+| **PROPAGATE-NA** (sensible/pandas-like) | 10 | `add`, `multiply`, `replace`, `strip`, `lstrip`, `rstrip`, `center`, `ljust`, `rjust`, `zfill` | NA in → NA out |
+| **NA→False (predicates)** | 17 | `isalpha`, `isalnum`, `isdigit`, `isdecimal`, `isnumeric`, `isspace`, `islower`, `isupper`, `istitle`, `startswith`, `endswith`, `equal`, `not_equal`, `greater`, `greater_equal`, `less`, `less_equal` | returns `False` for NA (no NA propagation) |
+| **CLEAN-ERR** `"…not supported for null values that are not strings"` | 6 | `str_len`, `find`, `rfind`, `index`, `rindex`, `count` | `ValueError` |
+| **LEAKY-ERR** `"descriptor 'upper' for 'str' objects doesn't apply to a 'float' object"` (a bug) | 6 | `upper`, `lower`, `capitalize`, `swapcase`, `title`, `encode` | `TypeError` (internals leak) |
+| **3rd error style** `"Cannot slice null string"` | 1 | `slice` | `TypeError` |
 
-So the *same* missing value yields propagate / clean-error / leaky-error / bool
-depending only on which op you call — there is **no coherent NA policy**.
+So the *same* missing value yields **propagate / False / three different errors**
+depending only on which op you call. **12 ops (CLEAN-ERR + LEAKY-ERR + slice)
+outright reject NA, in three inconsistent message styles** — on the dtype whose
+headline feature is `na_object`.
 
-## The sharp, file-worthy bug: case ops leak the legacy `_vec_string` path
-`upper`/`lower`/`capitalize`/`swapcase`/`title` are still implemented via the
-legacy element-wise helper (traceback: `numpy/_core/strings.py … `
-`return _vec_string(a_arr, a_arr.dtype, 'upper')`), which calls Python
-`str.upper` on each element — including the `na_object` (`nan`) — producing the
-nonsensical `descriptor 'upper' for 'str' objects doesn't apply to a 'float'
-object`. The analogous **native** string ufuncs on the same array either
-**propagate NA** (`replace`, `strip`) or raise a **clean domain error**
-(`find`, `str_len`). So the case ops are the odd ones out on two counts: wrong
-error text *and* an implementation detail leaked to the user. Clear fix: port
-them to the native path (propagate NA like `replace`) or, at minimum, raise the
-same clean "not supported for null values" error as `find`.
+## Separate sub-finding — `partition`/`rpartition` unsupported for `StringDType`
+`np.strings.partition` / `rpartition` fail on `StringDType` **even with no NA
+present** — `UFuncTypeError: ufunc '_partition' did not contain a loop with the
+correct signature`. This is a *coverage gap* (the kernel isn't implemented for
+the dtype at all), independent of the NA issue — the NumPy sibling of the Arrow
+view-kernel gaps (AG9). Worth a one-line mention or its own issue.
+
+## The sharp, file-worthy bug: case/encode ops leak the legacy `_vec_string` path
+`upper`/`lower`/`capitalize`/`swapcase`/`title`/`encode` are still implemented via
+the legacy element-wise helper (traceback: `numpy/_core/strings.py … `
+`return _vec_string(a_arr, a_arr.dtype, 'upper')`), which calls the Python
+`str.upper` descriptor on each element — including the `na_object` (`nan`) —
+producing the nonsensical `descriptor 'upper' for 'str' objects doesn't apply to
+a 'float' object`. The analogous **native** string ufuncs on the same array either
+**propagate NA** (`replace`, `strip`) or raise a **clean domain error** (`find`,
+`str_len`). So these ops are the odd ones out on two counts: wrong error text
+*and* a leaked implementation detail. Clear fix: route them through the native
+path (propagate NA like `replace`) or, at minimum, raise the same clean "not
+supported for null values" error as `find`.
+
+Note the broader inconsistency this sits inside: NA rejection uses **three
+different messages** — `"…not supported for null values that are not strings"`
+(find-family), `"descriptor … doesn't apply to a 'float'"` (case/encode, the
+leak), and `"Cannot slice null string"` (`slice`). Even the engines that *do*
+reject NA don't agree on how.
 
 ## Why it matters (pandas relevance)
 pandas needs NA in string columns. If pandas were to back a string dtype with
@@ -81,14 +97,23 @@ strings upper lower error`, `StringDType missing value ufunc inconsistent`.
   the NA-consistency gap or the case-op leaky error.
 
 ## Recommendation
-**File one focused bug** on numpy/numpy for the case-op leaky error
-(`upper`/`lower`/`capitalize`/`swapcase`/`title` raise a wrong internals-leaking
-`TypeError` on NA where sibling ops propagate or error cleanly), **and** mention
-the broader four-way inconsistency as motivation for a coherent NA policy (or add
-it to #25693). Lead with the concrete bug + the matrix; it's small and actionable.
+Two candidate reports (the first is the sharp, small, unambiguous one):
+1. **The case/encode leaky-error bug** — `upper`/`lower`/`capitalize`/`swapcase`/
+   `title`/`encode` raise a wrong internals-leaking `TypeError` on NA where
+   siblings propagate or error cleanly. Lead with this + the full matrix; small
+   and actionable, clear fix (native path / clean error).
+2. **The broader NA-policy inconsistency** — 5 behaviors, 3 error styles — as
+   motivation for a coherent, documented NA policy across `np.strings`
+   (propagate vs reject, and if reject then one message). Fits #25693 or its own
+   discussion.
+
+Also worth a **one-line mention**: `partition`/`rpartition` are unimplemented for
+`StringDType` (coverage gap, NA-independent). Lead outward with #1; it's the most
+defensible single bug.
 
 ## Gates
-- [x] **Reproduces** — numpy 2.5.1, matrix + standalone repro above.
+- [x] **Reproduces** — numpy 2.5.1, full ~43-op matrix + standalone repro above;
+      `partition` coverage gap and `slice`/case-op error styles all confirmed.
 - [x] **Duplicate search recorded** — novel; #25693 is internals-only, #26198/#25347 related-not-this.
 - [ ] **Re-verify on the latest numpy release** at file time (2.5.1 may not be newest).
 - [ ] **Human approval before filing** (outward-facing; guardrail).
