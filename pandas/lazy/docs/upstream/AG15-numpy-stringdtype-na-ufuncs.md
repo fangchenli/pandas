@@ -118,7 +118,25 @@ defensible single bug.
 - [ ] **Re-verify on the latest numpy release** at file time (2.5.1 may not be newest).
 - [ ] **Human approval before filing** (outward-facing; guardrail).
 
+## Adjacent: `StringDType` interop (scouted 2026-07-11 — LOW-YIELD, recorded so we don't re-scout)
+Probed `StringDType` round-tripping with Arrow / pandas / object for a *second*
+finding. Verdict: nothing new to file.
+- **`pa.array(StringDType)` fails** (`ArrowNotImplementedError: Unsupported numpy
+  type 2056`; forcing `type=large_string` → `ArrowTypeError`) — so NumPy's modern
+  string dtype has no path to Arrow. **Already tracked: Arrow #42018 [open]
+  "[Python] Conversion to/from numpy 2.0+ new StringDType"** → attach-data if we
+  ever care, don't file.
+- **NA gets stringified on cast** (`None`→`"None"`, `pd.NA`→`"<NA>"`, and NA→`"nan"`
+  casting to `<U`) — but this is **sentinel-mismatch, expected**: `astype(SD)`
+  only treats the exact declared `na_object` as NA (`object(None)→SD(na_object=None)`
+  correctly yields NA; `<U` has no NA slot so the sentinel is stringified). A
+  silent footgun, but defensible by design — not a clean bug.
+- **`pd.Series(SD)` → object dtype** (pandas doesn't recognize `StringDType`;
+  expected — no pandas support yet).
+
 ## Definition of done
 Filed (with #) or shelved, recorded here + in `README.md` + `../ARROW_GAPS.md`.
 This is a pure-numpy substrate gap surfaced by the NumPy/CPython scout — the
-scout's first genuine find (the DuckDB scout before it was low-yield).
+scout's first genuine find (the DuckDB scout before it was low-yield). The
+interop follow-up (above) was low-yield; the `np.strings` NA gap remains the
+file-worthy item.
