@@ -96,16 +96,25 @@ strings upper lower error`, `StringDType missing value ufunc inconsistent`.
   and **#25347 (NEP 55 introduction)** — related, not this. No open issue frames
   the NA-consistency gap or the case-op leaky error.
 
+## What "desired behavior" rests on (be honest)
+The `na_object` NA policy for `np.strings` is **not documented** — so #2 below is
+not a docs-violation, it's "there is no coherent policy; what should it be?".
+But #1 is **defensible regardless of any NA policy**: `descriptor 'upper' for
+'str' objects doesn't apply to a 'float' object` is a broken error under *every*
+possible intended behavior (propagate, or reject-with-a-clean-message) — nobody
+intends to leak the `str.upper` descriptor and the `nan` na_object to the user.
+That is why #1 is the file-worthy core and #2 is posed as a question.
+
 ## Recommendation
 Two candidate reports (the first is the sharp, small, unambiguous one):
 1. **The case/encode leaky-error bug** — `upper`/`lower`/`capitalize`/`swapcase`/
    `title`/`encode` raise a wrong internals-leaking `TypeError` on NA where
-   siblings propagate or error cleanly. Lead with this + the full matrix; small
-   and actionable, clear fix (native path / clean error).
-2. **The broader NA-policy inconsistency** — 5 behaviors, 3 error styles — as
-   motivation for a coherent, documented NA policy across `np.strings`
-   (propagate vs reject, and if reject then one message). Fits #25693 or its own
-   discussion.
+   siblings propagate or error cleanly. Wrong under any NA policy → the most
+   defensible single bug. Lead with this + the full matrix; clear fix.
+2. **The broader NA-policy inconsistency** — 5 behaviors, 3 error styles — posed
+   as a **question**: `np.strings` has no coherent NA policy; what should it be
+   (propagate vs reject, and if reject then one message)? Fits #25693 or its own
+   discussion. Not framed as a docs violation (there are no docs to violate).
 
 Also worth a **one-line mention**: `partition`/`rpartition` are unimplemented for
 `StringDType` (coverage gap, NA-independent). Lead outward with #1; it's the most

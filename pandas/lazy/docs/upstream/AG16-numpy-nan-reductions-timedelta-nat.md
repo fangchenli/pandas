@@ -32,6 +32,24 @@ are exactly the timedelta reductions that make sense and that pandas needs
 `nan*` family is to skip missing values (`nansum` of a float with `NaN` treats it
 as 0); on `timedelta64` these three silently don't, and don't error either.
 
+## What "desired behavior" rests on (be honest — the docs don't settle it)
+The `nansum`/`nanmean`/`nanmin` docstrings all say *"NaN"* ("treating NaNs as
+zero" / "ignoring NaNs"); **none mentions `NaT`, `timedelta64`/`datetime64`, or a
+dtype restriction.** So this is **not** a documented-contract violation, and the
+report must not claim it is. The basis that `NaT` *should* be skipped, in
+descending strength:
+1. **Internal inconsistency** (strongest, needs no external spec): on the *same*
+   array, **7 sibling `nan*` reductions skip `NaT`** (matrix above) and 3 don't —
+   all sharing the "ignoring NaNs" wording. NumPy contradicts itself.
+2. **Maintainer precedent** #5222: they already treated the analogous
+   NaT-across-reductions inconsistency as a bug and fixed it toward consistency.
+3. **Unambiguous regardless of policy**: `nansum` returns `NaT` **silently** — not
+   an error, not a documented rejection. Silent-wrong-output is bad whether the
+   intended answer is skip-`NaT` *or* raise.
+
+**Posture:** file as a **question** ("is this intended? sibling ops + #5222 say
+no"), not an assertion that the docs mandate skipping.
+
 ## Root cause (confirmed in numpy source — `numpy/lib/_nanfunctions_impl.py`)
 `nansum`/`nanmean`/`nanvar`/`nanstd` all mask NaNs via `_replace_nan(a, val)`,
 which builds the mask **only** for object or inexact dtypes:
@@ -105,9 +123,11 @@ issue reports the additive-nan-reduction `NaT` leak on `timedelta64`/`datetime64
   `nansum`/`nanmean`/`nancumsum` (the AG11 pattern: a fix that missed a sibling).
 
 ## Recommendation
-**File one focused bug** on numpy/numpy: the additive nan-reductions `nansum`,
-`nanmean`, `nancumsum` silently return `NaT` on `timedelta64` with a missing
-value, where the 7 order-based nan-reductions skip it (matrix above). Root cause +
+**File one focused issue** on numpy/numpy, framed as a **question** (not a
+docs-violation claim — see "desired behavior" above): the additive nan-reductions
+`nansum`/`nanmean`/`nancumsum` silently return `NaT` on `timedelta64`, where the 7
+order-based nan-reductions skip it — is the inconsistency intended? Lead with the
+matrix + #5222 precedent. Root cause +
 fix: extend `_replace_nan`'s mask branch to cover datetime/timedelta
 (`a.dtype.kind in "mM"`) using `np.isnat` (or `np.isnan`, which already works),
 then fill `NaT` with the zero-timedelta. Reference #5222 as the precedent for the
