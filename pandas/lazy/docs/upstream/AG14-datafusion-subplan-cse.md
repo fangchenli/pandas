@@ -5,12 +5,22 @@
 data-point on #22676**, NOT a PR (the fix is epic-scale). Its one novel angle is
 **correctness**; everything else is already understood upstream.
 
-> **STATUS (2026-07-10): REVISED after review (verified against datafusion-python
-> 54.0.0 built from local `main`).** Recomputation confirmed; the *correctness*
-> failure is now reproduced (flaky, characterized below). Scope of the pitch
-> narrowed to the one thing upstream hasn't said. Recommendation: post the
-> correctness data point on #22676 with the flakiness caveat, and keep our
-> workaround. Gate: human approval to comment.
+> **STATUS (2026-07-10): SHELVED — not actionable for us now (human decision).**
+> The workaround is KEPT (see below / `translate_datafusion.py`); the #22676
+> comment is **shelved, not posted.** Rationale: the fix is an epic-scale
+> upstream effort with an open execution-design blocker (#8777), the only novel
+> angle (correctness) rests on a **flaky** repro, and the generalization is
+> already accepted upstream — so a comment adds little for the cost. This doc
+> stays as a complete, verified record (recompute + reproduced-but-flaky
+> correctness failure + comment draft) to revisit ONLY if: the flaky repro can be
+> made deterministic, #22676 nears landing (then re-test whether our workaround
+> can be dropped — see the AG14 "what if it lands" analysis), or a maintainer
+> asks for the correctness data point.
+>
+> _History (2026-07-10): REVISED after review (verified vs datafusion-python
+> 54.0.0 from local `main`) — recomputation confirmed, correctness failure
+> reproduced (flaky, characterized), framing corrected, pitch narrowed to
+> correctness. Superseded by the shelve decision above._
 
 ## The finding (one line)
 DataFusion's **logical optimizer inlines a shared subplan at every reference
@@ -124,10 +134,11 @@ lowering 21/22 → 22/22 vs DuckDB (SF-0.1 and SF-1).
 - [x] **Duplicate search** — #22676 (epic, POC #22551/#22675) + #8777; the
       "duplicated-subplan generalization" is already accepted, the **correctness**
       angle is not present in either.
-- [ ] **Human approval before commenting** (outward-facing; guardrail).
+- [x] **Human decision: SHELVE the comment** (2026-07-10) — not actionable for us
+      now; nothing posted.
 
 ## Definition of done
-Correctness data point posted on #22676 (with the flakiness caveat) — or shelved
-if the reviewer judges a flaky repro too weak to post. Keep the materialize-
-shared-subplan workaround in `translate_datafusion.py` regardless. Record the
-outcome here + in `README.md` + `../ARROW_GAPS.md`.
+**DONE — SHELVED (2026-07-10).** Human decision: a flaky repro + an
+already-accepted generalization make the #22676 comment low-value for now; the
+correctness angle stays recorded here if it ever becomes worth posting. Workaround
+KEPT in `translate_datafusion.py`. Revisit triggers are in the status block above.
