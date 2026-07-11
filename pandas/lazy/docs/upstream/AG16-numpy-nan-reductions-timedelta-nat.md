@@ -11,25 +11,26 @@ re-check.
 > Nothing filed without go-ahead (guardrail).
 
 ## The finding (one line)
-NumPy's **nan-aware reductions handle `NaT` inconsistently on `timedelta64`**:
-`nanmin`/`nanmax`/`nanmedian` correctly **skip** `NaT`, but `nansum`/`nanmean`
-**return `NaT`** (they don't skip it) — a silent wrong result on the dtype's
-missing value.
+Across the **full `nan*` reduction family on `timedelta64`**, the **additive**
+reductions (`nansum`, `nanmean`, `nancumsum`) **silently return `NaT`** instead of
+skipping it, while all 7 order-based reductions correctly skip — a silent wrong
+result on the dtype's missing value.
 
-## Evidence (numpy 2.5.1)
-```python
-import numpy as np
-td = np.array([1, np.timedelta64("NaT"), 3, 2], dtype="timedelta64[D]")
-np.nanmin(td)     # 1 days      <- skips NaT (correct)
-np.nanmax(td)     # 3 days      <- skips NaT (correct)
-np.nanmedian(td)  # 2 days      <- skips NaT (correct)
-np.nansum(td)     # NaT         <- DOES NOT skip (wrong; expected 6 days)
-np.nanmean(td)    # NaT         <- DOES NOT skip (wrong; expected 2 days)
-np.nanstd(td)     # TypeError: ufunc 'square' not supported  (separate; std of timedelta ill-defined)
-```
-The whole point of the `nan*` family is to skip missing values (`nansum` of a
-float with `NaN` → treats `NaN` as 0). On `timedelta64`, `nansum`/`nanmean` don't
-— and they don't error either; they silently return `NaT`.
+## Evidence (numpy 2.5.1) — the full family matrix on `timedelta64` + `NaT`
+`td = np.array([1, np.timedelta64("NaT"), 3, 2], dtype="timedelta64[D]")`
+(skipping `NaT` → values `[1, 3, 2]` days)
+
+| behavior | # | ops | note |
+|---|---|---|---|
+| **SKIP-NaT** (correct) | 7 | `nanmin`, `nanmax`, `nanmedian`, `nanpercentile`, `nanquantile`, `nanargmin`, `nanargmax` | order/sort-based path handles `NaT` |
+| **LEAK-NaT** (silent bug) | 3 | `nansum`, `nanmean`, `nancumsum` | return `NaT`; `nancumsum` → `[1 day, NaT, NaT, NaT]` |
+| **ERROR** (defensible) | 4 | `nanprod`, `nanstd`, `nanvar`, `nancumprod` | `multiply`/`square` undefined for timedelta — product/variance of durations is ill-defined |
+
+So the bug is precisely the **additive `_replace_nan`-based subfamily** — and those
+are exactly the timedelta reductions that make sense and that pandas needs
+(`sum`/`mean`/`cumsum` of durations, skipping `NaT`). The whole point of the
+`nan*` family is to skip missing values (`nansum` of a float with `NaN` treats it
+as 0); on `timedelta64` these three silently don't, and don't error either.
 
 ## Root cause (confirmed in numpy source — `numpy/lib/_nanfunctions_impl.py`)
 `nansum`/`nanmean`/`nanvar`/`nanstd` all mask NaNs via `_replace_nan(a, val)`,
@@ -83,12 +84,14 @@ NaT isnan`, `nanmean datetime timedelta NaT`, `nansum nanmean NaT timedelta`.
 - **No open issue** reports the `nansum`/`nanmean` timedelta `NaT` leak.
 
 ## Recommendation
-**File one focused bug** on numpy/numpy: `nansum`/`nanmean` (and `nanvar`/`nanstd`
-by extension) silently return `NaT` on `timedelta64` with a missing value, where
-`nanmin`/`nanmax`/`nanmedian` skip it. Root cause + fix: extend `_replace_nan`'s
-mask branch to cover datetime/timedelta (`a.dtype.kind in "mM"`) using
-`np.isnat` (or `np.isnan`, which already works), then replace `NaT` with the
-zero-timedelta fill. Reference #5222 as the precedent for the min/max half.
+**File one focused bug** on numpy/numpy: the additive nan-reductions `nansum`,
+`nanmean`, `nancumsum` silently return `NaT` on `timedelta64` with a missing
+value, where the 7 order-based nan-reductions skip it (matrix above). Root cause +
+fix: extend `_replace_nan`'s mask branch to cover datetime/timedelta
+(`a.dtype.kind in "mM"`) using `np.isnat` (or `np.isnan`, which already works),
+then fill `NaT` with the zero-timedelta. Reference #5222 as the precedent for the
+min/max half. (The 4 ERROR ops — `nanprod`/`nanstd`/`nanvar`/`nancumprod` — are
+out of scope: product/variance of durations is genuinely ill-defined.)
 
 ## Gates
 - [x] **Reproduces** — numpy 2.5.1, repro above; root cause read from
