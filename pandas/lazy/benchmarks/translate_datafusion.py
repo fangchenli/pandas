@@ -11,6 +11,8 @@ Polars' from_pandas). Unsupported nodes/exprs raise NotSupported.
 
 from __future__ import annotations
 
+import itertools
+
 import datafusion as D
 from datafusion import (
     SessionContext,
@@ -45,6 +47,10 @@ from pandas.lazy.plan import (
 NotSupported = NotImplementedError
 
 _AGG = {"sum", "mean", "min", "max", "count", "n_unique"}
+
+# process-monotonic counter for materialized-subplan table names, so they stay
+# unique across run() calls sharing one ctx (register-once, query-many).
+_MAT_CTR = itertools.count()
 
 
 def _df_to_arrow(df: pd.DataFrame) -> pa.RecordBatch:
@@ -235,14 +241,16 @@ def _count_refs(plan, counts: dict | None = None) -> dict:
 
 
 def _fresh_table(ctx, ctr: list, batches: list) -> D.DataFrame:
-    """Register `batches` under a unique name and return a fresh table handle."""
-    nm = f"m{ctr[0]}"
-    ctr[0] += 1
+    """Register `batches` under a process-unique name and return a fresh table.
+    The name uses a monotonic counter (not the per-run ``ctr``, which resets each
+    ``run()``) so materialized tables don't collide when a ctx is reused across
+    queries (the register-once, query-many path)."""
+    nm = f"m{next(_MAT_CTR)}"
     ctx.register_record_batches(nm, [batches])
     return ctx.table(nm)
 
 
-def _lower(plan, ctx, ctr, memo, refs) -> D.DataFrame:
+def _lower(plan, ctx, ctr, memo, refs, sources) -> D.DataFrame:
     """Lower a node. A node referenced >=2 times (a shared subplan) is
     MATERIALIZED once to Arrow, and *each* reference gets a fresh table over
     those cached batches. Two reasons, both found by the differential probe:
@@ -260,7 +268,7 @@ def _lower(plan, ctx, ctr, memo, refs) -> D.DataFrame:
         cached = memo[key]
         # a shared node caches its Arrow batches -> a fresh table per reference
         return _fresh_table(ctx, ctr, cached) if isinstance(cached, list) else cached
-    df = _lower_impl(plan, ctx, ctr, memo, refs)
+    df = _lower_impl(plan, ctx, ctr, memo, refs, sources)
     if refs.get(key, 0) >= 2 and not isinstance(plan, DataFrameSource):
         batches = [b.replace_schema_metadata(None) for b in df.collect()]  # AG11 strip
         if not batches:
@@ -274,15 +282,21 @@ def _lower(plan, ctx, ctr, memo, refs) -> D.DataFrame:
     return df
 
 
-def _lower_impl(plan, ctx, ctr, memo, refs) -> D.DataFrame:
+def _lower_impl(plan, ctx, ctr, memo, refs, sources) -> D.DataFrame:
     if isinstance(plan, DataFrameSource):
+        # reuse a pre-registered source table when available (register-once,
+        # query-many; also the fair 'execute-only' timing that excludes the
+        # per-run registration boundary).
+        pre = sources.get(id(plan.df))
+        if pre is not None:
+            return ctx.table(pre)
         nm = f"t{ctr[0]}"
         ctr[0] += 1
         ctx.register_record_batches(nm, [[_df_to_arrow(plan.df)]])
         return ctx.table(nm)
 
     if isinstance(plan, Filter):
-        return _lower(plan.input, ctx, ctr, memo, refs).filter(
+        return _lower(plan.input, ctx, ctr, memo, refs, sources).filter(
             _expr(_ir(plan.predicate))
         )
 
@@ -291,10 +305,10 @@ def _lower_impl(plan, ctx, ctr, memo, refs) -> D.DataFrame:
         for e in plan.exprs:
             node = _ir(e)
             exprs.append(_expr(node).alias(_name_of(node)))
-        return _lower(plan.input, ctx, ctr, memo, refs).select(*exprs)
+        return _lower(plan.input, ctx, ctr, memo, refs, sources).select(*exprs)
 
     if isinstance(plan, Aggregate):
-        df = _lower(plan.input, ctx, ctr, memo, refs)
+        df = _lower(plan.input, ctx, ctr, memo, refs, sources)
         gnames = [_name_of(_ir(g)) for g in plan.group_by]
         agg_nodes = [_ir(e) for e in plan.agg_exprs]
         rw = _rewrite_n_unique(df, gnames, agg_nodes)
@@ -305,7 +319,7 @@ def _lower_impl(plan, ctx, ctr, memo, refs) -> D.DataFrame:
         return df.aggregate(groups, aggs)
 
     if isinstance(plan, Sort):
-        df = _lower(plan.input, ctx, ctr, memo, refs)
+        df = _lower(plan.input, ctx, ctr, memo, refs, sources)
         keys = [
             # nulls_first=False matches pandas' sort_values(na_position="last"),
             # which places NA last for BOTH directions; DataFusion's DataFrame-API
@@ -317,12 +331,12 @@ def _lower_impl(plan, ctx, ctr, memo, refs) -> D.DataFrame:
         return df.sort(*keys)
 
     if isinstance(plan, Limit):
-        return _lower(plan.input, ctx, ctr, memo, refs).limit(
+        return _lower(plan.input, ctx, ctr, memo, refs, sources).limit(
             int(plan.n), int(plan.offset or 0)
         )
 
     if isinstance(plan, TopK):
-        df = _lower(plan.input, ctx, ctr, memo, refs)
+        df = _lower(plan.input, ctx, ctr, memo, refs, sources)
         keys = [
             # nulls_first=False matches pandas' sort_values(na_position="last"),
             # which places NA last for BOTH directions; DataFusion's DataFrame-API
@@ -334,11 +348,11 @@ def _lower_impl(plan, ctx, ctr, memo, refs) -> D.DataFrame:
         return df.sort(*keys).limit(int(plan.k))
 
     if isinstance(plan, Distinct):
-        return _lower(plan.input, ctx, ctr, memo, refs).distinct()
+        return _lower(plan.input, ctx, ctr, memo, refs, sources).distinct()
 
     if isinstance(plan, Join):
-        left = _lower(plan.left, ctx, ctr, memo, refs)
-        right = _lower(plan.right, ctx, ctr, memo, refs)
+        left = _lower(plan.left, ctx, ctr, memo, refs, sources)
+        right = _lower(plan.right, ctx, ctr, memo, refs, sources)
         how = plan.how
         if how == "cross":
             # DataFusion has no cross method; join_on with no predicates == cross.
@@ -400,8 +414,23 @@ def _ir(e):
     return e._node if hasattr(e, "_node") else e
 
 
-def run(ldf) -> pd.DataFrame:
+def register_sources(ctx: SessionContext, tables: dict) -> dict:
+    """Register each source frame once under ``src_<name>``; return a
+    ``{id(df): table_name}`` map to pass to ``run(..., sources=)`` so repeated
+    runs reuse the tables instead of re-registering (register-once, query-many)."""
+    srcs = {}
+    for name, df in tables.items():
+        tn = f"src_{name}"
+        ctx.register_record_batches(tn, [[_df_to_arrow(df)]])
+        srcs[id(df)] = tn
+    return srcs
+
+
+def run(
+    ldf, ctx: SessionContext | None = None, sources: dict | None = None
+) -> pd.DataFrame:
     plan = ldf._get_optimized_plan()
-    ctx = SessionContext()
-    df = _lower(plan, ctx, [0], {}, _count_refs(plan))
+    if ctx is None:
+        ctx = SessionContext()
+    df = _lower(plan, ctx, [0], {}, _count_refs(plan), sources or {})
     return df.to_pandas()
