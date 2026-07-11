@@ -53,12 +53,28 @@ mask is available — `_replace_nan` just never reaches for it. `nanmin`/`nanmax
 Confirmation: `np.nansum(td_without_NaT) == 6 days` (works), `np.nansum(td_with_NaT)
 == NaT` (leaks).
 
+## Also breaks `datetime64` (via differences — the pandas mean-date idiom)
+The leak follows through anything that produces a `timedelta64` with `NaT`:
+```python
+dt = np.array(["2020-01-01","NaT","2020-03-01","2020-02-01"], dtype="datetime64[D]")
+np.nansum(dt - dt[0])        # NaT   (differences from a ref)
+np.nansum(np.diff(dt))       # NaT   (consecutive differences)
+dt[0] + np.nanmean(dt - dt[0])   # NaT  <- the pandas "mean date, skip NaT" idiom, broken
+```
+This last line matters: NumPy **can't** `mean`/`nanmean` a `datetime64` array
+directly (`ufunc 'add' cannot use operands with type datetime64`), so the *only*
+way to get a nan-skipping mean date is the offset idiom `ref + mean(values-ref)` —
+which AG16 silently turns into `NaT`. (Separately, `np.nanmedian(dt)` also errors
+on `add` for `datetime64`, though it works fine for `timedelta64` — a smaller
+adjacent datetime-median gap.)
+
 ## Why it matters (pandas relevance)
 pandas' `Series.mean()`/`.sum()` on a `timedelta64` column **skip `NaT`** (the
-`skipna=True` default). NumPy's `nanmean`/`nansum` — the natural primitives for
-exactly that — give the wrong answer (`NaT`) on the same data, so they can't be
-relied on for nullable-timedelta reductions; a consumer must special-case `NaT`
-itself. Any code assuming `nan*` means "skip missing" is silently wrong here.
+`skipna=True` default). NumPy's `nanmean`/`nansum`/`nancumsum` — the natural
+primitives for exactly that, and the building blocks of the mean-date idiom above
+— give the wrong answer (`NaT`) on the same data, so they can't be relied on for
+nullable-timedelta/datetime reductions; a consumer must special-case `NaT` itself.
+Any code assuming `nan*` means "skip missing" is silently wrong here.
 
 ## Standalone repro (pure numpy)
 ```python
@@ -72,16 +88,21 @@ print("nanmean:", np.nanmean(td))  # NaT     (BUG: should be 2 days)
 print("isnan works:", np.isnan(td).tolist())  # [False, True, False, False]
 ```
 
-## Dup-search (recorded — numpy/numpy)
-Searched `nansum nanmean timedelta NaT not skipped`, `nan functions timedelta64
-NaT isnan`, `nanmean datetime timedelta NaT`, `nansum nanmean NaT timedelta`.
+## Dup-search (recorded — numpy/numpy, thorough)
+Searched (issues **and** PRs): `nansum nanmean timedelta NaT not skipped`, `nan
+functions timedelta64 NaT isnan`, `nanmean datetime timedelta NaT`, `nansum
+nanmean NaT timedelta`, `nanmean nansum datetime timedelta`, `_replace_nan
+timedelta datetime`, `nan functions not support datetime timedelta`, `nanmean
+timedelta returns NaT`, `nansum NaT not treated as zero`, `nanfunctions datetime
+timedelta support`, `reduction skipna datetime timedelta`. **No open or closed
+issue reports the additive-nan-reduction `NaT` leak on `timedelta64`/`datetime64`**
+— all hits were unrelated (groupby ENH, MIPS `nanmin`, float16→datetime UB).
 - **#5222 [closed 2020] "BUG: (nan)?(arg)?(max|min) handling of NaT inconsistent"**
   — the PRECEDENT, but a *different* case: it fixed the **plain** `min`/`max`/
   `argmin`/`argmax` NaT consistency (they now propagate NaT like NaN). It did
   **not** touch the **nan-aware additive** reductions. This is the surviving
   sibling — same "NaT-handling inconsistent across reductions" class, unfixed for
-  `nansum`/`nanmean` (the AG11 pattern: a fix that missed a sibling path).
-- **No open issue** reports the `nansum`/`nanmean` timedelta `NaT` leak.
+  `nansum`/`nanmean`/`nancumsum` (the AG11 pattern: a fix that missed a sibling).
 
 ## Recommendation
 **File one focused bug** on numpy/numpy: the additive nan-reductions `nansum`,
@@ -96,8 +117,10 @@ out of scope: product/variance of durations is genuinely ill-defined.)
 ## Gates
 - [x] **Reproduces** — numpy 2.5.1, repro above; root cause read from
       `_nanfunctions_impl._replace_nan`.
-- [x] **Duplicate search recorded** — #5222 is the closed plain-reduction sibling;
-      the nan-aware additive case is novel/unfixed.
+- [x] **Duplicate search recorded (thorough, 11 phrasings, issues+PRs)** — no
+      issue reports it; #5222 is the closed plain-reduction sibling; the nan-aware
+      additive case is novel/unfixed. Datetime manifestation (mean-date idiom)
+      confirmed too.
 - [ ] **Re-verify on the latest numpy release** at file time (2.5.1 may not be newest).
 - [ ] **Human approval before filing** (outward-facing; guardrail).
 
