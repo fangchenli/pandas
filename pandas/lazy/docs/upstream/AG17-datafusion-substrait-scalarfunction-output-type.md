@@ -1,17 +1,51 @@
-# Hand-off: AG17 — DataFusion's Substrait producer omits `ScalarFunction.output_type` (breaks portability)
+# Hand-off: AG17 — ~~DataFusion omits `ScalarFunction.output_type`~~ **RESOLVED UPSTREAM (not filing)**
 
-**For:** a fresh agent. Read `README.md` first. **Target project:
-`apache/datafusion`** (the `datafusion-substrait` crate; surfaced via
-`datafusion-python`). **Priority: 2** — a broad, clean, causally-proven producer
-defect with **two closed-fix precedents** (regression/incomplete-fix class, like
-AG11/AG16); it makes DataFusion-produced Substrait unconsumable by any other
-compliant engine. File-worthy after a latest-version re-check.
+**Target project:** `apache/datafusion`. **STATUS: NOT FILEABLE — already fixed
+on `main`.** The live salvage moved to **`AG20-datafusion-substrait-aggregate-output-type-phase.md`**.
 
-> **STATUS (2026-07-11): FOUND BY THE SUBSTRAIT ROUNDTRIP-SURVIVAL PROBE +
-> ROOT-CAUSED + CAUSALLY PROVEN + DUP-SEARCHED — hand-off-ready (not filed).**
-> Verified on **datafusion 51.0.0** producer, consumed by **pyarrow/Acero
-> 23.0.1** and DataFusion's own consumer. Nothing filed without go-ahead
-> (guardrail).
+> **STATUS (2026-07-12): RESOLVED-UPSTREAM / DO NOT FILE.** The scalar-function
+> `output_type` omission was fixed by **PR #20597 "fix: Set Substrait output types
+> for expressions"** (merged to `main` 2026-05-27, with a regression test
+> `binary_expr_output_type`). It is **not a regression and not an incomplete fix**
+> — it's a merged fix that simply hadn't shipped in the **54.0.0** release this
+> probe tested (branch-54 was cut before #20597 merged; it wasn't backported).
+
+## Post-mortem — why this doc was wrong (the methodology lesson)
+This finding failed a check it never ran, and it's the important takeaway:
+
+1. **Tested the release, concluded about `main`.** Verified on the pip package
+   `datafusion 54.0.0` and marked "reproduces on latest" `[x]`. But 54.0.0
+   (tagged 2026-06-03) is `diverged` from #20597's merge commit
+   (`77240f9f`, 2026-05-27) — `git merge-base` shows the fix is **not** an
+   ancestor of the tag. The released binary lacks the fix; `main` has it. "Still
+   omits on current / regression persists" is true of the *artifact* pip-installed
+   and **false of the codebase**. Confirmed by reading `main`:
+   `scalar_function.rs` now sets `output_type: Some(...)` (L129/160/339/367) with
+   the regression test at L463.
+2. **Misread the precedent as "fixed twice."** #15831 is the *issue*; #20597 is
+   the *PR* that closed it — one recent fix, same day. The "regression with two
+   closed-fix precedents (AG11/AG16 class)" framing rested on that misread and
+   collapses.
+3. **The causal proof was solid but aimed at an already-solved target** — the
+   inject-`output_type`→Acero-consumes repro proves the value of a fix that
+   already exists.
+
+**The gate this should have had (now standard — see `README.md` §2):** *any*
+"still broken / regression / incomplete-fix" claim must be verified against the
+repo's `main`/HEAD source, not the released package. Released version answers "is
+it shipped"; only `main` answers "is it fixed." Check with `git grep` on `main` +
+`git merge-base --is-ancestor <fix-commit> <release-tag>`. AG20 applies this gate.
+
+## What survives → AG20
+The **aggregate** path #20597 didn't touch is the live finding: on current `main`,
+aggregate Measures still emit `output_type: None` + `phase: Unspecified`
+(`aggregate_function.rs`), and the LIKE/ILIKE builder still emits
+`output_type: None` (`scalar_function.rs:296,312`). Since every real query
+aggregates, *that* is what blocks Acero on `main`. Causally proven + verified on
+`main` in **`AG20-datafusion-substrait-aggregate-output-type-phase.md`**.
+
+---
+*Historical record of the (resolved) scalar finding follows.*
 
 ## How it was found (the experiment)
 The question: *of the 22 TPC-H plans that lower cleanly to the DataFusion
@@ -182,41 +216,36 @@ python pkg. Re-run on the latest datafusion release before filing.
   output_type`, `substrait output_type missing regression`, `to_substrait_plan
   output type`, and check open PRs.
 
-## Recommendation
-**File one focused issue** on apache/datafusion, framed as a **regression** of
-#15831/#20597: `to_substrait_plan` emits `ScalarFunction` with no `output_type`
-(comparison + arithmetic, DataFrame + SQL) on 51.0.0, making the output
-unconsumable by Acero; reference the two closed fixes + the causal repro. Fix:
-set `output_type` when serializing `ScalarFunction` in the producer (the type is
-already known from the logical plan's schema). Mention the aggregation-phase
-omission as a likely-related second issue. This is **on-charter** (DataFusion is a
-named substrate) and directly serves the differential probe: a portable-Substrait
-producer would let one lowering fan across DataFusion + Acero + DuckDB, turning
-every cross-engine result divergence into a free finding.
+## Recommendation — DO NOT FILE (resolved)
+The scalar `output_type` omission is **fixed on `main`** by #20597; filing it
+would report an already-merged fix. Take instead the live sibling — **AG20**
+(aggregate `output_type`/`phase` + LIKE `output_type`), which #20597 missed and
+which is verified unfixed on `main`.
 
-## Gates
-- [x] **Reproduces** — datafusion 51.0.0 producer; `HasField("output_type")` False
-      on all scalar functions (both front-ends); Acero 23.0.1 consumer fails;
-      protobuf decoded.
-- [x] **Reproduces on the LATEST stack too** — datafusion **54.0.0** still emits
-      `output_type` unset (`[False]`); pyarrow **25.0.0** Acero still fails on it.
-      So AG17 is not a stale-version artifact (`verify_substrait_latest.py`, run in
-      a fresh venv, 2026-07-11). The #15831/#20597 regression persists on current.
-- [x] **Causally proven** — inject `output_type` → Acero consumes the identical
-      plan → correct rows. The field is the sole filter-path blocker. The local
-      workaround (`substrait_fixup.py`) takes Acero 0/22 → 11/22 correct.
-- [x] **Duplicate search recorded** — two closed precedents (#15831, #20597);
-      current state is a regression/incomplete fix; novel as an open report.
-- [ ] **Human approval before filing** (outward-facing; guardrail).
+## Gates (corrected)
+- [x] **Reproduced on the 51.0.0 / 54.0.0 *releases*** — but that only proved the
+      *release artifact* omits it, not the codebase (the error below).
+- [x] **~~Reproduces on the latest~~ → CORRECTED: fixed on `main`.** #20597 (merged
+      2026-05-27) sets `output_type` in `scalar_function.rs` on `main`; the 54.0.0
+      *tag* (2026-06-03) is `diverged` from that commit (`merge-base` not an
+      ancestor). "Regression persists on current" was a claim about the pip
+      package, not `main`. **Verified by reading `main` source.**
+- [x] **Causally proven** — inject → Acero consumes. Solid work, but aimed at an
+      already-solved target.
+- [~] **Duplicate search** — MISREAD: #15831 is the *issue*, #20597 the *PR* that
+      closed it (one fix, not two precedents). The "regression / two closed fixes"
+      framing is retracted.
+- [x] **NEW GATE (now standard, `README.md` §2): defect confirmed on `main`/HEAD,
+      not just the release** — this doc FAILED it; AG20 passes it.
 
-**AG18 gate (the residual Arrow-consumer cluster):** both manifestations also
-**reproduce on the latest** pyarrow **25.0.0** (not just pinned 23.0.1):
-`FetchRel.count_expr` → still silent 0 rows; `precision_timestamp` → still
-`substrait literal did not have any literal type set`. So AG18 clears its
-"re-verify on latest" gate too — it's a live Arrow-consumer gap, not version rot.
+## Note on the AG18/AG19 (Arrow-consumer) findings
+Those were verified on **released** pyarrow 25.0.0, not Arrow C++ `main`. By the
+same lesson, before filing AG18/AG19, run the `main`-first gate against
+`apache/arrow` HEAD (the consumer registration / FetchRel-oneof handling may have
+landed since the release). Their repros stand on the released artifact; their
+"still unfixed" status needs the source check.
 
 ## Definition of done
-Filed (with #) referencing #15831/#20597, or shelved, recorded here + in
-`README.md`. The Substrait roundtrip-survival probe's first genuine find — and
-the answer to "is Substrait a portable lowering for us?": **yes for the
-DataFusion route (22/22), no across engines yet — and this is why.**
+**Done: RESOLVED-UPSTREAM, not filing.** Recorded here + in `README.md`; live work
+handed to `AG20-datafusion-substrait-aggregate-output-type-phase.md`. The durable
+value of AG17 is the methodology gate it forced (test `main`, not the release).

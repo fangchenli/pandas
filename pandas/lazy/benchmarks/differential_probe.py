@@ -42,12 +42,15 @@ op to DataFusion, serialize to Substrait — the portable IR — and consume it 
 on a *second* engine (Acero). Every "DataFusion emits but Acero can't consume" is a
 COVERAGE finding, every "Acero consumes but silently disagrees" a RESULT finding.
 Its cells are standing trackers: ``acero-raw`` (Acero on UNFIXED datafusion
-Substrait) flips ok when datafusion stops omitting ``ScalarFunction.output_type``
-(AG17); ``acero-fix`` (Acero on the AG17/AG18 portability-fixed plan, via
-``substrait_fixup.py``) flips ok as arrow registers the missing string-function
-mappings (AG19) / ``precision_timestamp`` (AG18b), and guards the AG18a
-``FetchRel`` silent-0-row fix from regressing. Skipped unless the ``substrait``
-proto pkg is importable.
+Substrait) tracks the producer's missing ``output_type`` — the scalar case is
+already fixed on datafusion ``main`` (PR #20597, ships post-54.0.0), but the
+AGGREGATE case (``Measure.output_type`` + ``phase``) is still unfixed on ``main``
+(**AG20** — the live salvage of the retracted AG17; see docs/upstream), so the
+aggregating cells stay ``XX`` until AG20 lands. ``acero-fix`` (Acero on the
+AG17/AG18-portability-fixed plan, via ``substrait_fixup.py``) flips ok as arrow
+registers the missing string-function mappings (AG19) / ``precision_timestamp``
+(AG18b), and guards the AG18a ``FetchRel`` silent-0-row fix from regressing.
+Skipped unless the ``substrait`` proto pkg is importable.
 
 Self-contained: pyarrow + polars + datafusion + numpy + pandas, synthetic data.
 Run on the *current* releases in a throwaway venv (see ``upstream/README.md`` §1),

@@ -42,11 +42,15 @@ dies.
 | DataFusion → Substrait(bytes) → **DataFusion** | **22/22** | Substrait IS a viable portable lowering for the DataFusion route — it re-ingests its own Substrait, correct vs DuckDB, in 0.8–5.5 KB/plan |
 | DataFusion → Substrait(bytes) → **Acero** | **0/22** | DataFusion's Substrait roundtrips only to *itself* — non-portable |
 
-The 22-vs-0 split is itself the finding. Bisected on trivial plans to a concrete,
-causally-proven producer defect → **AG17**: `to_substrait_plan` omits the
-required `ScalarFunction.output_type` (a regression of closed fixes #15831/#20597;
-inject the field → Acero consumes). Second, adjacent: aggregate rels emitted with
-phase `UNSPECIFIED`, which Acero rejects.
+The 22-vs-0 split is itself the finding. Bisected on trivial plans to a
+producer `output_type` omission. **Correction (2026-07-12):** the *scalar*
+`output_type` omission (originally AG17) turned out to be **fixed on datafusion
+`main`** by PR #20597 — absent only from the 54.0.0 *release* we tested, so AG17
+is retracted (RESOLVED-UPSTREAM; a released-artifact mirage). The **live** producer
+defect is the aggregate path #20597 missed → **AG20**: `Measure.output_type: None`
++ `phase: UNSPECIFIED` on `main`, causally proven (inject both → Acero consumes),
+blocking every aggregating query. (See AG17 doc's post-mortem for the `main`-first
+methodology gate this produced.)
 
 ## The fix — a local portability pass (`substrait_fixup.py`, `--fix`)
 Keep-the-workaround principle: post-process the emitted protobuf to re-derive what
@@ -58,7 +62,7 @@ layers (all on pinned pyarrow 23.0.1 — re-verify on latest):
 
 | what the fixup does | lifts | class |
 |---|---|---|
-| fill `ScalarFunction`/`AggregateFunction` `output_type` + agg phase | 7 | **AG17** (DataFusion producer) |
+| fill `ScalarFunction`/`AggregateFunction` `output_type` + agg phase | 7 | DataFusion producer: scalar=fixed on `main` (~~AG17~~ #20597); aggregate=**AG20** |
 | downgrade `precision_timestamp` → legacy `timestamp` | +? | AG18 (Arrow consumer reads deprecated field) |
 | mirror `FetchRel.count_expr` → deprecated `count` (**silent 0-row LIMIT fix**) | +4 | AG18 (silent-wrong; Acero read `count==0`) |
 
@@ -80,12 +84,13 @@ correct on all of them; every gap is an **engine** failing to implement it:
 - `FetchRel.count` is a `oneof count_mode` and the spec (PR #748 + proto docs)
   says consumers must check the oneof / unset = ALL → the silent 0-rows is an
   **Arrow-consumer** bug, not a spec ambiguity (#748 even pre-flagged the hazard).
-- `output_type` is spec-**required** → **DataFusion-producer** bug (AG17).
+- `output_type` is spec-**required** → **DataFusion-producer** bug: scalar case
+  fixed on `main` (#20597, retracted AG17); aggregate case still open → **AG20**.
 - `starts_with`/`ends_with`/`substring`, `precision_timestamp`, and the
   `DISTINCT` invocation are all standard spec surface → **Arrow-consumer** gaps.
 - `date_part`/`regexp_like` aren't standard names → **DataFusion-producer** issue.
 
-So the fixes go to **DataFusion** (AG17, canonical names) and **Arrow** (AG18/AG19),
+So the fixes go to **DataFusion** (AG20 aggregate output_type/phase, canonical names) and **Arrow** (AG18/AG19),
 never to Substrait. The only conceivable Substrait-project contribution is
 *conformance test vectors* (their consumer-testing effort would catch exactly
 these engine bugs) — test infra, not a spec fix. Net: a quiet endorsement of the
@@ -98,8 +103,8 @@ with the `substrait_fixup.py` workaround (`--fix`), one plan runs correctly on
 both DataFusion (22/22) and Acero (7/22), and every remaining cross-engine
 divergence is a characterized finding (AG18 + the Arrow function-coverage /
 cross-join / 0-row layers above). Re-run `substrait_roundtrip.py --acero --fix` on
-each datafusion/pyarrow release: the fixup auto-retires once AG17 lands upstream
-(output_type stops being missing), and the Acero OK count tracks the Arrow
-consumer's Substrait coverage as it improves. That rising number is the fan-out
+each datafusion/pyarrow release: the fixup's scalar-`output_type` step auto-retires
+once #20597 ships and its aggregate step once **AG20** lands, and the Acero OK
+count tracks the Arrow consumer's Substrait coverage as it improves. That rising number is the fan-out
 going live — at which point the same instrument starts emitting cross-engine
 *result* divergences (the free findings) instead of consumer-coverage ones.
