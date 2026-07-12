@@ -113,6 +113,11 @@ producer issue below.)
 - **All** function extensions are emitted **unanchored**
   (`extension_urn_reference = 4294967295`, no URN declared) — a third producer gap:
   even the standard-named functions carry no pointer to their defining extension.
+  **Already tracked: DataFusion #11545 [open] "Provide valid extensionUris and
+  extensionUriReferences in Substrait"** — it names the exact symptom ("hardcoded
+  extensionUriReference of max i32") but has **no reproducer**. → *attach our repro
+  + the concrete consumer consequence (Acero can't anchor/map) as a data point;
+  do not file new.*
 - These belong in the AG17 hand-off's "producer portability" scope; recorded here
   so the split is explicit and AG19 stays narrowly the Arrow-consumer piece.
 
@@ -121,7 +126,11 @@ Acero's Substrait consumer rejects the DISTINCT aggregate invocation:
 `Unsupported aggregation invocation 'AGGREGATION_INVOCATION_DISTINCT'`. This IS in
 Substrait scope (`AggregateFunction.invocation`), and Arrow has `count_distinct`,
 so again the kernel exists and only the invocation→kernel path is missing — a real
-Acero consumer gap, same class as the string functions above.
+Acero consumer gap, same class as the string functions above. **Related open issue:
+Arrow #32369 "[Python][Substrait] Acero consumer is unable to consume count
+function"** (about `count(*)` via Isthmus — plain `count` works in our matrix, only
+the DISTINCT *invocation* fails, so it's an adjacent sub-case). → *attach our
+DISTINCT-invocation data point to #32369 rather than file new.*
 
 ## Why it matters (probe relevance)
 This is the last wall between the Substrait fan-out and full cross-engine coverage:
