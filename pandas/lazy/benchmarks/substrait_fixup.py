@@ -277,6 +277,21 @@ def _mirror_fetch_count(msg):
             msg.offset = e.literal.i64
 
 
+def fill_output_types(raw: bytes) -> bytes:
+    """Apply ONLY the AG17 fix: fill missing ``output_type`` + aggregate phase
+    (no cross-join / fetch / timestamp rewrites). Public entry point for
+    isolating AG18 behavior — lets a consumer be tested on an AG17-clean plan
+    without the other portability rewrites masking it."""
+    plan = Plan()
+    plan.ParseFromString(raw)
+    fx = _Fixer(plan)
+    for rel in plan.relations:
+        root = rel.root.input if rel.HasField("root") else None
+        if root is not None:
+            fx.rel_out(root)
+    return plan.SerializeToString()
+
+
 def fix_plan(raw: bytes, legacy_timestamp: bool = False) -> bytes:
     """DataFusion Substrait bytes -> portable Substrait bytes.
 

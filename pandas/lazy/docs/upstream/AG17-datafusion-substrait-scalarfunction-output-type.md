@@ -196,13 +196,22 @@ every cross-engine result divergence into a free finding.
 - [x] **Reproduces** — datafusion 51.0.0 producer; `HasField("output_type")` False
       on all scalar functions (both front-ends); Acero 23.0.1 consumer fails;
       protobuf decoded.
+- [x] **Reproduces on the LATEST stack too** — datafusion **54.0.0** still emits
+      `output_type` unset (`[False]`); pyarrow **25.0.0** Acero still fails on it.
+      So AG17 is not a stale-version artifact (`verify_substrait_latest.py`, run in
+      a fresh venv, 2026-07-11). The #15831/#20597 regression persists on current.
 - [x] **Causally proven** — inject `output_type` → Acero consumes the identical
-      plan → correct rows. The field is the sole filter-path blocker.
+      plan → correct rows. The field is the sole filter-path blocker. The local
+      workaround (`substrait_fixup.py`) takes Acero 0/22 → 11/22 correct.
 - [x] **Duplicate search recorded** — two closed precedents (#15831, #20597);
       current state is a regression/incomplete fix; novel as an open report.
-- [ ] **Re-verify on the latest datafusion release** at file time (51.0.0 may not
-      be newest) — the fix may already be in-flight.
 - [ ] **Human approval before filing** (outward-facing; guardrail).
+
+**AG18 gate (the residual Arrow-consumer cluster):** both manifestations also
+**reproduce on the latest** pyarrow **25.0.0** (not just pinned 23.0.1):
+`FetchRel.count_expr` → still silent 0 rows; `precision_timestamp` → still
+`substrait literal did not have any literal type set`. So AG18 clears its
+"re-verify on latest" gate too — it's a live Arrow-consumer gap, not version rot.
 
 ## Definition of done
 Filed (with #) referencing #15831/#20597, or shelved, recorded here + in
