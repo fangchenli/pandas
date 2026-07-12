@@ -7,13 +7,18 @@ doc** below that a fresh agent can execute end-to-end without prior context.
 
 **Read this playbook first**, then open the hand-off for your feature.
 
-> **Finding new gaps:** the standing discovery instrument is
-> `../DIFFERENTIAL_PROBE.md` (`../../benchmarks/differential_probe.py`) — a fixed
-> workload grid run across `{pandas, polars, acero, datafusion-sql,
-> datafusion-df}` that emits RESULT/PLAN/PERF divergences as candidate findings.
-> It rediscovered AG10/AG4/AG5′ from scratch. Run it on each new release to
-> generate the next backlog rows (and auto-retire fixed ones) instead of finding
-> by accident.
+> **Finding new gaps:** two standing discovery instruments —
+> 1. `../DIFFERENTIAL_PROBE.md` (`../../benchmarks/differential_probe.py`) — a
+>    fixed workload grid across `{pandas, polars, acero, datafusion-sql,
+>    datafusion-df}` emitting RESULT/PLAN/PERF divergences. Rediscovered
+>    AG10/AG4/AG5′ from scratch.
+> 2. `../SUBSTRAIT_ROUNDTRIP.md` (`../../benchmarks/substrait_roundtrip.py`) —
+>    lowers the 22 TPC-H plans, roundtrips each through **Substrait** (the
+>    portable IR), and scores survival across DataFusion + Acero consumers.
+>    Cross-engine divergences on one IR are free findings; it found **AG17**.
+>
+> Run both on each new release to generate the next backlog rows (and auto-retire
+> fixed ones) instead of finding by accident.
 
 ## Backlog index
 
@@ -32,6 +37,7 @@ doc** below that a fresh agent can execute end-to-end without prior context.
 | AG14 | **DataFusion** inlines shared subplans (recompute; both DataFrame API + SQL CTEs) — novel **correctness** angle: a recomputed non-deterministic parallel float `SUM` under exact `==` gives wrong results (TPC-H q15 → 0 rows vs DuckDB 1; flaky, ~50% @ target_partitions=8) | **SHELVED — not actionable for us now** (flaky repro + generalization already accepted upstream #22676/#8777); **workaround kept**, comment not posted | — | `AG14-datafusion-subplan-cse.md` |
 | AG15 | **NumPy** `StringDType(na_object=…)` — no coherent NA policy across the ~43 `np.strings` ufuncs (5 behaviors; **12 ops reject NA in 3 different message styles**); case/`encode` ops leak `descriptor 'upper' … doesn't apply to a 'float'` (legacy `_vec_string`) where siblings propagate. Separate: `partition`/`rpartition` unimplemented for `StringDType` | **found by the NumPy/CPython scout + exhaustively characterized on numpy 2.5.1 + non-dup — hand-off-ready** | 3 | `AG15-numpy-stringdtype-na-ufuncs.md` |
 | AG16 | **NumPy** additive nan-reductions (`nansum`/`nanmean`/`nancumsum`) silently return `NaT` on `timedelta64` with a missing value, while the 7 order-based ones (`nanmin`/`max`/`median`/`percentile`/`quantile`/`argmin`/`argmax`) skip it — root cause: `_replace_nan` only masks object/inexact dtypes, passes `timedelta64` through, though `np.isnan(td)` works. Sibling of the fixed #5222 (plain min/max NaT) | **found by the NumPy/CPython scout (datetime64/NaT one-shot) + full-family matrix + root-caused on numpy 2.5.1 + non-dup — hand-off-ready** | **2** | `AG16-numpy-nan-reductions-timedelta-nat.md` |
+| AG17 | **DataFusion** `to_substrait_plan` omits the **required** `ScalarFunction.output_type` (comparison + arithmetic, DataFrame **and** SQL) → its Substrait roundtrips to *itself* (22/22 TPC-H) but is unconsumable by Acero (0/22; blank-typed error). Causally proven (inject the field → Acero consumes). **Regression of two closed fixes #15831/#20597** (AG11 sibling-miss pattern). Adjacent: producer also leaves aggregate phase `UNSPECIFIED` (Acero rejects) | **found by the Substrait roundtrip-survival probe (`substrait_roundtrip.py`) + root-caused + causally proven on datafusion 51.0.0 — hand-off-ready** | **2** | `AG17-datafusion-substrait-scalarfunction-output-type.md` |
 | AG6 | Acero filter→reduce compaction tax | **SCOPED → don't file** (resolved multithreaded on 24.0.0) | — | `AG6-acero-filter-compaction.md` |
 | AG7 | Arrow↔NumPy/pandas boundary tax | **SCOPED → not an Arrow gap** (dtype-model mismatch; clean numeric already zero-copy) | — | `AG7-boundary-tax.md` |
 | AG8 | Gandiva expression-JIT unpackaged / not in Acero | **SCOPED → low value** (Acero project already removes the materialization tax; chain-JIT redundant) | — | `../MATERIALIZATION_EXPERIMENT.md` addendum + `../ARROW_GAPS.md` R2 |
