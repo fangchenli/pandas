@@ -37,12 +37,24 @@ cross-count-metadata reproduces AG11 (datafusion PR #23442), self-join reproduce
 the datafusion-df duplicate-qualified-field limit (open #14147), and each
 COVERAGE cell flips NotImpl->ok as arrow #44336 view-kernel sub-PRs land.
 
+A sixth source is the **Substrait fan-out** matrix (AG17/AG18/AG19 axis): lower one
+op to DataFusion, serialize to Substrait — the portable IR — and consume it back
+on a *second* engine (Acero). Every "DataFusion emits but Acero can't consume" is a
+COVERAGE finding, every "Acero consumes but silently disagrees" a RESULT finding.
+Its cells are standing trackers: ``acero-raw`` (Acero on UNFIXED datafusion
+Substrait) flips ok when datafusion stops omitting ``ScalarFunction.output_type``
+(AG17); ``acero-fix`` (Acero on the AG17/AG18 portability-fixed plan, via
+``substrait_fixup.py``) flips ok as arrow registers the missing string-function
+mappings (AG19) / ``precision_timestamp`` (AG18b), and guards the AG18a
+``FetchRel`` silent-0-row fix from regressing. Skipped unless the ``substrait``
+proto pkg is importable.
+
 Self-contained: pyarrow + polars + datafusion + numpy + pandas, synthetic data.
 Run on the *current* releases in a throwaway venv (see ``upstream/README.md`` §1),
 never the repo's pinned pyarrow — the whole point is to catch what changed:
 
     python -m venv /tmp/upstream-venv && . /tmp/upstream-venv/bin/activate
-    pip install -U pyarrow polars datafusion numpy pandas
+    pip install -U pyarrow polars datafusion numpy pandas substrait
     cd /tmp && python <repo>/pandas/lazy/benchmarks/differential_probe.py
 
 (Run from *outside* the repo so the source ``pandas/`` doesn't shadow the built
@@ -59,6 +71,7 @@ from dataclasses import (
     dataclass,
     field,
 )
+import datetime
 import os
 import time
 
@@ -1020,6 +1033,189 @@ def analyze_coverage(fam: CoverageFamily, matrix: dict) -> list[Finding]:
     return findings
 
 
+# --------------------------------------------------------------------------- #
+# Substrait fan-out matrix (the AG17/AG18/AG19 axis). Lower one op to DataFusion,
+# serialize to Substrait, consume it back on Acero — one portable IR, a second
+# engine. COVERAGE = DataFusion emits but Acero can't consume; RESULT = Acero
+# consumes but silently disagrees. Needs the `substrait` proto pkg (for the AG17/
+# AG18 fixup) + datafusion.substrait + pyarrow.substrait; skipped otherwise.
+# --------------------------------------------------------------------------- #
+try:
+    import datafusion.substrait as _dfss
+    import pyarrow.substrait as _pas
+    import substrait_fixup as _sfix
+
+    _SUBSTRAIT_OK = True
+except Exception:
+    _SUBSTRAIT_OK = False
+
+
+def _sub_table() -> pa.RecordBatch:
+    ts = pa.array(
+        [
+            datetime.datetime(2020, 1, 1),
+            datetime.datetime(2020, 6, 1),
+            datetime.datetime(2020, 3, 1),
+        ],
+        type=pa.timestamp("ns"),
+    )
+    return pa.RecordBatch.from_arrays(
+        [
+            pa.array([1, 2, 3]),
+            pa.array([1.0, 2.0, 3.0]),
+            pa.array(["alpha", "beta", "gamma"]),
+            ts,
+        ],
+        names=["k", "v", "s", "t"],
+    )
+
+
+def build_substrait_cases():
+    """(name, builder) — builder(datafusion_table) -> a DataFrame emitting one
+    construct. Chosen to cover each Substrait interop finding + a working
+    baseline (so an all-fail signals a real regression, not a broken harness)."""
+    from datafusion import (
+        col,
+        functions as SF,
+        lit,
+    )
+
+    mar = pa.scalar(datetime.datetime(2020, 3, 1), type=pa.timestamp("ns"))
+    return [
+        ("filter_cmp", lambda t: t.filter(col("k") > lit(1))),  # baseline
+        ("agg_sum", lambda t: t.aggregate([col("k")], [SF.sum(col("v")).alias("m")])),
+        # AG18a — LIMIT via FetchRel.count_expr (silent-0-row regression guard)
+        ("limit", lambda t: t.filter(col("k") > lit(0)).sort(col("k")).limit(2)),
+        ("ts_filter", lambda t: t.filter(col("t") >= lit(mar))),  # AG18b (precision_ts)
+        ("starts_with", lambda t: t.filter(SF.starts_with(col("s"), lit("al")))),
+        ("substring", lambda t: t.select(_sub(SF).alias("o"))),  # both AG19
+        ("count_distinct", lambda t: t.aggregate([col("k")], [_cd(SF)])),
+    ]  # fmt: skip
+
+
+def _sub(SF):  # substring(s, 1, 2) — factored out to keep case lines short
+    from datafusion import (
+        col,
+        lit,
+    )
+
+    return SF.substring(col("s"), lit(1), lit(2))
+
+
+def _cd(SF):  # count(distinct v) — factored out to keep case lines short
+    from datafusion import col
+
+    return SF.count(col("v")).distinct().build().alias("m")
+
+
+def _sub_agree(a: pd.DataFrame, b: pd.DataFrame) -> bool:
+    """value-multiset equality (order-insensitive); a row-count mismatch — the
+    AG18a silent-0-row signal — fails here."""
+    if a.shape != b.shape:
+        return False
+    ra = sorted(str(r) for r in a.itertuples(index=False, name=None))
+    rb = sorted(str(r) for r in b.itertuples(index=False, name=None))
+    return ra == rb
+
+
+def _consume_df(ctx, raw: bytes, ref: pd.DataFrame):
+    """DataFusion re-ingests its own Substrait (should always work)."""
+    try:
+        lp = _dfss.Consumer.from_substrait_plan(ctx, _dfss.Serde.deserialize_bytes(raw))
+        got = ctx.create_dataframe_from_logical_plan(lp).to_pandas()
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as e:
+        return ("crash", f"{type(e).__name__}: {str(e)[:48]}")
+    return (
+        ("ok", got)
+        if _sub_agree(got, ref)
+        else ("wrong", f"{len(got)}v{len(ref)} rows")
+    )
+
+
+def _consume_acero(ctx, raw: bytes, ref: pd.DataFrame, legacy_ts: bool):
+    def tp(names, schema):
+        tbl = pa.Table.from_batches(ctx.table(names[-1]).collect()).select(schema.names)
+        if legacy_ts:
+            tbl = pa.table(
+                [
+                    c.cast(pa.timestamp("us")) if pa.types.is_timestamp(c.type) else c
+                    for c in tbl.columns
+                ],
+                names=tbl.column_names,
+            )
+        return tbl
+
+    try:
+        got = (
+            _pas.run_query(pa.py_buffer(raw), table_provider=tp).read_all().to_pandas()
+        )
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as e:
+        msg = str(e)
+        kind = "no-map" if "No conversion function" in msg else "crash"
+        return (kind, f"{type(e).__name__}: {msg[:80]}")
+    return (
+        ("ok", got)
+        if _sub_agree(got, ref)
+        else ("wrong", f"{len(got)}v{len(ref)} rows")
+    )
+
+
+def run_substrait_case(builder) -> dict:
+    ctx = SessionContext()
+    ctx.register_record_batches("A", [[_sub_table()]])
+    df = builder(ctx.table("A"))
+    ref = df.to_pandas()  # datafusion direct execution = correctness reference
+    raw = _dfss.Producer.to_substrait_plan(df.logical_plan(), ctx).encode()
+    fixed = _sfix.fix_plan(raw, legacy_timestamp=True)
+    return {
+        "df-rt": _consume_df(ctx, raw, ref),
+        "acero-raw": _consume_acero(ctx, raw, ref, legacy_ts=False),
+        "acero-fix": _consume_acero(ctx, fixed, ref, legacy_ts=True),
+    }
+
+
+def analyze_substrait(workload: str, results: dict) -> list[Finding]:
+    findings: list[Finding] = []
+    rt_st, rt_det = results["df-rt"]
+    fx_st, fx_det = results["acero-fix"]
+    # DataFusion should re-ingest its own Substrait — a failure is a loud find.
+    if rt_st != "ok":
+        findings.append(
+            Finding(
+                "CRASH",
+                workload,
+                f"datafusion cannot roundtrip its own Substrait ({rt_st}): {rt_det}",
+                9e5,
+            )
+        )
+    # Acero can't consume even after the AG17/AG18 portability fixup -> COVERAGE.
+    if fx_st in ("no-map", "crash"):
+        findings.append(
+            Finding(
+                "COVERAGE",
+                workload,
+                f"acero cannot consume fixed Substrait ({fx_st}): {fx_det} "
+                f"[AG19/AG18b — flips ok when arrow registers it]",
+                3e5,
+            )
+        )
+    # Acero consumes but disagrees (the AG18a silent-0-row class) -> RESULT.
+    elif fx_st == "wrong":
+        findings.append(
+            Finding(
+                "RESULT",
+                workload,
+                f"acero silently disagrees on fixed Substrait: {fx_det} [AG18a class]",
+                1e6,
+            )
+        )
+    return findings
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -1137,6 +1333,27 @@ def main():
         )
         print(f"{wid:<40} | {summ}")
         all_findings.extend(analyze_coverage(fam, matrix))
+
+    # ---- substrait fan-out matrix (COVERAGE/RESULT, the AG17/AG18/AG19 axis) -
+    print()
+    if not _SUBSTRAIT_OK:
+        print(
+            "substrait/*  skipped — needs `pip install substrait` + "
+            "datafusion.substrait + pyarrow.substrait"
+        )
+    else:
+        _labels = {"ok": "OK", "no-map": "NM", "wrong": "!!", "crash": "XX"}
+        for name, builder in build_substrait_cases():
+            wid = f"substrait/{name}"
+            if args.only and args.only not in wid:
+                continue
+            results = run_substrait_case(builder)
+            status = " ".join(
+                f"{k.split('-')[-1]:>3.3}={_labels.get(s, s[:2])}"
+                for k, (s, _) in results.items()
+            )
+            print(f"{wid:<40} | {status}")
+            all_findings.extend(analyze_substrait(wid, results))
 
     # ---- divergence report -------------------------------------------------
     print("\n" + "=" * 78)
