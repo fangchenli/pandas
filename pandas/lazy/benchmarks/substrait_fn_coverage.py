@@ -145,8 +145,11 @@ def main() -> int:
         print(f"{label:<18} {verdict}")
     print("\n" + "  ".join(f"{k}={v}" for k, v in sorted(tally.items())))
     print(
-        "\nNO-CONVERSION = Arrow's Substrait consumer has no function-extension "
-        "mapping\nfor that Substrait function (the AG9-class coverage gap)."
+        "\nNO-CONVERSION = Arrow's Substrait consumer produced no Arrow call. NB "
+        "(AG19 spec-split):\nstarts_with/ends_with/substring are STANDARD Substrait "
+        "-> real Arrow-consumer gap;\ndate_part/regexp_like are NOT standard names "
+        "(canonical: extract / regexp_match_substring)\n-> a DataFusion-producer "
+        "issue, not an Arrow coverage gap."
     )
     return 0
 
