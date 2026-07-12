@@ -47,6 +47,7 @@ import argparse
 import bench_tpch as B
 from datafusion import SessionContext
 import datafusion.substrait as ss
+import substrait_fixup
 import translate_datafusion as T
 
 
@@ -57,32 +58,35 @@ def lower_to_df(ldf, ctx: SessionContext):
     return T._lower(plan, ctx, [0], {}, T._count_refs(plan), {})
 
 
-def _acero_run(raw: bytes, tables: dict):
-    """Feed the same Substrait protobuf to pyarrow/Acero. Acero resolves named
-    tables via a table_provider callback; we serve the source frames as Arrow."""
+def _acero_run(raw: bytes, ctx, legacy_ts: bool):
+    """Feed the same Substrait protobuf to pyarrow/Acero. Acero resolves each
+    NamedTable via a table_provider callback; we resolve *any* name — source
+    tables (t0, src_*) AND materialized shared-subplan tables (m0, m1, ...) —
+    straight from the same DataFusion ``ctx`` that produced the plan, so Acero
+    sees exactly the tables the plan references.
+
+    When the plan was downgraded to legacy ``timestamp`` (µs), the served data
+    must match, so cast timestamp columns ns -> µs."""
     import pyarrow as pa
     import pyarrow.substrait as pas
 
-    # arrow-table view of each registered source, keyed by the name the lowering
-    # used (t0, t1, ...). We don't know the exact name map, so provide by schema:
-    # Acero passes the requested names + expected schema to the callback.
-    providers = {}
-    for name, df in tables.items():
-        providers[name] = pa.Table.from_pandas(df, preserve_index=False)
-
     def table_provider(names, schema):
-        # names: list[str] identifying the requested table. Match by column set.
-        want = set(schema.names)
-        for tbl in providers.values():
-            if want.issubset(set(tbl.schema.names)):
-                return tbl.select(schema.names)
-        raise KeyError(f"no provider for {names} / {schema.names}")
+        name = names[-1] if names else None
+        tbl = pa.Table.from_batches(ctx.table(name).collect())
+        tbl = tbl.select(schema.names)
+        if legacy_ts:
+            cols = [
+                c.cast(pa.timestamp("us")) if pa.types.is_timestamp(c.type) else c
+                for c in tbl.columns
+            ]
+            tbl = pa.table(cols, names=tbl.column_names)
+        return tbl
 
     reader = pas.run_query(pa.py_buffer(raw), table_provider=table_provider)
     return reader.read_all().to_pandas()
 
 
-def probe_query(n: int, tables: dict, con, do_acero: bool) -> dict:
+def probe_query(n: int, tables: dict, con, do_acero: bool, do_fix: bool) -> dict:
     r = {"q": n, "status": "", "detail": "", "acero": ""}
     lp_fn, _ = B.QUERIES[n]
 
@@ -140,10 +144,16 @@ def probe_query(n: int, tables: dict, con, do_acero: bool) -> dict:
         r["status"] = "RESULT-DIVERGE" if base_ok else "BASELINE-WRONG"
         r["detail"] = str(msg)[:60]
 
-    # --- second engine: Acero (independent Substrait consumer) ---
+    # --- second engine: Acero (independent Substrait consumer). With --fix, apply
+    # the AG17 portability fixup (fill output_type + agg phase) to the SAME bytes
+    # first, so we measure Acero on portable Substrait without touching the clean
+    # DataFusion roundtrip tally above. ------------------------------------------
     if do_acero:
         try:
-            aout = _acero_run(raw, tables)
+            abytes = (
+                substrait_fixup.fix_plan(raw, legacy_timestamp=True) if do_fix else raw
+            )
+            aout = _acero_run(abytes, ctx, legacy_ts=do_fix)
             aok, amsg = B.validate(aout, ref)
             r["acero"] = "OK" if aok else f"DIVERGE:{str(amsg)[:30]}"
         except Exception as e:
@@ -158,6 +168,12 @@ def main() -> int:
     ap.add_argument(
         "--acero", action="store_true", help="also score the pyarrow/Acero consumer"
     )
+    ap.add_argument(
+        "--fix",
+        action="store_true",
+        help="apply the AG17 portability fixup (fill output_type + agg phase) "
+        "before consuming — turns DataFusion Substrait portable",
+    )
     args = ap.parse_args()
 
     which = (
@@ -168,7 +184,8 @@ def main() -> int:
     print(
         f"Substrait roundtrip survival | SF-{args.sf} | "
         f"lineitem={len(tables['lineitem']):,} | datafusion + "
-        f"{'acero + ' if args.acero else ''}duckdb\n"
+        f"{'acero + ' if args.acero else ''}duckdb"
+        f"{'  [+AG17 fixup]' if args.fix else ''}\n"
     )
     hdr = f"{'q':>4} {'status':<16} {'detail':<50}"
     if args.acero:
@@ -180,7 +197,7 @@ def main() -> int:
     for n in which:
         if n not in B.QUERIES:
             continue
-        r = probe_query(n, tables, con, args.acero)
+        r = probe_query(n, tables, con, args.acero, args.fix)
         tally[r["status"]] = tally.get(r["status"], 0) + 1
         line = f"q{n:<3} {r['status']:<16} {r['detail']:<50}"
         if args.acero:

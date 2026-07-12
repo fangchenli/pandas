@@ -48,11 +48,34 @@ required `ScalarFunction.output_type` (a regression of closed fixes #15831/#2059
 inject the field → Acero consumes). Second, adjacent: aggregate rels emitted with
 phase `UNSPECIFIED`, which Acero rejects.
 
+## The fix — a local portability pass (`substrait_fixup.py`, `--fix`)
+Keep-the-workaround principle: post-process the emitted protobuf to re-derive what
+the producer omitted (propagate types bottom-up, fill every missing `output_type`,
+stamp aggregate phase). With `--fix`, **Acero climbs 0/22 → 7/22 fully correct vs
+DuckDB** — proving AG17's omission is the root blocker. The residual 15 peel into
+*downstream* Arrow/Acero-consumer layers (all on pinned pyarrow 23.0.1 — re-verify
+on latest):
+
+| residual Acero blocker | # | class |
+|---|---|---|
+| `precision_timestamp` type/literal unsupported (fixup downgrades → legacy `timestamp`, lifting 5) | — | Arrow consumer (**AG18** candidate) |
+| `No conversion function … <ends_with/date_part/starts_with/…>` | 8 | Arrow Substrait function coverage (AG9-class) |
+| `join rel's expression must be a simple equality` (cross/non-equi) | 3 | Acero JoinRel limitation |
+| consumes + executes but 0 rows vs DuckDB | 4 | execution-semantics divergence (investigate) |
+
+So one ~150-line consumer-blind patch turns DataFusion's Substrait portable enough
+to run 7 TPC-H queries correctly on a *second* engine, and cleanly stratifies
+what's left as Arrow-consumer findings rather than our-producer ones.
+
 ## Standing conclusion
 Keep the **DataFrame-API route** as the faithful single-engine oracle
-(`translate_datafusion.py`). Treat **Substrait as an additive fan-out layer** for
-the differential probe once AG17 (and the phase omission) are fixed upstream —
-until then, DataFusion-produced Substrait can't reach a second engine, so the
-fan-out yields findings *about that gap* rather than cross-engine result
-divergences. Re-run `substrait_roundtrip.py --acero` on each datafusion/pyarrow
-release; when Acero consumption climbs off 0/22, the fan-out becomes live.
+(`translate_datafusion.py`). The **Substrait fan-out layer is now partially live**:
+with the `substrait_fixup.py` workaround (`--fix`), one plan runs correctly on
+both DataFusion (22/22) and Acero (7/22), and every remaining cross-engine
+divergence is a characterized finding (AG18 + the Arrow function-coverage /
+cross-join / 0-row layers above). Re-run `substrait_roundtrip.py --acero --fix` on
+each datafusion/pyarrow release: the fixup auto-retires once AG17 lands upstream
+(output_type stops being missing), and the Acero OK count tracks the Arrow
+consumer's Substrait coverage as it improves. That rising number is the fan-out
+going live — at which point the same instrument starts emitting cross-engine
+*result* divergences (the free findings) instead of consumer-coverage ones.

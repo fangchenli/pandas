@@ -67,6 +67,35 @@ filter breaks it. Injecting the single missing field into the emitted protobuf �
 Acero **consume the identical plan and return the correct 2 rows**. So the
 omitted `output_type` is the sole filter-path blocker. (Repro below.)
 
+## Local workaround built + measured (strengthens the finding)
+`../../benchmarks/substrait_fixup.py` is the engine's keep-the-workaround fix: it
+post-processes the emitted protobuf to re-derive what the producer omitted —
+propagate types bottom-up and fill every missing `ScalarFunction.output_type`,
+stamp aggregate phase `INITIAL_TO_RESULT`. Applying it (`substrait_roundtrip.py
+--acero --fix`) takes **Acero consumption from 0/22 → 7/22 fully correct vs
+DuckDB** (q1/4/5/6/12/17/19), with the `conversion to arrow::DataType` error gone
+entirely. That a ~150-line consumer-blind protobuf patch — filling exactly the
+producer's omissions — flips 0→7 is direct evidence the omission is the root
+blocker, not a symptom.
+
+The remaining 15 stratify into **downstream Arrow/Acero-consumer** gaps (separate
+from this DataFusion-producer finding, and all on pinned **pyarrow 23.0.1** — the
+playbook says re-verify these on the latest pyarrow before treating as findings):
+- **AG18 (Arrow, candidate):** Acero's Substrait consumer doesn't support
+  `precision_timestamp` (the type/literal that *deprecated* legacy `timestamp`) —
+  `substrait literal did not have any literal type set`. The fixup's opt-in
+  `legacy_timestamp` downgrade (→ `timestamp`, ns→µs) works around it; that's what
+  lifts 5 of the 7.
+- **Arrow function coverage (AG9-class):** `No conversion function exists to
+  convert the Substrait function <ends_with|date_part|starts_with|…> to an Arrow
+  call expression` (8 queries) — Acero registers only a subset of Substrait
+  functions.
+- **Acero cross/non-equi join:** `A join rel's expression must be a simple
+  equality between keys` (3 queries) — Acero's Substrait JoinRel rejects anything
+  but key-equality, so cross joins are unconsumable.
+- **0-row correctness divergence:** 4 queries consume + execute but return 0 rows
+  vs DuckDB — a separate execution-semantics divergence to investigate.
+
 ## What "desired behavior" rests on (be honest, but this one is strong)
 Unlike the NumPy finds (AG15/AG16, where docs were silent), this has a
 **documented-contract basis plus precedent plus cross-engine demonstration** —
