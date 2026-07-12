@@ -74,6 +74,23 @@ ones. The standout find en route: a **silent** 0-row result on every `LIMIT` que
 because Acero reads Substrait's deprecated `FetchRel.count` (0) while DataFusion
 writes only the newer `count_expr`.
 
+## Is any of this a *Substrait* (spec) contribution? — No.
+Checked every finding against the spec (substrait-io/substrait). The spec is
+correct on all of them; every gap is an **engine** failing to implement it:
+- `FetchRel.count` is a `oneof count_mode` and the spec (PR #748 + proto docs)
+  says consumers must check the oneof / unset = ALL → the silent 0-rows is an
+  **Arrow-consumer** bug, not a spec ambiguity (#748 even pre-flagged the hazard).
+- `output_type` is spec-**required** → **DataFusion-producer** bug (AG17).
+- `starts_with`/`ends_with`/`substring`, `precision_timestamp`, and the
+  `DISTINCT` invocation are all standard spec surface → **Arrow-consumer** gaps.
+- `date_part`/`regexp_like` aren't standard names → **DataFusion-producer** issue.
+
+So the fixes go to **DataFusion** (AG17, canonical names) and **Arrow** (AG18/AG19),
+never to Substrait. The only conceivable Substrait-project contribution is
+*conformance test vectors* (their consumer-testing effort would catch exactly
+these engine bugs) — test infra, not a spec fix. Net: a quiet endorsement of the
+Substrait spec's design.
+
 ## Standing conclusion
 Keep the **DataFrame-API route** as the faithful single-engine oracle
 (`translate_datafusion.py`). The **Substrait fan-out layer is now partially live**:

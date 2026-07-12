@@ -88,14 +88,16 @@ playbook says re-verify these on the latest pyarrow before treating as findings)
   - *`precision_timestamp`* (the type/literal that *deprecated* legacy
     `timestamp`) → `substrait literal did not have any literal type set` (an
     error). Fixup: opt-in `legacy_timestamp` downgrade → `timestamp` (ns→µs).
-  - ***`FetchRel.count_expr` (silent-wrong, worst kind)*** — DataFusion emits
-    `LIMIT n` via the newer `count_expr`/`offset_expr` (Expression) and leaves the
-    **deprecated** int64 `count`/`offset` at 0; Acero reads the deprecated
-    `count == 0` and **silently returns 0 rows** — no error (TPC-H
-    q3/q10/q18/q21). Fixup: mirror the `count_expr` literal into the deprecated
-    `count`. This lifted the 4 "0-row divergence" queries to OK and is the
-    highest-severity item here (a silent wrong result across a whole class of
-    LIMIT queries).
+  - ***`FetchRel.count_expr` (silent-wrong, worst kind) — an Arrow-consumer bug,
+    NOT a Substrait gap.*** `count` lives in a `oneof count_mode { count,
+    count_expr }`; the spec (proto docs + PR #748) says consumers must check the
+    oneof and that an unset `count` means **ALL**. DataFusion sets the `count_expr`
+    arm; Acero ignores the oneof, reads the deprecated `count` as its default 0,
+    and treats that as `LIMIT 0` → **silently returns 0 rows**, no error (TPC-H
+    q3/q10/q18/q21). So Arrow is wrong *twice* (ignores the oneof; treats unset as
+    0 not ALL). Fixup mirrors the literal into the deprecated arm. Highest-severity
+    item here — a silent wrong result across every LIMIT query — and a clean Arrow
+    bug (the spec anticipated exactly this ambiguity and handled it).
 - **Arrow function coverage (AG9-class):** `No conversion function exists to
   convert the Substrait function <ends_with|date_part|starts_with|regexp_like|…>
   to an Arrow call expression` (8 queries) — Acero registers only a subset of

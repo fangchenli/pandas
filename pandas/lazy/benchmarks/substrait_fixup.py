@@ -252,13 +252,17 @@ def _fill_cross_join(msg):
 
 
 def _mirror_fetch_count(msg):
-    """SILENT-WRONG-RESULT fix. DataFusion emits ``LIMIT n`` in a ``FetchRel``
-    via the newer ``count_expr``/``offset_expr`` (Expression) fields and leaves
-    the **deprecated** int64 ``count``/``offset`` at their default 0. A consumer
-    that reads the deprecated fields (e.g. Acero on pyarrow 23.0.1) then sees
-    ``count == 0`` and returns **zero rows** — no error, just an empty result
-    (TPC-H q3/q10/q18/q21). Mirror the literal from ``*_expr`` into the deprecated
-    field. Harmless for consumers that read ``*_expr`` (they ignore the int64)."""
+    """SILENT-WRONG-RESULT workaround for an ARROW-CONSUMER bug (not a Substrait
+    spec gap — the spec is correct here). ``FetchRel.count`` lives in a
+    ``oneof count_mode { count, count_expr }``; the spec (proto docs + PR #748)
+    says a consumer must check the oneof and that an unset ``count`` means **ALL**.
+    DataFusion sets the ``count_expr`` arm (``WhichOneof == 'count_expr'``); Acero
+    ignores the oneof, reads the deprecated ``count`` as its default 0, and treats
+    that as ``LIMIT 0`` -> **zero rows**, no error (TPC-H q3/q10/q18/q21). Workaround:
+    mirror the ``*_expr`` literal into the deprecated arm so even a spec-noncompliant
+    consumer reads the right value. (Setting ``count`` switches the oneof to that
+    arm, clearing ``count_expr``; a compliant consumer then reads ``count`` — still
+    correct.)"""
     if msg.DESCRIPTOR.name != "FetchRel":
         return
     if msg.count == 0 and msg.HasField("count_expr"):
