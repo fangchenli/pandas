@@ -86,13 +86,21 @@ which AG16 silently turns into `NaT`. (Separately, `np.nanmedian(dt)` also error
 on `add` for `datetime64`, though it works fine for `timedelta64` — a smaller
 adjacent datetime-median gap.)
 
-## Why it matters (pandas relevance)
-pandas' `Series.mean()`/`.sum()` on a `timedelta64` column **skip `NaT`** (the
-`skipna=True` default). NumPy's `nanmean`/`nansum`/`nancumsum` — the natural
-primitives for exactly that, and the building blocks of the mean-date idiom above
-— give the wrong answer (`NaT`) on the same data, so they can't be relied on for
-nullable-timedelta/datetime reductions; a consumer must special-case `NaT` itself.
-Any code assuming `nan*` means "skip missing" is silently wrong here.
+## Why it matters (pandas relevance) — verified: pandas already routes AROUND it
+pandas' `Series.mean()`/`.sum()`/`.cumsum()` on a `timedelta64`/`datetime64`
+column with `NaT` return the **correct** skip-`NaT` result (verified, pandas
+3.1.dev / numpy 2.4.6): `s.mean()` → `2 days`, `s.sum()` → `6 days`,
+`s.cumsum()` → `[1d, NaT, 4d, 6d]` (skips, keeps accumulating), datetime
+`s.mean()` → the correct average date. On the **same values**, raw
+`np.nanmean`/`np.nansum` give `NaT`, and `np.nancumsum` gives `[1d, NaT, NaT, NaT]`
+(poisons everything downstream).
+
+pandas gets it right because it does **not** call `np.nan*` — it maintains its own
+`pandas.core.nanops` (mask-based via `_get_values`). **That a major downstream
+maintains a parallel nan-reduction implementation precisely because NumPy's is
+unusable for timedelta/datetime `NaT` is itself strong evidence the NumPy behavior
+is a real gap** — worth stating in the report. (So: no pandas bug; AG16 is
+NumPy-only. Reproduced on numpy **2.4.6 and 2.5.1**.)
 
 ## Standalone repro (pure numpy)
 ```python
@@ -141,7 +149,10 @@ out of scope: product/variance of durations is genuinely ill-defined.)
       issue reports it; #5222 is the closed plain-reduction sibling; the nan-aware
       additive case is novel/unfixed. Datetime manifestation (mean-date idiom)
       confirmed too.
-- [ ] **Re-verify on the latest numpy release** at file time (2.5.1 may not be newest).
+- [x] **Reproduced on two numpy versions** — 2.4.6 (pandas-dev) and 2.5.1 (venv).
+      Still re-verify on the latest release at file time.
+- [x] **Not a pandas bug** — pandas' own `nanops` skips `NaT` correctly; the gap is
+      NumPy-only (and pandas' workaround is evidence for the report).
 - [ ] **Human approval before filing** (outward-facing; guardrail).
 
 ## Definition of done
