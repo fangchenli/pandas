@@ -64,7 +64,7 @@ layers (all on pinned pyarrow 23.0.1 — re-verify on latest):
 
 | residual Acero blocker (not ours to fix) | # | class |
 |---|---|---|
-| `No conversion function … <ends_with/date_part/starts_with/…>` | 8 | Arrow Substrait function coverage (AG9-class) |
+| `No conversion function … <ends_with/date_part/starts_with/…>` | 8 | Arrow Substrait fn coverage → **AG19** (5 fns pinned via `substrait_fn_coverage.py`; kernels exist) |
 | `join rel's expression must be a simple equality` (cross/non-equi) | 3 | Acero JoinRel limitation |
 
 So one ~200-line consumer-blind patch turns DataFusion's Substrait portable enough
