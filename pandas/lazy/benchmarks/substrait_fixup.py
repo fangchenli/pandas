@@ -251,13 +251,40 @@ def _fill_cross_join(msg):
         msg.expression.literal.boolean = True
 
 
+def _mirror_fetch_count(msg):
+    """SILENT-WRONG-RESULT fix. DataFusion emits ``LIMIT n`` in a ``FetchRel``
+    via the newer ``count_expr``/``offset_expr`` (Expression) fields and leaves
+    the **deprecated** int64 ``count``/``offset`` at their default 0. A consumer
+    that reads the deprecated fields (e.g. Acero on pyarrow 23.0.1) then sees
+    ``count == 0`` and returns **zero rows** — no error, just an empty result
+    (TPC-H q3/q10/q18/q21). Mirror the literal from ``*_expr`` into the deprecated
+    field. Harmless for consumers that read ``*_expr`` (they ignore the int64)."""
+    if msg.DESCRIPTOR.name != "FetchRel":
+        return
+    if msg.count == 0 and msg.HasField("count_expr"):
+        e = msg.count_expr
+        if (
+            e.WhichOneof("rex_type") == "literal"
+            and e.literal.WhichOneof("literal_type") == "i64"
+        ):
+            msg.count = e.literal.i64
+    if msg.offset == 0 and msg.HasField("offset_expr"):
+        e = msg.offset_expr
+        if (
+            e.WhichOneof("rex_type") == "literal"
+            and e.literal.WhichOneof("literal_type") == "i64"
+        ):
+            msg.offset = e.literal.i64
+
+
 def fix_plan(raw: bytes, legacy_timestamp: bool = False) -> bytes:
     """DataFusion Substrait bytes -> portable Substrait bytes.
 
     Always: fill missing ``ScalarFunction``/``AggregateFunction`` ``output_type``
-    (AG17), stamp aggregate phase, and inject a cross-join condition. With
-    ``legacy_timestamp``, also downgrade ``precision_timestamp`` -> ``timestamp``
-    for consumers that predate the newer type (AG18)."""
+    (AG17), stamp aggregate phase, inject a cross-join condition, and mirror
+    ``FetchRel.count_expr`` -> deprecated ``count`` (the silent 0-row limit fix).
+    With ``legacy_timestamp``, also downgrade ``precision_timestamp`` ->
+    ``timestamp`` for consumers that predate the newer type (AG18)."""
     plan = Plan()
     plan.ParseFromString(raw)
     fx = _Fixer(plan)
@@ -266,6 +293,7 @@ def fix_plan(raw: bytes, legacy_timestamp: bool = False) -> bytes:
         if root is not None:
             fx.rel_out(root)
     _walk_msg(plan, _fill_cross_join)
+    _walk_msg(plan, _mirror_fetch_count)
     if legacy_timestamp:
         _walk_msg(plan, _downgrade_precision_timestamp)
     return plan.SerializeToString()

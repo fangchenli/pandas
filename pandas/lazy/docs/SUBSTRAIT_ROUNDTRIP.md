@@ -51,21 +51,28 @@ phase `UNSPECIFIED`, which Acero rejects.
 ## The fix — a local portability pass (`substrait_fixup.py`, `--fix`)
 Keep-the-workaround principle: post-process the emitted protobuf to re-derive what
 the producer omitted (propagate types bottom-up, fill every missing `output_type`,
-stamp aggregate phase). With `--fix`, **Acero climbs 0/22 → 7/22 fully correct vs
-DuckDB** — proving AG17's omission is the root blocker. The residual 15 peel into
-*downstream* Arrow/Acero-consumer layers (all on pinned pyarrow 23.0.1 — re-verify
-on latest):
+stamp aggregate phase; plus two deprecated-field bridges). With `--fix`, **Acero
+climbs 0/22 → 11/22 fully correct vs DuckDB** — proving the producer omissions are
+the root blockers. The residual 11 peel into *downstream* Arrow/Acero-consumer
+layers (all on pinned pyarrow 23.0.1 — re-verify on latest):
 
-| residual Acero blocker | # | class |
+| what the fixup does | lifts | class |
 |---|---|---|
-| `precision_timestamp` type/literal unsupported (fixup downgrades → legacy `timestamp`, lifting 5) | — | Arrow consumer (**AG18** candidate) |
+| fill `ScalarFunction`/`AggregateFunction` `output_type` + agg phase | 7 | **AG17** (DataFusion producer) |
+| downgrade `precision_timestamp` → legacy `timestamp` | +? | AG18 (Arrow consumer reads deprecated field) |
+| mirror `FetchRel.count_expr` → deprecated `count` (**silent 0-row LIMIT fix**) | +4 | AG18 (silent-wrong; Acero read `count==0`) |
+
+| residual Acero blocker (not ours to fix) | # | class |
+|---|---|---|
 | `No conversion function … <ends_with/date_part/starts_with/…>` | 8 | Arrow Substrait function coverage (AG9-class) |
 | `join rel's expression must be a simple equality` (cross/non-equi) | 3 | Acero JoinRel limitation |
-| consumes + executes but 0 rows vs DuckDB | 4 | execution-semantics divergence (investigate) |
 
-So one ~150-line consumer-blind patch turns DataFusion's Substrait portable enough
-to run 7 TPC-H queries correctly on a *second* engine, and cleanly stratifies
-what's left as Arrow-consumer findings rather than our-producer ones.
+So one ~200-line consumer-blind patch turns DataFusion's Substrait portable enough
+to run **11** TPC-H queries correctly on a *second* engine, and cleanly stratifies
+what's left as genuine Arrow-consumer coverage findings rather than our-producer
+ones. The standout find en route: a **silent** 0-row result on every `LIMIT` query
+because Acero reads Substrait's deprecated `FetchRel.count` (0) while DataFusion
+writes only the newer `count_expr`.
 
 ## Standing conclusion
 Keep the **DataFrame-API route** as the faithful single-engine oracle
