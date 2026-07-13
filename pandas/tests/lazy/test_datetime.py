@@ -349,10 +349,10 @@ class TestDatetimeTypeInference:
 
     def test_dt_year_infers_numeric(self):
         from pandas.lazy.ir import FieldRef
+        from pandas.lazy.type_inference import infer_expr_dtype
         from pandas.lazy.types import (
             LazyDtype,
             Schema,
-            infer_expr_dtype,
         )
 
         schema = Schema({"ts": LazyDtype("datetime", None, None, False)})
@@ -362,10 +362,10 @@ class TestDatetimeTypeInference:
 
     def test_dt_is_month_start_infers_boolean(self):
         from pandas.lazy.ir import FieldRef
+        from pandas.lazy.type_inference import infer_expr_dtype
         from pandas.lazy.types import (
             LazyDtype,
             Schema,
-            infer_expr_dtype,
         )
 
         schema = Schema({"ts": LazyDtype("datetime", None, None, False)})
@@ -375,10 +375,10 @@ class TestDatetimeTypeInference:
 
     def test_dt_date_infers_datetime(self):
         from pandas.lazy.ir import FieldRef
+        from pandas.lazy.type_inference import infer_expr_dtype
         from pandas.lazy.types import (
             LazyDtype,
             Schema,
-            infer_expr_dtype,
         )
 
         schema = Schema({"ts": LazyDtype("datetime", None, None, False)})

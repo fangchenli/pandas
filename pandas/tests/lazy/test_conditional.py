@@ -201,10 +201,10 @@ class TestWhenThenOtherwiseTypeInference:
     """Tests for type inference of conditional expressions."""
 
     def test_numeric_type_inference(self):
+        from pandas.lazy.type_inference import infer_expr_dtype
         from pandas.lazy.types import (
             LazyDtype,
             Schema,
-            infer_expr_dtype,
         )
 
         schema = Schema({"a": LazyDtype("numeric", None, None, False)})
@@ -213,10 +213,10 @@ class TestWhenThenOtherwiseTypeInference:
         assert dtype.category == "numeric"
 
     def test_string_type_inference(self):
+        from pandas.lazy.type_inference import infer_expr_dtype
         from pandas.lazy.types import (
             LazyDtype,
             Schema,
-            infer_expr_dtype,
         )
 
         schema = Schema({"a": LazyDtype("numeric", None, None, False)})
@@ -225,10 +225,10 @@ class TestWhenThenOtherwiseTypeInference:
         assert dtype.category == "string"
 
     def test_nullable_output(self):
+        from pandas.lazy.type_inference import infer_expr_dtype
         from pandas.lazy.types import (
             LazyDtype,
             Schema,
-            infer_expr_dtype,
         )
 
         schema = Schema({"a": LazyDtype("numeric", None, None, False)})

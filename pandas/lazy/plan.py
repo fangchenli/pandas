@@ -22,10 +22,10 @@ from pandas.lazy.ir import (
     Alias,
     FieldRef,
 )
+from pandas.lazy.type_inference import infer_expr_dtype
 from pandas.lazy.types import (
     LazyDtype,
     Schema,
-    infer_expr_dtype,
 )
 
 

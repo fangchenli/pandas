@@ -173,10 +173,8 @@ def profile_type_inference():
         Call,
         FieldRef,
     )
-    from pandas.lazy.types import (
-        LazyDtype,
-        infer_expr_dtype,
-    )
+    from pandas.lazy.type_inference import infer_expr_dtype
+    from pandas.lazy.types import LazyDtype
 
     df = create_test_data(100_000, use_arrow=True)
 

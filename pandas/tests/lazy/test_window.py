@@ -349,10 +349,10 @@ class TestWindowTypeInference:
 
     def test_window_sum_type(self):
         from pandas.lazy.ir import FieldRef
+        from pandas.lazy.type_inference import infer_expr_dtype
         from pandas.lazy.types import (
             LazyDtype,
             Schema,
-            infer_expr_dtype,
         )
 
         schema = Schema({"a": LazyDtype("numeric", np.dtype("int64"), None, False)})
@@ -364,10 +364,10 @@ class TestWindowTypeInference:
 
     def test_rank_type(self):
         from pandas.lazy.ir import FieldRef
+        from pandas.lazy.type_inference import infer_expr_dtype
         from pandas.lazy.types import (
             LazyDtype,
             Schema,
-            infer_expr_dtype,
         )
 
         schema = Schema({"a": LazyDtype("numeric", np.dtype("int64"), None, False)})
@@ -377,10 +377,10 @@ class TestWindowTypeInference:
 
     def test_lag_preserves_type(self):
         from pandas.lazy.ir import FieldRef
+        from pandas.lazy.type_inference import infer_expr_dtype
         from pandas.lazy.types import (
             LazyDtype,
             Schema,
-            infer_expr_dtype,
         )
 
         schema = Schema({"a": LazyDtype("string", None, None, False)})
@@ -390,10 +390,10 @@ class TestWindowTypeInference:
 
     def test_cum_sum_type(self):
         from pandas.lazy.ir import FieldRef
+        from pandas.lazy.type_inference import infer_expr_dtype
         from pandas.lazy.types import (
             LazyDtype,
             Schema,
-            infer_expr_dtype,
         )
 
         schema = Schema({"a": LazyDtype("numeric", np.dtype("float64"), None, False)})

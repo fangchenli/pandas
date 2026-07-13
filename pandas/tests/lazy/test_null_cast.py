@@ -243,10 +243,10 @@ class TestNullCastTypeInference:
 
     def test_fill_null_preserves_type(self):
         from pandas.lazy.ir import FieldRef
+        from pandas.lazy.type_inference import infer_expr_dtype
         from pandas.lazy.types import (
             LazyDtype,
             Schema,
-            infer_expr_dtype,
         )
 
         schema = Schema({"a": LazyDtype("numeric", np.dtype("float64"), None, True)})
@@ -256,10 +256,10 @@ class TestNullCastTypeInference:
 
     def test_coalesce_type_from_first_arg(self):
         from pandas.lazy.ir import FieldRef
+        from pandas.lazy.type_inference import infer_expr_dtype
         from pandas.lazy.types import (
             LazyDtype,
             Schema,
-            infer_expr_dtype,
         )
 
         schema = Schema(

@@ -55,7 +55,7 @@ from pandas.lazy.plan import (
     Sort,
     TopK,
 )
-from pandas.lazy.types import infer_expr_dtype
+from pandas.lazy.type_inference import infer_expr_dtype
 
 # =============================================================================
 # ConstantFolding Pass
