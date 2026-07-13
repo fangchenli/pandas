@@ -37,8 +37,12 @@ class LogicalPlan:
     the schema cache field.
     """
 
-    # Cache for resolved schema
-    __slots__ = ("_cached_schema",)
+    # Intentionally NOT slotted. The @dataclass subclasses are dict-backed
+    # (they'd each need their own slots=True to benefit, and the mutable
+    # _cached_schema memo rules out the frozen+slots combo the IR nodes use).
+    # Plan nodes are allocated in the single digits per query and hold no bulk
+    # data, so slotting them saves ~1 KB against MB-GB row payloads — not worth
+    # the per-subclass friction. Slots stay where they pay off: ir.py / types.py.
 
     def __init__(self) -> None:
         self._cached_schema: Schema | None = None
