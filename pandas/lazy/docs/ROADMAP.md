@@ -374,6 +374,21 @@ crosses ~0.5x or gains plateau, whichever first.
     review leverage); coordinate on GH-43010/GH-44336, file the missing
     grouper/join issues first. Original plan: **(parallel external
     track).**
+  - **UPDATE (2026-07-14) — the decision was executed and is paying off.**
+    The June text above is a snapshot; two things in it are now stale.
+    (a) "*group-by keys … entirely untracked — no issues exist*": we filed
+    GH-50223 and **[#50224](https://github.com/apache/arrow/pull/50224)
+    MERGED 2026-07-07** (pitrou) — the `BinaryViewKeyEncoder`, so view-keyed
+    `group_by` works, at the medium/~2–3 wk estimate the section predicted.
+    (b) A second contribution is in flight: GH-50478 /
+    **[#50479](https://github.com/apache/arrow/pull/50479)** (scalar string
+    **predicate** kernels — the TPC-H `LIKE` family) **OPEN, in review** by
+    zanmato1984 since 07-13. Still open upstream: take/filter (#50164,
+    claimed by Periecle — don't duplicate), sort-view, and acero join keys
+    (the 4–8+ wk `KeyColumnArray` structural blocker is unchanged, so the
+    "joins likely 2027" read still holds). Full state →
+    `upstream/AG9-next-string-predicate-kernels.md`; registry →
+    `ARROW_GAPS.md` AG9.
 
 - **Scale-out evaluation (planned; researched June 2026).** The 1TB/10TB
   comparison is **Coiled's TPC-H benchmarks** (coiled/benchmarks,

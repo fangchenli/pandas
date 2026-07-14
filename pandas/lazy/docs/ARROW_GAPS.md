@@ -20,7 +20,7 @@ worked-around** (real, we route around it) · **observed**.
 | AG6 | Acero **per-node overhead** — filter→reduce catastrophic, per-join-node overhead at filtered scale | quantified / worked-around | med | MATERIALIZATION_EXPERIMENT.md I & III |
 | AG7 | Acero join/agg wins **die at the Arrow→NumPy round-trip** (boundary tax) | quantified (structural) | high | MATERIALIZATION_EXPERIMENT.md II; PERF_CEILING.md |
 | AG8 | **Gandiva**: optional/often-unshipped pyarrow + **not wired into Acero** (expression codegen unavailable in practice) | observed | low-med | MATERIALIZATION_EXPERIMENT.md F4 (corrected below) |
-| AG9 | `string_view` **kernel coverage** (at-scale/string gains) | **active contribution — OUR PR #50224 merged 2026-07-07** (Grouper view keys, GH-50223); #44336 open; #50166 merged | high | upstream/STRING_VIEW_CONTRIBUTION_PLAN.md |
+| AG9 | `string_view` **kernel coverage** (at-scale/string gains) | **active contribution — OUR PR #50224 merged 2026-07-07** (Grouper view keys, GH-50223); **OUR PR #50479 (GH-50478) OPEN/in review 2026-07-14** (scalar string predicate kernels — the LIKE/substring family; see upstream/AG9-next-string-predicate-kernels.md); #44336 + #50164 open; #50166 + #49964 (view comparison kernels, Periecle) merged | high | upstream/STRING_VIEW_CONTRIBUTION_PLAN.md; upstream/AG9-next-string-predicate-kernels.md |
 | AG12 | Temporal unit **downcast has no floor rounding** — `*_temporal` kernels lack a `duration` kernel; `cast(safe=False)` truncates toward zero, `safe=True` refuses (numpy floors toward −∞) | **dup for gap #1 → #50395 (open)**; gap #2 (rounding-mode on `cast`) no issue | med (correctness, downstream pandas) | upstream/AG12-arrow-temporal-duration-floor.md |
 
 ## Upstream duplicate-search results (apache/arrow, 2026-06-18)
@@ -39,6 +39,21 @@ Searched issues **and** PRs across many phrasings (`gh api search/issues`):
   string_view/binary_view keys in the hash-aggregate Grouper) MERGED 2026-07-07 —
   the AG9 track's first landed contribution; enables view-key group_by, the path
   around the AG1/AG2 >2 GB int32-offset cliff.**
+  **Progress (2026-07-14): our second AG9 contribution is in flight — PR #50479
+  (GH-50478, `string_view`/`binary_view` in the scalar string predicate kernels:
+  `match_substring`/`match_like`/`starts_with`/`ends_with`/`find_substring`/
+  `count_substring`/`*_length`/`utf8_is_*`) OPEN, MERGEABLE, in review;
+  `zanmato1984` engaged 07-13 and his one ask is addressed. This is the TPC-H
+  `LIKE`-filter payoff (Q2/Q9/Q13/Q14/Q16/Q20). Sibling #50164 (take/filter,
+  Periecle) still OPEN and tracker #39634 still has take/filter unchecked, so the
+  view-coverage gap remains open overall. Separately, #49964 (view *comparison*
+  kernels — `equal`/`less`/… — Periecle) MERGED 2026-06-09 → pyarrow 25; it is a
+  different kernel family and must not be read as closing the predicate gap.**
+  *Caution recorded 2026-07-14 after a false "it merged" report: verify view
+  coverage by reading Arrow `main` source (`scalar_string_ascii.cc` et al. still
+  have zero Arrow view-type refs; the many `std::string_view` hits are the stdlib
+  type, not the view layout), not by PR-title search — the families' names
+  collide.*
 - **AG1 — effectively a duplicate.** **#25822 (open)** "[C++] Take kernel can't
   handle ChunkedArrays that don't fit in an Array" is the same root limitation
   (Take concatenates first, breaks past 2 GB). Our angle (it **segfaults**

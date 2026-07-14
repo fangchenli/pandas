@@ -1,5 +1,58 @@
 # Hand-off: AG9-next — `string_view`/`binary_view` support for scalar string predicate kernels
 
+> ## ✅ EXECUTED — FILED as [PR #50479](https://github.com/apache/arrow/pull/50479) (issue GH-50478), **OPEN / in review**
+>
+> **Status as of 2026-07-14** (verified live via `gh` + Arrow `main` source read):
+>
+> | | |
+> |---|---|
+> | **PR** | [#50479](https://github.com/apache/arrow/pull/50479) `GH-50478: [C++][Compute] Support string_view/binary_view in scalar string predicate kernels` — opened 2026-07-11 by fangchenli |
+> | **State** | OPEN, not draft, **MERGEABLE**, +323 −33 across 6 files. **No approval yet** (`reviewDecision: none`) |
+> | **Reviewer** | `zanmato1984` engaged 2026-07-13 — the reviewer this hand-off targeted |
+> | **Outstanding on our side** | **None.** Ball is in the reviewer's court. |
+>
+> **Review thread, resolved:**
+> - **`zanmato1984` (07-13)** — asked for a `utf8_view` + `ignore_case=true` +
+>   **non-ASCII** case, because the impl registers `utf8_view` as `StringViewType`
+>   rather than via the generic `BinaryViewType` dispatch, and the view tests were
+>   mostly ASCII so they'd miss a lost UTF-8/Latin1 distinction.
+>   → **Addressed 07-14 in `8082d31`**: `TestStringViewPredicates.MatchSubstringIgnoreCase`,
+>   pattern `"aé("` over `["abc","aEb","baÉ(","aé(","ae(","Aé("]` → `[F,F,T,T,F,T]`.
+>   The `É`/`é` fold only holds on the full-Unicode `utf8_view` path, so the test
+>   fails if it ever regresses to generic `BinaryViewType` (ASCII/Latin1 folding).
+> - **Copilot ×2 (07-12)** — flagged that the view fast path evaluated the matcher
+>   on **null slots**: a view's null header is not validated (`ValidateBinaryView`
+>   skips nulls) so it may carry a bogus `buffer_index`/`offset` that decoding
+>   would dereference → OOB read/crash, even though output validity masks the bit.
+>   (Same family as the AG1 `take` segfault — a real hazard, not a nitpick.)
+>   → **Addressed**: both `MatchSubstringImpl` and `StringPredicateFunctor` view
+>   paths now use `VisitArrayValuesInline<Type>` with an explicit null-visitor
+>   (`[&]() { writer.Next(); }`) and a comment naming the hazard; `binary_length`
+>   uses `ScalarUnaryNotNull`. Copilot re-reviewed **07-14: "no new comments."**
+>
+> **Independent confirmation the feature has NOT landed** (2026-07-14): Arrow
+> `main` HEAD `scalar_string_ascii.cc` / `scalar_string_utf8.cc` /
+> `scalar_string_internal.h` contain **zero** `StringViewType`/`BinaryViewType`/
+> `STRING_VIEW` references (all "view" hits are `std::string_view`, the stdlib
+> type); registration still loops `StringTypes()` = {`string`, `large_string`};
+> last commit touching `scalar_string_ascii.cc` is 2026-01-05. Sibling #50164
+> (take/filter) also still OPEN, and tracker #39634 still has take/filter
+> unchecked. **Do not record this gap as closed until #50479 merges.**
+>
+> ⚠ **Do not conflate with [#49964](https://github.com/apache/arrow/pull/49964)**
+> ("Add binary view comparison kernels", Periecle, **merged 2026-06-09**). That is
+> a *different kernel family* (`equal`/`not_equal`/`less`/`greater`/…) in a
+> different file, already recorded in `STRING_VIEW_CONTRIBUTION_PLAN.md` and
+> `../ROADMAP.md`. It is **not** this hand-off's target list (`match_substring`,
+> `match_like`, `starts_with`, `ends_with`, `find_substring`, `count_substring`,
+> `*_length`, `utf8_is_*`) — those carry the TPC-H `LIKE` payoff and land in #50479.
+>
+> Everything below is the **original 2026-07-09 scoping**, kept as provenance for
+> how the target was chosen. Its "re-verify / do not file without go-ahead" gates
+> were satisfied at filing time.
+
+---
+
 **For:** a fresh agent. Read `README.md` (playbook) first, then
 `AG9-string-view-kernels.md` (the umbrella context). **Target: `apache/arrow`
 C++ compute.** This is a **code contribution (PR)** — the concrete next step on
@@ -110,6 +163,15 @@ PR merged or in review with maintainer buy-in → recorded in
 `AG9-string-view-kernels.md`, `../ARROW_GAPS.md` AG9, and `README.md`. This is the
 next single step; sort-view and row-table-view encoding are the subsequent AG9
 steps (larger).
+
+**Reached "in review with maintainer buy-in" 2026-07-13** (#50479; `zanmato1984`
+reviewing, his one ask addressed 07-14) and recorded in all three docs. Remaining
+for full done: **merge**. Next AG9 steps once it lands, in cost order:
+sort-view (`array_sort_indices` — view has no physical-type mapping), then
+row-table hash-join key encoding (`encode_internal.cc`, Large/hard). The
+string-*emitting* kernels (`utf8_upper/lower`, `replace_substring`, `utf8_trim`)
+were deliberately deferred out of #50479 — output-view construction is the hard
+part, and it is the natural immediate follow-up PR on this same file.
 
 ## Provenance / caveats
 State above pulled live via `gh` + `raw.githubusercontent.com/apache/arrow/main/`

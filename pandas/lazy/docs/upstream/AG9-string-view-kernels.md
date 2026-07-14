@@ -46,6 +46,28 @@ consumers.
 > arrays but can't evaluate a string WHERE clause on them), highest TPC-H-LIKE
 > payoff, Medium difficulty. That doc has the full state table, gap map, files,
 > template (#50164), and checklist.
+>
+> **✅ THAT PR IS NOW FILED (2026-07-11) AND IN REVIEW: #50479 (GH-50478,
+> "[C++][Compute] Support string_view/binary_view in scalar string predicate
+> kernels"), authored by fangchenli — OPEN, MERGEABLE, +323 −33 / 6 files, no
+> approval yet.** `zanmato1984` (a #50164 reviewer, as the hand-off recommended)
+> engaged 2026-07-13; his one ask — a `utf8_view` + `ignore_case` + non-ASCII test
+> to lock the `StringViewType`-vs-generic-`BinaryViewType` dispatch distinction —
+> was addressed 07-14 in `8082d31`. A Copilot null-slot/OOB hazard (unvalidated
+> view null headers) was addressed via `VisitArrayValuesInline` + null-visitor;
+> Copilot re-reviewed clean 07-14. **Second AG9 contribution in flight; nothing
+> outstanding on our side.** Full state → `AG9-next-string-predicate-kernels.md`.
+>
+> **⚠ Status hygiene (2026-07-14).** A report that "string_view/binary_view
+> support for scalar string predicate kernels was merged" was checked and found
+> **false**: #50479 is still open, #50164 (take/filter) is still open, tracker
+> #39634 still has take/filter unchecked, and Arrow `main`'s
+> `scalar_string_ascii.cc`/`scalar_string_utf8.cc`/`scalar_string_internal.h` have
+> **zero** Arrow view-type references (their many `std::string_view` hits are the
+> C++ stdlib type — the name collision is the trap). What *did* merge is #49964
+> (view **comparison** kernels, Periecle, 2026-06-09) — a different family, already
+> recorded in `STRING_VIEW_CONTRIBUTION_PLAN.md`. **Verify view coverage by reading
+> `main` source, not by PR-title search.**
 
 ## Context & full plan
 `string_view` (German-style strings) is the modern Arrow string layout but its
@@ -66,11 +88,21 @@ geo-mean) are in **`STRING_VIEW_CONTRIBUTION_PLAN.md`** (this folder).
 - [x] Duplicate/overlap search done → #44336 + PRs #50164/#50166/#48734, issues
       #43010/#46128. Re-check these are still the live set before engaging.
       (2026-07-08: #50166 MERGED; #50164/#48734/#43010/#46128 + umbrella still open.)
-- [ ] A specific unaddressed kernel identified (not covered by the open PRs).
-- [ ] Maintainer alignment on #44336.
-- [ ] Human approval before any outward comment/PR.
+- [x] A specific unaddressed kernel identified (not covered by the open PRs).
+      Round 1: hash-agg Grouper view keys → #50224 (merged 2026-07-07).
+      Round 2 (2026-07-09): scalar string predicate kernels → #50479 (open).
+- [x] Maintainer alignment: #50224 merged by pitrou (xref #44336); #50479 under
+      review by zanmato1984 since 2026-07-13.
+- [x] Human approval before any outward comment/PR — obtained for both #50224 and
+      #50479. **Still required for every future one** (standing guardrail).
 
 ## Definition of done
 PR(s) merged or in review with maintainer buy-in → recorded in `../ARROW_GAPS.md`
 AG9 + `README.md`. Note: this is the highest-effort item here; treat as a
 multi-step project, not a single sitting.
+
+**Progress: 1 merged (#50224), 1 in review (#50479).** The umbrella gap is NOT
+closed — take/filter (#50164/#43010) is claimed-but-open, and sort-view
+(`array_sort_indices`) + row-table hash-join key encoding (`encode_internal.cc`,
+Large/hard) remain unclaimed. Next steps in cost order live at the foot of
+`AG9-next-string-predicate-kernels.md`.

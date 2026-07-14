@@ -6,6 +6,28 @@ hand to an engineer/agent with no prior context. Researched June 2026
 against `apache/arrow` main (`fea7897`), pyarrow 23.0.1/24.0.0, and a local
 kernel probe.
 
+> **STATUS (updated 2026-07-14) — the plan is executing; two of ours in the tree:**
+>
+> | Kernel family | Vehicle | State |
+> |---|---|---|
+> | hash-agg **Grouper keys** | **our #50224** (GH-50223) | **MERGED 2026-07-07** (pitrou) |
+> | **scalar string predicates** (`match_substring`/`match_like`/`starts_with`/`ends_with`/`find_substring`/`count_substring`/`*_length`/`utf8_is_*`) | **our #50479** (GH-50478) | **OPEN, in review** (zanmato1984, since 07-13) → `AG9-next-string-predicate-kernels.md` |
+> | comparisons (`equal`/`less`/…) | #49964 (Periecle) | MERGED 2026-06-09 → pyarrow 25 |
+> | cast → view null buffers | #50166 | MERGED 2026-07-01 |
+> | take / filter | #50164 (Periecle) | **still OPEN** (claimed — don't duplicate) |
+> | sort (`array_sort_indices`) | — | unclaimed |
+> | acero join keys (`encode_internal.cc`) | — | unclaimed, Large/hard |
+>
+> The string-*emitting* kernels (`utf8_upper/lower`, `replace_substring`,
+> `utf8_trim`) were deliberately deferred out of #50479 — output-view construction
+> is the hard part; natural follow-up PR.
+>
+> ⚠ **Verify coverage by reading Arrow `main` source, not PR titles.** As of
+> 2026-07-14 `scalar_string_ascii.cc` has zero Arrow view-type refs; its ~30
+> `std::string_view` hits are the C++ stdlib type. "Comparison kernels" (#49964,
+> merged) and "predicate kernels" (#50479, open) are *different families* and are
+> easy to conflate — one such false "it merged" report already occurred.
+
 ## Why (the motivating measurement)
 
 The lazy-pandas engine is memory-bandwidth-walled on Arrow `large_string`:
