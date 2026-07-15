@@ -738,6 +738,23 @@ def test_normalize(form, expected, any_string_dtype):
     tm.assert_series_equal(result, expected)
 
 
+@pytest.mark.parametrize(
+    "form, expected",
+    [
+        ("NFC", ["abc", "\u00e9", "\u00e9", "\ufb01", np.nan]),
+        ("NFD", ["abc", "e\u0301", "e\u0301", "\ufb01", np.nan]),
+        ("NFKC", ["abc", "\u00e9", "\u00e9", "fi", np.nan]),
+        ("NFKD", ["abc", "e\u0301", "e\u0301", "fi", np.nan]),
+    ],
+)
+def test_normalize_composition(form, expected, any_string_dtype):
+    # GH#64359
+    ser = Series(["abc", "e\u0301", "\u00e9", "\ufb01", np.nan], dtype=any_string_dtype)
+    expected = Series(expected, dtype=any_string_dtype)
+    result = ser.str.normalize(form)
+    tm.assert_series_equal(result, expected)
+
+
 def test_normalize_bad_arg_raises(any_string_dtype):
     ser = Series(
         ["ABC", "ＡＢＣ", "１２３", np.nan, "ｱｲｴ"],  # noqa: RUF001
