@@ -2519,6 +2519,11 @@ class ArrowExtensionArray(
             else:
                 data_to_reduce = self._pa_array.cast(pa.int64())
 
+        elif name in ["median", "std", "var", "sem"] and pa.types.is_boolean(pa_type):
+            # pyarrow's stddev/variance/quantile kernels reject booleans; cast to
+            # integer so booleans reduce as 0/1, matching numpy and BooleanDtype.
+            data_to_reduce = self._pa_array.cast(pa.uint8())
+
         if name == "sem":
 
             def pyarrow_meth(data, skip_nulls, **kwargs):  # pyright: ignore[reportRedeclaration]

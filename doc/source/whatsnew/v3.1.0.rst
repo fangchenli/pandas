@@ -371,6 +371,7 @@ Timezones
 
 Numeric
 ^^^^^^^
+- Bug in :class:`ArrowDtype` boolean data being treated as non-numeric, so it was silently dropped from ``numeric_only=True`` reductions (e.g. :meth:`DataFrame.mean`, :meth:`DataFrame.sum`, :meth:`DataFrame.corr`) and :meth:`Series.std`, :meth:`Series.var`, :meth:`Series.median`, and :meth:`Series.sem` raised ``TypeError``; booleans are now treated as numeric and reduce as ``0``/``1``, matching the NumPy ``bool`` and :class:`BooleanDtype` backends (:issue:`XXXXX`)
 - Bug in :meth:`DataFrame.min`, :meth:`DataFrame.max`, :meth:`Series.min`, and :meth:`Series.max` on object-dtype data raising ``TypeError`` when missing values were present alongside values that do not support comparison with ``float`` (e.g. strings or mixed-timezone :class:`Timestamp` objects) (:issue:`65500`)
 - Fixed bug in :func:`read_excel` where having a column with mixture of numeric and boolean values will typecast the values based on the first appearance data type since 1==True and 0==False (:issue:`60088`)
 - Fixed bug in :meth:`DataFrame.idxmax` and :meth:`DataFrame.idxmin` returning incorrect row labels for nullable ``UInt64`` columns containing missing values alongside values above ``2**53`` (:issue:`64478`)
@@ -608,6 +609,7 @@ ExtensionArray
 - Bug in numpy ufuncs like :func:`numpy.isnan` raising ``TypeError`` on :class:`Series` or :class:`Index` backed by PyArrow dtypes when ``future.distinguish_nan_and_na`` is ``True`` (:issue:`62506`)
 - Fixed bug in :meth:`Series.apply` and :meth:`Series.map` where nullable integer dtypes were converted to float, causing precision loss for large integers; now the nullable dtype will be preserved (:issue:`63903`).
 - Fixed bug in :meth:`Series.cummax` and :meth:`Series.cummin` (and their :class:`DataFrame` counterparts) with floating-point :class:`ArrowDtype` returning a finite sentinel value instead of the correct running maximum/minimum (:issue:`66257`)
+- Bug in :meth:`Series.to_numpy` on nullable boolean data (:class:`BooleanDtype` or ``bool[pyarrow]``) returning an ``object`` array even when an explicit non-missing ``na_value`` was supplied; the result now uses a ``bool`` NumPy dtype since no missing value survives (:issue:`XXXXX`)
 - Fixed the :attr:`~Series.is_monotonic_increasing` and :attr:`~Series.is_monotonic_decreasing` properties to dispatch to the underlying :class:`ExtensionArray` implementation (:issue:`65585`)
 -
 

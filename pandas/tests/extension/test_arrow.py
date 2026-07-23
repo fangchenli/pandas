@@ -480,12 +480,8 @@ class TestArrowArray(base.ExtensionTests):
             return False
 
         if pa.types.is_boolean(pa_dtype) and op_name in [
-            "median",
-            "std",
-            "var",
             "skew",
             "kurt",
-            "sem",
         ]:
             return False
 
@@ -1538,10 +1534,63 @@ def test_is_numeric_dtype(data):
         pa.types.is_floating(pa_type)
         or pa.types.is_integer(pa_type)
         or pa.types.is_decimal(pa_type)
+        or pa.types.is_boolean(pa_type)
     ):
         assert is_numeric_dtype(data)
     else:
         assert not is_numeric_dtype(data)
+
+
+@pytest.mark.parametrize("op", ["mean", "sum", "std", "var", "median", "sem"])
+def test_numeric_only_includes_bool(op):
+    # GH#XXXXX bool[pyarrow] must count as numeric for numeric_only=True and
+    # reduce as 0/1, matching numpy bool and the masked BooleanDtype backend
+    # rather than being silently dropped (mean/sum) or raising (std/var/etc.).
+    values = [True, False, True, False]
+
+    def reduce(dtype):
+        df = pd.DataFrame({"flag": pd.array(values, dtype=dtype), "val": [1, 2, 3, 4]})
+        return getattr(df, op)(numeric_only=True)
+
+    result = reduce("bool[pyarrow]")
+    assert "flag" in result.index
+    # the bool column is both included and reduces to the same value as the
+    # numpy bool and masked BooleanDtype backends
+    expected = reduce(bool)["flag"]
+    assert result["flag"] == pytest.approx(expected)
+    assert reduce("boolean")["flag"] == pytest.approx(expected)
+
+
+def test_bool_describe_still_dropped():
+    # GH#XXXXX describe() drops bool for every backend; the numeric_only fix
+    # must not change that.
+    df = pd.DataFrame(
+        {"flag": pd.array([True, False, True], dtype="bool[pyarrow]"), "val": [1, 2, 3]}
+    )
+    assert "flag" not in df.describe().columns
+
+
+def test_bool_index_uses_masked_engine():
+    # GH#XXXXX bool[pyarrow] now routes to the masked engine instead of the slow
+    # ObjectEngine, and lookups that previously raised on the int sentinel now
+    # succeed.
+    from pandas._libs import index as libindex
+
+    idx = pd.Index(pd.array([True, False, None], dtype="bool[pyarrow]"))
+    assert isinstance(idx._engine, libindex.MaskedBoolEngine)
+    assert idx.get_loc(False) == 1
+
+
+@pytest.mark.parametrize("dtype", ["bool[pyarrow]", "boolean"])
+def test_to_numpy_bool_with_na_value_keeps_bool(dtype):
+    # GH#XXXXX an explicit non-NA fill leaves no missing values, so a nullable
+    # boolean array (arrow or masked) converts to a bool ndarray rather than
+    # object.
+    arr = pd.array([True, None, False], dtype=dtype)
+    result = arr.to_numpy(na_value=False)
+    tm.assert_numpy_array_equal(result, np.array([True, False, False]))
+    # the default keeps NA, which a bool ndarray cannot hold, so it stays object
+    assert arr.to_numpy().dtype == object
 
 
 def test_is_integer_dtype(data):
@@ -1638,7 +1687,13 @@ def test_to_numpy_with_defaults(data, using_nan_is_na):
     else:
         expected = np.array(data._pa_array)
 
-    if data._hasna and (not is_numeric_dtype(data.dtype) or not using_nan_is_na):
+    # bool has no NaN representation, so a bool column with NA always falls back
+    # to object under the default na_value regardless of the nan_is_na mode.
+    if data._hasna and (
+        not is_numeric_dtype(data.dtype)
+        or pa.types.is_boolean(pa_type)
+        or not using_nan_is_na
+    ):
         expected = expected.astype(object)
         expected[pd.isna(data)] = pd.NA
 

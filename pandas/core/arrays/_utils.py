@@ -36,7 +36,15 @@ def to_numpy_dtype_inference(
         inferred_numeric_dtype = True
         if hasna:
             if arr.dtype.kind == "b":
-                result_dtype = np.dtype(np.object_)
+                if na_value is lib.no_default:
+                    # No fill is given, so NA survives into the result and a
+                    # NumPy bool array cannot hold it: fall back to object.
+                    result_dtype = np.dtype(np.object_)
+                else:
+                    # An explicit fill leaves no NA behind, so the values fit in
+                    # a bool array. A fill that is itself NA-like (e.g. NaN) is
+                    # downgraded to object by the np_can_hold_element check below.
+                    result_dtype = arr.dtype.numpy_dtype  # type: ignore[attr-defined]
             else:
                 if arr.dtype.kind in "iu":
                     result_dtype = np.dtype(np.float64)

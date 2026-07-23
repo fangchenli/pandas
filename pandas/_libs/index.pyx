@@ -1260,9 +1260,12 @@ cdef class MaskedIndexEngine(IndexEngine):
         if hasattr(values, "_mask"):
             return values._data
         # We are an ArrowExtensionArray
-        # Set 1 as na_value to avoid ending up with NA and an object array
+        # Set a non-NA na_value to avoid ending up with NA and an object array.
+        # Cast the sentinel through the target numpy dtype so boolean arrays get
+        # True rather than the integer 1, which pyarrow refuses to coerce.
         # TODO: Remove when arrow engine is implemented
-        return values.to_numpy(na_value=1, dtype=values.dtype.numpy_dtype)
+        numpy_dtype = values.dtype.numpy_dtype
+        return values.to_numpy(na_value=numpy_dtype.type(1), dtype=numpy_dtype)
 
     def _get_mask(self, object values) -> np.ndarray:
         if hasattr(values, "_mask"):
