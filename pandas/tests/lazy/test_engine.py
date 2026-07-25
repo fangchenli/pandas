@@ -409,6 +409,61 @@ class TestMorselParallelism:
         graph = compile_graph(ldf)
         assert any(pipeline_is_morsel_parallel(p) for p in graph.pipelines)
 
+    def test_trailing_materialize_is_morsel_transparent(self):
+        # A compute-bound (str_) chain that feeds a breaker (here a join
+        # build side) carries a trailing PhysicalMaterialize. That op is not
+        # itself morsel-safe, but it only concatenates the batches — exactly
+        # what concat_morsel_results already does — so it must not force the
+        # whole chain single-threaded. Regression for TPC-H q13's regex
+        # filter feeding the left-join build (445 -> ~165 ms at SF-3).
+        from pandas.lazy.engine.parallel import (
+            _chain_has_compute_bound,
+            _morsel_operators,
+            _op_is_morsel_safe,
+            pipeline_is_morsel_parallel,
+        )
+        from pandas.lazy.physical import PhysicalMaterialize
+
+        left = pd.DataFrame({"id": np.arange(1000), "v": np.arange(1000)})
+        right = pd.DataFrame({"id": np.arange(1000), "s": pd.array(["special"] * 1000)})
+        ldf = left.select().join(
+            right.select().filter(~col("s").str.contains("x.*y")), on="id"
+        )
+        graph = compile_graph(ldf)
+
+        # locate the str-filter build-side pipeline: a compute-bound chain
+        # ending in a Materialize (the join build side). The other build side
+        # (left) has no str op, so select by compute-bound content.
+        target = None
+        for p in graph.pipelines:
+            if (
+                p.operators
+                and isinstance(p.operators[-1], PhysicalMaterialize)
+                and _chain_has_compute_bound(p)
+            ):
+                target = p
+                break
+        assert target is not None, "expected a str-filter pipeline with Materialize"
+
+        mat = target.operators[-1]
+        # the Materialize itself is NOT morsel-safe -> without stripping, the
+        # old gate would reject the whole chain
+        assert not _op_is_morsel_safe(mat)
+        # the fix strips the trailing Materialize for morsel purposes ...
+        assert _morsel_operators(target) == list(target.operators[:-1])
+        # ... so the compute-bound chain now parallelizes
+        assert pipeline_is_morsel_parallel(target)
+
+        # and the executed result still matches eager (dtype check relaxed: the
+        # physical/eager string na_value nuance is orthogonal to routing)
+        result = ldf.collect(use_physical_planner=True)
+        expected = ldf.collect()
+        tm.assert_frame_equal(
+            result.sort_values("id").reset_index(drop=True),
+            expected.sort_values("id").reset_index(drop=True),
+            check_dtype=False,
+        )
+
     def test_aggregate_and_window_exprs_excluded(self):
         from pandas.lazy.engine.parallel import (
             pipeline_is_morsel_parallel,

@@ -42,6 +42,7 @@ from pandas.lazy.physical import (
     PhysicalConvert,
     PhysicalFilter,
     PhysicalFusedPipeline,
+    PhysicalMaterialize,
     PhysicalProject,
     PhysicalScan,
 )
@@ -141,8 +142,32 @@ def _expr_has_compute_bound(ir) -> bool:
     return False
 
 
+def _morsel_operators(pipeline: Pipeline) -> list:
+    """The operators to run per morsel.
+
+    A *trailing* ``PhysicalMaterialize`` is transparent to morsel
+    parallelism: the node's only job is to consume its input and
+    concatenate the batches (``PhysicalMaterialize.execute``), which is
+    exactly what ``concat_morsel_results`` already does at the end of
+    ``run_morsel_parallel`` — in stable sequence order. So running the
+    compute-bound prefix in parallel and concatenating is identical to
+    prefix→Materialize. Stripping it lets a compute-bound chain that feeds
+    a breaker (join build side, aggregate input) parallelize instead of
+    being forced single-threaded by the materialize boundary — e.g. TPC-H
+    q13's regex filter feeding the left-join build (445→~165 ms at SF-3).
+
+    Only a trailing Materialize is stripped; a non-trailing one (which
+    should not occur — Materialize is a pipeline breaker) is left in place
+    so the morsel-safety check still rejects the chain.
+    """
+    ops = pipeline.operators
+    if ops and isinstance(ops[-1], PhysicalMaterialize):
+        return ops[:-1]
+    return list(ops)
+
+
 def _chain_has_compute_bound(pipeline: Pipeline) -> bool:
-    for op in pipeline.operators:
+    for op in _morsel_operators(pipeline):
         if isinstance(op, PhysicalFilter):
             if _expr_has_compute_bound(op.predicate._ir):
                 return True
@@ -171,13 +196,14 @@ def pipeline_is_morsel_parallel(pipeline: Pipeline) -> bool:
     compute-bound kernel in the chain (bandwidth-bound chains are
     saturated by a single thread; see _COMPUTE_BOUND_PREFIXES).
     """
-    if not pipeline.operators:
+    ops = _morsel_operators(pipeline)
+    if not ops:
         return False
     if pipeline.source_node is not None and not isinstance(
         pipeline.source_node, PhysicalScan
     ):
         return False
-    if not all(_op_is_morsel_safe(op) for op in pipeline.operators):
+    if not all(_op_is_morsel_safe(op) for op in ops):
         return False
     return _chain_has_compute_bound(pipeline)
 
@@ -193,7 +219,7 @@ def compile_chain(pipeline: Pipeline):
     with zero semantic divergence: it is literally the same logic.
     """
     appliers = []
-    for op in pipeline.operators:
+    for op in _morsel_operators(pipeline):
         if isinstance(op, PhysicalFusedPipeline):
             appliers.append(op._execute_fused)
         elif isinstance(op, PhysicalProject):

@@ -8,6 +8,29 @@ landed). Dated performance reports live in `../benchmarks/`.
 
 ## Competitive Standing (vs Polars, June 2026 — engine era)
 
+> **Progress 2026-07-25 (kernel-routing track resumed).** Re-baselined SF-3
+> (all 22 exact): **S1 geo-mean 0.44–0.45x** — the campaign-close number holds
+> on current `main`. Profiled the two biggest absolute sinks:
+> - **q21 (2.0 s, 0.36x) — bandwidth-bound, no clean kernel win.** Its three
+>   hot spots (two `n_unique` group-bys 42%, join-chain gather 28%,
+>   filter-materialize 24%) are all memory-bandwidth-bound O(n) passes over
+>   18M-row int64. Probes: parallel radix sort of the packed `n_unique` key
+>   *loses* (0.75x — more traffic, bandwidth-saturated); a hash/partition route
+>   is 0.09x. The single-threaded packed sort is already near the bandwidth
+>   floor. Recorded negative result — G3(a)'s "ordinary engineering" promise
+>   does not survive measurement.
+> - **q13 0.45x → 0.94x (near-parity) — a routing fix, shipped.** Its
+>   `~o_comment.str.contains(...)` regex (compute-bound, 4.5M rows) feeding the
+>   left-join build ran **single-threaded (446 ms)** because a *trailing
+>   `PhysicalMaterialize`* on the build-side pipeline disqualified the whole
+>   chain from morsel parallelism. Fix (`engine/parallel.py`): a trailing
+>   Materialize is transparent — `concat_morsel_results` already materializes,
+>   so the compute-bound prefix parallelizes and the concat is the materialize.
+>   Controlled A/B: q13 **0.49x** (446→102 ms on the regex pipeline), zero
+>   regressions (q1/q6/q14/q16/q19/q22/q2/q20 all 0.99–1.05x), every query
+>   validates ON==OFF; 1732 lazy tests pass. **Lesson (reaffirmed): substrate
+>   wins are compute-bound (q13 regex) — bandwidth-bound ops (q21) don't yield.**
+
 > **Refreshed 2026-06-16 (post plumbing-harvest session).** SF-3 TPC-H S1
 > geo-mean **~0.42x** (run-to-run 0.42–0.45x; machine loaded), all 22 exact;
 > q6 the lone outright win (1.18x). This session shipped filter→scalar-agg
@@ -255,10 +278,13 @@ answers (pre-PDEP): is the rest of the gap closable, and at what cost?
 5. **String layout — structural, upstream-blocked.** Arrow `large_string`
    gathers are a measured memory-bandwidth wall (~4x vs Polars' German
    strings); pyarrow 23 AND 24 lack `string_view` kernels (re-verified).
-   Caps q13 (regex over 1.5M comments), q16, H2O join q4 (0.13x),
+   Caps q16, H2O join q4 (0.13x),
    filter_project (0.21x). Closable only by contributing `string_view`
    take/hash kernels to Arrow upstream or vendoring string kernels — the
-   one item that is someone else's timeline.
+   one item that is someone else's timeline. (NB 2026-07-25: q13's regex cost
+   was **not** the string-layout wall but a morsel-routing gap — the regex
+   filter feeding the join build ran single-threaded past a trailing
+   Materialize; fixed, q13 0.45x→0.94x. See the 2026-07-25 note above.)
 6. **What is NOT the gap** (measured and ruled out across the campaign):
    pandas↔Arrow conversions (absent from profiles), join order on
    hand-written queries, column pruning through joins, planning overhead
@@ -639,9 +665,12 @@ upstream; masked-`Float64` storage flag; chain build caps at scale.
      Cython-join build cap (≤500k) and the chain's eligibility exclude
      these; profile, then consider raising the cap for the parallel kernel
      / letting order-free chains take big builds.
-  2. **String-heavy q22 (222 ms, 0.15x) and q13 (211 ms, 0.48x).** q13's
-     left join is chain-ineligible and its `str.contains` regex runs over
-     1.5M comments single-threaded; q22 is `str.slice` + cross + anti.
+  2. **String-heavy q22 (222 ms, 0.15x) and ~~q13~~ (211 ms, 0.48x).**
+     ~~q13's~~ **q13 DONE (2026-07-25, 0.45x→0.94x):** its `str.contains` regex
+     ran single-threaded not for lack of a parallel string kernel but because
+     a trailing Materialize on the join-build pipeline gated morsel
+     parallelism off — the regex *was* morsel-safe; fixed in
+     `engine/parallel.py`. q22 remains (`str.slice` + cross + anti).
      Leads: morsel-parallel string kernels, left-join chain support.
   3. **Small-query floors: q15/q16/q20/q8/q14 (20–60 ms absolute).**
      Dominated by per-operator overhead and planning (the long-standing
