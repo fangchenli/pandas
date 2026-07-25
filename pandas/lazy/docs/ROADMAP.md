@@ -19,17 +19,35 @@ landed). Dated performance reports live in `../benchmarks/`.
 >   is 0.09x. The single-threaded packed sort is already near the bandwidth
 >   floor. Recorded negative result — G3(a)'s "ordinary engineering" promise
 >   does not survive measurement.
-> - **q13 0.45x → 0.94x (near-parity) — a routing fix, shipped.** Its
->   `~o_comment.str.contains(...)` regex (compute-bound, 4.5M rows) feeding the
->   left-join build ran **single-threaded (446 ms)** because a *trailing
->   `PhysicalMaterialize`* on the build-side pipeline disqualified the whole
->   chain from morsel parallelism. Fix (`engine/parallel.py`): a trailing
+> - **q13 0.45x → 0.94x (near-parity) — a routing fix, shipped (commit
+>   294aac2e45).** Its `~o_comment.str.contains(...)` regex (compute-bound, 4.5M
+>   rows) feeding the left-join build ran **single-threaded (446 ms)** because a
+>   *trailing `PhysicalMaterialize`* on the build-side pipeline disqualified the
+>   whole chain from morsel parallelism. Fix (`engine/parallel.py`): a trailing
 >   Materialize is transparent — `concat_morsel_results` already materializes,
 >   so the compute-bound prefix parallelizes and the concat is the materialize.
 >   Controlled A/B: q13 **0.49x** (446→102 ms on the regex pipeline), zero
 >   regressions (q1/q6/q14/q16/q19/q22/q2/q20 all 0.99–1.05x), every query
->   validates ON==OFF; 1732 lazy tests pass. **Lesson (reaffirmed): substrate
->   wins are compute-bound (q13 regex) — bandwidth-bound ops (q21) don't yield.**
+>   validates ON==OFF; 1732 lazy tests pass.
+> - **The fix is suite-wide, and the q13-class hunt is now EXHAUSTED.** An audit
+>   of all 22 plans found **exactly 6 compute-bound (`str_`) pipelines**
+>   (q2/q9/q13/q16×2/q20) — and **every one was serialized by a trailing
+>   Materialize** before this fix (toggled off, all 6 read `SERIAL: unsafe op
+>   PhysicalMaterialize`; on, all 6 parallelize). q13 is the only one with
+>   enough data×compute to move (regex over 4.5M `o_comment`); the other five
+>   are cheap `startswith`/`endswith`/`contains-substring` over the small `part`
+>   table (200–600k) → now-correct but negligible. **Zero serialized
+>   compute-bound pipelines remain** — one commit closed the whole class.
+> - **q22 (0.54x) profiled — no win, q21-class.** Its one kernel-looking target,
+>   `distinct` over 4.5M `o_custkey`, is already **at Polars parity**
+>   (`pd.duplicated` 27.5 ms vs Polars 25.2 ms) and does not parallelize
+>   (hash-partition route 0.07x — the partition needs its own sort). The LP↔PL
+>   gap is diffuse (small cross/anti joins + materializations), no single lever.
+> - **Lesson (reaffirmed): kernel-routing wins are compute-bound and are now
+>   harvested (q13).** Bandwidth-bound ops (q21 sort, q22 distinct) are already
+>   at/near parity and don't yield to threads. What remains on the scorecard is
+>   the architectural/substrate wall (join chains, high-card groupby,
+>   small-query floors) — not more routing gaps.
 
 > **Refreshed 2026-06-16 (post plumbing-harvest session).** SF-3 TPC-H S1
 > geo-mean **~0.42x** (run-to-run 0.42–0.45x; machine loaded), all 22 exact;
