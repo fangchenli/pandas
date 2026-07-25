@@ -1,5 +1,42 @@
 # Hand-off: AG18 — Arrow's Substrait consumer silently returns 0 rows for every `LIMIT`
 
+> ## ✅ EXECUTED — FILED as [PR #50635](https://github.com/apache/arrow/pull/50635) (issue GH-50634), **OPEN / draft**
+>
+> **Status as of 2026-07-25** (verified live via `gh`). Filed by fangchenli; marked
+> a **"Critical Fix"** (produces incorrect data). No reviews yet.
+>
+> | | |
+> |---|---|
+> | **PR** | [#50635](https://github.com/apache/arrow/pull/50635) `GH-50634: [C++][Engine] Fix Substrait consumer silently dropping modern FetchRel/AggregateRel fields` — opened 2026-07-25 |
+> | **State** | OPEN, **draft**, MERGEABLE, +449 −16 across 5 files. No reviews yet. |
+> | **Closes** | issue **#50634** |
+>
+> **The filed fix GENERALIZED the root cause beyond this doc's FetchRel scope.** The
+> vendored-proto version lag (v0.44.0) silently drops *several* modern fields, not
+> just `count_expr`. PR #50635 fixes the whole family in one bump:
+> - **Bump** the vendored substrait proto **v0.44.0 → v0.63.0** (matches DataFusion's
+>   substrait-rs; deprecated arms remain for back-compat) — exactly what this
+>   hand-off recommended.
+> - **FetchRel** (this doc, AG18a): read the `count_mode`/`offset_mode` oneofs, eval
+>   `count_expr`/`offset_expr` to a constant, unset count = ALL, unset offset = 0,
+>   skip a no-op fetch. Fixes silent `LIMIT 0`.
+> - **AggregateRel** (a *new sibling* found while fixing this — same root cause):
+>   GROUP BY keys moved from deprecated `Grouping.grouping_expressions` to
+>   `Grouping.expression_references` (indexing the AggregateRel-level
+>   `grouping_expressions`). Reading only the deprecated field **dropped the group
+>   keys → collapsed every row into one group** — a second silent-wrong-result.
+> - **JoinRel**: update the renamed `JoinType` enum (`JOIN_TYPE_SEMI/ANTI` →
+>   `JOIN_TYPE_LEFT_SEMI/LEFT_ANTI`) surfaced by the bump.
+> - Regression tests for the expr arms, unset-count = ALL, and grouping-by-reference.
+>
+> ⚠ **Do not conflate with AG19** (`No conversion function … starts_with`): that is
+> a *function-coverage* gap (`extension_set.cc` registry), a different fix, still
+> unfiled. AG18 is the *deprecated-field/stale-proto* class.
+>
+> ---
+> Everything below is the original 2026-07-24 scoping (FetchRel only), kept as
+> provenance for how the finding was characterized and gated before filing.
+
 **For:** a fresh agent. Read `README.md` first. **Target project: `apache/arrow`**
 (the C++ `arrow::engine`/Substrait **consumer**). **Priority: 2** — the *severity*
 is the highest class on the board (a **silent wrong result**, no error), but the
@@ -157,7 +194,12 @@ DataFusion-0.63-emits-`count_expr` mechanism. Do **not** bundle `precision_times
 without explicit human go-ahead** (guardrail).
 
 ## Definition of done
-Characterized, `main`-first-gated (HEAD `62d2dd8270`), mechanism re-derived from
-source, non-dup, repro standing on latest releases — **hand-off-ready, not filed.**
-Keep the `substrait_fixup.py` scalar-count mirror in our lowering until a fixed
-Arrow ships in a release we depend on, then retire it.
+**✅ FILED as PR #50635 (GH-50634), OPEN/draft, 2026-07-25** — the version-lag
+diagnosis held and generalized (FetchRel + AggregateRel + JoinRel enum, one proto
+bump). Remaining: mark PR ready-for-review, land review, merge. Keep the
+`substrait_fixup.py` scalar-count mirror (and the grouping/join fixups) in our
+lowering until a fixed Arrow ships in a release we depend on, then retire them.
+
+_History: characterized, `main`-first-gated (HEAD `62d2dd8270`), mechanism
+re-derived from source, non-dup, repro on latest releases — was hand-off-ready
+2026-07-24, filed 2026-07-25._

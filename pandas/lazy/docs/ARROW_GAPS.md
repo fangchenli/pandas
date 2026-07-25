@@ -62,9 +62,16 @@ Searched issues **and** PRs across many phrasings (`gh api search/issues`):
   (3) **AG18/AG19 `main`-first gate CLOSED** vs Arrow HEAD `62d2dd8270`:
   **AG19** (string-fn coverage) and **AG18(a)** (FetchRel silent-`LIMIT 0`) both
   CONFIRMED LIVE at HEAD; **AG18(b)** (`precision_timestamp`) RESOLVED upstream and
-  dropped (an AG17-class released-artifact mirage the gate caught). Both remaining
-  Arrow findings non-dup (umbrella #13285 stale-closed 2025-12-05), filing-ready
-  pending go-ahead. AG10/AG11 (DataFusion) unchanged — all four issues/PRs OPEN.*
+  dropped (an AG17-class released-artifact mirage the gate caught). Both non-dup
+  (umbrella #13285 stale-closed 2025-12-05). AG10/AG11 (DataFusion) unchanged.*
+  **Progress (2026-07-25): AG18 FILED — OUR PR #50635 (GH-50634) OPEN/draft,
+  "Critical Fix".** The version-lag diagnosis generalized: one proto bump
+  (substrait v0.44→v0.63) fixes the whole silently-dropped-modern-field family —
+  FetchRel `count_expr`/`offset_expr` (silent `LIMIT 0`) **plus a new sibling found
+  in the process: AggregateRel GROUP-BY keys moved to `Grouping.expression_references`,
+  and reading only the deprecated inline field dropped the keys → collapsed every
+  row into one group** — plus the JoinRel `JOIN_TYPE_*_SEMI/ANTI` enum rename. AG19
+  (function coverage — a *different* fix class) remains hand-off-ready, not filed.*
 - **AG1 — effectively a duplicate.** **#25822 (open)** "[C++] Take kernel can't
   handle ChunkedArrays that don't fit in an Array" is the same root limitation
   (Take concatenates first, breaks past 2 GB). Our angle (it **segfaults**
