@@ -19,6 +19,17 @@ after a latest-version re-check + dup-search refresh.
 > hand-off-ready (not filed).** Reproduces IDENTICALLY on pinned pyarrow 23.0.1
 > AND latest **25.0.0** (`substrait_fn_coverage.py`). Nothing filed without
 > go-ahead (guardrail).
+>
+> **✅ `main`-FIRST GATE CLOSED (2026-07-24) — verified against `apache/arrow`
+> HEAD `62d2dd8270`, not the release.** Read the C++ consumer source directly:
+> `cpp/src/arrow/engine/substrait/extension_set.cc` — the `DefaultExtensionIdRegistry`
+> constructor is the entire Substrait→Arrow consumer function map, and it registers
+> exactly **one** `kSubstraitStringFunctionsUri` name: `"concat"` (line 1148). No
+> `starts_with`, `ends_with`, `substring`, `like`, or `match_substring`. Gap is
+> **still live at HEAD** (not a released-artifact mirage). **Dup:** non-dup —
+> `gh search` returns zero Arrow issues on Substrait string-function coverage; the
+> umbrella #13285 was **auto-closed as stale 2025-12-05** (365-day stalebot), never
+> landed a fix. **Filing-ready pending human go-ahead.**
 
 ## Scope check first — "are these even Substrait's job?" (they split 3 ways)
 Before blaming the consumer, the honest question (raised in review): are these

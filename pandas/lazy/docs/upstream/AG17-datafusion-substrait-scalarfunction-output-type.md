@@ -116,12 +116,19 @@ root blockers, not symptoms.
 The remaining 11 stratify into **downstream Arrow/Acero-consumer** gaps (separate
 from this DataFusion-producer finding, and all on pinned **pyarrow 23.0.1** — the
 playbook says re-verify these on the latest pyarrow before treating as findings):
-- **AG18 (Arrow, candidate) — the consumer reads *deprecated* Substrait fields.**
+- **AG18 (Arrow) — the consumer reads *deprecated* Substrait fields.**
+  → **Now promoted to its own self-contained hand-off:
+  [`AG18-arrow-substrait-fetchrel-limit.md`](AG18-arrow-substrait-fetchrel-limit.md)**
+  (root cause re-derived to a vendored-proto version lag; `precision_timestamp`
+  dropped as resolved-upstream). The notes below are kept as provenance.
   Two manifestations, both worked around in the fixup, both because Acero's
   Substrait consumer lags the spec's deprecated→new field moves:
   - *`precision_timestamp`* (the type/literal that *deprecated* legacy
     `timestamp`) → `substrait literal did not have any literal type set` (an
     error). Fixup: opt-in `legacy_timestamp` downgrade → `timestamp` (ns→µs).
+    **⚠ RESOLVED at Arrow HEAD (gate 2026-07-24 — see "GATE CLOSED" below):
+    `type_internal.cc` now handles `precision_timestamp` both ways; this arm is
+    floor-debt, NOT a live Arrow gap. Drop from any AG18 filing.**
   - ***`FetchRel.count_expr` (silent-wrong, worst kind) — an Arrow-consumer bug,
     NOT a Substrait gap.*** `count` lives in a `oneof count_mode { count,
     count_expr }`; the spec (proto docs + PR #748) says consumers must check the
@@ -244,6 +251,26 @@ same lesson, before filing AG18/AG19, run the `main`-first gate against
 `apache/arrow` HEAD (the consumer registration / FetchRel-oneof handling may have
 landed since the release). Their repros stand on the released artifact; their
 "still unfixed" status needs the source check.
+
+> ### ✅ GATE CLOSED (2026-07-24) — read `apache/arrow` HEAD `62d2dd8270`
+> Ran the `main`-first gate by reading the C++ consumer source at HEAD (not the
+> released pkg). Results — **two still live, one already fixed:**
+>
+> | claim | HEAD verdict | evidence (main @ `62d2dd8270`) |
+> |---|---|---|
+> | **AG18(a)** `FetchRel` silent-`LIMIT 0` | **✅ CONFIRMED LIVE — root cause sharpened** | `relation_internal.cc:782-786` reads `int64_t count = fetch.count();` — a **scalar** accessor. **The real root cause is a substrait-version lag, not "ignores a oneof":** Arrow pins **substrait v0.44.0** (Arrow's `versions.txt`, `ARROW_SUBSTRAIT_BUILD_VERSION=v0.44.0`), whose `FetchRel` has only `int64 count = 4` (no expression form exists yet). DataFusion (main) uses **substrait-rs 0.63.0** and its producer emits `count_mode = CountMode::CountExpr(..)` (`datafusion/substrait/.../producer/rel/fetch_rel.rs`). Arrow's v0.44.0 proto has no `count_expr` field → it lands in protobuf **unknown-fields** and is dropped; `fetch.count()` returns the scalar default **0** → `FetchNodeOptions(offset, 0)` → **LIMIT 0 → silent 0 rows**. Fix scope is therefore *not* a small registry add: **bump the vendored substrait proto (≥~0.61, where `count_mode`/`offset_mode` land) + teach the FetchRel consumer to read `count_expr`/`offset_expr`, eval the literal, unset count = ALL.** Bigger/riskier (a proto bump ripples across all rels) but fixes a silent-wrong-result bug. |
+> | **AG18(b)** no `precision_timestamp` support | **❌ RESOLVED at HEAD — DROP from filing** | `type_internal.cc:136-145` (consumer `FromProto`) handles `kPrecisionTimestamp`/`kPrecisionTimestampTz`; `:328,:334` (producer `ToProto`) emit them. Fixed upstream since our pyarrow-25 read. **This is an AG17-class released-artifact mirage — must NOT appear in any AG18 filing.** Our `legacy_timestamp` fixup is now floor-debt, not an Arrow gap. |
+> | **AG19** string-fn coverage (`starts_with`/`ends_with`/`substring`) | **✅ CONFIRMED LIVE** | `extension_set.cc` `DefaultExtensionIdRegistry` is the complete consumer map; it registers exactly **one** `kSubstraitStringFunctionsUri` name — `"concat"` (line 1148). No `starts_with`/`ends_with`/`substring`/`like`/`match_substring`. Kernels (`pc.starts_with`, …) exist → additive registry fix. Unchanged. |
+>
+> **Dup check (2026-07-24):** non-dup — `gh search` finds **zero** Arrow issues on
+> substrait string-function coverage or on `FetchRel`/`count_mode`. The referenced
+> umbrella **#13285** ("register tricky Substrait functions with the consumer") was
+> **auto-closed as stale 2025-12-05** (365-day stalebot), *not* fixed — so the one
+> issue that could have covered AG19 lapsed without landing anything.
+>
+> **Net:** AG18 narrows to the single silent-`LIMIT 0` bug (its highest-severity
+> manifestation anyway); AG19 stands as scoped. Both now pass the `main`-first
+> gate and are filing-ready **pending human go-ahead** (guardrail).
 
 ## Definition of done
 **Done: RESOLVED-UPSTREAM, not filing.** Recorded here + in `README.md`; live work

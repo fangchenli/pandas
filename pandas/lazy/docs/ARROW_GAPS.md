@@ -54,6 +54,17 @@ Searched issues **and** PRs across many phrasings (`gh api search/issues`):
   have zero Arrow view-type refs; the many `std::string_view` hits are the stdlib
   type, not the view layout), not by PR-title search — the families' names
   collide.*
+  **Progress (2026-07-24) — status sweep + `main`-first gate closures:**
+  (1) **AG13 landed** — datafusion-python PR #1627 MERGED 07-14, issue #1626
+  closed (empty-partition panic fix). (2) **AG9-next #50479** still OPEN/MERGEABLE,
+  no approval; `zanmato1984` left one *optional* test nit 07-14 (exercise a
+  numeric-output view kernel in the null-slot regression) — not a blocker.
+  (3) **AG18/AG19 `main`-first gate CLOSED** vs Arrow HEAD `62d2dd8270`:
+  **AG19** (string-fn coverage) and **AG18(a)** (FetchRel silent-`LIMIT 0`) both
+  CONFIRMED LIVE at HEAD; **AG18(b)** (`precision_timestamp`) RESOLVED upstream and
+  dropped (an AG17-class released-artifact mirage the gate caught). Both remaining
+  Arrow findings non-dup (umbrella #13285 stale-closed 2025-12-05), filing-ready
+  pending go-ahead. AG10/AG11 (DataFusion) unchanged — all four issues/PRs OPEN.*
 - **AG1 — effectively a duplicate.** **#25822 (open)** "[C++] Take kernel can't
   handle ChunkedArrays that don't fit in an Array" is the same root limitation
   (Take concatenates first, breaks past 2 GB). Our angle (it **segfaults**

@@ -6,12 +6,13 @@
 repro is three lines, verified on latest, non-duplicate. File-ready pending human
 go-ahead.
 
-> **STATUS (2026-07-11): FILED + PR OPEN.** Issue **#1626**
-> ("`register_record_batches` panics ("index out of bounds") on an empty
-> partition") and fix **PR #1627** ("fix: no panic on empty partition in
-> register_record_batches") are open on `apache/datafusion-python`, by fangchenli.
-> Remaining: review, merge. Keep the empty-frame guard in our lowering until the
-> fix ships in a release we depend on.
+> **STATUS (2026-07-24): ✅ MERGED.** Fix **PR #1627** ("fix: no panic on empty
+> partition in register_record_batches") **merged 2026-07-14**; issue **#1626**
+> closed. Landed on `apache/datafusion-python` by fangchenli. Remaining: keep the
+> empty-frame guard in our lowering until the fix ships in a released
+> datafusion-python we depend on, then retire it.
+>
+> _History (2026-07-11): FILED + PR OPEN — issue #1626 + fix PR #1627 open, awaiting review._
 >
 > _History (2026-07-09): FOUND BY THE DIFFERENTIAL PROBE (`../DIFFERENTIAL_PROBE.md`)
 > — its first new find, via the degenerate-input (empty table) edge sweep. Verified

@@ -2,14 +2,14 @@
 
 > ## ✅ EXECUTED — FILED as [PR #50479](https://github.com/apache/arrow/pull/50479) (issue GH-50478), **OPEN / in review**
 >
-> **Status as of 2026-07-14** (verified live via `gh` + Arrow `main` source read):
+> **Status as of 2026-07-24** (re-verified live via `gh`):
 >
 > | | |
 > |---|---|
 > | **PR** | [#50479](https://github.com/apache/arrow/pull/50479) `GH-50478: [C++][Compute] Support string_view/binary_view in scalar string predicate kernels` — opened 2026-07-11 by fangchenli |
-> | **State** | OPEN, not draft, **MERGEABLE**, +323 −33 across 6 files. **No approval yet** (`reviewDecision: none`) |
-> | **Reviewer** | `zanmato1984` engaged 2026-07-13 — the reviewer this hand-off targeted |
-> | **Outstanding on our side** | **None.** Ball is in the reviewer's court. |
+> | **State** | OPEN, not draft, **MERGEABLE**. **No approval yet** (`reviewDecision: none`). Last activity 2026-07-14T18:00Z. |
+> | **Reviewer** | `zanmato1984` engaged 2026-07-13, still reviewing (no request-changes, no approve) |
+> | **Outstanding on our side** | **One OPTIONAL test nit** (see 07-14 18:00 below) — not a blocker, no code change strictly required. Otherwise ball is in the reviewer's court. |
 >
 > **Review thread, resolved:**
 > - **`zanmato1984` (07-13)** — asked for a `utf8_view` + `ignore_case=true` +
@@ -29,6 +29,14 @@
 >   paths now use `VisitArrayValuesInline<Type>` with an explicit null-visitor
 >   (`[&]() { writer.Next(); }`) and a comment naming the hazard; `binary_length`
 >   uses `ScalarUnaryNotNull`. Copilot re-reviewed **07-14: "no new comments."**
+> - **`zanmato1984` (07-14 18:00)** — **OPTIONAL** test-coverage nit (not a change
+>   request): also exercise one fixed-width **numeric-output** kernel
+>   (`find_substring` or `utf8_length`) in the `NullSlotWithUnvalidatedHeader`
+>   regression test — the current regression covers the two boolean-output paths,
+>   while several newly-registered view kernels take the applicator path. He notes
+>   "It looks null-safe too, but this would make the null-slot header invariant
+>   explicit across both paths." → **Cheap to satisfy; would likely close his
+>   engagement.** No response posted (guardrail — draft in chat, user posts).
 >
 > **Independent confirmation the feature has NOT landed** (2026-07-14): Arrow
 > `main` HEAD `scalar_string_ascii.cc` / `scalar_string_utf8.cc` /
