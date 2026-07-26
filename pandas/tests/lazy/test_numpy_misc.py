@@ -5,7 +5,9 @@ Tests rolling window operations, shift/lag/lead, and fill NA variants.
 """
 
 import numpy as np
+import pytest
 
+import pandas as pd
 import pandas._testing as tm
 
 
@@ -469,3 +471,107 @@ class TestEdgeCases:
         result = numpy_shift(arr, periods=10)
 
         assert np.all(np.isnan(result))
+
+
+class TestBottleneckFallbackParity:
+    """The pure-NumPy fallback (used when Bottleneck is absent or disabled)
+    must match both pandas and the Bottleneck path. Bottleneck is installed and
+    enabled by default, so without these the fallback branches are never run."""
+
+    # (kernel name, pandas Series.rolling method, extra kwargs)
+    CASES = [
+        ("rolling_sum", "sum", {}),
+        ("rolling_mean", "mean", {}),
+        ("rolling_min", "min", {}),
+        ("rolling_max", "max", {}),
+        ("rolling_std", "std", {"ddof": 1}),
+        ("rolling_var", "var", {"ddof": 1}),
+        ("rolling_median", "median", {}),
+        ("rolling_count", "count", {}),
+    ]
+
+    @pytest.fixture(autouse=True)
+    def _restore_bottleneck(self):
+        # Restore option-following after each test so the toggle doesn't leak.
+        from pandas.lazy.backends._bottleneck import set_use_bottleneck
+
+        yield
+        set_use_bottleneck(None)
+
+    @pytest.mark.parametrize("kernel_name,pd_method,kwargs", CASES)
+    @pytest.mark.parametrize(
+        "enabled", [True, False], ids=["bottleneck", "numpy_fallback"]
+    )
+    def test_rolling_kernel_matches_pandas(
+        self, kernel_name, pd_method, kwargs, enabled
+    ):
+        from pandas.lazy.backends import get_kernel
+        from pandas.lazy.backends._bottleneck import (
+            BOTTLENECK_INSTALLED,
+            set_use_bottleneck,
+        )
+
+        if enabled and not BOTTLENECK_INSTALLED:
+            pytest.skip("bottleneck not installed")
+        set_use_bottleneck(enabled)
+
+        arr = np.array([1.0, 3.0, 2.0, 5.0, 4.0, 6.0, 0.0, 7.0], dtype=float)
+        window, min_periods = 3, 1
+        kernel = get_kernel(kernel_name, "numpy")
+        got = kernel(arr, window, min_periods, **kwargs)
+
+        rolling = pd.Series(arr).rolling(window, min_periods=min_periods)
+        expected = getattr(rolling, pd_method)(**kwargs)
+        tm.assert_series_equal(
+            pd.Series(np.asarray(got, dtype=float)),
+            pd.Series(expected.to_numpy(dtype=float)),
+            check_dtype=False,
+        )
+
+    @pytest.mark.parametrize("kernel_name,pd_method,kwargs", CASES)
+    def test_fallback_handles_nan_like_pandas(self, kernel_name, pd_method, kwargs):
+        from pandas.lazy.backends import get_kernel
+        from pandas.lazy.backends._bottleneck import set_use_bottleneck
+
+        set_use_bottleneck(False)  # force the pure-NumPy fallback
+        arr = np.array([1.0, np.nan, 3.0, np.nan, np.nan, 6.0, 7.0], dtype=float)
+        window, min_periods = 3, 1
+        kernel = get_kernel(kernel_name, "numpy")
+        got = kernel(arr, window, min_periods, **kwargs)
+        expected = getattr(
+            pd.Series(arr).rolling(window, min_periods=min_periods), pd_method
+        )(**kwargs)
+        tm.assert_series_equal(
+            pd.Series(np.asarray(got, dtype=float)),
+            pd.Series(expected.to_numpy(dtype=float)),
+            check_dtype=False,
+        )
+
+    def test_rolling_rank_requires_bottleneck_without_it(self):
+        # rolling_rank is the one rolling kernel with no NumPy fallback.
+        from pandas.lazy.backends import get_kernel
+        from pandas.lazy.backends._bottleneck import set_use_bottleneck
+
+        set_use_bottleneck(False)
+        kernel = get_kernel("rolling_rank", "numpy")
+        with pytest.raises(NotImplementedError, match="requires Bottleneck"):
+            kernel(np.array([1.0, 2.0, 3.0]), 2, 1)
+
+    def test_option_follows_pd_set_option(self):
+        from pandas.lazy.backends._bottleneck import (
+            BOTTLENECK_INSTALLED,
+            set_use_bottleneck,
+            use_bottleneck,
+        )
+
+        if not BOTTLENECK_INSTALLED:
+            pytest.skip("bottleneck not installed")
+        set_use_bottleneck(None)  # follow the option
+        with pd.option_context("compute.use_bottleneck", False):
+            assert use_bottleneck() is False
+        with pd.option_context("compute.use_bottleneck", True):
+            assert use_bottleneck() is True
+        # An explicit override wins over the option.
+        set_use_bottleneck(False)
+        with pd.option_context("compute.use_bottleneck", True):
+            assert use_bottleneck() is False
