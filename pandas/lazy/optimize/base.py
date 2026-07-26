@@ -28,6 +28,7 @@ def _dispatch_table() -> dict[type, str]:
     if _DISPATCH_TABLE is None:
         from pandas.lazy.plan import (
             Aggregate,
+            Concat,
             Convert,
             DataFrameSource,
             Distinct,
@@ -36,6 +37,8 @@ def _dispatch_table() -> dict[type, str]:
             Join,
             Limit,
             Project,
+            ResetIndex,
+            SetIndex,
             Sort,
             TopK,
         )
@@ -52,6 +55,9 @@ def _dispatch_table() -> dict[type, str]:
             Join: "visit_join",
             TopK: "visit_topk",
             Convert: "visit_convert",
+            SetIndex: "visit_set_index",
+            ResetIndex: "visit_reset_index",
+            Concat: "visit_concat",
         }
     return _DISPATCH_TABLE
 
@@ -263,6 +269,33 @@ class PlanVisitor(OptimizationPass):
             from pandas.lazy.plan import Convert
 
             return Convert(new_input, plan.target_backend)
+        return plan
+
+    def visit_set_index(self, plan) -> LogicalPlan:
+        """Visit a SetIndex node. Default: recurse into input."""
+        new_input = self.visit(plan.input)
+        if new_input is not plan.input:
+            from pandas.lazy.plan import SetIndex
+
+            return SetIndex(new_input, plan.keys, plan.drop)
+        return plan
+
+    def visit_reset_index(self, plan) -> LogicalPlan:
+        """Visit a ResetIndex node. Default: recurse into input."""
+        new_input = self.visit(plan.input)
+        if new_input is not plan.input:
+            from pandas.lazy.plan import ResetIndex
+
+            return ResetIndex(new_input, plan.drop)
+        return plan
+
+    def visit_concat(self, plan) -> LogicalPlan:
+        """Visit a Concat node. Default: recurse into all inputs."""
+        new_inputs = tuple(self.visit(inp) for inp in plan.inputs)
+        if any(a is not b for a, b in zip(new_inputs, plan.inputs, strict=True)):
+            from pandas.lazy.plan import Concat
+
+            return Concat(new_inputs)
         return plan
 
 

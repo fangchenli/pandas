@@ -305,21 +305,27 @@ class ParquetSource(LogicalPlan):
 
     def _read_parquet_schema(self) -> Schema:
         """Read schema from Parquet file metadata without reading data."""
+        import os
+
         import pyarrow.parquet as pq
 
-        # Handle glob patterns
         path = self.path
         if "*" in path:
+            # Glob pattern: all matching files share a schema; read the first.
             import glob
 
             files = glob.glob(path)
             if not files:
                 raise FileNotFoundError(f"No files match pattern: {path}")
-            path = files[0]  # Use first file for schema
+            arrow_schema = pq.ParquetFile(files[0]).schema_arrow
+        elif os.path.isdir(path):
+            # Directory of parquet files: ParquetFile rejects directories, so
+            # use the directory-aware Dataset API (matching physical scanning).
+            import pyarrow.dataset as ds
 
-        # Read schema from metadata only
-        parquet_file = pq.ParquetFile(path)
-        arrow_schema = parquet_file.schema_arrow
+            arrow_schema = ds.dataset(path, format="parquet").schema
+        else:
+            arrow_schema = pq.ParquetFile(path).schema_arrow
 
         # Convert Arrow schema to lazy Schema
         columns = {}
@@ -334,6 +340,8 @@ class ParquetSource(LogicalPlan):
     def _estimate_row_count_impl(self) -> int | None:
         """Estimate row count from Parquet metadata."""
         try:
+            import os
+
             import pyarrow.parquet as pq
 
             path = self.path
@@ -350,8 +358,14 @@ class ParquetSource(LogicalPlan):
                     total += pf.metadata.num_rows
                 return total
 
-            pf = pq.ParquetFile(path)
-            row_count = pf.metadata.num_rows
+            if os.path.isdir(path):
+                # Directory: ParquetFile rejects it; count via the Dataset API.
+                import pyarrow.dataset as ds
+
+                row_count = ds.dataset(path, format="parquet").count_rows()
+            else:
+                pf = pq.ParquetFile(path)
+                row_count = pf.metadata.num_rows
 
             # Apply predicate-aware selectivity to the pushed-down filter,
             # refined by row-group statistics where available (min/max for

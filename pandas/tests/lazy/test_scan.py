@@ -227,6 +227,30 @@ class TestScanDirectory:
 
             assert len(result) == 4
 
+    def test_scan_bare_directory_resolves_schema(self):
+        """A bare directory path (no glob) must resolve its schema via the
+        Dataset API instead of failing in ParquetFile."""
+        df1 = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
+        df2 = pd.DataFrame({"a": [5, 6], "b": [7, 8]})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            datadir = os.path.join(tmpdir, "data")
+            os.makedirs(datadir)
+            df1.to_parquet(os.path.join(datadir, "part1.parquet"), index=False)
+            df2.to_parquet(os.path.join(datadir, "part2.parquet"), index=False)
+
+            ldf = scan(datadir, format="parquet")
+            # Schema resolution must not raise on the directory.
+            assert list(ldf.schema.names) == ["a", "b"]
+            # Row-count estimate uses the directory-aware Dataset API.
+            assert ldf._plan.estimate_row_count() == 4
+            out = (
+                ldf.collect(use_physical_planner=True)
+                .sort_values("a")
+                .reset_index(drop=True)
+            )
+            assert out["a"].tolist() == [1, 2, 5, 6]
+
 
 class TestScanURLPaths:
     """Tests for URL path format detection."""

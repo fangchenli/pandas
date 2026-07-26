@@ -1403,6 +1403,36 @@ class TestSortLimitToTopK:
         assert "TopK" in repr(optimized)
         assert "k=2" in repr(optimized)
 
+    def test_topk_fires_below_reset_index(self):
+        # The optimizer must recurse through ResetIndex (and SetIndex/Concat);
+        # otherwise the Sort+Limit under a reset_index() is never fused.
+        df = pd.DataFrame({"a": [5, 1, 3, 2, 4], "b": [10, 20, 30, 40, 50]})
+        ldf = df.select().sort("a").head(1).reset_index()
+        optimized = Optimizer().optimize(ldf._plan)
+
+        def _has_topk(p):
+            from pandas.lazy.plan import TopK as _TopK
+
+            return isinstance(p, _TopK) or any(_has_topk(c) for c in p.children())
+
+        assert _has_topk(optimized)
+        # And the result is still correct in both engines.
+        tm.assert_frame_equal(
+            ldf.collect().reset_index(drop=True),
+            ldf.collect(use_physical_planner=True).reset_index(drop=True),
+            check_dtype=False,
+        )
+
+    def test_optimizer_recurses_through_set_index(self):
+        # Constant folding below a SetIndex must be reached.
+        from pandas.lazy import lit
+        from pandas.lazy.optimize.passes import ConstantFolding
+
+        df = pd.DataFrame({"a": [1, 2, 3]})
+        plan = df.select((col("a") + (lit(1) + lit(2))).alias("w")).set_index("w")._plan
+        folded = ConstantFolding().visit(plan)
+        assert folded is not plan  # the child rewrite was detected and applied
+
 
 class TestTopKNode:
     """Tests for TopK plan node directly."""
