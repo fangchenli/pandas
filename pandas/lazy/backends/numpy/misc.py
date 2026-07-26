@@ -1519,10 +1519,11 @@ def numpy_interpolate_linear(arr: np.ndarray) -> np.ndarray:
     all_indices = np.arange(n)
     result = np.interp(all_indices, valid_indices, valid_values)
 
-    # Keep leading/trailing NaN if original had them
+    # Leading NaNs stay NaN (pandas' default limit_direction="forward" cannot
+    # fill before the first valid value). Trailing NaNs are forward-filled with
+    # the last valid value -- which np.interp's edge-clamp already produced, so
+    # they are intentionally NOT re-masked here.
     if valid_indices[0] > 0:
         result[: valid_indices[0]] = np.nan
-    if valid_indices[-1] < n - 1:
-        result[valid_indices[-1] + 1 :] = np.nan
 
     return result

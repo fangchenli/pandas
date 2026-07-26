@@ -2163,8 +2163,9 @@ class TestFillNAKernels:
         assert result[1] == 2.0  # interpolated
         assert result[2] == 3.0  # interpolated
         assert result[3] == 4.0
-        # Trailing NaN should remain NaN
-        assert np.isnan(result[4])
+        # Trailing NaN is forward-filled with the last valid value, matching
+        # pandas' default limit_direction="forward".
+        assert result[4] == 4.0
 
     def test_arrow_interpolate_leading_nan(self):
         """Test Arrow interpolation preserves leading NaN."""

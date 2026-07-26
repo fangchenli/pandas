@@ -720,3 +720,59 @@ class TestAggregateNaNSkipping:
             use_physical_planner=True
         )
         assert float(r["r"].iloc[0]) == 3 * 6.0  # count=3, sum=1+2+3
+
+
+class TestGroupByNaNSemantics:
+    """NumPy groupby kernels must match pandas skipna/empty-group behavior:
+    all-NaN groups yield NaN (not sentinels/uninitialized memory), and the
+    multi-key path applies skipna like the single-key path."""
+
+    def _kernel(self, keys, vals, agg, **kw):
+        from pandas.lazy.backends.numpy.groupby import _numpy_groupby_aggregate
+
+        uk, res = _numpy_groupby_aggregate(
+            np.asarray(keys), np.asarray(vals), agg, **kw
+        )
+        order = np.argsort(uk)
+        return np.asarray(res)[order]
+
+    @pytest.mark.parametrize(
+        "agg,pdm",
+        [
+            ("min", "min"),
+            ("max", "max"),
+            ("std", "std"),
+            ("var", "var"),
+            ("first", "first"),
+            ("last", "last"),
+        ],
+    )
+    def test_single_key_all_nan_group_is_nan(self, agg, pdm):
+        keys = [1, 1, 2, 2, 3]
+        vals = [10.0, np.nan, np.nan, np.nan, 5.0]  # group 2 all-NaN
+        got = self._kernel(keys, vals, agg)
+        want = getattr(pd.Series(vals).groupby(keys), pdm)().to_numpy()
+        tm.assert_numpy_array_equal(got, want)
+
+    def test_single_key_first_last_no_uninitialized_memory(self):
+        # An all-NaN float group's first/last must be NaN, not np.empty garbage.
+        got_first = self._kernel([1, 2, 2], [5.0, np.nan, np.nan], "first")
+        assert got_first[0] == 5.0 and np.isnan(got_first[1])
+
+    @pytest.mark.parametrize(
+        "agg,pdm", [("sum", "sum"), ("min", "min"), ("max", "max"), ("mean", "mean")]
+    )
+    def test_multi_key_applies_skipna(self, agg, pdm):
+        df = pd.DataFrame(
+            {"a": [1, 1, 2, 2], "b": [1, 1, 2, 2], "v": [1.0, np.nan, 3.0, 4.0]}
+        )
+        got = (
+            df.select()
+            .group_by("a", "b")
+            .agg(getattr(col("v"), agg)().alias("r"))
+            .collect(use_physical_planner=True, engine="numpy")
+            .sort_values(["a", "b"])["r"]
+            .to_numpy()
+        )
+        want = getattr(df.groupby(["a", "b"])["v"], pdm)().to_numpy()
+        tm.assert_numpy_array_equal(got, want)

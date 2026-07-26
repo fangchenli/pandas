@@ -857,3 +857,24 @@ class TestArrayEvaluatorCastNoStringify:
         ev = ArrayEvaluator({}, preferred_backend="arrow")
         with pytest.raises(NotImplementedError, match="not supported"):
             ev._dtype_to_arrow("interval[int64]")
+
+
+class TestArrayEvaluatorCumulativeNaN:
+    """Cumulative ops must skip NaN in the running accumulation but keep NaN at
+    the input-NaN row (pandas semantics), in both backends."""
+
+    @pytest.mark.parametrize("dtype", ["float64", "float64[pyarrow]"])
+    @pytest.mark.parametrize("name", ["cum_sum", "cum_max", "cum_min", "cum_prod"])
+    def test_cumulative_keeps_nan_at_null_row(self, dtype, name):
+        from pandas.lazy import col
+
+        s = [1.0, np.nan, 2.0, np.nan, 3.0]
+        df = pd.DataFrame({"v": pd.array(s, dtype=dtype)})
+        q = df.select(getattr(col("v"), name)().alias("r"))
+        # Physical must match eager (pandas), which for both backends skips the
+        # missing value in the running accumulation but keeps it at that row.
+        eager = q.collect().reset_index(drop=True)
+        phys = q.collect(use_physical_planner=True).reset_index(drop=True)
+        tm.assert_frame_equal(eager, phys, check_dtype=False)
+        # The missing value at the null row is preserved (not the running total).
+        assert phys["r"].isna().tolist() == [False, True, False, True, False]

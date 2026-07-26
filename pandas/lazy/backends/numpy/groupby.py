@@ -171,7 +171,9 @@ def _numpy_groupby_aggregate(
     elif agg_func == "mean":
         sums = np.bincount(codes, weights=values.astype(float), minlength=n_groups)
         counts = np.bincount(codes, minlength=n_groups)
-        result = sums / counts
+        # Empty groups divide 0/0 -> NaN (intended); silence the warning.
+        with np.errstate(invalid="ignore", divide="ignore"):
+            result = sums / counts
 
     elif agg_func == "min":
         result = np.empty(n_groups, dtype=values.dtype)
@@ -206,23 +208,25 @@ def _numpy_groupby_aggregate(
 
     elif agg_func == "std":
         ddof = kwargs.get("ddof", 1)
-        # Two-pass algorithm for numerical stability
+        # Two-pass algorithm for numerical stability. Empty/single-element
+        # groups divide by zero/negative -> NaN (intended); silence the warning.
         sums = np.bincount(codes, weights=values.astype(float), minlength=n_groups)
         counts = np.bincount(codes, minlength=n_groups)
-        means = sums / counts
-        # Compute squared deviations
-        sq_devs = (values - means[codes]) ** 2
-        sum_sq_devs = np.bincount(codes, weights=sq_devs, minlength=n_groups)
-        result = np.sqrt(sum_sq_devs / (counts - ddof))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            means = sums / counts
+            sq_devs = (values - means[codes]) ** 2
+            sum_sq_devs = np.bincount(codes, weights=sq_devs, minlength=n_groups)
+            result = np.sqrt(sum_sq_devs / (counts - ddof))
 
     elif agg_func == "var":
         ddof = kwargs.get("ddof", 1)
         sums = np.bincount(codes, weights=values.astype(float), minlength=n_groups)
         counts = np.bincount(codes, minlength=n_groups)
-        means = sums / counts
-        sq_devs = (values - means[codes]) ** 2
-        sum_sq_devs = np.bincount(codes, weights=sq_devs, minlength=n_groups)
-        result = sum_sq_devs / (counts - ddof)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            means = sums / counts
+            sq_devs = (values - means[codes]) ** 2
+            sum_sq_devs = np.bincount(codes, weights=sq_devs, minlength=n_groups)
+            result = sum_sq_devs / (counts - ddof)
 
     elif agg_func == "median":
         # Exact per-group median. Arrow has no exact hash_median kernel (only
@@ -266,6 +270,18 @@ def _numpy_groupby_aggregate(
 
     else:
         raise NotImplementedError(f"Aggregation function '{agg_func}' not implemented")
+
+    # A group whose every value was dropped as NaN has no rows here (only
+    # possible for float data). For value-based aggregates it must be NaN, not
+    # the min/max init sentinel, the std/var 0/-ddof artifact, or the
+    # uninitialized np.empty memory used by first/last.
+    if agg_func in ("min", "max", "std", "var", "first", "last") and np.issubdtype(
+        values.dtype, np.floating
+    ):
+        empty = np.bincount(codes, minlength=n_groups) == 0
+        if empty.any():
+            result = np.asarray(result, dtype=float)
+            result[empty] = np.nan
 
     return unique_keys, result
 
@@ -599,40 +615,59 @@ def _numpy_multi_key_groupby(
     # Aggregate each value array using the group codes
     result_values = []
     for values, agg_func in zip(value_arrays, agg_funcs, strict=False):
-        # Use the core aggregation logic with group_codes
+        # Aggregations not inlined below (std/var/median/first/last/...) get
+        # correct skipna + empty-group handling from _numpy_groupby_aggregate.
+        if agg_func not in ("sum", "count", "mean", "min", "max"):
+            _, result = _numpy_groupby_aggregate(composite_codes, values, agg_func)
+            result_values.append(result)
+            continue
+
+        # pandas skipna: drop float NaN values before aggregating, mirroring the
+        # single-key path (the inlined multi-key aggs previously did not, so
+        # sum/min/max leaked NaN into the affected groups).
+        codes = group_codes
+        vals = values
+        if np.issubdtype(vals.dtype, np.floating):
+            nan_mask = np.isnan(vals)
+            if nan_mask.any():
+                codes = codes[~nan_mask]
+                vals = vals[~nan_mask]
+
         if agg_func == "sum":
-            if np.issubdtype(values.dtype, np.floating):
-                result = np.bincount(group_codes, weights=values, minlength=n_groups)
+            if np.issubdtype(vals.dtype, np.floating):
+                result = np.bincount(codes, weights=vals, minlength=n_groups)
             else:
                 result = np.zeros(n_groups, dtype=np.float64)
-                np.add.at(result, group_codes, values.astype(np.float64))
+                np.add.at(result, codes, vals.astype(np.float64))
         elif agg_func == "count":
-            result = np.bincount(group_codes, minlength=n_groups)
+            result = np.bincount(codes, minlength=n_groups)
         elif agg_func == "mean":
-            sums = np.bincount(
-                group_codes, weights=values.astype(float), minlength=n_groups
-            )
-            counts = np.bincount(group_codes, minlength=n_groups)
-            result = sums / counts
+            sums = np.bincount(codes, weights=vals.astype(float), minlength=n_groups)
+            counts = np.bincount(codes, minlength=n_groups)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                result = sums / counts
         elif agg_func == "min":
-            result = np.empty(n_groups, dtype=values.dtype)
+            result = np.empty(n_groups, dtype=vals.dtype)
             result[:] = (
-                np.iinfo(values.dtype).max
-                if np.issubdtype(values.dtype, np.integer)
+                np.iinfo(vals.dtype).max
+                if np.issubdtype(vals.dtype, np.integer)
                 else np.inf
             )
-            np.minimum.at(result, group_codes, values)
+            np.minimum.at(result, codes, vals)
         elif agg_func == "max":
-            result = np.empty(n_groups, dtype=values.dtype)
+            result = np.empty(n_groups, dtype=vals.dtype)
             result[:] = (
-                np.iinfo(values.dtype).min
-                if np.issubdtype(values.dtype, np.integer)
+                np.iinfo(vals.dtype).min
+                if np.issubdtype(vals.dtype, np.integer)
                 else -np.inf
             )
-            np.maximum.at(result, group_codes, values)
-        else:
-            # Fallback for other aggregations
-            _, result = _numpy_groupby_aggregate(composite_codes, values, agg_func)
+            np.maximum.at(result, codes, vals)
+
+        # Empty (all-NaN) float groups -> NaN, not the min/max init sentinel.
+        if agg_func in ("min", "max") and np.issubdtype(vals.dtype, np.floating):
+            empty = np.bincount(codes, minlength=n_groups) == 0
+            if empty.any():
+                result = np.where(empty, np.nan, result)
         result_values.append(result)
 
     # Decompose the unique composite codes back to individual key values

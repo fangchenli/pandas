@@ -597,33 +597,23 @@ class ArrayEvaluator:
             return result
 
     def _evaluate_cumulative(self, arr: ArrayLike, agg: str) -> ArrayLike:
-        """Evaluate cumulative operation (cumsum, cummin, cummax, cummean, cumprod)."""
-        if is_arrow_backed(arr):
-            import pyarrow.compute as pc
+        """Evaluate cumulative operation (cumsum, cummin, cummax, cummean, cumprod).
 
-            if agg == "sum":
-                return pc.cumulative_sum(arr)
-            elif agg == "min":
-                return pc.cumulative_min(arr)
-            elif agg == "max":
-                return pc.cumulative_max(arr)
-            elif agg == "mean":
-                return pc.cumulative_mean(arr)
-            elif agg == "prod":
-                return pc.cumulative_prod(arr)
-        elif agg == "sum":
-            return np.cumsum(arr)
-        elif agg == "min":
-            return np.minimum.accumulate(arr)
-        elif agg == "max":
-            return np.maximum.accumulate(arr)
-        elif agg == "mean":
-            # NumPy doesn't have cumulative_mean, compute manually
-            cumsum = np.cumsum(arr)
-            counts = np.arange(1, len(arr) + 1)
-            return cumsum / counts
-        elif agg == "prod":
-            return np.cumprod(arr)
+        Dispatches to the registered per-backend kernels (preserving the input
+        backend) instead of a bespoke inline implementation. Both honour pandas
+        skipna semantics -- skip the missing value in the running accumulation
+        but keep it (NaN/null) at that row: the NumPy kernels handle float NaN,
+        and the Arrow kernels use skip_nulls=True (verified to keep the null at
+        position, matching pandas). The previous inline code used plain
+        np.cumsum / pc.cumulative_* with NaN-propagation, diverging from pandas.
+        """
+        from pandas.lazy.backends import get_kernel
+
+        backend = "arrow" if is_arrow_backed(arr) else "numpy"
+        kernel = get_kernel(f"cumulative_{agg}", backend)
+        if kernel is None:
+            raise NotImplementedError(f"cumulative_{agg} has no {backend} kernel")
+        return kernel(arr)
 
     # =========================================================================
     # Arrow Memory Pool

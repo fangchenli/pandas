@@ -32,9 +32,12 @@ def numpy_cumulative_sum(arr: np.ndarray, skip_nulls: bool = True) -> np.ndarray
         Cumulative sum array.
     """
     if skip_nulls and np.issubdtype(arr.dtype, np.floating):
-        # Vectorized: replace NaN with 0 for cumsum, then forward-fill result
-        filled = np.where(np.isnan(arr), 0.0, arr)
-        return np.cumsum(filled)
+        # Skip NaN in the running total but keep NaN at the input-NaN rows,
+        # matching pandas cumsum (which returns NaN there, not the running sum).
+        nan_mask = np.isnan(arr)
+        result = np.cumsum(np.where(nan_mask, 0.0, arr))
+        result[nan_mask] = np.nan
+        return result
     return np.cumsum(arr)
 
 
@@ -57,10 +60,11 @@ def numpy_cumulative_max(arr: np.ndarray, skip_nulls: bool = True) -> np.ndarray
     """
     if skip_nulls and np.issubdtype(arr.dtype, np.floating):
         # Vectorized: replace NaN with -inf, then accumulate max
-        filled = np.where(np.isnan(arr), -np.inf, arr)
-        result = np.maximum.accumulate(filled)
-        # Replace -inf (meaning no valid values seen yet) with NaN
-        result = np.where(result == -np.inf, np.nan, result)
+        nan_mask = np.isnan(arr)
+        result = np.maximum.accumulate(np.where(nan_mask, -np.inf, arr))
+        # -inf means no valid value seen yet; input-NaN rows stay NaN (pandas
+        # cummax returns NaN there, not the running max).
+        result = np.where(nan_mask | (result == -np.inf), np.nan, result)
         return result
     return np.maximum.accumulate(arr)
 
@@ -84,10 +88,11 @@ def numpy_cumulative_min(arr: np.ndarray, skip_nulls: bool = True) -> np.ndarray
     """
     if skip_nulls and np.issubdtype(arr.dtype, np.floating):
         # Vectorized: replace NaN with inf, then accumulate min
-        filled = np.where(np.isnan(arr), np.inf, arr)
-        result = np.minimum.accumulate(filled)
-        # Replace inf (meaning no valid values seen yet) with NaN
-        result = np.where(result == np.inf, np.nan, result)
+        nan_mask = np.isnan(arr)
+        result = np.minimum.accumulate(np.where(nan_mask, np.inf, arr))
+        # inf means no valid value seen yet; input-NaN rows stay NaN (pandas
+        # cummin returns NaN there, not the running min).
+        result = np.where(nan_mask | (result == np.inf), np.nan, result)
         return result
     return np.minimum.accumulate(arr)
 
@@ -110,9 +115,12 @@ def numpy_cumulative_prod(arr: np.ndarray, skip_nulls: bool = True) -> np.ndarra
         Cumulative product array.
     """
     if skip_nulls and np.issubdtype(arr.dtype, np.floating):
-        # Vectorized: replace NaN with 1 for cumprod (identity for multiplication)
-        filled = np.where(np.isnan(arr), 1.0, arr)
-        return np.cumprod(filled)
+        # Skip NaN in the running product but keep NaN at the input-NaN rows,
+        # matching pandas cumprod (which returns NaN there).
+        nan_mask = np.isnan(arr)
+        result = np.cumprod(np.where(nan_mask, 1.0, arr))
+        result[nan_mask] = np.nan
+        return result
     return np.cumprod(arr)
 
 
