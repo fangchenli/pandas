@@ -79,6 +79,16 @@ the isolation over-stated the cost ~1.7x and inverted an on/off A/B.
 
 ## Scan-in-place kernel — replicated Polars, but a net regression integrated
 
+> **REMOVED 2026-07-25 (superseded by the direct-address kernel below).** The
+> scan-in-place kernel (`_scan_in_place_grouped_table` +
+> `lazy_groupby.scan_partition_agg`/`compute_hash_part`) was default-off dead
+> code: it never fired after the numpy-native direct-address kernel took the
+> single-int-key groups (q17/q18) and the string-hash kernel took the string-key
+> groups (q10) — a fire-counter A/B showed it firing on exactly one query (q10,
+> neutral, string-hash already handles it). Deleted. The section below is kept
+> for the record (why the isolated win didn't integrate — the lesson that led to
+> the direct-address kernel).
+
 Built a Polars-style scan-in-place fused aggregate to replicate
 `group_by_threaded_*` (`lazy_groupby.scan_partition_agg` + `compute_hash_part`;
 `physical._scan_in_place_grouped_table`): hash the key, then each thread scans
