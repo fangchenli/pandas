@@ -333,7 +333,7 @@ class TestPayloadAwareGate:
         Rust index-gen (preferred when available) or the Cython indexer — since
         either avoids pd.merge. Spying the module attributes catches the calls."""
         import pandas.lazy.backends.numpy.join as J
-        import pandas.lazy.physical as P
+        import pandas.lazy.physical.join as P
 
         calls = []
         orig = J.inner_join_indexers_i8
@@ -380,7 +380,7 @@ class TestPayloadAwareGate:
         # handles wide payloads (real-threaded index-gen + parallel gather), so
         # it engages when available; without Rust the Cython wide-payload bail
         # sends it to pd.merge. Either way the result must equal eager.
-        import pandas.lazy.physical as P
+        import pandas.lazy.physical.join as P
 
         n = 600_000
         left = pd.DataFrame(

@@ -520,7 +520,7 @@ class TestDirectAddressGroupBy:
         import numpy as np
         import pyarrow as pa
 
-        from pandas.lazy.physical import _direct_address_grouped_arrays
+        from pandas.lazy.physical.groupby import _direct_address_grouped_arrays
 
         rng = np.random.RandomState(1)
         keys = rng.randint(0, 50_000, size=200_000).astype(np.int64)
@@ -542,7 +542,7 @@ class TestDirectAddressGroupBy:
     def test_gate_rejections_fall_back(self):
         import numpy as np
 
-        from pandas.lazy.physical import _direct_address_grouped_arrays
+        from pandas.lazy.physical.groupby import _direct_address_grouped_arrays
 
         n = 100_000
         keys = np.random.RandomState(2).randint(0, 20_000, n).astype(np.int64)

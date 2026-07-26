@@ -779,7 +779,7 @@ class TestParallelExecutionPaths:
         # At/above the multikey threshold with all-numeric keys, the physical
         # sort must match eager exactly (ascending + descending + a float key
         # with NaN, which the per-key NaN handling places last).
-        from pandas.lazy import physical
+        from pandas.lazy.physical import sort_limit as physical
 
         monkeypatch.setattr(physical, "ARROW_MULTIKEY_SORT_MIN_ROWS", 1_000)
         rng = np.random.default_rng(6)
@@ -813,7 +813,7 @@ class TestParallelExecutionPaths:
         # order-preserving codes and rides the radix lexsort; the result must
         # match eager exactly, including null-bearing string keys (nulls last)
         # and per-key descending.
-        from pandas.lazy import physical
+        from pandas.lazy.physical import sort_limit as physical
 
         monkeypatch.setattr(physical, "ARROW_MULTIKEY_SORT_MIN_ROWS", 1_000)
         rng = np.random.default_rng(11)
@@ -848,7 +848,7 @@ class TestParallelExecutionPaths:
             )
 
     def test_keys_for_radix_lexsort_codes_strings_and_rejects_datetime(self):
-        from pandas.lazy.physical import _keys_for_radix_lexsort
+        from pandas.lazy.physical.sort_limit import _keys_for_radix_lexsort
 
         # String key -> order-preserving float codes (alpha<beta<gamma).
         keyed = _keys_for_radix_lexsort([np.array(["beta", "alpha", "gamma"])])
@@ -878,10 +878,10 @@ class TestParallelExecutionPaths:
         # between the eager evaluator and the physical engine (stable sort
         # contract), including through the parallel argsort path.
         import pandas.lazy.backends.numpy.core as np_core
-        import pandas.lazy.physical as phys
+        import pandas.lazy.physical.join as phys_join
 
         monkeypatch.setattr(np_core, "PARALLEL_SORT_MIN_ROWS", 10)
-        monkeypatch.setattr(phys, "PARALLEL_TAKE_MIN_ROWS", 10)
+        monkeypatch.setattr(phys_join, "PARALLEL_TAKE_MIN_ROWS", 10)
         rng = np.random.default_rng(3)
         df = pd.DataFrame(
             {
@@ -900,10 +900,11 @@ class TestParallelExecutionPaths:
             assert (np.diff(payloads) > 0).all()
 
     def test_multikey_sort_ties_match_across_engines(self, monkeypatch):
-        import pandas.lazy.physical as phys
+        import pandas.lazy.physical.join as phys_join
+        import pandas.lazy.physical.sort_limit as phys_sort
 
-        monkeypatch.setattr(phys, "ARROW_MULTIKEY_SORT_MIN_ROWS", 10)
-        monkeypatch.setattr(phys, "PARALLEL_TAKE_MIN_ROWS", 10)
+        monkeypatch.setattr(phys_sort, "ARROW_MULTIKEY_SORT_MIN_ROWS", 10)
+        monkeypatch.setattr(phys_join, "PARALLEL_TAKE_MIN_ROWS", 10)
         rng = np.random.default_rng(4)
         df = pd.DataFrame(
             {
@@ -919,10 +920,11 @@ class TestParallelExecutionPaths:
         tm.assert_frame_equal(eager, physical, check_dtype=False)
 
     def test_arrow_multikey_sort_path(self, monkeypatch):
-        import pandas.lazy.physical as phys
+        import pandas.lazy.physical.join as phys_join
+        import pandas.lazy.physical.sort_limit as phys_sort
 
-        monkeypatch.setattr(phys, "ARROW_MULTIKEY_SORT_MIN_ROWS", 10)
-        monkeypatch.setattr(phys, "PARALLEL_TAKE_MIN_ROWS", 10)
+        monkeypatch.setattr(phys_sort, "ARROW_MULTIKEY_SORT_MIN_ROWS", 10)
+        monkeypatch.setattr(phys_join, "PARALLEL_TAKE_MIN_ROWS", 10)
         rng = np.random.default_rng(0)
         df = pd.DataFrame(
             {
@@ -937,9 +939,9 @@ class TestParallelExecutionPaths:
         tm.assert_frame_equal(result, expected, check_dtype=False)
 
     def test_arrow_multikey_sort_mixed_directions(self, monkeypatch):
-        import pandas.lazy.physical as phys
+        import pandas.lazy.physical.sort_limit as phys_sort
 
-        monkeypatch.setattr(phys, "ARROW_MULTIKEY_SORT_MIN_ROWS", 10)
+        monkeypatch.setattr(phys_sort, "ARROW_MULTIKEY_SORT_MIN_ROWS", 10)
         rng = np.random.default_rng(1)
         df = pd.DataFrame(
             {
@@ -959,9 +961,9 @@ class TestParallelExecutionPaths:
         tm.assert_frame_equal(result, expected, check_dtype=False)
 
     def test_parallel_take_after_single_key_sort(self, monkeypatch):
-        import pandas.lazy.physical as phys
+        import pandas.lazy.physical.join as phys_join
 
-        monkeypatch.setattr(phys, "PARALLEL_TAKE_MIN_ROWS", 10)
+        monkeypatch.setattr(phys_join, "PARALLEL_TAKE_MIN_ROWS", 10)
         rng = np.random.default_rng(2)
         df = pd.DataFrame(
             {
@@ -1377,7 +1379,7 @@ class TestParallelPartitionedGroupBy:
     )
     def test_parallel_matches_single_multikey(self, monkeypatch, agg):
         # Force the parallel path on small data and assert bit-exact vs single.
-        import pandas.lazy.physical as P
+        import pandas.lazy.physical.groupby as P
 
         monkeypatch.setattr(P, "_PARALLEL_GROUPBY_MIN_ROWS", 0)
         monkeypatch.setattr(P, "_PARALLEL_GROUPBY_MIN_RATIO", 0.0)
@@ -1410,7 +1412,7 @@ class TestParallelPartitionedGroupBy:
 
     def test_parallel_matches_single_datetime_key(self, monkeypatch):
         # Temporal keys are packed via their int64 view; must stay bit-exact.
-        import pandas.lazy.physical as P
+        import pandas.lazy.physical.groupby as P
 
         monkeypatch.setattr(P, "_PARALLEL_GROUPBY_MIN_ROWS", 0)
         monkeypatch.setattr(P, "_PARALLEL_GROUPBY_MIN_RATIO", 0.0)
@@ -1441,7 +1443,7 @@ class TestParallelPartitionedGroupBy:
     def test_string_keys_still_correct(self, monkeypatch):
         # String keys now route to the parallel factorize path (not single);
         # the result must still match pandas.
-        import pandas.lazy.physical as P
+        import pandas.lazy.physical.groupby as P
 
         monkeypatch.setattr(P, "_PARALLEL_GROUPBY_MIN_ROWS", 0)
         monkeypatch.setattr(P, "_PARALLEL_GROUPBY_MIN_RATIO", 0.0)
@@ -1478,7 +1480,7 @@ class TestStringHashGroupBy:
     """
 
     def _force(self, monkeypatch):
-        import pandas.lazy.physical as P
+        import pandas.lazy.physical.groupby as P
 
         monkeypatch.setattr(P, "_PARALLEL_GROUPBY_MIN_ROWS", 0)
         monkeypatch.setattr(P, "_PARALLEL_GROUPBY_MIN_RATIO", 0.0)
