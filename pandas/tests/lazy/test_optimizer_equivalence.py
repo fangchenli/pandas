@@ -755,3 +755,70 @@ class TestNaNAggregationSemantics:
             result = ldf.collect(**kwargs)
             assert len(result) == 1
             assert float(result["v"].iloc[0]) == 4.0
+
+
+class TestOptimizerRewriteSafety:
+    """Regressions for optimizer rewrites that changed results or were
+    silently discarded (optimize=True must match optimize=False)."""
+
+    def _both(self, ldf, sort_cols):
+        on = ldf.collect(optimize=True).sort_values(sort_cols).reset_index(drop=True)
+        off = ldf.collect(optimize=False).sort_values(sort_cols).reset_index(drop=True)
+        return on, off
+
+    def test_filter_not_pushed_below_subset_distinct(self):
+        df = pd.DataFrame({"k": [1, 1, 2, 2], "v": [10, 20, 30, 40]})
+        on, off = self._both(
+            df.select().distinct("k").filter(col("v") > 15), ["k", "v"]
+        )
+        tm.assert_frame_equal(on, off)
+
+    def test_multiply_by_zero_preserves_nan_inf(self):
+        df = pd.DataFrame({"x": [1.0, np.nan, np.inf, -np.inf, 5.0]})
+        ldf = df.select().filter((col("x") * 0) == 0)
+        on = ldf.collect(optimize=True).reset_index(drop=True)
+        off = ldf.collect(optimize=False).reset_index(drop=True)
+        tm.assert_frame_equal(on, off)
+        assert len(on) == 2  # only the two finite values
+
+    def test_clip_kwargs_not_treated_as_equal(self):
+        df = pd.DataFrame({"a": [1, 4, 6, 8, 20]})
+        ldf = df.select().filter(col("a").clip(lower=5) != col("a").clip(lower=8))
+        on = ldf.collect(optimize=True).reset_index(drop=True)
+        off = ldf.collect(optimize=False).reset_index(drop=True)
+        tm.assert_frame_equal(on, off)
+        assert len(on) == 3
+
+    def test_cse_temp_name_does_not_shadow_user_column(self):
+        df = pd.DataFrame({"__cse_0": [100, 200, 300], "a": [1, 2, 3], "b": [4, 5, 6]})
+        ldf = df.select(
+            col("__cse_0"),
+            (col("a") + col("b")).alias("x"),
+            (col("a") + col("b")).alias("y"),
+        )
+        on = ldf.collect(optimize=True)
+        assert on["x"].tolist() == [5, 7, 9]
+        assert on["y"].tolist() == [5, 7, 9]
+        assert on["__cse_0"].tolist() == [100, 200, 300]
+
+    def test_scan_column_order_preserved(self):
+        import os
+        import tempfile
+
+        from pandas.lazy import scan
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "t.parquet")
+            pd.DataFrame({"z": [1, 2, 3], "a": [4, 5, 6], "m": [7, 8, 9]}).to_parquet(
+                path
+            )
+            out = scan(path).collect(optimize=True)
+            assert list(out.columns) == ["z", "a", "m"]
+
+    def test_constant_fold_is_applied_not_discarded(self):
+        from pandas.lazy.optimize.passes import ConstantFolding
+
+        df = pd.DataFrame({"v": [1, 2, 3]})
+        plan = df.select((col("v") + (lit(1) + lit(2))).alias("w"))._plan
+        folded = ConstantFolding().visit(plan)
+        assert folded is not plan  # the change is detected and applied

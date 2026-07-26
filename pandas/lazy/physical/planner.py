@@ -532,7 +532,9 @@ class PhysicalPlanner:
 
         for op in fused.operations:
             if op.op_type == "filter":
-                pred = getattr(op, "predicate", None) or getattr(op, "expr", None)
+                pred = getattr(op, "predicate", None)
+                if pred is None:
+                    pred = getattr(op, "expr", None)
                 if pred is None:
                     return None
                 parts: list = []

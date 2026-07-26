@@ -238,6 +238,20 @@ class Expr:
         """Greater than or equal: col("a") >= col("b") or col("a") >= 1"""
         return Expr(Call("greater_equal", (self._node, _to_expr(other)._node)))
 
+    def __bool__(self) -> bool:
+        """Expr has no boolean value — guard against Python ``and``/``or``/``not``.
+
+        ``__eq__`` and the other comparisons build new expressions rather than
+        returning a bool, so ``col("a") and col("b")`` or ``if col("a") == 1``
+        would otherwise silently keep only one operand. Raise instead, pointing
+        to the element-wise ``&``/``|``/``~`` operators.
+        """
+        raise TypeError(
+            "The truth value of an Expr is ambiguous. Use '&', '|', '~' for "
+            "element-wise boolean logic (e.g. (col('a') > 0) & (col('b') < 10)) "
+            "instead of 'and', 'or', 'not'."
+        )
+
     # -------------------------------------------------------------------------
     # Logical operators
     # -------------------------------------------------------------------------

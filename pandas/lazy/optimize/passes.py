@@ -57,6 +57,21 @@ from pandas.lazy.plan import (
 )
 from pandas.lazy.type_inference import infer_expr_dtype
 
+
+def _exprs_changed(new_exprs: tuple[Expr, ...], old_exprs: tuple[Expr, ...]) -> bool:
+    """Whether an expression rewrite pass produced a changed expression tuple.
+
+    Rewrite helpers return the *same* Expr object when nothing changed and a
+    new Expr when they rewrite, so change detection uses object identity.
+    ``new_exprs != old_exprs`` cannot be used: ``Expr.__eq__`` is overloaded to
+    build a comparison expression (never a bool), so tuple ``!=`` would always
+    report "equal" and silently discard every rewrite.
+    """
+    return len(new_exprs) != len(old_exprs) or any(
+        n is not o for n, o in zip(new_exprs, old_exprs, strict=True)
+    )
+
+
 # =============================================================================
 # ConstantFolding Pass
 # =============================================================================
@@ -77,7 +92,7 @@ class ConstantFolding(PlanVisitor):
     def visit_project(self, plan: Project) -> LogicalPlan:
         new_input = self.visit(plan.input)
         new_exprs = tuple(self._fold_expr(e) for e in plan.exprs)
-        if new_input is not plan.input or new_exprs != plan.exprs:
+        if new_input is not plan.input or _exprs_changed(new_exprs, plan.exprs):
             return Project(new_input, new_exprs)
         return plan
 
@@ -94,8 +109,8 @@ class ConstantFolding(PlanVisitor):
         new_agg_exprs = tuple(self._fold_expr(e) for e in plan.agg_exprs)
         if (
             new_input is not plan.input
-            or new_group_by != plan.group_by
-            or new_agg_exprs != plan.agg_exprs
+            or _exprs_changed(new_group_by, plan.group_by)
+            or _exprs_changed(new_agg_exprs, plan.agg_exprs)
         ):
             return Aggregate(new_input, new_group_by, new_agg_exprs)
         return plan
@@ -103,14 +118,14 @@ class ConstantFolding(PlanVisitor):
     def visit_sort(self, plan: Sort) -> LogicalPlan:
         new_input = self.visit(plan.input)
         new_by = tuple(self._fold_expr(e) for e in plan.by)
-        if new_input is not plan.input or new_by != plan.by:
+        if new_input is not plan.input or _exprs_changed(new_by, plan.by):
             return Sort(new_input, new_by, plan.descending)
         return plan
 
     def visit_topk(self, plan: TopK) -> LogicalPlan:
         new_input = self.visit(plan.input)
         new_by = tuple(self._fold_expr(e) for e in plan.by)
-        if new_input is not plan.input or new_by != plan.by:
+        if new_input is not plan.input or _exprs_changed(new_by, plan.by):
             return TopK(new_input, plan.k, new_by, plan.descending)
         return plan
 
@@ -447,9 +462,13 @@ class PredicatePushdown(PlanVisitor):
             return Filter(input_plan, predicate)
 
         elif isinstance(input_plan, Distinct):
-            # Filter can pass through Distinct
-            new_input = self._push_filter(input_plan.input, predicate)
-            return Distinct(new_input, input_plan.subset)
+            # A filter commutes with a full-row distinct, but NOT with a subset
+            # distinct: subset-distinct keeps the first row per subset key, so
+            # filtering first can change which row survives.
+            if input_plan.subset is None:
+                new_input = self._push_filter(input_plan.input, predicate)
+                return Distinct(new_input, input_plan.subset)
+            return Filter(input_plan, predicate)
 
         elif isinstance(input_plan, Aggregate):
             # Cannot push filter below Aggregate (filter on aggregate result)
@@ -705,7 +724,6 @@ class ProjectionPruning(PlanVisitor):
             # Push column selection into ParquetSource
             # Only select columns that are actually needed
             full_schema = plan.resolve_schema()
-            available = set(full_schema.names)
 
             # Include columns needed by the predicate
             predicate_cols = (
@@ -715,7 +733,9 @@ class ProjectionPruning(PlanVisitor):
             )
             all_needed = needed | predicate_cols
 
-            columns_to_read = tuple(sorted(all_needed & available))
+            # Preserve the source column order (do not sort — that reorders the
+            # collected output when nothing downstream pins column order).
+            columns_to_read = tuple(c for c in full_schema.names if c in all_needed)
 
             if columns_to_read and columns_to_read != plan.columns:
                 return ParquetSource(
@@ -729,7 +749,6 @@ class ProjectionPruning(PlanVisitor):
             # Push column selection into CSVSource
             # Only select columns that are actually needed
             full_schema = plan.resolve_schema()
-            available = set(full_schema.names)
 
             # Include columns needed by the predicate
             predicate_cols = (
@@ -739,7 +758,9 @@ class ProjectionPruning(PlanVisitor):
             )
             all_needed = needed | predicate_cols
 
-            columns_to_read = tuple(sorted(all_needed & available))
+            # Preserve the source column order (do not sort — that reorders the
+            # collected output when nothing downstream pins column order).
+            columns_to_read = tuple(c for c in full_schema.names if c in all_needed)
 
             if columns_to_read and columns_to_read != plan.columns:
                 return CSVSource(
@@ -1078,11 +1099,18 @@ class CommonSubexpressionElimination(PlanVisitor):
     def __init__(self) -> None:
         self._cse_counter = 0
 
-    def _next_cse_name(self) -> str:
-        """Generate a unique CSE temp column name."""
-        name = f"__cse_{self._cse_counter}"
-        self._cse_counter += 1
-        return name
+    def _next_cse_name(self, reserved: set[str] = frozenset()) -> str:
+        """Generate a CSE temp column name not present in ``reserved``.
+
+        Without the reserved check a ``__cse_N`` name can collide with an
+        existing user column that is passed through stage 1, so the CSE ref
+        would resolve to the user's column instead of the computed value.
+        """
+        while True:
+            name = f"__cse_{self._cse_counter}"
+            self._cse_counter += 1
+            if name not in reserved:
+                return name
 
     def optimize(self, plan: LogicalPlan) -> LogicalPlan:
         self._visit_memo = {}
@@ -1151,8 +1179,9 @@ class CommonSubexpressionElimination(PlanVisitor):
         cse_mapping: dict[str, str] = {}  # fingerprint -> __cse_N name
         input_cols_needed: set[str] = set()
 
+        reserved = set(input_plan.resolve_schema().names)
         for fingerprint, occurrences in duplicates.items():
-            cse_name = self._next_cse_name()
+            cse_name = self._next_cse_name(reserved)
             cse_mapping[fingerprint] = cse_name
 
             # Use the core IR from the first occurrence
@@ -1478,7 +1507,7 @@ class ExpressionSimplification(PlanVisitor):
         # Set schema context for expression simplification
         self._current_schema = new_input.resolve_schema()
         new_exprs = tuple(self._simplify_expr(e) for e in plan.exprs)
-        if new_input is not plan.input or new_exprs != plan.exprs:
+        if new_input is not plan.input or _exprs_changed(new_exprs, plan.exprs):
             return Project(new_input, new_exprs)
         return plan
 
@@ -1499,8 +1528,8 @@ class ExpressionSimplification(PlanVisitor):
         new_agg_exprs = tuple(self._simplify_expr(e) for e in plan.agg_exprs)
         if (
             new_input is not plan.input
-            or new_group_by != plan.group_by
-            or new_agg_exprs != plan.agg_exprs
+            or _exprs_changed(new_group_by, plan.group_by)
+            or _exprs_changed(new_agg_exprs, plan.agg_exprs)
         ):
             return Aggregate(new_input, new_group_by, new_agg_exprs)
         return plan
@@ -1510,7 +1539,7 @@ class ExpressionSimplification(PlanVisitor):
         # Set schema context for expression simplification
         self._current_schema = new_input.resolve_schema()
         new_by = tuple(self._simplify_expr(e) for e in plan.by)
-        if new_input is not plan.input or new_by != plan.by:
+        if new_input is not plan.input or _exprs_changed(new_by, plan.by):
             return Sort(new_input, new_by, plan.descending)
         return plan
 
@@ -1519,7 +1548,7 @@ class ExpressionSimplification(PlanVisitor):
         # Set schema context for expression simplification
         self._current_schema = new_input.resolve_schema()
         new_by = tuple(self._simplify_expr(e) for e in plan.by)
-        if new_input is not plan.input or new_by != plan.by:
+        if new_input is not plan.input or _exprs_changed(new_by, plan.by):
             return TopK(new_input, plan.k, new_by, plan.descending)
         return plan
 
@@ -1589,18 +1618,16 @@ class ExpressionSimplification(PlanVisitor):
         if not (left_is_lit or right_is_lit):
             return None
 
-        # Multiplication simplifications
+        # Multiplication simplifications. Note: x * 0 -> 0 is intentionally NOT
+        # applied — it is unsafe for floating/nullable columns, where
+        # NaN * 0 == NaN and inf * 0 == NaN (and NA * 0 == NA), not 0.
         if function == "multiply":
             if right_is_lit:
                 if right.value == 1:
                     return left  # x * 1 -> x
-                if right.value == 0:
-                    return Literal(0)  # x * 0 -> 0
             if left_is_lit:
                 if left.value == 1:
                     return right  # 1 * x -> x
-                if left.value == 0:
-                    return Literal(0)  # 0 * x -> 0
 
         # Division simplifications
         elif function == "divide":
@@ -1811,7 +1838,11 @@ class ExpressionSimplification(PlanVisitor):
             return a.target_dtype == b.target_dtype and self._ir_equal(a.arg, b.arg)
 
         elif isinstance(a, Call):
-            if a.function != b.function or len(a.args) != len(b.args):
+            if (
+                a.function != b.function
+                or len(a.args) != len(b.args)
+                or a.kwargs != b.kwargs
+            ):
                 return False
             return all(
                 self._ir_equal(aa, bb) for aa, bb in zip(a.args, b.args, strict=True)

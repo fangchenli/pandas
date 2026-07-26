@@ -466,3 +466,35 @@ class TestEngineParityRobustness:
         df = pd.DataFrame([[1, 2, 3]], columns=["a", "a", "b"])
         with pytest.raises(NotImplementedError, match="duplicate column"):
             df.select()
+
+
+class TestExprBoolGuard:
+    """Regression: an Expr has no truth value; Python and/or/not must raise
+    rather than silently discarding an operand."""
+
+    def test_bool_raises(self):
+        import pytest
+
+        from pandas.lazy import col
+
+        with pytest.raises(TypeError, match="truth value of an Expr is ambiguous"):
+            bool(col("a"))
+
+    def test_and_or_raise(self):
+        import pytest
+
+        from pandas.lazy import col
+
+        with pytest.raises(TypeError, match="ambiguous"):
+            col("a") and col("b")
+        with pytest.raises(TypeError, match="ambiguous"):
+            col("a") or col("b")
+
+    def test_if_expr_raises(self):
+        import pytest
+
+        from pandas.lazy import col
+
+        with pytest.raises(TypeError, match="ambiguous"):
+            if col("a") == 1:
+                pass
