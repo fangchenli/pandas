@@ -50,12 +50,11 @@ def get_numexpr_min_elements() -> int:
 # NumPy dtypes supported by NumExpr
 NUMEXPR_SUPPORTED_DTYPES = frozenset(
     {
-        "int8",
-        "int16",
+        # int8/int16/uint8/uint16 are intentionally excluded: numexpr upcasts
+        # them to int32 internally, so it silently avoids the wraparound the
+        # NumPy (unfused) path produces, giving a different value AND dtype.
         "int32",
         "int64",
-        "uint8",
-        "uint16",
         "uint32",
         "uint64",
         "float32",
@@ -74,7 +73,8 @@ FUSEABLE_OPS = frozenset(
         "subtract",
         "multiply",
         "divide",
-        "power",
+        # "power" is intentionally excluded: numexpr's ** returns 0 for negative
+        # integer exponents where NumPy raises, a silent semantic divergence.
         "negate",
         "abs",
         # Comparison

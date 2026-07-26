@@ -512,3 +512,17 @@ class TestStringKernelPandasParity:
         )
         want = pd.Series(data).str.match("b").tolist()
         assert list(phys) == list(want) == [False, True, False]
+
+
+class TestStrReverseRouting:
+    """str_reverse is Arrow-only; NumPy(object) input must route to Arrow
+    rather than a missing NumPy kernel (regression for the router)."""
+
+    def test_str_reverse_numpy_object_input(self):
+        import numpy as np
+
+        df = pd.DataFrame({"s": np.array(["abc", "xy", ""], dtype=object)})
+        out = df.select(col("s").str.reverse().alias("r")).collect(
+            use_physical_planner=True
+        )["r"]
+        assert out.tolist() == ["cba", "yx", ""]

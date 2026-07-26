@@ -235,10 +235,14 @@ class PhysicalHashJoin(PhysicalPlan):
         # Size-triggered (not merely spill-enabled), so turning spilling on no
         # longer pessimizes small joins - those fall through to the fast
         # in-memory pd.merge below; only genuinely large joins partition/spill.
+        # Only inner joins spill: the Grace path's single-sided partitions need
+        # null-padding of the missing side, which is not implemented (it would
+        # crash / drop columns), so left/right/outer fall through to the
+        # in-memory pd.merge below rather than partitioning.
         if (
             context.spill_enabled
             and context.spill_manager is not None
-            and self.how in ("inner", "left", "right")
+            and self.how == "inner"
             and equi
         ):
             budget = context._spill_config.operator_budget_mb * 1024 * 1024

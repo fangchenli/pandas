@@ -10,7 +10,9 @@ import tempfile
 
 import numpy as np
 import pyarrow as pa
+import pytest
 
+import pandas as pd
 import pandas._testing as tm
 
 
@@ -1101,3 +1103,72 @@ class TestSpillSort:
         out = df.select().sort("a").collect(use_physical_planner=True, spill_config=cfg)
         exp = df.sort_values("a").reset_index(drop=True)
         assert np.allclose(out["a"].to_numpy(), exp["a"].to_numpy())
+
+
+class TestGraceJoinSpillHow:
+    """Grace hash join only spills inner joins; left/right/outer fall through
+    to the in-memory join instead of crashing on the null-pad path (H16)."""
+
+    def _frames(self):
+        left = pd.DataFrame({"k": np.arange(20000), "lv": np.arange(20000.0)})
+        right = pd.DataFrame({"k": np.arange(0, 20000, 2), "rv": np.arange(10000.0)})
+        return left, right
+
+    def _cfg(self):
+        from pandas.lazy.backends.spill import SpillConfig
+
+        # Budget far below the input size to force the spill decision.
+        return SpillConfig(enabled=True, operator_budget_mb=0.05)
+
+    @pytest.mark.parametrize("how", ["inner", "left", "right"])
+    def test_join_over_budget_matches_pandas(self, how):
+        left, right = self._frames()
+        got = (
+            left.select()
+            .join(right.select(), on="k", how=how)
+            .collect(use_physical_planner=True, spill_config=self._cfg())
+            .sort_values("k")
+            .reset_index(drop=True)
+        )
+        want = (
+            left.merge(right, on="k", how=how).sort_values("k").reset_index(drop=True)
+        )
+        assert len(got) == len(want)
+        assert set(got.columns) == set(want.columns)
+
+    def test_grace_joiner_rejects_non_inner(self):
+        from pandas.lazy.backends.spill import (
+            GraceHashJoiner,
+            SpillConfig,
+            SpillManager,
+        )
+
+        mgr = SpillManager(SpillConfig(enabled=True))
+        j = GraceHashJoiner(mgr, num_partitions=4)
+        j.partition_left({"k": np.arange(10), "lv": np.arange(10.0)}, ["k"])
+        j.partition_right({"k": np.arange(5), "rv": np.arange(5.0)}, ["k"])
+        with pytest.raises(NotImplementedError, match="only inner"):
+            j.join(how="left")
+
+
+class TestNumexprFusionSafety:
+    """numexpr fusion must not silently diverge from the NumPy path."""
+
+    def test_small_int_not_fuseable(self):
+        from pandas.lazy.backends.numexpr_fusion import can_fuse_expression
+        from pandas.lazy.ir import (
+            Call,
+            FieldRef,
+        )
+
+        n = 200_000
+        for dt in ("int8", "int16", "uint8", "uint16"):
+            a = np.full(n, 100, dt)
+            b = np.full(n, 2, dt)
+            e = Call("multiply", (FieldRef("a"), FieldRef("b")))
+            assert can_fuse_expression(e, {"a": a, "b": b}) is False
+
+    def test_power_not_fuseable(self):
+        from pandas.lazy.backends.numexpr_fusion import FUSEABLE_OPS
+
+        assert "power" not in FUSEABLE_OPS

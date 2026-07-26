@@ -1289,6 +1289,16 @@ class GraceHashJoiner:
         if not self._left_partitioned or not self._right_partitioned:
             raise RuntimeError("Must partition both sides before joining")
 
+        # Only inner joins are supported: outer-family joins need the
+        # missing side of a single-sided partition null-padded to the full
+        # output schema, which is not implemented. Callers gate on this
+        # (physical/join.py only spills inner joins); fail loudly otherwise
+        # rather than dropping columns / crashing in the concat below.
+        if how != "inner":
+            raise NotImplementedError(
+                f"GraceHashJoiner supports only inner joins, got {how!r}"
+            )
+
         results = []
 
         # Process each partition pair
@@ -1299,20 +1309,13 @@ class GraceHashJoiner:
             left = self.spill_manager.reload(left_name)
             right = self.spill_manager.reload(right_name)
 
-            if left is None and right is None:
+            if left is None or right is None:
                 continue
 
             # Perform in-memory join for this partition
-            if left is not None and right is not None:
-                part_result = self._join_partition(left, right, how)
-                if part_result:
-                    results.append(part_result)
-            elif how in ("left", "outer") and left is not None:
-                # Left side with nulls for right
-                results.append(self._pad_with_nulls(left, "right"))
-            elif how in ("right", "outer") and right is not None:
-                # Right side with nulls for left
-                results.append(self._pad_with_nulls(right, "left"))
+            part_result = self._join_partition(left, right, how)
+            if part_result:
+                results.append(part_result)
 
         # Concatenate all partition results
         if not results:
@@ -1358,9 +1361,3 @@ class GraceHashJoiner:
 
         # Convert back to arrays
         return {col: result_df[col].values for col in result_df.columns}
-
-    def _pad_with_nulls(self, arrays: ArrayDict, side: str) -> ArrayDict:
-        """Pad arrays with null columns for missing join side."""
-        # This would add null columns for the missing side
-        # Simplified: just return the arrays we have
-        return arrays

@@ -52,6 +52,9 @@ ARROW_PREFERRED_OPS: frozenset[str] = frozenset(
         "str_endswith",
         "str_replace",
         "str_slice",
+        # Arrow-only (no NumPy kernel): must prefer Arrow, else NumPy input
+        # routes to a missing kernel and raises NotImplementedError.
+        "str_reverse",
         # Null operations (native Arrow support)
         "is_null",
         "is_not_null",
