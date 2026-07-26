@@ -118,7 +118,7 @@ class TestLazyDataFrameFilter:
 
     def test_filter_preserves_columns(self):
         df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
-        ldf = df.select().filter(col("a"))
+        ldf = df.select().filter(col("a") > 1)
         # Filter doesn't change schema
         assert ldf.columns == ["a", "b"]
 
@@ -901,3 +901,54 @@ class TestSchemaCollisionValidation:
         d = pd.DataFrame({"a": [1, 2], "b": [3, 4]}).set_index("a")
         out = d.select().reset_index().collect(use_physical_planner=True)
         assert list(out.columns) == ["a", "b"]
+
+
+class TestValidationParity:
+    """Invalid inputs must fail like eager pandas instead of the physical
+    engine silently producing a different (wrong) result."""
+
+    def test_non_boolean_filter_predicate_raises(self):
+        df = pd.DataFrame({"a": [2, 0, 1]})
+        with pytest.raises(TypeError, match="boolean expression"):
+            df.select().filter(col("a"))
+
+    def test_boolean_filter_predicate_ok(self):
+        df = pd.DataFrame({"a": [2, 0, 1]})
+        out = df.select().filter(col("a") > 0).collect()
+        assert out["a"].tolist() == [2, 1]
+
+    def test_set_index_missing_key_raises_eager_and_physical(self):
+        d = pd.DataFrame({"a": [1, 2], "b": [3, 4]})
+        with pytest.raises(KeyError, match="None of .* are in the columns"):
+            d.select().set_index("nope").collect()
+        with pytest.raises(KeyError, match="None of .* are in the columns"):
+            d.select().set_index("nope").collect(use_physical_planner=True)
+
+    def test_cross_join_with_on_raises(self):
+        from pandas.errors import MergeError
+
+        left = pd.DataFrame({"k": [1, 2], "x": [10, 20]})
+        right = pd.DataFrame({"k": [1, 2], "y": [30, 40]})
+        with pytest.raises(MergeError, match="cross"):
+            left.select().join(right.select(), how="cross", on="k")
+
+    def test_cross_join_without_keys_ok(self):
+        left = pd.DataFrame({"k": [1, 2], "x": [10, 20]})
+        right = pd.DataFrame({"j": [1, 2], "y": [30, 40]})
+        out = left.select().join(right.select(), how="cross").collect()
+        assert len(out) == 4
+
+
+class TestFilterPredicateInference:
+    """Boolean-producing predicates must not be rejected by the filter
+    boolean-dtype guard (regression for isin over a string column)."""
+
+    def test_isin_string_filter_ok(self):
+        df = pd.DataFrame({"c": ["13", "30", "31", "99"]})
+        out = df.select().filter(col("c").isin(["13", "31"])).collect()
+        assert out["c"].tolist() == ["13", "31"]
+
+    def test_isin_numeric_filter_ok(self):
+        df = pd.DataFrame({"a": [1, 2, 3, 4]})
+        out = df.select().filter(col("a").isin([2, 4])).collect()
+        assert out["a"].tolist() == [2, 4]

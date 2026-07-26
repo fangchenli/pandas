@@ -74,8 +74,10 @@ def _infer_call_dtype(node: Call, schema: Schema) -> LazyDtype:
         "greater_equal",
     }
     logical_funcs = {"and_", "or_", "invert"}
+    # Membership tests also return a boolean mask, not the operand's dtype.
+    membership_funcs = {"isin"}
 
-    if node.function in comparison_funcs | logical_funcs:
+    if node.function in comparison_funcs | logical_funcs | membership_funcs:
         return LazyDtype("boolean", np.dtype("bool"), None, False)
 
     # Unary operators

@@ -221,6 +221,26 @@ class LazyDataFrame:
                 f"predicate must be an Expr, got {type(predicate).__name__}"
             )
 
+        # The predicate must be a boolean mask. A non-boolean expression (e.g.
+        # a bare integer column) is reordered by eager pandas via label-based
+        # .loc but truthiness-masked by the physical engine, so the two paths
+        # silently disagree. Reject an unambiguously non-boolean predicate.
+        from pandas.lazy.type_inference import infer_expr_dtype
+
+        try:
+            pred_dtype = infer_expr_dtype(predicate._ir, self._schema)
+        except (KeyError, TypeError):
+            pred_dtype = None
+        if pred_dtype is not None and pred_dtype.category in (
+            "numeric",
+            "datetime",
+            "string",
+        ):
+            raise TypeError(
+                "filter predicate must be a boolean expression, got a "
+                f"{pred_dtype.category} expression"
+            )
+
         new_plan = Filter(self._plan, predicate)
         return LazyDataFrame(new_plan, self._schema)
 
@@ -865,6 +885,16 @@ class LazyDataFrame:
             other_plan = Project(other_source, other_exprs)
             other_schema = other_plan.resolve_schema()
             other = LazyDataFrame(other_plan, other_schema)
+
+        # A cross join takes no keys; passing on/left_on/right_on is
+        # contradictory. pandas raises MergeError, but the ``on`` branch below
+        # would otherwise silently win and drop the cross semantics.
+        if how == "cross" and (
+            on is not None or left_on is not None or right_on is not None
+        ):
+            from pandas.errors import MergeError
+
+            raise MergeError("Can not pass on OR left_on + right_on with how='cross'")
 
         # Normalize on/left_on/right_on to tuples
         if on is not None:

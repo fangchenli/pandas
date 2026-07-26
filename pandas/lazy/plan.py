@@ -1170,10 +1170,15 @@ class SetIndex(LogicalPlan):
 
         input_schema = self.input.resolve_schema()
 
+        # Reject unknown keys instead of silently ignoring them: eager
+        # execution raises KeyError, so a filtering comprehension here would
+        # make physical execution return the frame unchanged and diverge.
+        missing = [k for k in self.keys if k not in input_schema.fields]
+        if missing:
+            raise KeyError(f"None of {missing} are in the columns")
+
         # The key columns become the (new) index, replacing any prior index.
-        index_fields = {
-            k: input_schema.fields[k] for k in self.keys if k in input_schema.fields
-        }
+        index_fields = {k: input_schema.fields[k] for k in self.keys}
         if self.drop:
             # Key columns move out of the visible columns into the index.
             new_fields = {
