@@ -2426,3 +2426,36 @@ def _kernel_source(fn):
     import inspect
 
     return inspect.getsource(fn)
+
+
+class TestMaskedIntPrecision:
+    """Nullable Int64/UInt64 values above 2**53 must survive a passthrough
+    projection without float64 precision loss (regression in extract_array /
+    to_pandas_array_contract)."""
+
+    def test_int64_above_2e53_with_null_passthrough(self):
+        from pandas.lazy import col
+
+        big = 9007199254740995  # > 2**53, not representable exactly in float64
+        df = pd.DataFrame({"a": pd.array([big, 3, None], dtype="Int64")})
+        eager = df.select(col("a")).collect()
+        phys = df.select(col("a")).collect(use_physical_planner=True)
+        tm.assert_frame_equal(eager, phys)
+        assert phys["a"].iloc[0] == big
+
+    def test_uint64_above_2e53_with_null_passthrough(self):
+        from pandas.lazy import col
+
+        big = 18014398509481987  # > 2**53
+        df = pd.DataFrame({"a": pd.array([big, 3, None], dtype="UInt64")})
+        phys = df.select(col("a")).collect(use_physical_planner=True)
+        assert phys["a"].iloc[0] == big
+        assert str(phys["a"].dtype) == "UInt64"
+
+    def test_int64_no_null_unaffected(self):
+        from pandas.lazy import col
+
+        big = 9007199254740995
+        df = pd.DataFrame({"a": pd.array([big, 3, 7], dtype="Int64")})
+        phys = df.select(col("a")).collect(use_physical_planner=True)
+        assert phys["a"].iloc[0] == big

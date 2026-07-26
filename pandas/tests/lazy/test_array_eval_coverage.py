@@ -771,3 +771,89 @@ class TestArrayEvaluatorBackendSelection:
             "add", [np.array([1, 2, 3]), pa.array([4, 5, 6])]
         )
         assert backend == "numpy"
+
+
+class TestArrayEvaluatorAliasingSafety:
+    """Scratch-buffer reuse must not corrupt branching expression trees or
+    mutate source columns (regression for the rotating 3-buffer pool)."""
+
+    def _data(self):
+        return {c: np.arange(1, 21, dtype=float) + i for i, c in enumerate("abcdefgh")}
+
+    def test_branching_tree_matches_numpy(self):
+        from pandas.lazy.backends.array_eval import ArrayEvaluator
+        from pandas.lazy.ir import (
+            Call,
+            FieldRef,
+        )
+
+        R = FieldRef
+        A = lambda x, y: Call("add", (x, y))
+        d = self._data()
+        # 8 leaves, deeply branched: far more than 3 simultaneously-live
+        # intermediates, which corrupted the old rotating pool.
+        tree = A(
+            A(A(R("a"), R("b")), A(R("c"), R("d"))),
+            A(A(R("e"), R("f")), A(R("g"), R("h"))),
+        )
+        got = np.asarray(ArrayEvaluator(d, preferred_backend="numpy").evaluate(tree))
+        want = ((d["a"] + d["b"]) + (d["c"] + d["d"])) + (
+            (d["e"] + d["f"]) + (d["g"] + d["h"])
+        )
+        tm.assert_numpy_array_equal(got, want)
+
+    def test_source_columns_not_mutated(self):
+        from pandas.lazy.backends.array_eval import ArrayEvaluator
+        from pandas.lazy.ir import (
+            Call,
+            FieldRef,
+        )
+
+        R = FieldRef
+        A = lambda x, y: Call("add", (x, y))
+        d = self._data()
+        originals = {c: v.copy() for c, v in d.items()}
+        ArrayEvaluator(d, preferred_backend="numpy").evaluate(
+            A(A(R("a"), R("b")), A(R("c"), R("d")))
+        )
+        for c, v in originals.items():
+            tm.assert_numpy_array_equal(d[c], v)
+
+    def test_repeated_leaf_reuse(self):
+        from pandas.lazy.backends.array_eval import ArrayEvaluator
+        from pandas.lazy.ir import (
+            Call,
+            FieldRef,
+        )
+
+        R = FieldRef
+        A = lambda x, y: Call("add", (x, y))
+        d = {"a": np.arange(1, 6, dtype=float)}
+        got = np.asarray(
+            ArrayEvaluator(d, preferred_backend="numpy").evaluate(
+                A(A(R("a"), R("a")), A(R("a"), R("a")))
+            )
+        )
+        tm.assert_numpy_array_equal(got, d["a"] * 4)
+
+
+class TestArrayEvaluatorCastNoStringify:
+    """Casting an Arrow-backed column to an unmapped dtype must not silently
+    stringify it (regression for _dtype_to_arrow's pa.string() default)."""
+
+    def test_cast_arrow_int_to_datetime(self):
+        from pandas.lazy import col
+
+        df = pd.DataFrame(
+            {"a": pd.array([1_600_000_000_000_000_000, 2, 3], dtype="int64[pyarrow]")}
+        )
+        q = df.select(col("a").cast("datetime64[ns]").alias("t"))
+        phys = q.collect(use_physical_planner=True)
+        assert str(phys["t"].dtype).startswith("datetime64[ns")
+
+    def test_unsupported_cast_raises_not_stringify(self):
+        from pandas.lazy.backends.array_eval import ArrayEvaluator
+
+        ev = ArrayEvaluator({}, preferred_backend="arrow")
+        with pytest.raises(NotImplementedError, match="not supported"):
+            ev._dtype_to_arrow("interval[int64]")

@@ -170,6 +170,21 @@ def extract_array(obj) -> ArrayLike:
             and not hasattr(arr, "_mask")  # Skip masked arrays
         ):
             return arr._data
+        # Masked int64/uint64 arrays that actually carry nulls widen to float64
+        # under np.asarray, losing integer precision above 2**53. Route those
+        # through Arrow, which preserves the exact integers and the null mask.
+        # (Smaller ints and null-free arrays are lossless as float64/int, so
+        # they keep the cheaper NumPy path below.)
+        mask = getattr(arr, "_mask", None)
+        if mask is not None:
+            np_dt = getattr(arr.dtype, "numpy_dtype", None)
+            if (
+                np_dt is not None
+                and np_dt.kind in ("i", "u")
+                and np_dt.itemsize >= 8
+                and mask.any()
+            ):
+                return pa.array(arr)
         # NumPy-backed - convert to ndarray
         return np.asarray(arr)
 
@@ -636,7 +651,14 @@ def arrays_to_dataframe(
                 ):
                     values = chunked.to_pandas()
                 else:
-                    values = chunked.to_numpy(zero_copy_only=False)
+                    # Build the masked array straight from Arrow. to_numpy()
+                    # would widen an int64/uint64+null column to float64 and
+                    # lose integer precision above 2**53; going through
+                    # ArrowExtensionArray keeps the values exact.
+                    try:
+                        return pd.arrays.ArrowExtensionArray(chunked).astype(target)
+                    except (TypeError, ValueError):
+                        values = chunked.to_numpy(zero_copy_only=False)
             else:
                 values = arr
             try:

@@ -145,7 +145,6 @@ class ArrayEvaluator:
         if isinstance(pooling_strategy, str):
             pooling_strategy = PoolingStrategy(pooling_strategy)
         self._pooling_strategy = pooling_strategy
-        self._scratch_pool = None  # Lazy init for scratch buffers
         self._array_pool = None  # Lazy init for acquire/release pool
 
         # Arrow memory pool (lazy init)
@@ -247,14 +246,17 @@ class ArrayEvaluator:
             if result is not None:
                 return result
 
-        # For NumPy backend with pooling, try pooled evaluation for ~3x speedup
-        # (Arrow has its own built-in memory pools, so we only pool NumPy)
+        # For NumPy backend with pooling, reuse an ephemeral intermediate as the
+        # output buffer to save an allocation. Only a freshly-computed
+        # sub-result (a Call/Cast node) is safe to overwrite in place; a source
+        # column (FieldRef) is shared and must never be mutated.
         if (
             backend == "numpy"
             and self._pooling_strategy != PoolingStrategy.NONE
             and not node.kwargs
         ):
-            result = self._try_pooled_numpy_call(func, args)
+            ephemeral = [self._is_ephemeral(a) for a in node.args]
+            result = self._try_pooled_numpy_call(func, args, ephemeral)
             if result is not None:
                 return result
 
@@ -377,6 +379,7 @@ class ArrayEvaluator:
 
     def _dtype_to_arrow(self, dtype):
         """Convert pandas/numpy dtype to Arrow type."""
+        import numpy as np
         import pyarrow as pa
 
         dtype_str = str(dtype)
@@ -395,7 +398,17 @@ class ArrayEvaluator:
             "string": pa.string(),
             "object": pa.string(),
         }
-        return mapping.get(dtype_str, pa.string())
+        if dtype_str in mapping:
+            return mapping[dtype_str]
+        # Fall back to Arrow's own NumPy-dtype mapping (datetime64, timedelta64,
+        # ...) rather than silently defaulting to pa.string(), which would
+        # stringify the column and corrupt a cast to e.g. datetime64[ns].
+        try:
+            return pa.from_numpy_dtype(np.dtype(dtype))
+        except (pa.ArrowNotImplementedError, TypeError, ValueError) as err:
+            raise NotImplementedError(
+                f"Arrow-backed cast to dtype {dtype!r} is not supported"
+            ) from err
 
     def _evaluate_datetime(self, func: str, arr: ArrayLike) -> ArrayLike:
         """Evaluate datetime accessor operations."""
@@ -776,24 +789,36 @@ class ArrayEvaluator:
         }
     )
 
-    def _get_scratch_pool(self, size: int, dtype: np.dtype) -> Any:
-        """Get or create scratch buffer pool for the given size/dtype."""
-        from pandas.lazy.backends.memory_pool import ScratchBufferPool
+    @staticmethod
+    def _is_ephemeral(node) -> bool:
+        """Whether evaluating ``node`` yields a freshly-owned array.
 
-        # Create scratch pool on first use (lazy init)
-        if self._scratch_pool is None:
-            self._scratch_pool = ScratchBufferPool(size, dtype, num_buffers=3)
-        return self._scratch_pool
-
-    def _try_pooled_numpy_call(self, func: str, args: list) -> ArrayLike | None:
+        A ``Call``/``Cast`` produces a single-use intermediate that is safe to
+        overwrite in place; a ``FieldRef`` returns a shared source column that
+        must never be mutated. ``Alias`` is transparent. Anything else (e.g.
+        ``Literal``) is treated as non-ephemeral (conservative = safe).
         """
-        Try to evaluate using pooled output arrays.
+        from pandas.lazy.ir import (
+            Alias,
+            Call,
+            Cast,
+        )
 
-        Uses scratch buffers from a rotating pool for operations that support
-        the out= parameter. This achieves ~3x speedup by eliminating
-        memory allocation overhead for intermediate results.
+        while isinstance(node, Alias):
+            node = node.arg
+        return isinstance(node, (Call, Cast))
 
-        Returns None if pooled evaluation is not possible.
+    def _try_pooled_numpy_call(
+        self, func: str, args: list, ephemeral: list[bool]
+    ) -> ArrayLike | None:
+        """
+        Evaluate an elementwise op writing into a reusable output buffer.
+
+        When one of the array inputs is an ephemeral intermediate (a
+        freshly-computed sub-result, flagged in ``ephemeral``) of a matching
+        dtype, it is reused as the ``out=`` buffer so a chain of operations runs
+        in place without per-step allocation. A shared source column is never
+        reused. Returns None if pooled evaluation is not possible.
         """
         from pandas.lazy.backends.memory_pool import can_use_pooled_output
 
@@ -823,15 +848,26 @@ class ArrayEvaluator:
 
         # Determine output dtype
         if func in self._BOOLEAN_OPS:
-            out_dtype = np.bool_
+            out_dtype = np.dtype(np.bool_)
         else:
             out_dtype = np.result_type(
                 *[a for a in numpy_args if isinstance(a, np.ndarray)]
             )
 
-        # Use scratch buffer pool (rotating buffers)
-        scratch_pool = self._get_scratch_pool(size, out_dtype)
-        out = scratch_pool.get_next()
+        # Reuse an ephemeral input of the right shape/dtype as the output
+        # buffer (safe in-place chaining); otherwise allocate a fresh output.
+        out = None
+        for arg, is_eph in zip(args, ephemeral, strict=True):
+            if (
+                is_eph
+                and isinstance(arg, np.ndarray)
+                and arg.dtype == out_dtype
+                and arg.shape == (size,)
+            ):
+                out = arg
+                break
+        if out is None:
+            out = np.empty(size, dtype=out_dtype)
 
         try:
             return ufunc(*numpy_args, out=out)
