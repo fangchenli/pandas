@@ -23,8 +23,10 @@ ARROW_FUNC_MAP: dict[str, str] = {
     "subtract": "subtract",
     "multiply": "multiply",
     "divide": "divide",
-    "floor_divide": "floor_divide",
-    "modulo": "mod",  # PyArrow uses 'mod' not 'modulo'
+    # NOTE: floor_divide and modulo are intentionally absent -- PyArrow has no
+    # such compute functions, and its integer divide truncates toward zero. They
+    # are handled by dedicated registered kernels (arrow_floor_divide /
+    # arrow_modulo) that implement pandas' round-toward--inf semantics.
     "power": "power",
     "negate": "negate",
     "abs": "abs",

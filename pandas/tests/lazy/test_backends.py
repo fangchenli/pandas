@@ -1480,7 +1480,9 @@ class TestDatetimeKernels:
             ["2020-01-15", "2021-06-30", "2022-12-31"], dtype="datetime64[ns]"
         )
         result = dispatch_kernel("dt_year", "numpy", arr)
-        expected = np.array([2020, 2021, 2022])
+        # int32, matching eager pandas .dt.year (the old raw-astype path
+        # returned int64 and produced garbage for NaT).
+        expected = np.array([2020, 2021, 2022], dtype="int32")
         tm.assert_numpy_array_equal(result, expected)
 
     def test_arrow_dt_month(self):
@@ -2460,3 +2462,63 @@ class TestMaskedIntPrecision:
         df = pd.DataFrame({"a": pd.array([big, 3, 7], dtype="Int64")})
         phys = df.select(col("a")).collect(use_physical_planner=True)
         assert phys["a"].iloc[0] == big
+
+
+class TestArrowArithmeticAndDatetime:
+    """Batch-4 regressions: arrow floor_divide/modulo signs, datetime
+    components, n_unique null-exclusion, and exact median."""
+
+    def test_floor_divide_and_modulo_negatives(self):
+        from pandas.lazy import col
+
+        left = pd.DataFrame({"a": pd.array([-7, 8, -3, 7], dtype="int64[pyarrow]")})
+        fd = left.select((col("a") // 3).alias("r")).collect(use_physical_planner=True)[
+            "r"
+        ]
+        md = left.select((col("a") % 3).alias("r")).collect(use_physical_planner=True)[
+            "r"
+        ]
+        assert fd.tolist() == [-3, 2, -1, 2]  # floor toward -inf
+        assert md.tolist() == [2, 2, 0, 1]  # sign of divisor
+        assert str(fd.dtype) == "Int64" and str(md.dtype) == "Int64"
+
+    def test_dt_is_month_end(self):
+        from pandas.lazy.backends import get_kernel
+
+        dts = ["2020-01-31", "2020-02-01", "2020-02-29", "2020-04-30", "2020-01-15"]
+        arr = pa.array(pd.to_datetime(dts), type=pa.timestamp("ns"))
+        got = get_kernel("dt_is_month_end", "arrow")(arr).to_pylist()
+        assert got == pd.Series(pd.to_datetime(dts)).dt.is_month_end.tolist()
+
+    def test_dt_microsecond_full_range(self):
+        from pandas.lazy.backends import get_kernel
+
+        ts = pd.to_datetime(
+            ["2020-01-01 12:00:00.123456", "2020-06-15 03:30:00.000789"]
+        )
+        arr = pa.array(ts, type=pa.timestamp("ns"))
+        got = get_kernel("dt_microsecond", "arrow")(arr).to_pylist()
+        assert got == pd.Series(ts).dt.microsecond.tolist()  # 0-999999, not 0-999
+
+    def test_n_unique_excludes_nulls(self):
+        from pandas.lazy.backends import get_kernel
+
+        arr = pa.array([1.0, 2.0, None, 2.0, None])
+        # nunique excludes nulls (was off-by-one: len(pc.unique) counted null)
+        assert get_kernel("n_unique", "arrow")(arr) == 2
+
+    def test_median_is_exact(self):
+        from pandas.lazy.backends import get_kernel
+
+        rng = np.random.default_rng(1)
+        vals = rng.random(10001)
+        got = get_kernel("median", "arrow")(pa.array(vals))
+        assert abs(got - np.median(vals)) < 1e-12
+
+    def test_numpy_dt_year_matches_eager_dtype(self):
+        from pandas.lazy.backends import get_kernel
+
+        got = get_kernel("dt_year", "numpy")(
+            np.array(["2020-01-15", "2021-06-30"], dtype="datetime64[ns]")
+        )
+        tm.assert_numpy_array_equal(got, np.array([2020, 2021], dtype="int32"))

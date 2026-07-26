@@ -276,23 +276,50 @@ def arrow_divide(left: PyArrowArray, right: PyArrowArray | float | int) -> PyArr
     return pc.divide(left, right)
 
 
+def _is_int_arrow(x) -> bool:
+    return isinstance(x, (pa.Array, pa.ChunkedArray)) and pa.types.is_integer(x.type)
+
+
+def _both_integer(left, right) -> bool:
+    def _int(x):
+        return _is_int_arrow(x) or (isinstance(x, int) and not isinstance(x, bool))
+
+    return _int(left) and _int(right)
+
+
+def _true_floor_quotient(left, right):
+    """floor(left / right) rounded toward -inf (pandas), not toward zero.
+
+    pc.divide truncates toward zero for integer operands and pc.floor on an
+    integer is a no-op, so the division is done in float to make floor a real
+    floor. Casting the dividend to float is enough to float-promote the result.
+    """
+    dividend = pc.cast(left, pa.float64()) if _is_int_arrow(left) else left
+    return pc.floor(pc.divide(dividend, right))
+
+
 @register_kernel("floor_divide", "arrow")
 def arrow_floor_divide(
     left: PyArrowArray, right: PyArrowArray | float | int
 ) -> PyArrowArray:
-    """Floor divide two arrays or array and scalar."""
-    # PyArrow doesn't have direct floor_divide, use divide + floor
-    result = pc.divide(left, right)
-    return pc.floor(result)
+    """Floor divide two arrays or array and scalar (rounds toward -inf)."""
+    result = _true_floor_quotient(left, right)
+    # int // int -> int in pandas.
+    if _both_integer(left, right):
+        result = pc.cast(result, pa.int64())
+    return result
 
 
 @register_kernel("modulo", "arrow")
 def arrow_modulo(left: PyArrowArray, right: PyArrowArray | float | int) -> PyArrowArray:
-    """Modulo of two arrays or array and scalar."""
-    # PyArrow uses different semantics; compute manually
-    # a % b = a - floor(a/b) * b
-    quotient = pc.floor(pc.divide(left, right))
-    return pc.subtract(left, pc.multiply(quotient, right))
+    """Modulo of two arrays or array and scalar (result follows sign of divisor)."""
+    # a % b = a - floor(a / b) * b, with floor toward -inf so the sign follows
+    # the divisor (pandas semantics), unlike a truncating integer divide.
+    quotient = _true_floor_quotient(left, right)
+    result = pc.subtract(left, pc.multiply(quotient, right))
+    if _both_integer(left, right):
+        result = pc.cast(result, pa.int64())
+    return result
 
 
 @register_kernel("power", "arrow")
@@ -451,17 +478,23 @@ def arrow_var(arr: PyArrowArray, *, ddof: int = 1):
 
 @register_kernel("n_unique", "arrow")
 def arrow_n_unique(arr: PyArrowArray) -> int:
-    """Count unique values."""
-    unique = pc.unique(arr)
-    return len(unique)
+    """Count unique values, excluding nulls (pandas nunique dropna=True)."""
+    # len(pc.unique(arr)) counts null (and NaN) as a distinct value, which is
+    # an off-by-one vs pandas nunique.
+    return pc.count_distinct(arr, mode="only_valid").as_py()
 
 
 @register_kernel("median", "arrow")
 def arrow_median(arr: PyArrowArray):
-    """Median of array elements."""
-    # PyArrow doesn't have direct median; use approximate or exact computation
-    result = pc.approximate_median(arr)
-    return result.as_py()
+    """Median of array elements (exact, skipping nulls/NaN)."""
+    import numpy as np
+
+    # pc.approximate_median is a t-digest approximation; pandas median is exact.
+    vals = np.asarray(arr.to_numpy(zero_copy_only=False), dtype="float64")
+    if vals.size == 0:
+        return float("nan")
+    with np.errstate(invalid="ignore"):
+        return float(np.nanmedian(vals))
 
 
 @register_kernel("any", "arrow")

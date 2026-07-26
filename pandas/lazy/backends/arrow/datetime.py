@@ -136,7 +136,9 @@ def arrow_dt_microsecond(arr: PyArrowArray) -> PyArrowArray:
     PyArrowArray
         Array of microseconds (0-999999).
     """
-    return pc.microsecond(arr)
+    # pandas .dt.microsecond is the microsecond within the *second* (0-999999),
+    # but pc.microsecond is only the microsecond within the millisecond (0-999).
+    return pc.add(pc.multiply(pc.millisecond(arr), 1000), pc.microsecond(arr))
 
 
 @register_kernel("dt_nanosecond", "arrow")
@@ -152,7 +154,7 @@ def arrow_dt_nanosecond(arr: PyArrowArray) -> PyArrowArray:
     Returns
     -------
     PyArrowArray
-        Array of nanoseconds (0-999999999).
+        Array of nanoseconds (0-999), matching pandas .dt.nanosecond.
     """
     return pc.nanosecond(arr)
 
@@ -442,9 +444,13 @@ def arrow_dt_is_month_start(arr: PyArrowArray) -> PyArrowArray:
 @register_kernel("dt_is_month_end", "arrow")
 def arrow_dt_is_month_end(arr: PyArrowArray) -> PyArrowArray:
     """Check if datetime is last day of month."""
-    return pc.equal(
-        pc.day(arr), pc.days_between(arr, pc.ceil_temporal(arr, unit="month"))
+    # day == days_in_month. The previous code compared to days_between(arr,
+    # month_ceil) -- days *remaining* in the month -- which was ~never equal to
+    # the day-of-month, so this returned False for real month-ends.
+    days_in_month = pc.days_between(
+        pc.floor_temporal(arr, unit="month"), pc.ceil_temporal(arr, unit="month")
     )
+    return pc.equal(pc.day(arr), days_in_month)
 
 
 @register_kernel("dt_is_year_start", "arrow")

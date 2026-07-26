@@ -406,7 +406,7 @@ class TestArrayEvaluatorDatetime:
 
         node = Call("dt_year", args=(FieldRef("date"),))
         result = evaluator.evaluate(node)
-        tm.assert_numpy_array_equal(result, np.array([2020, 2021]))
+        tm.assert_numpy_array_equal(result, np.array([2020, 2021], dtype="int32"))
 
 
 class TestArrayEvaluatorCumulative:

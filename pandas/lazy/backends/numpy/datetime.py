@@ -27,8 +27,12 @@ def numpy_dt_year(arr: np.ndarray) -> np.ndarray:
     np.ndarray
         Array of years (int64).
     """
-    # Convert to datetime64[Y] and extract year
-    return arr.astype("datetime64[Y]").astype(int) + 1970
+    import pandas as pd
+
+    # Use pandas for reliable component extraction (NaT-safe, unit-agnostic),
+    # matching the other dt_* kernels. The raw datetime64[Y].astype(int)+1970
+    # produced a garbage year for NaT and assumed nanosecond resolution.
+    return pd.DatetimeIndex(arr).year.to_numpy()
 
 
 @register_kernel("dt_month", "numpy")
