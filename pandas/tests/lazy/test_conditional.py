@@ -405,3 +405,16 @@ class TestDirectEvaluatorConditional:
             index=sample_df.index,
         )
         tm.assert_series_equal(result, expected)
+
+
+class TestWhenNullCondition:
+    """Regression: a null in the when() condition falls through to otherwise
+    (NA treated as False), consistent across engines and with pandas."""
+
+    def test_nullable_bool_na_takes_otherwise(self):
+        # Eager path (this fix). The physical path has a separate, pre-existing
+        # nullable-boolean instability tracked outside this change.
+        cond = pd.array([True, False, pd.NA], dtype="boolean")
+        df = pd.DataFrame({"c": cond})
+        q = df.select(when(col("c")).then(1).otherwise(0).alias("r"))
+        assert q.collect()["r"].tolist() == [1, 0, 0]

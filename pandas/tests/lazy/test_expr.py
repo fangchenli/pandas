@@ -498,3 +498,20 @@ class TestExprBoolGuard:
         with pytest.raises(TypeError, match="ambiguous"):
             if col("a") == 1:
                 pass
+
+
+class TestShiftFillValue:
+    """Regression: shift(fill_value=) fills only the shifted-in gap, not
+    pre-existing nulls (matches pandas and the physical engine)."""
+
+    def test_shift_fill_value_keeps_existing_nulls(self):
+        import pandas as pd
+        import pandas._testing as tm
+        from pandas.lazy import col
+
+        df = pd.DataFrame({"x": [1.0, None, 3.0, 4.0]})
+        q = df.select(col("x").shift(1, fill_value=0).alias("s"))
+        expected = df["x"].shift(1, fill_value=0)
+        for phys in (False, True):
+            got = q.collect(use_physical_planner=phys)["s"]
+            tm.assert_series_equal(got, expected, check_names=False, check_dtype=False)

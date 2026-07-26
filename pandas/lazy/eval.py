@@ -422,9 +422,12 @@ class Evaluator:
             # periods and the optional fill value directly.
             periods = node.kwargs.get("periods", 1)
             fill_value = node.kwargs.get("fill_value")
-            result = args[0].shift(periods)
+            # Pass fill_value to shift() so only the shifted-in gap is filled;
+            # a trailing fillna() would also overwrite pre-existing nulls.
             if fill_value is not None:
-                result = result.fillna(fill_value)
+                result = args[0].shift(periods, fill_value=fill_value)
+            else:
+                result = args[0].shift(periods)
             return result
 
         elif func == "clip":
@@ -585,6 +588,11 @@ class Evaluator:
         # Apply cases in reverse order (last case has lowest priority)
         for condition_node, value_node in reversed(cases):
             condition = self.evaluate(condition_node)
+            # A null in the condition must fall through to the otherwise branch
+            # (treat NA as False), matching pandas/physical when/then semantics;
+            # otherwise Series.mask/where would propagate or mistreat the NA.
+            if hasattr(condition, "fillna"):
+                condition = condition.fillna(False).astype(bool)
             value = self.evaluate(value_node)
 
             # Use np.where or Series.where to apply the condition
