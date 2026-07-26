@@ -199,9 +199,14 @@ def _infer_call_dtype(node: Call, schema: Schema) -> LazyDtype:
     if node.function in {"rank", "dense_rank", "row_number"}:
         return LazyDtype("numeric", np.dtype("float64"), None, True)
 
-    if node.function in {"lag", "lead"}:
+    if node.function in {"lag", "lead", "shift", "diff", "pct_change"}:
+        # Positional shifts and differences introduce NaN/NA at the edges
+        # (the leading/trailing rows that have no neighbour), so the result is
+        # always nullable even when the input column is a non-nullable integer.
+        # Reporting non-nullable here would let the optimizer rewrite
+        # ``shift(x) - shift(x)`` to 0 and drop those introduced nulls.
         if node.args:
-            return infer_expr_dtype(node.args[0], schema)
+            return infer_expr_dtype(node.args[0], schema).after_introducing_nulls()
         return LazyDtype("object", np.dtype("object"), None, True)
 
     if node.function in {"cum_sum", "cum_min", "cum_max", "cum_mean", "cum_prod"}:

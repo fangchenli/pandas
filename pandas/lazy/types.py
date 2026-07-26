@@ -161,6 +161,41 @@ class LazyDtype:
     def is_boolean(self) -> bool:
         return self.category == "boolean"
 
+    def as_nullable(self) -> LazyDtype:
+        """Return an equivalent dtype whose ``nullable`` flag is set.
+
+        Used by schema resolution wherever an operation can introduce missing
+        values that the input dtype does not itself advertise (the null-adding
+        side of an outer join, a positional shift, a mixed-type concat). Keeping
+        ``nullable`` truthful there is what stops the optimizer's
+        ``col - col -> 0`` style rewrites from firing on NaN-capable columns.
+        """
+        if self.nullable:
+            return self
+        return LazyDtype(self.category, self.numpy_dtype, self.arrow_type, True)
+
+    def after_introducing_nulls(self) -> LazyDtype:
+        """Model the eager dtype once an operation fills some rows with NaN/NA.
+
+        Used for the null-adding side of an outer join and for positional
+        shifts/diffs. NumPy int/unsigned arrays cannot hold NaN, so pandas
+        widens them to ``float64`` (and bool to object); masked, float, and
+        Arrow dtypes already carry nulls in place and only gain the nullable
+        flag. Keeping this faithful both blocks the ``col - col -> 0`` rewrite
+        and lets the output dtype contract match eager.
+        """
+        if self.nullable:
+            return self
+        if self.arrow_type is not None:
+            return self.as_nullable()
+        if self.numpy_dtype is not None:
+            kind = np.dtype(self.numpy_dtype).kind
+            if kind in ("i", "u"):
+                return LazyDtype("numeric", np.dtype("float64"), None, True)
+            if kind == "b":
+                return LazyDtype("object", np.dtype("object"), None, True)
+        return self.as_nullable()
+
     @property
     def storage_backend(self) -> str:
         """

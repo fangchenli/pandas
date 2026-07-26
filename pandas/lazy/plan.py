@@ -29,6 +29,60 @@ from pandas.lazy.types import (
 )
 
 
+def _unify_concat_dtypes(dtypes: list[LazyDtype]) -> LazyDtype:
+    """Combine the dtypes of one column across the inputs of a vertical concat.
+
+    The result is nullable if any input is nullable, and widens across mixed
+    numeric types the way pandas does (int + float -> float64). This keeps the
+    reported dtype/nullability truthful so optimizer rewrites that depend on
+    non-nullability do not fire on a column that concat can fill with NaN.
+    """
+    import numpy as np
+
+    first = dtypes[0]
+    nullable = any(d.nullable for d in dtypes)
+
+    def _npdt(d: LazyDtype):
+        # ``numpy_dtype`` may be a numpy scalar *type* (from Arrow's
+        # to_pandas_dtype) rather than a np.dtype; normalize so ``.kind`` /
+        # ``.itemsize`` are always available.
+        return np.dtype(d.numpy_dtype) if d.numpy_dtype is not None else None
+
+    # Identical concrete dtype across all inputs: only nullability can change.
+    if all(
+        d.category == first.category
+        and _npdt(d) == _npdt(first)
+        and d.arrow_type == first.arrow_type
+        for d in dtypes[1:]
+    ):
+        return LazyDtype(first.category, first.numpy_dtype, first.arrow_type, nullable)
+
+    # Mixed numeric widths/kinds: pandas upcasts int+float to float64. A float
+    # participant means the output can carry NaN, so force nullable.
+    if all(d.is_numeric() for d in dtypes):
+        np_dts = [dt for dt in (_npdt(d) for d in dtypes) if dt is not None]
+        has_float = any(dt.kind == "f" for dt in np_dts)
+        if all(d.arrow_type is not None for d in dtypes):
+            # Keep the column Arrow-backed and let Arrow's promotion rules pick
+            # the common type (matching the physical concat's promote path).
+            import pyarrow as pa
+
+            promoted = (
+                pa.float64()
+                if has_float
+                else max((d.arrow_type for d in dtypes), key=lambda t: t.bit_width)
+            )
+            return LazyDtype.from_arrow_type(promoted)
+        if has_float:
+            return LazyDtype("numeric", np.dtype("float64"), None, True)
+        # All-integer but differing widths: no NaN introduced, keep the widest.
+        widest = max(np_dts, key=lambda dt: dt.itemsize) if np_dts else None
+        return LazyDtype("numeric", widest, None, nullable)
+
+    # Incompatible categories (e.g. numeric + string): fall back to object.
+    return LazyDtype("object", np.dtype("object"), None, True)
+
+
 class LogicalPlan:
     """
     Base class for logical plan nodes.
@@ -58,6 +112,19 @@ class LogicalPlan:
             return self._cached_schema
         self._cached_schema = self._resolve_schema_impl()
         return self._cached_schema
+
+    def invalidate_schema_cache(self) -> None:
+        """Clear cached schemas on this node and all descendants.
+
+        A ``DataFrameSource`` schema is derived from a live, user-held
+        DataFrame whose dtypes can change after the plan is built (an int
+        column gains a NaN and becomes float). Clearing the cache before
+        optimization guarantees nullability-dependent rewrites see the current
+        dtypes rather than a stale snapshot captured at construction time.
+        """
+        self._cached_schema = None
+        for child in self.children():
+            child.invalidate_schema_cache()
 
     def _resolve_schema_impl(self) -> Schema:
         """Actual schema resolution - override in subclasses."""
@@ -936,9 +1003,20 @@ class Join(LogicalPlan):
         else:
             join_cols = set()
 
+        # An outer-family join fills the non-preserved side with NaN/NA for
+        # unmatched rows, so those columns become nullable regardless of the
+        # source dtype. Keeping this truthful stops the optimizer from
+        # rewriting e.g. ``right_col - right_col -> 0`` on a left join and
+        # silently dropping the introduced nulls. (Conservative on the key
+        # columns of a right/outer join, which is safe.)
+        left_becomes_nullable = self.how in ("right", "outer")
+        right_becomes_nullable = self.how in ("left", "outer")
+
         # Add all left columns
         for name in left_schema.names:
             dtype = left_schema[name]
+            if left_becomes_nullable:
+                dtype = dtype.after_introducing_nulls()
             if name in right_schema and name not in join_cols:
                 # Overlapping non-join column gets suffix
                 columns[name + self.suffix[0]] = dtype
@@ -950,6 +1028,8 @@ class Join(LogicalPlan):
             if self.on is not None and name in join_cols:
                 continue  # Skip, already added from left
             dtype = right_schema[name]
+            if right_becomes_nullable:
+                dtype = dtype.after_introducing_nulls()
             if name in left_schema and name not in join_cols:
                 # Overlapping non-join column gets suffix
                 columns[name + self.suffix[1]] = dtype
@@ -1188,9 +1268,18 @@ class Concat(LogicalPlan):
                 )
 
     def _resolve_schema_impl(self) -> Schema:
-        # Use schema from first input (all inputs validated compatible
-        # in __post_init__)
-        return self.inputs[0].resolve_schema()
+        # Union the per-column dtypes across all inputs rather than trusting
+        # input 0. Concatenating an int64 column with a float64 column yields a
+        # float column that can hold NaN; reporting input 0's non-nullable int
+        # would let the optimizer rewrite ``x - x -> 0`` and lose those NaNs.
+        schemas = [inp.resolve_schema() for inp in self.inputs]
+        base = schemas[0]
+        fields: dict[str, LazyDtype] = {}
+        for name in base.names:
+            fields[name] = _unify_concat_dtypes([s[name] for s in schemas])
+        # All inputs share column names (validated in __post_init__); the row
+        # index metadata follows input 0, matching physical execution.
+        return Schema(fields, index_fields=dict(base.index_fields))
 
     def children(self) -> list[LogicalPlan]:
         return list(self.inputs)

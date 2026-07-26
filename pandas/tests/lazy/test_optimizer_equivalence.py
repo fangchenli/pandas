@@ -822,3 +822,77 @@ class TestOptimizerRewriteSafety:
         plan = df.select((col("v") + (lit(1) + lit(2))).alias("w"))._plan
         folded = ConstantFolding().visit(plan)
         assert folded is not plan  # the change is detected and applied
+
+    def test_left_join_right_column_self_subtract_keeps_nan(self):
+        # Right-side columns of a left join can be NaN for unmatched rows, so
+        # ``w - w`` must NOT be rewritten to 0 (self-cancellation is only sound
+        # on non-nullable columns).
+        left = pd.DataFrame({"k": [1, 2]})
+        right = pd.DataFrame({"k": [1], "w": [10]})
+        ldf = (
+            left.select()
+            .join(right.select(), on="k", how="left")
+            .select((col("w") - col("w")).alias("d"))
+        )
+        on = ldf.collect(optimize=True).reset_index(drop=True)
+        off = ldf.collect(optimize=False).reset_index(drop=True)
+        tm.assert_frame_equal(on, off)
+        assert on["d"].isna().sum() == 1  # the unmatched row stays NaN
+
+    def test_concat_int_and_float_self_subtract_keeps_nan(self):
+        # Concatenating an int column with a float column yields a float column
+        # that can hold NaN; the schema must report that so ``x - x`` is not
+        # rewritten to 0.
+        from pandas.lazy import concat
+
+        a = pd.DataFrame({"x": pd.array([1], dtype="int64")}).select()
+        b = pd.DataFrame({"x": pd.array([np.nan], dtype="float64")}).select()
+        ldf = concat([a, b]).select((col("x") - col("x")).alias("d"))
+        on = ldf.collect(optimize=True).reset_index(drop=True)
+        off = ldf.collect(optimize=False).reset_index(drop=True)
+        tm.assert_frame_equal(on, off)
+        assert on["d"].isna().sum() == 1
+
+    def test_concat_mixed_arrow_int_widths_executes(self):
+        # int32 + int64 Arrow columns must promote instead of crashing the
+        # physical concat.
+        from pandas.lazy import concat
+
+        a = pd.DataFrame({"x": pd.array([1], dtype="int32[pyarrow]")}).select()
+        b = pd.DataFrame({"x": pd.array([2], dtype="int64[pyarrow]")}).select()
+        out = concat([a, b]).collect(use_physical_planner=True)
+        assert out["x"].tolist() == [1, 2]
+
+    def test_shift_self_subtract_keeps_nan(self):
+        # A positional shift introduces a leading NaN, so the shifted column is
+        # nullable and ``s - s`` must not collapse to 0.
+        df = pd.DataFrame({"v": pd.array([1, 2, 3], dtype="int64")})
+        ldf = df.select(col("v").shift(1).alias("sh")).select(
+            (col("sh") - col("sh")).alias("d")
+        )
+        on = ldf.collect(optimize=True).reset_index(drop=True)
+        off = ldf.collect(optimize=False).reset_index(drop=True)
+        tm.assert_frame_equal(on, off)
+        assert on["d"].isna().sum() == 1
+
+    def test_source_mutation_after_build_is_not_stale(self):
+        # Mutating the source DataFrame (int -> float with a NaN) after the
+        # lazy plan is built must not leave the optimizer trusting the old
+        # non-nullable integer schema.
+        df = pd.DataFrame({"v": pd.array([1, 2, 3], dtype="int64")})
+        ldf = df.select((col("v") - col("v")).alias("d"))
+        df.loc[0, "v"] = np.nan  # column becomes float64 with a NaN
+        on = ldf.collect(optimize=True).reset_index(drop=True)
+        off = ldf.collect(optimize=False).reset_index(drop=True)
+        tm.assert_frame_equal(on, off)
+        assert on["d"].isna().sum() == 1
+
+    def test_pure_int_self_subtract_still_folds_to_zero(self):
+        # The safe case must keep optimizing: a non-nullable int column's
+        # ``v - v`` still simplifies and matches the unoptimized result.
+        df = pd.DataFrame({"v": pd.array([1, 2, 3], dtype="int64")})
+        ldf = df.select((col("v") - col("v")).alias("d"))
+        on = ldf.collect(optimize=True).reset_index(drop=True)
+        off = ldf.collect(optimize=False).reset_index(drop=True)
+        tm.assert_frame_equal(on, off)
+        assert on["d"].tolist() == [0, 0, 0]

@@ -107,6 +107,10 @@ class LazyDataFrame:
         if self._optimized_plan is None:
             from pandas.lazy.optimize import Optimizer
 
+            # Source dtypes can change after the plan was built (a mutated
+            # DataFrame column gains a NaN). Drop stale schema caches so the
+            # optimizer's nullability-dependent rewrites see current dtypes.
+            self._plan.invalidate_schema_cache()
             self._optimized_plan = Optimizer().optimize(self._plan)
         return self._optimized_plan
 

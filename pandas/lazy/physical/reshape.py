@@ -308,7 +308,17 @@ class PhysicalConcat(PhysicalPlan):
                         chunks.extend(arr.chunks)
                     else:
                         chunks.append(arr)
-                result[name] = pa.chunked_array(chunks)
+                if len({c.type for c in chunks}) > 1:
+                    # Mixed Arrow types across inputs (e.g. int32 + int64):
+                    # chunked_array rejects them. Let Arrow promote to a common
+                    # type via a permissive table concat instead of crashing.
+                    tbl = pa.concat_tables(
+                        [pa.table({name: c}) for c in chunks],
+                        promote_options="permissive",
+                    )
+                    result[name] = tbl.column(name)
+                else:
+                    result[name] = pa.chunked_array(chunks)
             else:
                 # Concatenate NumPy arrays
                 result[name] = np.concatenate(arrays)
