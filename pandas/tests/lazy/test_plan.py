@@ -382,3 +382,41 @@ class TestCardinalityEstimation:
         st = ParquetSource(path).column_statistics("r")
         assert st.min_val == 0.0 and st.max_val == float(n - 1)
         assert st.ndv is None
+
+
+class TestResetIndexSchema:
+    """Regression: the logical schema must include the columns reset_index()
+    materializes (index-aware Schema), matching collected output."""
+
+    def _check(self, ldf):
+        assert ldf.schema.names == list(ldf.collect(use_physical_planner=True).columns)
+
+    def test_set_index_then_reset(self):
+        df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+        ldf = df.select().set_index("a").reset_index(drop=False)
+        assert ldf.schema.names == ["a", "b"]
+        self._check(ldf)
+
+    def test_named_index_source_reset(self):
+        df = pd.DataFrame({"x": [1, 2, 3]}, index=pd.Index([10, 20, 30], name="idx"))
+        ldf = df.select().reset_index(drop=False)
+        assert ldf.schema.names == ["idx", "x"]
+        self._check(ldf)
+
+    def test_default_index_reset(self):
+        df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+        ldf = df.select().reset_index(drop=False)
+        assert ldf.schema.names == ["index", "a", "b"]
+        self._check(ldf)
+
+    def test_reset_index_propagates_through_filter(self):
+        df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+        ldf = df.select().set_index("a").filter(col("b") > 4).reset_index(drop=False)
+        assert ldf.schema.names == ["a", "b"]
+        self._check(ldf)
+
+    def test_reset_index_drop_true_omits_index(self):
+        df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+        ldf = df.select().set_index("a").reset_index(drop=True)
+        assert ldf.schema.names == ["b"]
+        self._check(ldf)

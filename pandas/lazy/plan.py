@@ -1063,14 +1063,18 @@ class SetIndex(LogicalPlan):
 
         input_schema = self.input.resolve_schema()
 
+        # The key columns become the (new) index, replacing any prior index.
+        index_fields = {
+            k: input_schema.fields[k] for k in self.keys if k in input_schema.fields
+        }
         if self.drop:
-            # Remove key columns from schema
+            # Key columns move out of the visible columns into the index.
             new_fields = {
                 k: v for k, v in input_schema.fields.items() if k not in self.keys
             }
-            return Schema(new_fields)
-        # Keep all columns
-        return input_schema
+            return Schema(new_fields, index_fields=index_fields)
+        # drop=False: keys stay as columns AND become the index.
+        return Schema(dict(input_schema.fields), index_fields=index_fields)
 
     def children(self) -> list[LogicalPlan]:
         return [self.input]
@@ -1113,16 +1117,15 @@ class ResetIndex(LogicalPlan):
         input_schema = self.input.resolve_schema()
 
         if self.drop:
-            # Just return the same schema - index is discarded
-            return input_schema
+            # Index is discarded; visible columns unchanged, no index remains.
+            return Schema(dict(input_schema.fields))
 
-        # Add index columns back to schema
-        # Get index names from input schema
-        new_fields = dict(input_schema.fields)
-
-        # Add index columns at the beginning
-        # Note: The actual index column names depend on the source DataFrame
-        # This will be handled at execution time
+        # drop=False: materialize the index as leading columns, then clear it.
+        # Index columns come first; a field with the same name (e.g. from
+        # set_index(drop=False)) is not duplicated.
+        new_fields = dict(input_schema.index_fields)
+        for name, dtype in input_schema.fields.items():
+            new_fields.setdefault(name, dtype)
         return Schema(new_fields)
 
     def children(self) -> list[LogicalPlan]:

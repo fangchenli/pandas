@@ -6,7 +6,10 @@ Provides LazyDtype for type tracking and Schema for column metadata.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import (
+    dataclass,
+    field,
+)
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -201,11 +204,40 @@ def _cheap_has_nulls(ser) -> bool:
     return False
 
 
+def _index_fields_from_index(index) -> dict[str, LazyDtype]:
+    """Model a DataFrame's index as the columns ``reset_index()`` would add.
+
+    Each level maps to the name reset_index would give it: the level's name,
+    or ``"index"`` for a single unnamed index / ``"level_N"`` for unnamed
+    MultiIndex levels — matching pandas.
+    """
+    import pandas as pd
+
+    fields: dict[str, LazyDtype] = {}
+    if isinstance(index, pd.MultiIndex):
+        for level, name in enumerate(index.names):
+            col = name if name is not None else f"level_{level}"
+            fields[str(col)] = LazyDtype.from_pandas_dtype(
+                index.get_level_values(level).dtype, False
+            )
+    else:
+        name = index.name if index.name is not None else "index"
+        fields[str(name)] = LazyDtype.from_pandas_dtype(index.dtype, False)
+    return fields
+
+
 @dataclass
 class Schema:
-    """Schema for lazy operations - column names and types."""
+    """Schema for lazy operations - column names and types.
+
+    ``fields`` are the visible columns. ``index_fields`` models the row index
+    (name -> dtype, in order) that a later ``reset_index()`` would materialize
+    as leading columns; it is metadata and does not appear in ``names``/``len``
+    until reset_index moves it into ``fields``.
+    """
 
     fields: dict[str, LazyDtype]
+    index_fields: dict[str, LazyDtype] = field(default_factory=dict)
 
     @property
     def names(self) -> list[str]:
@@ -231,7 +263,7 @@ class Schema:
             ser = df[col]
             dtype = ser.dtype
             fields[str(col)] = LazyDtype.from_pandas_dtype(dtype, _cheap_has_nulls(ser))
-        return cls(fields)
+        return cls(fields, index_fields=_index_fields_from_index(df.index))
 
     @classmethod
     def from_exprs(cls, exprs: tuple[Expr, ...], input_schema: Schema) -> Schema:
@@ -250,7 +282,8 @@ class Schema:
                 )
             dtype = infer_expr_dtype(expr._ir, input_schema)
             fields[name] = dtype
-        return cls(fields)
+        # A projection preserves the row index, so carry it through.
+        return cls(fields, index_fields=dict(input_schema.index_fields))
 
     def with_columns(self, exprs: tuple[Expr, ...]) -> Schema:
         """Return schema with additional/replaced columns."""
@@ -272,7 +305,7 @@ class Schema:
             new_names.add(name)
             dtype = infer_expr_dtype(expr._ir, self)
             fields[name] = dtype
-        return Schema(fields)
+        return Schema(fields, index_fields=dict(self.index_fields))
 
     def __getitem__(self, name: str) -> LazyDtype:
         if name not in self.fields:
