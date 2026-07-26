@@ -342,7 +342,7 @@ result = ldf.collect(use_physical_planner=True)
 | File | Description |
 |------|-------------|
 | `pandas/lazy/scan.py` | `scan()` function and format detection |
-| `pandas/lazy/physical.py` | Physical operators |
+| `pandas/lazy/physical/` | Physical operators (package: base, scans, project_filter, groupby, join, reshape, fused, sort_limit, planner) |
 | `pandas/lazy/backends/__init__.py` | Kernel registry and dispatch |
 | `pandas/lazy/backends/_bottleneck.py` | Bottleneck integration and configuration |
 | `pandas/lazy/backends/router.py` | Backend routing logic |

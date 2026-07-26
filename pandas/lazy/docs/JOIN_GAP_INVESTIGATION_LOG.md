@@ -119,6 +119,6 @@ architectural engine, out of scope for a probe.
 - `BUFFER_JOIN_AGG_PROBE.md`, `benchmarks/probe_buffer_join_agg.py`,
   `benchmarks/probe_buffer_join_agg_gen.py`
 - `JOIN_KERNEL_PROFILE.md`, `JOIN_LEVERS_SCOPE.md`
-- `PhysicalFusedJoinAgg` + `_fuse_join_aggregates` (in `physical.py`,
-  **default-off** `_FUSE_JOIN_AGG=False`) — the validated foundation, kept for
+- `PhysicalFusedJoinAgg` + `_fuse_join_aggregates` (in `physical/planner.py`,
+  **default-off** `FUSE_JOIN_AGG=False`) — the validated foundation, kept for
   the record; not a win on the realized TPC-H shapes.

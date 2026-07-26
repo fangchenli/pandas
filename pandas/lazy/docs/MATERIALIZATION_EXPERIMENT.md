@@ -117,7 +117,7 @@ This reorders the priorities honestly:
 
 1. **Route `filter → select(scalar-agg)` to `PhysicalFusedFilterAgg`** —
    same path `.sum()`/`.mean()`/`.count()` frame-level aggs already take.
-   **DONE** (`physical.py` `_fuse_filter_aggregates` Shape B). The pass was
+   **DONE** (`physical/planner.py` `_fuse_filter_aggregates` Shape B). The pass was
    gated on `PhysicalHashAggregate`; an ungrouped `select(col.agg())` lowers
    to a reducing project at the tail of the fused pipeline instead, so it was
    missed and fell to the compacting generic pipeline. The terminal

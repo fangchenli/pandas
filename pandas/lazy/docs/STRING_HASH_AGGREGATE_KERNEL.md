@@ -55,7 +55,7 @@ aggregation.
 
 ## Status: PRODUCTIONIZED + INTEGRATED (default-on)
 
-Engine integration (`physical.py`): `_grouped_arrow_table` routes string-keyed
+Engine integration (`physical/groupby.py`): `_grouped_arrow_table` routes string-keyed
 groups to `_string_hash_grouped_table`, which classifies keys
 (int/temporal/bool/float-bits + string), cardinality-gates on a cheap strided
 sample (so low-card string groups like q1 don't pay), factorizes in parallel,

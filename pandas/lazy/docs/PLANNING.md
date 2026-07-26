@@ -86,7 +86,7 @@ for several queries duplicates nothing.
 
 ## Physical Planning
 
-`PhysicalPlanner.plan(logical_plan)` (in `physical.py`) runs three steps.
+`PhysicalPlanner.plan(logical_plan)` (in `physical/planner.py`) runs three steps.
 
 ### 1. Node mapping (`_plan_recursive`)
 

@@ -54,7 +54,7 @@ landed). Dated performance reports live in `../benchmarks/`.
 >   0.70x (1.43x, −191 ms), all-22 exact, no regressions**; validation caught a
 >   count-over-LEFT-join-NaN bug (q13), fixed by a NaN/null gate. Scorecard:
 >   **q18 0.40→0.58x, q17 0.73→1.51x (new outright win — single-int-key mean),
->   geo-mean 0.45→0.48x.** `physical.py _direct_address_grouped_arrays`,
+>   geo-mean 0.45→0.48x.** `physical/groupby.py _direct_address_grouped_arrays`,
 >   `Q18_DECOMP.md`.
 > - **Lesson: an isolated kernel win vs *raw* Arrow is not the bar — the parallel
 >   kernel + the mandatory Arrow round-trip is; but the round-trip is an
@@ -579,7 +579,7 @@ logical shape through whole-array pc / Acero / our fused kernel / our engine
   but ~5x is left in our own path at small-medium scale.
 
 **Fix landed**: route `filter→select(scalar-agg)` to
-`PhysicalFusedFilterAgg` (`physical.py` `_fuse_filter_aggregates` Shape B;
+`PhysicalFusedFilterAgg` (`physical/planner.py` `_fuse_filter_aggregates` Shape B;
 the ungrouped scalar-agg `select` lowers to a tail reducing-project, not a
 HashAggregate, so it was missed). Column pruning falls out for free. Measured
 controlled on/off at 10M: `select(sum)` 0.21→0.82x, `select(count)`

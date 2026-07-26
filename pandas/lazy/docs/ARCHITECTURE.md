@@ -17,7 +17,7 @@ Logical Plan (plan.py)            built incrementally by LazyDataFrame methods
 Optimizer (optimize/)             12 rule-based passes, cached per LazyDataFrame
     │
     ▼
-Physical Planner (physical.py)    logical → physical operators, operator fusion
+Physical Planner (physical/)      logical → physical operators, operator fusion
     │                             (only when use_physical_planner=True)
     ▼
 Execution                         array-based (ArrayDict) or pandas fallback
@@ -30,9 +30,11 @@ Two execution paths exist:
 
 1. **Pandas evaluator** (`eval.py`) — operates on DataFrames/Series. Default
    path and the fallback when a kernel is unavailable.
-2. **Physical planner** (`physical.py`) — operates on raw arrays via backend
-   kernels. Enabled with `collect(use_physical_planner=True)`. Supports
-   streaming, spilling, and parallel execution.
+2. **Physical planner** (`physical/` package) — operates on raw arrays via
+   backend kernels. Enabled with `collect(use_physical_planner=True)`. Supports
+   streaming, spilling, and parallel execution. Split by operator family:
+   `base`, `scans`, `project_filter`, `groupby`, `join`, `reshape`, `fused`,
+   `sort_limit`, and `planner` (the `PhysicalPlanner` + `execute_physical_plan`).
 
 ## Expression IR (`ir.py`)
 
@@ -160,7 +162,7 @@ operands when needed. It integrates:
   budget; small joins with spill enabled still take the fast `pd.merge` path.
   Both sides are hash-partitioned and spilled, partition pairs joined in
   memory (each pair itself via `pd.merge`), with a **sort-merge fallback**
-  on pathological skew (`physical.py:_execute_sort_merge_fallback`).
+  on pathological skew (`physical/join.py:_execute_sort_merge_fallback`).
 - **Parallel side execution** — left and right subplans execute concurrently.
 
 ### Join Column Disambiguation
@@ -222,7 +224,7 @@ small data never pays pool overhead.
   order): it is the only tie order the eager evaluator, NumPy engine, and
   Arrow engine (whose sorts are inherently stable) can all agree on, and
   the equivalence suite asserts it.
-- **Parallel gather** (`physical.py:_take_all_columns`) — applying sort
+- **Parallel gather** (`physical/join.py:take_all_columns`) — applying sort
   indices to result columns fans out per column (~2.5x for 4 columns at
   10M rows); used by single- and multi-key sort paths.
 - **Parallel concat inputs** — `PhysicalConcat.execute()` runs independent

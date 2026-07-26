@@ -68,7 +68,9 @@ pandas/lazy/
 ├── frame.py          # LazyDataFrame: collect(), explain(), plan caching
 ├── eval.py           # Pandas-based evaluator (fallback path)
 ├── scan.py           # Lazy file scanning (Parquet, CSV)
-├── physical.py       # Physical planner and operators
+├── physical/         # Physical planner and operators (package: base, scans,
+│                     # project_filter, groupby, join, reshape, fused,
+│                     # sort_limit, planner)
 ├── cost.py           # Engine cost model: decision constants + provenance
 ├── engine/           # Pipeline engine: graph compiler, executor,
 │                     # decision layer, morsel parallelism (ENGINE_DESIGN.md)
