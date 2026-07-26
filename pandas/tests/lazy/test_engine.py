@@ -502,6 +502,125 @@ class TestMorselParallelism:
         assert result["S"].iloc[999] == "X999"
 
 
+class TestDirectAddressGroupBy:
+    """The numpy-native direct-address (bincount) group-by for a single bounded
+    int key (docs/Q18_DECOMP.md). Unit + gate + end-to-end equivalence."""
+
+    def _oracle(self, keys, vals, funcs):
+        import pyarrow as pa
+
+        from pandas.lazy.backends.arrow.groupby import arrow_group_by
+
+        tbl = pa.table({"k": keys, "v": vals})
+        specs = [(f, "v", f) for f in funcs]
+        r = arrow_group_by(tbl, ["k"], specs).sort_by("k")
+        return r
+
+    def test_matches_arrow_high_card_sum_count_mean(self):
+        import numpy as np
+        import pyarrow as pa
+
+        from pandas.lazy.physical import _direct_address_grouped_arrays
+
+        rng = np.random.RandomState(1)
+        keys = rng.randint(0, 50_000, size=200_000).astype(np.int64)
+        vals = rng.uniform(1, 100, size=200_000).astype(np.float64)
+        specs = [("sum", "v", "sum"), ("count", "v", "count"), ("mean", "v", "mean")]
+        out = _direct_address_grouped_arrays({"k": keys, "v": vals}, ["k"], specs)
+        assert out is not None
+        got = pa.table(out).sort_by("k")
+        want = self._oracle(keys, vals, ["sum", "count", "mean"])
+        assert got.column("k").to_pylist() == want.column("k").to_pylist()
+        assert np.allclose(
+            got.column("sum").to_numpy(), want.column("sum").to_numpy(), rtol=1e-9
+        )
+        assert got.column("count").to_pylist() == want.column("count").to_pylist()
+        assert np.allclose(
+            got.column("mean").to_numpy(), want.column("mean").to_numpy(), rtol=1e-9
+        )
+
+    def test_gate_rejections_fall_back(self):
+        import numpy as np
+
+        from pandas.lazy.physical import _direct_address_grouped_arrays
+
+        n = 100_000
+        keys = np.random.RandomState(2).randint(0, 20_000, n).astype(np.int64)
+        vals = np.random.RandomState(3).uniform(1, 9, n).astype(np.float64)
+        ia = {"k": keys, "v": vals, "k2": keys.copy()}
+
+        # multi-key -> None
+        assert (
+            _direct_address_grouped_arrays(ia, ["k", "k2"], [("s", "v", "sum")]) is None
+        )
+        # unsupported agg (min) -> None
+        assert _direct_address_grouped_arrays(ia, ["k"], [("m", "v", "min")]) is None
+        # int value column for sum (precision) -> None
+        ia_int = {"k": keys, "vi": keys.copy()}
+        assert (
+            _direct_address_grouped_arrays(ia_int, ["k"], [("s", "vi", "sum")]) is None
+        )
+        # low-card (few groups) -> None (Arrow's tiny-hash path wins)
+        low = np.zeros(n, dtype=np.int64)
+        assert (
+            _direct_address_grouped_arrays(
+                {"k": low, "v": vals}, ["k"], [("s", "v", "sum")]
+            )
+            is None
+        )
+        # huge sparse span -> None (dense accumulator too big)
+        sparse = np.arange(n, dtype=np.int64) * 100_000
+        assert (
+            _direct_address_grouped_arrays(
+                {"k": sparse, "v": vals}, ["k"], [("s", "v", "sum")]
+            )
+            is None
+        )
+        # NaN in value column -> None (skip-semantics differ)
+        vnan = vals.copy()
+        vnan[0] = np.nan
+        assert (
+            _direct_address_grouped_arrays(
+                {"k": keys, "v": vnan}, ["k"], [("s", "v", "sum")]
+            )
+            is None
+        )
+        # count over a NaN column (LEFT-join unmatched, q13) -> None: dense
+        # counts every row, but count() skips NaN, so they would disagree.
+        cnan = vals.copy()
+        cnan[5] = np.nan
+        assert (
+            _direct_address_grouped_arrays(
+                {"k": keys, "c": cnan}, ["k"], [("n", "c", "count")]
+            )
+            is None
+        )
+
+    def test_end_to_end_matches_eager(self):
+        import numpy as np
+
+        rng = np.random.RandomState(4)
+        df = pd.DataFrame(
+            {
+                "k": rng.randint(0, 30_000, 150_000).astype("int64"),
+                "v": rng.uniform(1, 100, 150_000),
+            }
+        )
+        ldf = df.select().group_by("k").agg(col("v").sum().alias("s"))
+        physical = (
+            ldf.collect(use_physical_planner=True)
+            .sort_values("k")
+            .reset_index(drop=True)
+        )
+        eager = ldf.collect().sort_values("k").reset_index(drop=True)
+        assert list(physical["k"]) == list(eager["k"])
+        assert np.allclose(
+            physical["s"].to_numpy(dtype="float64"),
+            eager["s"].to_numpy(dtype="float64"),
+            rtol=1e-9,
+        )
+
+
 class TestCategoricalDictionaryRouting:
     """M4 part 2: Categorical columns flow as Arrow dictionaries.
 

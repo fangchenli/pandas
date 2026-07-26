@@ -2033,6 +2033,20 @@ _STRING_HASH_GROUPBY = True
 # validated, tested foundation; see docs/Q18_DECOMP.md. Module toggle for A/B.
 _SCAN_IN_PLACE_GROUPBY = False
 
+# Direct-address group-by (numpy-native): for a single BOUNDED int key,
+# sum/count/mean over high-card groups, accumulate straight into a dense array
+# indexed by (key - kmin) via np.bincount — one C pass per column, no hash, no
+# sort, no permutation. Wired at the NUMPY level (reads the numpy input arrays
+# directly, builds only the small arrow output) so it pays NO arrow<->numpy
+# round-trip on the 18M-row input — the tax that sank the earlier arrow-table
+# wiring (docs/Q18_DECOMP.md). Gated to a bounded dense accumulator and high
+# cardinality. DEFAULT-ON: in-context A/B is a clean win — q18 0.70x (1.43x,
+# -191 ms at SF-3), all 22 exact, no regressions. Module toggle for A/B.
+_DIRECT_ADDRESS_GROUPBY = True
+# Per-accumulator span ceiling (span * 8 bytes ~ 1 GB at 128M); falls back at
+# larger scale where the dense array would be too big / too sparse.
+_DIRECT_ADDRESS_MAX_SPAN = 128_000_000
+
 # Rust (PyO3+rayon) fused index-gen for inner single-int-key joins. The Cython
 # join can't beat Polars (no-OpenMP: no real threads / no fused SIMD gather); a
 # Rust kernel computes the join indices with real threads, then the engine
@@ -2437,6 +2451,130 @@ def _scan_in_place_grouped_table(table, group_cols, agg_specs):
     return pa.table(out)
 
 
+def _dense_int_keys(arr):
+    """Return a contiguous int64 numpy view of ``arr`` (numpy or Arrow) if it is
+    a null-free integer column, else None. Numpy input is used directly (no
+    copy when already int64) — the whole point is to avoid the Arrow round-trip.
+    """
+    if isinstance(arr, np.ndarray):
+        if arr.dtype.kind not in "iu":
+            return None
+        return np.ascontiguousarray(arr.astype(np.int64, copy=False))
+    if isinstance(arr, (pa.Array, pa.ChunkedArray)):
+        if arr.null_count or not pa.types.is_integer(arr.type):
+            return None
+        if isinstance(arr, pa.ChunkedArray):
+            arr = arr.combine_chunks()
+        return np.ascontiguousarray(
+            arr.to_numpy(zero_copy_only=False).astype(np.int64, copy=False)
+        )
+    return None
+
+
+def _dense_float_vals(arr):
+    """Return a float64 numpy view of ``arr`` (numpy or Arrow) if it is a
+    null-free, NaN-free floating column, else None. Int columns return None:
+    Arrow sums int->int64 exactly, but float-weight bincount would lose
+    precision above 2**53, so int value columns fall back."""
+    if isinstance(arr, np.ndarray):
+        if arr.dtype.kind != "f":
+            return None
+        v = np.ascontiguousarray(arr.astype(np.float64, copy=False))
+    elif isinstance(arr, (pa.Array, pa.ChunkedArray)):
+        if arr.null_count or not pa.types.is_floating(arr.type):
+            return None
+        if isinstance(arr, pa.ChunkedArray):
+            arr = arr.combine_chunks()
+        v = np.ascontiguousarray(arr.to_numpy(zero_copy_only=False).astype(np.float64))
+    else:
+        return None
+    if np.isnan(v).any():  # NaN-skip semantics differ from accumulate-every-row
+        return None
+    return v
+
+
+def _col_has_missing(arr) -> bool:
+    """True if ``arr`` (numpy or Arrow) has any null OR float NaN. count()/sum()
+    skip missing, but the dense accumulator counts/sums EVERY row — so any
+    missing in a referenced value column means the fast path would disagree
+    (e.g. a LEFT JOIN fills unmatched numeric columns with NaN: q13's
+    count(o_orderkey))."""
+    if isinstance(arr, np.ndarray):
+        return arr.dtype.kind == "f" and bool(np.isnan(arr).any())
+    if isinstance(arr, (pa.Array, pa.ChunkedArray)):
+        if arr.null_count:
+            return True
+        if pa.types.is_floating(arr.type):
+            return bool(pc.any(pc.is_nan(arr)).as_py())
+    return False
+
+
+def _direct_address_grouped_arrays(input_arrays, group_cols, agg_specs):
+    """Numpy-native dense direct-address grouped aggregate for a single bounded
+    int key. Reads the numpy input columns directly and returns a result
+    ``ArrayDict`` of Arrow columns (matching the arrow group_by output schema),
+    or ``None`` to fall back. See ``_DIRECT_ADDRESS_GROUPBY``.
+
+    Gates: one integer key, no nulls; aggs only sum/count/mean; sum/mean value
+    columns floating, null- and NaN-free; count column present and null-free;
+    key span bounded and dense (``span <= 2*n``); group count high (strided
+    sample >= the parallel ratio gate — low-card loses to Arrow's tiny hash).
+    """
+    if len(group_cols) != 1:
+        return None
+    if not {f for _, _, f in agg_specs} <= {"sum", "count", "mean"}:
+        return None
+
+    keys = _dense_int_keys(input_arrays.get(group_cols[0]))
+    if keys is None or len(keys) == 0:
+        return None
+    n = len(keys)
+    kmin = int(keys.min())
+    span = int(keys.max()) - kmin + 1
+    if span <= 0 or span > _DIRECT_ADDRESS_MAX_SPAN or span > 2 * n:
+        return None
+
+    # Cardinality gate on a cheap strided sample: skip low-card (Arrow wins).
+    step = max(1, n // 8192)
+    samp = keys[::step]
+    if len(np.unique(samp)) / len(samp) < _PARALLEL_GROUPBY_MIN_RATIO:
+        return None
+
+    fvals: dict[str, np.ndarray] = {}
+    for _, in_col, func in agg_specs:
+        if func == "count":
+            # count = count of non-null/non-NaN values; our dense counts are
+            # group sizes, so any missing in the count column disagrees. A LEFT
+            # JOIN fills unmatched numeric cols with NaN (q13's count(o_orderkey)),
+            # so this must check numpy NaN too, not just Arrow nulls.
+            if _col_has_missing(input_arrays.get(in_col)):
+                return None
+            continue
+        if in_col in fvals:
+            continue
+        v = _dense_float_vals(input_arrays.get(in_col))
+        if v is None:
+            return None
+        fvals[in_col] = v
+
+    idx = keys - kmin
+    counts = np.bincount(idx, minlength=span)
+    present = counts > 0
+    reps = np.nonzero(present)[0]
+    sums = {c: np.bincount(idx, weights=v, minlength=span) for c, v in fvals.items()}
+
+    out: ArrayDict = {}
+    out[group_cols[0]] = pa.array((reps + kmin).astype(keys.dtype, copy=False))
+    for out_name, in_col, func in agg_specs:
+        if func == "count":
+            out[out_name] = pa.array(counts[present])
+        elif func == "sum":
+            out[out_name] = pa.array(sums[in_col][present])
+        else:  # mean
+            out[out_name] = pa.array(sums[in_col][present] / counts[present])
+    return out
+
+
 def groupby_prefers_arrow(
     relevant_backends: set[str], all_numeric: bool, agg_funcs: set[str]
 ) -> bool:
@@ -2551,7 +2689,6 @@ class PhysicalHashAggregate(PhysicalPlan):
     planned_backend: str | None = None
 
     def execute(self, context: ExecutionContext) -> ArrayDict:
-
         # Extract group-by column names and aggregation specs early
         # (needed to decide if streaming is beneficial)
         group_cols = [extract_output_name(e) for e in self.group_by]
@@ -3058,6 +3195,28 @@ class PhysicalHashAggregate(PhysicalPlan):
             return self._execute_multi_key_groupby(
                 input_arrays, group_cols, agg_specs, "numpy", context
             )
+
+        # Numpy-native direct-address fast path: a single bounded int key with
+        # sum/count/mean over high-card groups accumulates via np.bincount on the
+        # numpy input columns directly, with no Arrow<->numpy round-trip on the
+        # (large) input — only the small grouped output is built as Arrow. Beats
+        # the partition-parallel arrow path ~1.5x on q18's inner group; falls
+        # through (None) for any unsupported key/agg/range (docs/Q18_DECOMP.md).
+        if _DIRECT_ADDRESS_GROUPBY:
+            try:
+                da = _direct_address_grouped_arrays(input_arrays, group_cols, agg_specs)
+            except Exception:
+                da = None  # any failure must not change results
+            if da is not None:
+                gcol = group_cols[0]
+                if context.preserve_index:
+                    context.index_names = list(group_cols)
+                    context.index_is_multi = False
+                    return {
+                        INDEX_COL_NAME: da[gcol],
+                        **{name: arr for name, arr in da.items() if name != gcol},
+                    }
+                return dict(da)
 
         columns = {k: v for k, v in input_arrays.items() if not is_index_col(k)}
         table = pa.table(columns)
@@ -3771,7 +3930,6 @@ class PhysicalSort(PhysicalPlan):
     algorithm: Literal["quicksort", "mergesort", "heapsort", "stable"] = "quicksort"
 
     def execute(self, context: ExecutionContext) -> ArrayDict:
-
         # Check if we should use external sort (spill-enabled out-of-core sorting)
         if context.spill_enabled:
             # Try streaming external sort if input supports it
@@ -4276,7 +4434,6 @@ class PhysicalTopK(PhysicalPlan):
         return result
 
     def _execute_materialized_topk(self, context: ExecutionContext) -> ArrayDict:
-
         input_arrays = self.input.execute(context)
 
         if self.k == 0:
@@ -4632,7 +4789,6 @@ class PhysicalDistinct(PhysicalPlan):
     schema: Schema
 
     def execute(self, context: ExecutionContext) -> ArrayDict:
-
         input_arrays = self.input.execute(context)
 
         # Get columns to check for distinctness
@@ -4833,7 +4989,6 @@ class PhysicalHashJoin(PhysicalPlan):
     planned_acero: bool = False
 
     def execute(self, context: ExecutionContext) -> ArrayDict:
-
         # Execute left and right sides in parallel. Every join path needs both
         # sides materialized (a hash join needs the full build side; this
         # engine does not stream join inputs), so we do it once up front and
@@ -6714,7 +6869,6 @@ class PhysicalConvert(PhysicalPlan):
     schema: Schema
 
     def execute(self, context: ExecutionContext) -> ArrayDict:
-
         input_arrays = self.input.execute(context)
 
         # Convert all arrays to target backend
@@ -6747,7 +6901,6 @@ class PhysicalSetIndex(PhysicalPlan):
     schema: Schema
 
     def execute(self, context: ExecutionContext) -> ArrayDict:
-
         input_arrays = self.input.execute(context)
         result: ArrayDict = {}
 
@@ -6800,7 +6953,6 @@ class PhysicalResetIndex(PhysicalPlan):
     schema: Schema
 
     def execute(self, context: ExecutionContext) -> ArrayDict:
-
         input_arrays = self.input.execute(context)
         result: ArrayDict = {}
 

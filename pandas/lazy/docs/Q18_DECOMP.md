@@ -130,18 +130,29 @@ scan-in-place kernel, and **isolated it beats Polars**: on the real q18 shape
 sweep: wins at density ≳ 0.25 with a bounded accumulator, loses when sparse
 (0.05 → 0.35x, 5.8 GB acc) or low-card (Arrow's tiny-hash path wins).
 
-**Built default-off, wired into `_grouped_arrow_table`, controlled A/B — and it
-ties in-context (q18 0.97x, all-22 exact).** Root cause pinned by measuring the
-kernel swap on the real arrow table: OFF (existing partition-parallel arrow) =
-**299 ms**; ON (direct-address) = **295 ms** = extract 24 + bincount 222 +
-assemble 49. The isolated 198 ms compared against *raw single-threaded* arrow
-(388); the engine's **already-shipped parallel kernel is 299 ms**, and once
-bincount pays the mandatory arrow→numpy→arrow round-trip (+73 ms) it lands at
-parity with it — both ~1.25x off Polars. **Polars' edge is its native columnar
-flow with no round-trip, not a better group-by kernel.** Reverted (not kept as
-foundation — it adds nothing the parallel kernel doesn't already give). The only
-integration point that could capture the ~77 ms round-trip is a fully
-numpy-native group-by route (bypass arrow), a larger re-architecture with modest
-payoff and the same in-context-evaporation risk. Third independent confirmation
-(after Acero-fusion and scan-in-place) that q18's group-by is
-**execution-model/substrate-bound, not kernel-bound**.
+First attempt wired it into `_grouped_arrow_table` (arrow table in/out) and
+**tied in-context** (q18 0.97x) — the arrow table forces the numpy-origin input
+back through an arrow→numpy→arrow round-trip that taxed back the win. That looked
+like a NO-GO, but the round-trip — not the kernel — was the cost.
+
+**Re-wired NUMPY-NATIVE and it SHIPS (2026-07-25, default-on `_DIRECT_ADDRESS_
+GROUPBY`).** The fast path lives at the top of `_execute_arrow_table_groupby`,
+reading the numpy `input_arrays` **directly** (no arrow build/extract on the 18M
+input) and building only the small grouped output as Arrow. One-process A/B: the
+numpy-native group-by is **189 ms vs the partition-parallel arrow path 283 ms
+(1.5x)**; the input numpy→arrow build is **zero-copy (0 ms)**, so bypassing it and
+the return extract is pure savings. End-to-end controlled A/B at SF-3: **q18
+0.70x (1.43x, −191 ms), all-22 exact, no regressions**; the full scorecard moved
+**q18 0.40x→0.58x, q17 0.73x→1.51x (new outright win — its `avg(l_quantity)` by
+`l_partkey` is a single-int-key mean), geo-mean 0.45x→0.48x**. Gate:
+single bounded int key · sum/count/mean · sum/mean value cols floating &
+NaN/null-free · count col NaN/null-free (a LEFT-join NaN in the count column
+would over-count — the q13 bug caught in validation) · `span <= 2*n` and under
+the accumulator cap · high-card (strided-sample ratio ≥ the parallel gate).
+
+**Lesson: an isolated kernel win measured against *raw* Arrow is not the bar —
+the engine's parallel kernel + the mandatory Arrow round-trip is. But the
+round-trip is an *integration-point* choice, not a law: wiring the kernel where
+the data already lives (numpy) captures the win the arrow-table wiring hid.**
+This reverses the earlier "substrate-bound, kernel can't help" read for the
+bounded-int-key case — the kernel *does* help, once it stops paying to convert.

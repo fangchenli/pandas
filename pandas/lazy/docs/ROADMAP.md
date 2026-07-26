@@ -43,23 +43,28 @@ landed). Dated performance reports live in `../benchmarks/`.
 >   (`pd.duplicated` 27.5 ms vs Polars 25.2 ms) and does not parallelize
 >   (hash-partition route 0.07x — the partition needs its own sort). The LP↔PL
 >   gap is diffuse (small cross/anti joins + materializations), no single lever.
-> - **q18 (0.40x) architectural probe — group-state kernel is a NO-GO
->   in-context.** A direct-address `np.bincount` group-by (single bounded int
->   key, sum/count/mean) beats Polars 1.21x and arrow 1.93x *isolated* on q18's
->   18M→4.5M group, but built + A/B'd it **ties the existing partition-parallel
->   arrow kernel in-context** (q18 0.97x, all-22 exact): the isolated win was vs
->   *raw* arrow (388 ms); the shipped parallel kernel is already 299 ms, and
->   bincount + the mandatory arrow→numpy→arrow round-trip (+73 ms) lands at
->   parity. Polars' edge is native columnar flow (no round-trip), not the
->   kernel. Reverted; third confirmation q18 is substrate-bound
->   (`Q18_DECOMP.md`).
-> - **Lesson (reaffirmed): kernel-routing wins are compute-bound and are now
->   harvested (q13).** Bandwidth-bound ops (q21 sort, q22 distinct) and the
->   high-card group-by (q18) are already at/near the parallel-kernel ceiling and
->   don't yield to a hand-written kernel. What remains on the scorecard is the
->   architectural/substrate wall (join chains, high-card groupby, small-query
->   floors) — closing it needs the execution model (native columnar flow /
->   pipelining), not more kernels or routing gaps.
+> - **q18 (0.40x→0.58x) — direct-address group-by kernel SHIPPED (default-on).**
+>   A numpy-native `np.bincount` group-by (single bounded int key, sum/count/mean
+>   over high-card groups: accumulate straight into a dense array indexed by
+>   `key-kmin`, no hash/sort/gather). *First attempt wired it at the arrow-table
+>   level and tied (q18 0.97x)* — the arrow→numpy→arrow round-trip on the 18M
+>   input taxed back the win. **Re-wired NUMPY-NATIVE** (reads the numpy input
+>   arrays directly, builds only the small arrow output; the numpy→arrow input
+>   build is zero-copy so bypassing it is pure savings): controlled A/B **q18
+>   0.70x (1.43x, −191 ms), all-22 exact, no regressions**; validation caught a
+>   count-over-LEFT-join-NaN bug (q13), fixed by a NaN/null gate. Scorecard:
+>   **q18 0.40→0.58x, q17 0.73→1.51x (new outright win — single-int-key mean),
+>   geo-mean 0.45→0.48x.** `physical.py _direct_address_grouped_arrays`,
+>   `Q18_DECOMP.md`.
+> - **Lesson: an isolated kernel win vs *raw* Arrow is not the bar — the parallel
+>   kernel + the mandatory Arrow round-trip is; but the round-trip is an
+>   INTEGRATION-POINT choice, not a law.** Wiring the kernel where the data
+>   already lives (numpy) captured a win the arrow-table wiring hid — the same
+>   trap that (with the arrow wiring) made scan-in-place look dead. Two shipped
+>   this session: q13 (compute-bound routing gap) and q18 (numpy-native group
+>   kernel). Still-genuine walls: q21 sort / q22 distinct (bandwidth-bound, at
+>   parity), the join chains, small-query floors — those need the execution model
+>   (native columnar flow / pipelining).
 
 > **Refreshed 2026-06-16 (post plumbing-harvest session).** SF-3 TPC-H S1
 > geo-mean **~0.42x** (run-to-run 0.42–0.45x; machine loaded), all 22 exact;
