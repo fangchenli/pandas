@@ -2359,3 +2359,70 @@ class TestKeyEncodingCache:
         q.collect(use_physical_planner=True)
         q.collect(use_physical_planner=True)
         assert keycache.cache_stats() == {"encoded": 0, "candidates": 0}
+
+
+class TestBottleneckReductionRouting:
+    """The NumPy reduction kernels route sum/mean/std/var/median to Bottleneck
+    (NaN-gated) but must stay numerically identical to np.nan* with Bottleneck
+    on or off, and must never route min/max to Bottleneck."""
+
+    @pytest.fixture(autouse=True)
+    def _restore_bottleneck(self):
+        from pandas.lazy.backends._bottleneck import set_use_bottleneck
+
+        yield
+        set_use_bottleneck(None)
+
+    CASES = {
+        "float_no_nan": np.array([1.0, 2.0, 3.0, 4.0, 5.0]),
+        "float_with_nan": np.array([1.0, np.nan, 3.0, np.nan, 5.0]),
+        "all_nan": np.array([np.nan, np.nan, np.nan]),
+        "int": np.array([1, 2, 3, 4], dtype="int64"),
+    }
+    REDUCERS = {
+        "sum": (np.nansum, {}),
+        "mean": (np.nanmean, {}),
+        "std": (np.nanstd, {"ddof": 1}),
+        "var": (np.nanvar, {"ddof": 1}),
+        "median": (np.nanmedian, {}),
+    }
+
+    # All-NaN reductions legitimately warn (numpy and pandas both do); the
+    # kernel mirrors that, so don't treat the warning as a failure here.
+    @pytest.mark.filterwarnings("ignore::RuntimeWarning")
+    @pytest.mark.parametrize("enabled", [True, False], ids=["bn_on", "bn_off"])
+    @pytest.mark.parametrize("case", list(CASES))
+    @pytest.mark.parametrize("op", list(REDUCERS))
+    def test_reduction_matches_numpy(self, op, case, enabled):
+        from pandas.lazy.backends import get_kernel
+        from pandas.lazy.backends._bottleneck import (
+            BOTTLENECK_INSTALLED,
+            set_use_bottleneck,
+        )
+
+        if enabled and not BOTTLENECK_INSTALLED:
+            pytest.skip("bottleneck not installed")
+        set_use_bottleneck(enabled)
+
+        arr = self.CASES[case]
+        ref, kwargs = self.REDUCERS[op]
+        kernel = get_kernel(op, "numpy")
+        got = kernel(arr, **kwargs)
+        expected = ref(arr, **kwargs)
+        if np.isnan(expected):
+            assert np.isnan(got)
+        else:
+            assert np.isclose(got, expected)
+
+    def test_min_max_never_use_bottleneck(self):
+        # bn.nanmin/nanmax are far slower; these must stay on NumPy regardless.
+        from pandas.lazy.backends.numpy import core
+
+        assert "bn." not in _kernel_source(core.numpy_min)
+        assert "bn." not in _kernel_source(core.numpy_max)
+
+
+def _kernel_source(fn):
+    import inspect
+
+    return inspect.getsource(fn)

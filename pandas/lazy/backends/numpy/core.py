@@ -15,6 +15,20 @@ This module contains basic operations:
 import numpy as np
 
 from pandas.lazy.backends import register_kernel
+from pandas.lazy.backends._bottleneck import (
+    bn,
+    use_bottleneck,
+)
+
+
+def _has_nan(arr: np.ndarray) -> bool:
+    """Fast NaN presence check for float arrays via Bottleneck's short-circuit.
+
+    Only floats can hold NaN, so callers gate on ``dtype.kind == "f"`` before
+    using this.
+    """
+    return bool(bn.anynan(arr))
+
 
 # =============================================================================
 # Arithmetic Operations
@@ -209,13 +223,24 @@ def numpy_isin(arr: np.ndarray, *, values: list) -> np.ndarray:
 
 @register_kernel("sum", "numpy")
 def numpy_sum(arr: np.ndarray):
-    """Sum of array elements (ignoring NaN)."""
+    """Sum of array elements (ignoring NaN).
+
+    On float data with Bottleneck enabled, route by NaN presence: the plain
+    ``sum`` is much faster than ``np.nansum`` when there are no NaNs, and
+    ``bn.nansum`` is ~2x faster than ``np.nansum`` when there are. The
+    ``bn.anynan`` probe short-circuits, so the check is cheap. Both branches
+    equal ``np.nansum`` (0.0 for empty/all-NaN).
+    """
+    if use_bottleneck() and arr.dtype.kind == "f":
+        return bn.nansum(arr) if _has_nan(arr) else arr.sum()
     return np.nansum(arr)
 
 
 @register_kernel("mean", "numpy")
 def numpy_mean(arr: np.ndarray):
     """Mean of array elements (ignoring NaN)."""
+    if use_bottleneck() and arr.dtype.kind == "f":
+        return bn.nanmean(arr) if _has_nan(arr) else arr.mean()
     return np.nanmean(arr)
 
 
@@ -249,12 +274,16 @@ def numpy_count(arr: np.ndarray) -> int:
 @register_kernel("std", "numpy")
 def numpy_std(arr: np.ndarray, *, ddof: int = 1):
     """Standard deviation (ignoring NaN)."""
+    if use_bottleneck() and arr.dtype.kind == "f":
+        return bn.nanstd(arr, ddof=ddof) if _has_nan(arr) else arr.std(ddof=ddof)
     return np.nanstd(arr, ddof=ddof)
 
 
 @register_kernel("var", "numpy")
 def numpy_var(arr: np.ndarray, *, ddof: int = 1):
     """Variance (ignoring NaN)."""
+    if use_bottleneck() and arr.dtype.kind == "f":
+        return bn.nanvar(arr, ddof=ddof) if _has_nan(arr) else arr.var(ddof=ddof)
     return np.nanvar(arr, ddof=ddof)
 
 
@@ -267,6 +296,8 @@ def numpy_n_unique(arr: np.ndarray) -> int:
 @register_kernel("median", "numpy")
 def numpy_median(arr: np.ndarray):
     """Median of array elements (ignoring NaN)."""
+    if use_bottleneck() and arr.dtype.kind == "f":
+        return bn.nanmedian(arr) if _has_nan(arr) else np.median(arr)
     return np.nanmedian(arr)
 
 
