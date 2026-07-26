@@ -184,6 +184,19 @@ lazy_join_reorder_doc = """
 """
 
 
+def _is_positive_int_or_none(value: object) -> None:
+    """Validate that a value is None or a strictly positive integer.
+
+    Used for ``compute.lazy.morsel_size``: a non-positive morsel size makes
+    the morsel-count arithmetic divide by (or step by) a non-positive number,
+    which silently drops all rows (negative) or raises ZeroDivisionError (0).
+    """
+    if value is None:
+        return
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError("Value must be a positive integer or None")
+
+
 def _lazy_threshold_cb(key: str) -> None:
     """Callback to sync pandas options with ThresholdConfig."""
     try:
@@ -288,6 +301,7 @@ with cf.config_prefix("compute.lazy"):
         "morsel_size",
         None,
         lazy_morsel_size_doc,
+        validator=_is_positive_int_or_none,
     )
     cf.register_option(
         "adaptive_thresholds",

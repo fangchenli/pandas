@@ -132,3 +132,25 @@ class TestScalarAggSelectFusion:
             df.select().filter(col("a") > 0).select(col("a").sum().alias("s"), col("b"))
         )
         assert "FusedFilterAgg" not in plan.explain(physical=True)
+
+
+class TestFusedCountNulls:
+    """Regression: the fused count() path must exclude nulls (GH lazy)."""
+
+    def test_ungrouped_count_excludes_nan(self):
+        # count(col) over a float column with a NaN must return the non-null
+        # count, not the row count. The fused kernel counts filter-passing
+        # rows, so it falls back to the exact aggregate when the counted
+        # column has NaNs.
+        df = pd.DataFrame({"x": [1.0, np.nan, 3.0, 5.0], "f": [10, 20, 30, 40]})
+        got = df.select().filter(col("f") > 0).count()
+        phys = got.collect(use_physical_planner=True)
+        eager = got.collect()
+        assert int(phys["x"].iloc[0]) == 3
+        assert int(eager["x"].iloc[0]) == 3
+
+    def test_ungrouped_count_no_nulls_still_fused_and_correct(self):
+        # A null-free column keeps the fast fused count-rows path and is exact.
+        df = pd.DataFrame({"x": [1.0, 2.0, 3.0, 5.0], "f": [10, 20, 30, 40]})
+        got = df.select().filter(col("f") > 25).count()
+        assert int(got.collect(use_physical_planner=True)["x"].iloc[0]) == 2

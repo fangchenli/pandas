@@ -109,9 +109,10 @@ def scan(
     LazyDataFrame.filter : Filter rows by predicate.
     LazyDataFrame.select : Select columns.
     """
-    # Infer format from path if not specified
+    # Infer format from path only when the caller did not specify one.
     path = os.fspath(path)
-    format = _infer_format(path)
+    if format is None:
+        format = _infer_format(path)
 
     if format is None:
         raise ValueError(

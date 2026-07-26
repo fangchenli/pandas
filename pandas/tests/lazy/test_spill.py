@@ -1081,3 +1081,23 @@ class TestCollectSpillConfigAPI:
         result = ldf.collect(use_physical_planner=True)
 
         tm.assert_frame_equal(result, df)
+
+
+class TestSpillSort:
+    """Regression: a spill-enabled sort must construct ExternalSorter with the
+    correct keyword and run to completion."""
+
+    def test_spill_enabled_sort_matches_eager(self):
+        import numpy as np
+
+        import pandas as pd
+        from pandas.lazy.backends.spill import SpillConfig
+
+        n = 5000
+        df = pd.DataFrame(
+            {"a": np.random.default_rng(0).standard_normal(n), "b": np.arange(n)}
+        )
+        cfg = SpillConfig(enabled=True, threshold_mb=0, operator_budget_mb=1)
+        out = df.select().sort("a").collect(use_physical_planner=True, spill_config=cfg)
+        exp = df.sort_values("a").reset_index(drop=True)
+        assert np.allclose(out["a"].to_numpy(), exp["a"].to_numpy())

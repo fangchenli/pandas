@@ -586,6 +586,13 @@ class PhysicalFusedFilterAgg(PhysicalPlan):
 
         for _out, kind, ca, cb, cc in spec.aggs:
             if kind == 2:
+                # count: the kernel counts filter-passing rows. That equals the
+                # non-null count only when the counted column has no NaNs, so
+                # for count(col) fall back to the exact aggregate when it does.
+                if ca is not None:
+                    a, _ = as_np(ca)
+                    if a is not None and a.dtype.kind == "f" and _np.isnan(a).any():
+                        return self.fallback.execute(context)
                 agg_a.append(None)
                 agg_b.append(None)
                 agg_c.append(None)

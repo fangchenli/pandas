@@ -645,7 +645,11 @@ class PhysicalPlanner:
 
             cls = classify(arg)
             if fn == "count":
-                spec.aggs.append((out_name, 2, None, None, None))
+                # count(col) excludes nulls; remember the counted column so the
+                # kernel can fall back when it actually contains NaNs (a bare
+                # count()/count(*) or count(expr) keeps the row-count path).
+                count_col = cls[1] if (cls is not None and cls[0] == 0) else None
+                spec.aggs.append((out_name, 2, count_col, None, None))
             elif fn == "sum":
                 if cls is None:
                     return None

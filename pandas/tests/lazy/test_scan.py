@@ -662,3 +662,24 @@ class TestScanPredicateFallback:
             .collect(use_physical_planner=True)
         )
         assert len(out) == 20
+
+
+class TestScanExplicitFormat:
+    """Regression: an explicit format= must override extension inference."""
+
+    def test_explicit_parquet_format_on_extensionless_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "datafile")  # no extension to infer from
+            pd.DataFrame({"a": [1, 2, 3]}).to_parquet(path)
+            lf = scan(path, format="parquet")
+            assert isinstance(lf._plan, ParquetSource)
+            out = lf.collect(use_physical_planner=True)
+            assert list(out.columns) == ["a"]
+            assert out["a"].tolist() == [1, 2, 3]
+
+    def test_unsupported_explicit_format_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "data.parquet")
+            pd.DataFrame({"a": [1]}).to_parquet(path)
+            with pytest.raises(ValueError, match="Unsupported format"):
+                scan(path, format="xml")

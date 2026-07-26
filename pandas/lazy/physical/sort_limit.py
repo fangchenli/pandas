@@ -260,13 +260,13 @@ class PhysicalSort(PhysicalPlan):
 
         # Get operator budget from spill config
         spill_config = context._spill_config
-        run_size_bytes = spill_config.operator_budget_mb * 1024 * 1024
 
-        # Create external sorter
+        # Create external sorter (ExternalSorter takes megabytes, converting
+        # to bytes internally).
         sorter = ExternalSorter(
             spill_manager=spill_manager,
             name="sort",
-            run_size_bytes=run_size_bytes,
+            run_size_mb=spill_config.operator_budget_mb,
         )
 
         # Process input in batches

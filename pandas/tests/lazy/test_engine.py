@@ -1177,3 +1177,34 @@ class TestPreAggregatedMorsels:
         eager = plan.collect(use_physical_planner=False)
         assert len(phys) == len(eager)
         assert abs(phys["s"].sum() - eager["s"].sum()) < 1e-6
+
+
+class TestBatch1Regressions:
+    """Regressions for the crash/validation fixes."""
+
+    def test_large_parallel_string_pipeline_into_aggregate(self):
+        # A compute-bound string projection over enough rows to run
+        # morsel-parallel, feeding an aggregate, must not raise (the
+        # PrecomputedBatches adapter previously referenced a nonexistent
+        # Morsel.preaggregated field).
+        n = 400_000
+        rng = np.random.default_rng(0)
+        df = pd.DataFrame({"s": rng.choice(list("abcde"), n), "v": np.arange(n)})
+        out = (
+            df.select(col("s").str.upper().alias("S"), col("v"))
+            .group_by("S")
+            .agg(col("v").sum().alias("t"))
+            .collect(use_physical_planner=True)
+        )
+        assert len(out) == 5
+        assert int(out["t"].sum()) == int(df["v"].sum())
+
+    def test_morsel_size_option_rejects_non_positive(self):
+        with pytest.raises(ValueError, match="positive integer or None"):
+            pd.set_option("compute.lazy.morsel_size", -1)
+        with pytest.raises(ValueError, match="positive integer or None"):
+            pd.set_option("compute.lazy.morsel_size", 0)
+        # None (auto) and a positive int remain valid.
+        pd.set_option("compute.lazy.morsel_size", None)
+        pd.set_option("compute.lazy.morsel_size", 100_000)
+        pd.reset_option("compute.lazy.morsel_size")

@@ -9,6 +9,7 @@ This module provides utilities for:
 """
 
 from typing import Literal
+import warnings
 
 import numpy as np
 import pyarrow as pa
@@ -739,6 +740,25 @@ def arrays_to_dataframe(
             if idx_arr is not None:
                 idx_name = index_names[0] if index_names else None
                 df.index = pd.Index(to_pandas_index_array(idx_arr), name=idx_name)
+                # The Arrow round-trip carries index values but no frequency
+                # metadata, so a regular DatetimeIndex/TimedeltaIndex comes back
+                # with freq=None. Restore it by inference (a no-op for
+                # irregular indexes, where infer_freq returns None).
+                if (
+                    isinstance(df.index, (pd.DatetimeIndex, pd.TimedeltaIndex))
+                    and df.index.freq is None
+                ):
+                    try:
+                        # infer_freq emits a future-behavior (string vs offset)
+                        # warning that is irrelevant here — we only need to set
+                        # a consistent freq back on the index.
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore")
+                            inferred = pd.infer_freq(df.index)
+                        if inferred is not None:
+                            df.index.freq = inferred
+                    except (ValueError, TypeError):
+                        pass
             else:
                 df.index = pd.RangeIndex(len(df))
     else:

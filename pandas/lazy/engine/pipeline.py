@@ -241,7 +241,6 @@ class NodeSink(Sink):
                     PrecomputedBatches(
                         batches=m.batches,
                         schema=child.output_schema,
-                        preaggregated=m.preaggregated,
                     )
                     if m.batches is not None  # type: ignore[union-attr]
                     else PrecomputedInput(
