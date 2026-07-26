@@ -242,6 +242,12 @@ class Schema:
         fields = {}
         for expr in exprs:
             name = extract_output_name(expr)
+            if name in fields:
+                raise ValueError(
+                    f"Duplicate output column name {name!r}; the lazy schema "
+                    "cannot hold two columns with the same name (rename one "
+                    "with .alias())."
+                )
             dtype = infer_expr_dtype(expr._ir, input_schema)
             fields[name] = dtype
         return cls(fields)
@@ -252,8 +258,18 @@ class Schema:
         from pandas.lazy.type_inference import infer_expr_dtype
 
         fields = dict(self.fields)
+        # A new expression may replace an existing column, but two new
+        # expressions cannot both claim the same output name.
+        new_names: set[str] = set()
         for expr in exprs:
             name = extract_output_name(expr)
+            if name in new_names:
+                raise ValueError(
+                    f"Duplicate output column name {name!r}; the lazy schema "
+                    "cannot hold two columns with the same name (rename one "
+                    "with .alias())."
+                )
+            new_names.add(name)
             dtype = infer_expr_dtype(expr._ir, self)
             fields[name] = dtype
         return Schema(fields)

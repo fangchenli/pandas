@@ -595,3 +595,46 @@ class TestGroupByHead:
         want = set(map(tuple, np.round(expected[["g", "v"]].to_numpy(), 9)))
         assert got == want
         assert len(out) == len(expected)
+
+
+class TestComputedGroupKeys:
+    """Regression: a computed group key must be materialized before grouping."""
+
+    def test_group_by_computed_key_both_engines(self):
+        df = pd.DataFrame({"a": [1, 2, 3, 4, 5], "v": [10, 20, 30, 40, 50]})
+        q = (
+            df.select()
+            .group_by((col("a") % 2).alias("parity"))
+            .agg(col("v").sum().alias("t"))
+        )
+        expected = (
+            df.assign(parity=df["a"] % 2)
+            .groupby("parity")["v"]
+            .sum()
+            .reset_index()
+            .rename(columns={"v": "t"})
+        )
+        for phys in (False, True):
+            out = (
+                q.collect(use_physical_planner=phys)
+                .sort_values("parity")
+                .reset_index(drop=True)
+            )
+            assert out["t"].tolist() == expected["t"].tolist()
+
+    def test_group_by_computed_key_with_composed_agg(self):
+        # Computed key + a non-trivial (composed) aggregate exercises the
+        # pre-project decomposition path too.
+        df = pd.DataFrame({"a": [1, 2, 3, 4], "x": [1.0, 2, 3, 4], "y": [4.0, 3, 2, 1]})
+        q = (
+            df.select()
+            .group_by((col("a") % 2).alias("p"))
+            .agg((col("x").sum() - col("y").sum()).alias("d"))
+        )
+        out = q.collect().sort_values("p").reset_index(drop=True)
+        exp = (
+            df.assign(p=df["a"] % 2)
+            .groupby("p")
+            .apply(lambda g: g["x"].sum() - g["y"].sum())
+        )
+        assert out["d"].tolist() == [exp.loc[0], exp.loc[1]]

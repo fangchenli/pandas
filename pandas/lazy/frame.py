@@ -37,6 +37,7 @@ from pandas.lazy.plan import (
     Aggregate,
     Concat,
     Convert,
+    CSVSource,
     DataFrameSource,
     Distinct,
     Filter,
@@ -1048,6 +1049,12 @@ class LazyDataFrame:
         if fast is not None:
             return fast
 
+        # The eager evaluator cannot read file sources (Parquet/CSV); only the
+        # physical planner has scan operators. Route such plans there so a bare
+        # ``scan(...).collect()`` works instead of raising NotImplementedError.
+        if not use_physical_planner and _plan_has_file_source(self._plan):
+            use_physical_planner = True
+
         if use_physical_planner:
             return self._collect_physical(
                 optimize=optimize,
@@ -1745,6 +1752,17 @@ def _get_parquet_row_group_stats(path: str) -> DataFrame:
     return PdDataFrame(records)
 
 
+def _plan_has_file_source(plan: LogicalPlan) -> bool:
+    """True if the plan tree contains a Parquet/CSV file source.
+
+    The eager evaluator has no scan operator, so such plans must run through
+    the physical planner.
+    """
+    if isinstance(plan, (ParquetSource, CSVSource)):
+        return True
+    return any(_plan_has_file_source(child) for child in plan.children())
+
+
 def _is_trivial_agg(ir) -> bool:
     """True if ``ir`` is an aggregate over bare column refs (optionally aliased).
 
@@ -1866,10 +1884,34 @@ class LazyGroupBy:
                     f"Use col('name').sum().alias('result_name')."
                 )
 
+        # Materialize computed group keys (e.g. (col("a") % 2).alias("parity"))
+        # into real columns via a pre-projection, then group by their names.
+        # Both engines group by column name, so a bare key needs nothing but a
+        # computed key must exist as a column first.
+        base_plan = self._plan
+        group_by = self._group_by
+        schema = self._schema
+
+        def _is_bare_key(g: Expr) -> bool:
+            ir = g._ir.arg if isinstance(g._ir, Alias) else g._ir
+            return isinstance(ir, FieldRef) and ir.name == extract_output_name(g)
+
+        if not all(_is_bare_key(g) for g in group_by):
+            key_exprs = tuple(
+                Expr(Alias(g._ir.arg if isinstance(g._ir, Alias) else g._ir, name))
+                for g in group_by
+                for name in (extract_output_name(g),)
+                if not _is_bare_key(g)
+            )
+            passthrough = tuple(col(c) for c in schema.names)
+            base_plan = Project(self._plan, passthrough + key_exprs)
+            group_by = tuple(col(extract_output_name(g)) for g in group_by)
+            schema = base_plan.resolve_schema()
+
         # Fast path: every expression is an aggregate over bare columns - the
         # Aggregate node handles it directly.
         if all(_is_trivial_agg(e._ir) for e in exprs):
-            new_plan = Aggregate(self._plan, self._group_by, exprs)
+            new_plan = Aggregate(base_plan, group_by, exprs)
             return LazyDataFrame(new_plan, new_plan.resolve_schema())
 
         # Otherwise some expression applies arithmetic *over* aggregates
@@ -1895,17 +1937,17 @@ class LazyGroupBy:
                 leaf_exprs.append(Expr(Alias(leaf_call, leaf_name)))
             post_exprs.append(Expr(Alias(rewritten, name)))
 
-        source = self._plan
+        source = base_plan
         if pre:
             # Pass through every input column (group keys + aggregate inputs)
             # and add the computed columns the leaf aggregates consume.
-            pre_exprs = tuple(col(c) for c in self._schema.names) + tuple(
+            pre_exprs = tuple(col(c) for c in schema.names) + tuple(
                 Expr(Alias(expr._ir, pre_name)) for pre_name, expr in pre.items()
             )
-            source = Project(self._plan, pre_exprs)
+            source = Project(base_plan, pre_exprs)
 
-        agg_node = Aggregate(source, self._group_by, tuple(leaf_exprs))
-        group_cols = tuple(col(extract_output_name(g)) for g in self._group_by)
+        agg_node = Aggregate(source, group_by, tuple(leaf_exprs))
+        group_cols = tuple(col(extract_output_name(g)) for g in group_by)
         new_plan = Project(agg_node, group_cols + tuple(post_exprs))
         return LazyDataFrame(new_plan, new_plan.resolve_schema())
 

@@ -1661,3 +1661,64 @@ class TestStringHashGroupBy:
         for grp in np.split(ref.to_numpy()[order], cuts):
             assert len(np.unique(grp)) == 1
         assert codes.max() + 1 == ref.max() + 1
+
+
+class TestDescendingStringSort:
+    """Regression: descending order must apply to string/non-numeric keys in
+    the multi-key lexsort fallback and in TopK (previously only numeric keys
+    were reversed)."""
+
+    def test_multikey_descending_string(self):
+        df = pd.DataFrame({"s": ["b", "a", "c", "a", "b"], "n": [1, 2, 3, 4, 5]})
+        got = (
+            df.select()
+            .sort("s", "n", descending=True)
+            .collect(use_physical_planner=True)
+        )
+        exp = df.sort_values(["s", "n"], ascending=False).reset_index(drop=True)
+        assert got["s"].tolist() == exp["s"].tolist()
+        assert got["n"].tolist() == exp["n"].tolist()
+
+    def test_multikey_mixed_directions_string(self):
+        df = pd.DataFrame({"s": ["b", "a", "c", "a", "b"], "n": [1, 2, 3, 4, 5]})
+        got = (
+            df.select()
+            .sort("s", "n", descending=[True, False])
+            .collect(use_physical_planner=True)
+        )
+        exp = df.sort_values(["s", "n"], ascending=[False, True]).reset_index(drop=True)
+        assert got["s"].tolist() == exp["s"].tolist()
+        assert got["n"].tolist() == exp["n"].tolist()
+
+    def test_topk_descending_string(self):
+        df = pd.DataFrame({"s": ["b", "a", "c", "a", "b"], "n": [1, 2, 3, 4, 5]})
+        got = (
+            df.select()
+            .sort("s", "n", descending=True)
+            .head(3)
+            .collect(use_physical_planner=True)
+        )
+        exp = df.sort_values(["s", "n"], ascending=False).reset_index(drop=True).head(3)
+        assert got["s"].tolist() == exp["s"].tolist()
+        assert got["n"].tolist() == exp["n"].tolist()
+
+    def test_multikey_nullable_string_does_not_crash(self):
+        df = pd.DataFrame({"s": ["b", None, "a", "c", None], "n": [1, 2, 3, 4, 5]})
+        got = df.select().sort("s", "n").collect(use_physical_planner=True)
+        exp = df.sort_values(["s", "n"]).reset_index(drop=True)
+        assert got["n"].tolist() == exp["n"].tolist()
+
+
+class TestDuplicateOutputNames:
+    """Regression: duplicate output column names must raise, not silently drop
+    a column (the schema is dict-backed)."""
+
+    def test_duplicate_alias_raises(self):
+        df = pd.DataFrame({"a": [1, 2, 3], "b": [10, 20, 30]})
+        with pytest.raises(ValueError, match="[Dd]uplicate output column"):
+            df.select(col("a").alias("x"), col("b").alias("x")).collect()
+
+    def test_rename_collision_raises(self):
+        df = pd.DataFrame({"a": [1, 2, 3], "b": [10, 20, 30]})
+        with pytest.raises(ValueError, match="[Dd]uplicate output column"):
+            df.select().rename({"a": "x", "b": "x"}).collect()

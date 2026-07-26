@@ -683,3 +683,26 @@ class TestScanExplicitFormat:
             pd.DataFrame({"a": [1]}).to_parquet(path)
             with pytest.raises(ValueError, match="Unsupported format"):
                 scan(path, format="xml")
+
+
+class TestDefaultScanCollect:
+    """Regression: a bare scan(...).collect() (no use_physical_planner) must
+    execute by routing file sources through the physical planner."""
+
+    def test_default_collect_reads_parquet(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "t.parquet")
+            pd.DataFrame({"z": [3, 1, 2], "a": [9, 8, 7]}).to_parquet(path)
+            # optimize=False keeps source column order (optimize reorders,
+            # tracked separately); the point here is that it runs at all.
+            out = scan(path).collect(optimize=False)
+            assert list(out.columns) == ["z", "a"]
+            assert out["z"].tolist() == [3, 1, 2]
+
+    def test_default_collect_reads_csv(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "t.csv")
+            pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]}).to_csv(path, index=False)
+            out = scan(path).collect(optimize=False)
+            assert list(out.columns) == ["a", "b"]
+            assert len(out) == 3

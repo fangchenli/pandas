@@ -94,6 +94,33 @@ def _is_arrow_sortable(arr) -> bool:
     return False
 
 
+def _lexsort_key(np_arr, desc: bool):
+    """Transform one sort key so an ascending ``np.lexsort`` yields the wanted
+    order for ``desc``.
+
+    Numeric keys are negated for descending. Non-numeric keys (strings,
+    datetimes, objects) are factorized into order-preserving int codes — this
+    both applies descending order (which plain negation cannot) and lets
+    ``np.lexsort`` handle keys with nulls, which it otherwise cannot. Nulls are
+    mapped to sort last in either direction, matching pandas' ``na_position``.
+    """
+    if np.issubdtype(np_arr.dtype, np.number):
+        return -np_arr if desc else np_arr
+
+    import pandas as pd
+
+    codes, _ = pd.factorize(np_arr, sort=True)  # int64 codes, -1 for missing
+    codes = codes.astype(np.int64, copy=False)
+    if desc:
+        # non-null codes 0..k-1 -> 0..-(k-1); null (-1) -> 1, which is greater
+        # than every non-null value, so nulls sort last.
+        return -codes
+    n_uniques = int(codes.max()) + 1 if codes.size else 0
+    out = codes.copy()
+    out[codes < 0] = n_uniques  # nulls sort last
+    return out
+
+
 @dataclass
 class PhysicalSort(PhysicalPlan):
     """
@@ -219,8 +246,7 @@ class PhysicalSort(PhysicalPlan):
             else:
                 np_arr = np.asarray(arr)
             # For descending, negate numeric arrays (lexsort sorts ascending)
-            if desc and np.issubdtype(np_arr.dtype, np.number):
-                np_arr = -np_arr
+            np_arr = _lexsort_key(np_arr, desc)
             np_keys.append(np_arr)
 
         sort_indices = np.lexsort(np_keys)
@@ -340,8 +366,7 @@ class PhysicalSort(PhysicalPlan):
                 np_arr = arr.to_numpy(zero_copy_only=False)
             else:
                 np_arr = np.asarray(arr)
-            if desc and np.issubdtype(np_arr.dtype, np.number):
-                np_arr = -np_arr
+            np_arr = _lexsort_key(np_arr, desc)
             np_keys.append(np_arr)
 
         sort_indices = np.lexsort(np_keys)
@@ -566,8 +591,7 @@ class PhysicalTopK(PhysicalPlan):
                 np_arr = arr.to_numpy(zero_copy_only=False)
             else:
                 np_arr = np.asarray(arr)
-            if desc and np.issubdtype(np_arr.dtype, np.number):
-                np_arr = -np_arr
+            np_arr = _lexsort_key(np_arr, desc)
             np_keys.append(np_arr)
 
         sort_indices = np.lexsort(np_keys)[:k]
@@ -602,8 +626,7 @@ class PhysicalTopK(PhysicalPlan):
                 np_arr = arr.to_numpy(zero_copy_only=False)
             else:
                 np_arr = np.asarray(arr)
-            if desc and np.issubdtype(np_arr.dtype, np.number):
-                np_arr = -np_arr
+            np_arr = _lexsort_key(np_arr, desc)
             np_keys.append(np_arr)
 
         sort_indices = np.lexsort(np_keys)
@@ -693,8 +716,7 @@ class PhysicalTopK(PhysicalPlan):
                     np_arr = arr.to_numpy(zero_copy_only=False)
                 else:
                     np_arr = np.asarray(arr)
-                if desc and np.issubdtype(np_arr.dtype, np.number):
-                    np_arr = -np_arr
+                np_arr = _lexsort_key(np_arr, desc)
                 np_keys.append(np_arr)
 
             sort_indices = np.lexsort(np_keys)
@@ -765,8 +787,7 @@ class PhysicalTopK(PhysicalPlan):
                 np_arr = arr.to_numpy(zero_copy_only=False)
             else:
                 np_arr = np.asarray(arr)
-            if desc and np.issubdtype(np_arr.dtype, np.number):
-                np_arr = -np_arr
+            np_arr = _lexsort_key(np_arr, desc)
             np_keys.append(np_arr)
 
         sort_indices = np.lexsort(np_keys)[: self.k]
