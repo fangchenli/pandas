@@ -596,6 +596,27 @@ class TestGroupByHead:
         assert got == want
         assert len(out) == len(expected)
 
+    def test_head_default_eager_collect(self):
+        # The default collect() is eager; group_by().head() must not raise
+        # NotImplementedError there.
+        df = pd.DataFrame({"g": [1, 1, 1, 2, 2], "v": [10, 20, 30, 40, 50]})
+        out = df.select().group_by("g").head(2).collect()
+        assert out["v"].tolist() == [10, 20, 40, 50]
+
+    def test_head_computed_key_both_engines(self):
+        # A computed group key must be materialized so neither engine looks up
+        # an unmaterialized column name.
+        df = pd.DataFrame({"g": [1, 1, 2, 2], "v": [10, 20, 30, 40]})
+        ldf = df.select().group_by((col("g") * 10).alias("gk")).head(1)
+        eager = ldf.collect().sort_values("gk").reset_index(drop=True)
+        phys = (
+            ldf.collect(use_physical_planner=True)
+            .sort_values("gk")
+            .reset_index(drop=True)
+        )
+        tm.assert_frame_equal(eager, phys, check_dtype=False)
+        assert eager["gk"].tolist() == [10, 20]
+
 
 class TestCorrPairwiseComplete:
     """Regression: corr must use pairwise-complete pairs (drop a row when

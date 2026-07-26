@@ -209,6 +209,20 @@ class DataFrameSource(LogicalPlan):
                 "lazy pandas does not support DataFrames with duplicate column "
                 f"labels: {dups}. Rename or drop the duplicates before going lazy."
             )
+        # The engine reserves the "__index" prefix for internal index columns
+        # (see backends.types.is_index_col). A user column in that namespace
+        # would be overwritten by the real index during scanning and stripped
+        # from the output as engine metadata, silently losing data. Reject it
+        # clearly at construction instead.
+        from pandas.lazy.backends.types import INDEX_COL_PREFIX
+
+        reserved = [c for c in self.df.columns if str(c).startswith(INDEX_COL_PREFIX)]
+        if reserved:
+            raise NotImplementedError(
+                f"lazy pandas reserves the {INDEX_COL_PREFIX!r} column-name "
+                f"prefix for internal use; rename these columns before going "
+                f"lazy: {reserved}."
+            )
         self._cached_schema = None
         self._stats_cache: dict[str, object] = {}
 

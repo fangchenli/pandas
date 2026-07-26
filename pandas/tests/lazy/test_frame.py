@@ -938,6 +938,17 @@ class TestValidationParity:
         out = left.select().join(right.select(), how="cross").collect()
         assert len(out) == 4
 
+    def test_reserved_index_prefix_column_raises(self):
+        # A user column in the engine's internal "__index" namespace would be
+        # silently dropped by the physical engine; reject it at construction.
+        df = pd.DataFrame({"__index__": [1, 2], "__index_payload": [3, 4], "x": [5, 6]})
+        with pytest.raises(NotImplementedError, match="reserves the '__index'"):
+            df.select()
+
+    def test_normal_columns_not_flagged_as_reserved(self):
+        df = pd.DataFrame({"index": [1, 2], "idx": [3, 4], "a": [5, 6]})
+        assert df.select().columns == ["index", "idx", "a"]
+
 
 class TestFilterPredicateInference:
     """Boolean-producing predicates must not be rejected by the filter

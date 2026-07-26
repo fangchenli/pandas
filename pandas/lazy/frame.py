@@ -41,6 +41,7 @@ from pandas.lazy.plan import (
     DataFrameSource,
     Distinct,
     Filter,
+    GroupByHead,
     Join,
     Limit,
     LogicalPlan,
@@ -51,6 +52,13 @@ from pandas.lazy.plan import (
     Sort,
     TopK,
 )
+
+
+def _is_bare_group_key(g: Expr) -> bool:
+    """True if ``g`` is a plain column reference whose output name is that
+    column (so both engines can group by it directly, no projection needed)."""
+    ir = g._ir.arg if isinstance(g._ir, Alias) else g._ir
+    return isinstance(ir, FieldRef) and ir.name == extract_output_name(g)
 
 
 class LazyDataFrame:
@@ -1289,6 +1297,14 @@ class LazyDataFrame:
                 user_set_index = False
                 return input_df.reset_index(drop=plan.drop)
 
+            elif isinstance(plan, GroupByHead):
+                input_df = evaluate(plan.input)
+                keys = [extract_output_name(g) for g in plan.group_by]
+                # sort=False / group_keys=False keeps the original row order and
+                # does not add the group keys to the index, so the result stays
+                # a plain row selection (matching the physical kernel).
+                return input_df.groupby(keys, sort=False, group_keys=False).head(plan.n)
+
             else:
                 raise NotImplementedError(f"Unknown plan type: {type(plan)}")
 
@@ -1883,6 +1899,28 @@ class LazyGroupBy:
         self._group_by = group_by
         self._schema = schema
 
+    def _materialize_computed_keys(self):
+        """Return ``(base_plan, group_by, schema)`` with any computed group key
+        projected into a real column so both engines can group by name.
+
+        A bare column key needs nothing; a computed key (e.g.
+        ``(col("a") % 2).alias("parity")``) must exist as a column first, or the
+        physical group-by kernel looks up a name the input never materialized.
+        """
+        if all(_is_bare_group_key(g) for g in self._group_by):
+            return self._plan, self._group_by, self._schema
+
+        key_exprs = tuple(
+            Expr(Alias(g._ir.arg if isinstance(g._ir, Alias) else g._ir, name))
+            for g in self._group_by
+            for name in (extract_output_name(g),)
+            if not _is_bare_group_key(g)
+        )
+        passthrough = tuple(col(c) for c in self._schema.names)
+        base_plan = Project(self._plan, passthrough + key_exprs)
+        group_by = tuple(col(extract_output_name(g)) for g in self._group_by)
+        return base_plan, group_by, base_plan.resolve_schema()
+
     def agg(self, *exprs: Expr) -> LazyDataFrame:
         """
         Specify aggregation expressions.
@@ -1920,27 +1958,7 @@ class LazyGroupBy:
 
         # Materialize computed group keys (e.g. (col("a") % 2).alias("parity"))
         # into real columns via a pre-projection, then group by their names.
-        # Both engines group by column name, so a bare key needs nothing but a
-        # computed key must exist as a column first.
-        base_plan = self._plan
-        group_by = self._group_by
-        schema = self._schema
-
-        def _is_bare_key(g: Expr) -> bool:
-            ir = g._ir.arg if isinstance(g._ir, Alias) else g._ir
-            return isinstance(ir, FieldRef) and ir.name == extract_output_name(g)
-
-        if not all(_is_bare_key(g) for g in group_by):
-            key_exprs = tuple(
-                Expr(Alias(g._ir.arg if isinstance(g._ir, Alias) else g._ir, name))
-                for g in group_by
-                for name in (extract_output_name(g),)
-                if not _is_bare_key(g)
-            )
-            passthrough = tuple(col(c) for c in schema.names)
-            base_plan = Project(self._plan, passthrough + key_exprs)
-            group_by = tuple(col(extract_output_name(g)) for g in group_by)
-            schema = base_plan.resolve_schema()
+        base_plan, group_by, schema = self._materialize_computed_keys()
 
         # Fast path: every expression is an aggregate over bare columns - the
         # Aggregate node handles it directly.
@@ -1995,9 +2013,10 @@ class LazyGroupBy:
 
         >>> ldf.sort("value", descending=True).group_by("key").head(2)
         """
-        from pandas.lazy.plan import GroupByHead
-
-        new_plan = GroupByHead(self._plan, self._group_by, n)
+        # Materialize computed group keys so both engines can group by name
+        # (the physical kernel otherwise looks up an unmaterialized key).
+        base_plan, group_by, _ = self._materialize_computed_keys()
+        new_plan = GroupByHead(base_plan, group_by, n)
         return LazyDataFrame(new_plan, new_plan.resolve_schema())
 
     def __repr__(self) -> str:
