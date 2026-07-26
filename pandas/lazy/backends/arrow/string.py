@@ -36,11 +36,11 @@ def arrow_str_split(
     PyArrowArray
         List array of split strings.
     """
+    # pandas treats n <= 0 (and None) as unlimited; only n > 0 caps the splits.
+    max_splits = n if n > 0 else None
     if regex:
-        return pc.split_pattern_regex(
-            arr, pattern=pattern, max_splits=n if n >= 0 else None
-        )
-    return pc.split_pattern(arr, pattern=pattern, max_splits=n if n >= 0 else None)
+        return pc.split_pattern_regex(arr, pattern=pattern, max_splits=max_splits)
+    return pc.split_pattern(arr, pattern=pattern, max_splits=max_splits)
 
 
 @register_kernel("str_rsplit", "arrow")
@@ -70,8 +70,8 @@ def arrow_str_rsplit(
     implements rsplit via: reverse strings -> reverse pattern -> split ->
     reverse each element -> reverse list order.
     """
-    # If no limit, rsplit produces same result as split
-    if n < 0:
+    # No limit (n <= 0): rsplit produces the same result as split.
+    if n <= 0:
         return pc.split_pattern(arr, pattern=pattern, max_splits=None)
 
     # For limited splits, implement rsplit via reverse-split-reverse
@@ -150,16 +150,19 @@ def arrow_str_get(arr: PyArrowArray, index: int) -> PyArrowArray:
     PyArrowArray
         Array of single characters.
     """
-    if index >= 0:
-        return pc.utf8_slice_codeunits(arr, index, 1)
+    import pyarrow as pa
+
+    # utf8_slice_codeunits' third arg is the stop index, so the one-character
+    # slice at ``index`` is [index, index + 1). ``index + 1 == 0`` (index == -1)
+    # means "to the end", which is expressed by omitting stop.
+    stop = index + 1
+    if stop == 0:
+        sliced = pc.utf8_slice_codeunits(arr, index)
     else:
-        # For negative indices, we need length - abs(index)
-        lengths = pc.utf8_length(arr)
-        # Use if_else to handle strings shorter than abs(index)
-        start = pc.subtract(lengths, -index)
-        # Clamp to 0 if negative
-        start = pc.if_else(pc.less(start, 0), 0, start)
-        return pc.utf8_slice_codeunits(arr, start, 1)
+        sliced = pc.utf8_slice_codeunits(arr, index, stop)
+    # Out-of-range positions (and empty/null sources) yield "" from Arrow, but
+    # pandas .str.get returns NaN there; null them so the two agree.
+    return pc.if_else(pc.equal(sliced, ""), pa.scalar(None, type=sliced.type), sliced)
 
 
 @register_kernel("str_ljust", "arrow")
@@ -421,9 +424,11 @@ def arrow_str_match(
     PyArrowArray
         Boolean array indicating matches.
     """
+    # pandas .str.match is anchored at the start of the string (re.match),
+    # whereas Arrow's match_substring[_regex] match anywhere. Anchor to agree.
     if regex:
-        return pc.match_substring_regex(arr, pattern=pattern)
-    return pc.match_substring(arr, pattern=pattern)
+        return pc.match_substring_regex(arr, pattern="^(?:" + pattern + ")")
+    return pc.starts_with(arr, pattern=pattern)
 
 
 # =============================================================================

@@ -106,7 +106,9 @@ def arrow_str_slice(
     start = start or 0
     if stop is None:
         return pc.utf8_slice_codeunits(arr, start)
-    return pc.utf8_slice_codeunits(arr, start, stop - start)
+    # utf8_slice_codeunits' third positional arg is the stop index, not a
+    # length -- passing (stop - start) truncated every slice.
+    return pc.utf8_slice_codeunits(arr, start, stop)
 
 
 # =============================================================================

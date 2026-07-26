@@ -38,7 +38,10 @@ def numpy_str_split(
     """
     import re
 
-    max_split = n if n >= 0 else 0  # 0 means no limit for str.split
+    # Python's str.split / re.split use maxsplit=-1 for "no limit"; pandas
+    # treats n <= 0 (and None) as unlimited, so only n > 0 caps the splits.
+    # (maxsplit=0 would mean *zero* splits -- the previous default never split.)
+    max_split = n if n > 0 else -1
 
     if regex:
         compiled = re.compile(pattern)
@@ -110,10 +113,11 @@ def numpy_str_get(arr: np.ndarray, index: int) -> np.ndarray:
     """
 
     def safe_get(s, i):
+        # Out-of-range indices (and null sources) are NaN in pandas, not "".
         try:
             return s[i]
-        except IndexError:
-            return ""
+        except (IndexError, TypeError):
+            return np.nan
 
     return np.array([safe_get(s, index) for s in arr], dtype=object)
 
@@ -374,14 +378,15 @@ def numpy_str_match(arr: np.ndarray, pattern: str, regex: bool = True) -> np.nda
     np.ndarray
         Boolean array indicating matches.
     """
+    # pandas .str.match is anchored at the start of the string (re.match),
+    # not a search-anywhere; mirror that in both branches.
     if regex:
         import re
 
         compiled = re.compile(pattern)
-        return np.array([bool(compiled.search(s)) for s in arr])
-    # Simple substring match
-    result = np.char.find(arr, pattern)
-    return result >= 0
+        return np.array([compiled.match(s) is not None for s in arr])
+    # Literal, start-anchored match.
+    return np.char.startswith(arr, pattern)
 
 
 # =============================================================================

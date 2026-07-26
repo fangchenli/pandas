@@ -463,3 +463,52 @@ class TestStringSplitMethods:
         # Verify: "a::b::c::d" -> ["a::b::c", "d"]
         assert result["parts"].iloc[0] == ["a::b::c", "d"]
         tm.assert_frame_equal(result, expected)
+
+
+class TestStringKernelPandasParity:
+    """Physical string kernels must match eager pandas across both the NumPy
+    (object) and Arrow (string[pyarrow]) backends. Regressions for str_slice,
+    str_get, str_match anchoring, and str_split n-handling."""
+
+    DATA = ["hello", "hi", "abcde", "x"]
+
+    @pytest.mark.parametrize("dtype", ["object", "string[pyarrow]"])
+    @pytest.mark.parametrize(
+        "exprfn,pdfn,label",
+        [
+            (lambda c: c.str.slice(2, 5), lambda s: s.str.slice(2, 5), "slice"),
+            (lambda c: c.str.get(2), lambda s: s.str.get(2), "get_pos"),
+            (lambda c: c.str.get(-1), lambda s: s.str.get(-1), "get_neg"),
+            (lambda c: c.str.get(10), lambda s: s.str.get(10), "get_oob"),
+            (lambda c: c.str.split("l"), lambda s: s.str.split("l"), "split_default"),
+            (
+                lambda c: c.str.split("l", n=1),
+                lambda s: s.str.split("l", n=1),
+                "split_n1",
+            ),
+            (lambda c: c.str.match("i"), lambda s: s.str.match("i"), "match_mid"),
+            (lambda c: c.str.match("h"), lambda s: s.str.match("h"), "match_start"),
+        ],
+    )
+    def test_physical_matches_pandas(self, dtype, exprfn, pdfn, label):
+        df = pd.DataFrame({"s": pd.array(self.DATA, dtype=dtype)})
+        phys = (
+            df.select(exprfn(col("s")).alias("r"))
+            .collect(use_physical_planner=True)["r"]
+            .tolist()
+        )
+        want = pdfn(pd.Series(self.DATA)).tolist()
+        assert str(phys) == str(want)
+
+    @pytest.mark.parametrize("dtype", ["object", "string[pyarrow]"])
+    def test_match_anchored_not_search(self, dtype):
+        # The discriminating case: a pattern that appears mid-string only.
+        data = ["abc", "bcd", "xab"]
+        df = pd.DataFrame({"s": pd.array(data, dtype=dtype)})
+        phys = (
+            df.select(col("s").str.match("b").alias("r"))
+            .collect(use_physical_planner=True)["r"]
+            .tolist()
+        )
+        want = pd.Series(data).str.match("b").tolist()
+        assert list(phys) == list(want) == [False, True, False]
