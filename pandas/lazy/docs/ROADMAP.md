@@ -43,11 +43,23 @@ landed). Dated performance reports live in `../benchmarks/`.
 >   (`pd.duplicated` 27.5 ms vs Polars 25.2 ms) and does not parallelize
 >   (hash-partition route 0.07x — the partition needs its own sort). The LP↔PL
 >   gap is diffuse (small cross/anti joins + materializations), no single lever.
+> - **q18 (0.40x) architectural probe — group-state kernel is a NO-GO
+>   in-context.** A direct-address `np.bincount` group-by (single bounded int
+>   key, sum/count/mean) beats Polars 1.21x and arrow 1.93x *isolated* on q18's
+>   18M→4.5M group, but built + A/B'd it **ties the existing partition-parallel
+>   arrow kernel in-context** (q18 0.97x, all-22 exact): the isolated win was vs
+>   *raw* arrow (388 ms); the shipped parallel kernel is already 299 ms, and
+>   bincount + the mandatory arrow→numpy→arrow round-trip (+73 ms) lands at
+>   parity. Polars' edge is native columnar flow (no round-trip), not the
+>   kernel. Reverted; third confirmation q18 is substrate-bound
+>   (`Q18_DECOMP.md`).
 > - **Lesson (reaffirmed): kernel-routing wins are compute-bound and are now
->   harvested (q13).** Bandwidth-bound ops (q21 sort, q22 distinct) are already
->   at/near parity and don't yield to threads. What remains on the scorecard is
->   the architectural/substrate wall (join chains, high-card groupby,
->   small-query floors) — not more routing gaps.
+>   harvested (q13).** Bandwidth-bound ops (q21 sort, q22 distinct) and the
+>   high-card group-by (q18) are already at/near the parallel-kernel ceiling and
+>   don't yield to a hand-written kernel. What remains on the scorecard is the
+>   architectural/substrate wall (join chains, high-card groupby, small-query
+>   floors) — closing it needs the execution model (native columnar flow /
+>   pipelining), not more kernels or routing gaps.
 
 > **Refreshed 2026-06-16 (post plumbing-harvest session).** SF-3 TPC-H S1
 > geo-mean **~0.42x** (run-to-run 0.42–0.45x; machine loaded), all 22 exact;

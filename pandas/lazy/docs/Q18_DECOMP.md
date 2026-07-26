@@ -118,3 +118,30 @@ Python-orchestrated engine** — the in-context arrow path is already close, and
 the orchestration overhead negates the kernel win. Confirms (now with a built,
 measured attempt) that closing this needs the execution model, not a kernel; the
 double-lineitem-scan optimizer lever remains the only small bounded option.
+
+## Direct-address probe (2026-07-25) — second confirmation, cleaner kernel
+
+Re-attacked q18's inner group-by with the *simplest possible* substrate kernel:
+for a single bounded int key, `np.bincount` straight into a dense accumulator
+(`key - kmin`) — no hash, no sort, no partition. It is even leaner than the
+scan-in-place kernel, and **isolated it beats Polars**: on the real q18 shape
+(18M → 4.5M) bincount-sum **198 ms vs Polars 238 ms (1.21x) vs raw arrow 388 ms
+(1.93x)**; holds on the q3/q10 post-join shape (1.35x). Gate scoped by density
+sweep: wins at density ≳ 0.25 with a bounded accumulator, loses when sparse
+(0.05 → 0.35x, 5.8 GB acc) or low-card (Arrow's tiny-hash path wins).
+
+**Built default-off, wired into `_grouped_arrow_table`, controlled A/B — and it
+ties in-context (q18 0.97x, all-22 exact).** Root cause pinned by measuring the
+kernel swap on the real arrow table: OFF (existing partition-parallel arrow) =
+**299 ms**; ON (direct-address) = **295 ms** = extract 24 + bincount 222 +
+assemble 49. The isolated 198 ms compared against *raw single-threaded* arrow
+(388); the engine's **already-shipped parallel kernel is 299 ms**, and once
+bincount pays the mandatory arrow→numpy→arrow round-trip (+73 ms) it lands at
+parity with it — both ~1.25x off Polars. **Polars' edge is its native columnar
+flow with no round-trip, not a better group-by kernel.** Reverted (not kept as
+foundation — it adds nothing the parallel kernel doesn't already give). The only
+integration point that could capture the ~77 ms round-trip is a fully
+numpy-native group-by route (bypass arrow), a larger re-architecture with modest
+payoff and the same in-context-evaporation risk. Third independent confirmation
+(after Acero-fusion and scan-in-place) that q18's group-by is
+**execution-model/substrate-bound, not kernel-bound**.
