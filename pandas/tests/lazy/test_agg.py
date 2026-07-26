@@ -597,6 +597,36 @@ class TestGroupByHead:
         assert len(out) == len(expected)
 
 
+class TestCorrPairwiseComplete:
+    """Regression: corr must use pairwise-complete pairs (drop a row when
+    either input is null), matching pandas.Series.corr, in both engines."""
+
+    def test_corr_nulls_in_different_rows(self):
+        df = pd.DataFrame(
+            {"x": [1.0, 2.0, 3.0, 4.0, None], "y": [1.0, 2.0, 3.0, None, 5.0]}
+        )
+        for phys in (False, True):
+            got = float(
+                df.select(col("x").corr(col("y")).alias("r"))
+                .collect(use_physical_planner=phys)["r"]
+                .iloc[0]
+            )
+            assert np.isclose(got, df["x"].corr(df["y"]), rtol=1e-9)
+
+    def test_corr_no_nulls_matches(self):
+        rng = np.random.default_rng(0)
+        x = rng.standard_normal(200)
+        y = 0.5 * x + rng.standard_normal(200)
+        df = pd.DataFrame({"x": x, "y": y})
+        for phys in (False, True):
+            got = float(
+                df.select(col("x").corr(col("y")).alias("r"))
+                .collect(use_physical_planner=phys)["r"]
+                .iloc[0]
+            )
+            assert np.isclose(got, df["x"].corr(df["y"]), rtol=1e-9)
+
+
 class TestComputedGroupKeys:
     """Regression: a computed group key must be materialized before grouping."""
 
@@ -638,3 +668,34 @@ class TestComputedGroupKeys:
             .apply(lambda g: g["x"].sum() - g["y"].sum())
         )
         assert out["d"].tolist() == [exp.loc[0], exp.loc[1]]
+
+
+class TestAggregateNaNSkipping:
+    """Regression: physical reducing aggregates must skip NaN (not just null)
+    to match pandas, deterministically — the cached-Arrow path counted/summed
+    a float NaN as present, hash-routing-dependently."""
+
+    def test_count_over_nan_column(self):
+        from pandas.lazy import (
+            lit,
+            when,
+        )
+
+        df = pd.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, None], "y": [1.0, 2, 3, None, 5]})
+        xp = when(col("y").is_null()).then(lit(float("nan"))).otherwise(col("x"))
+        for phys in (False, True):
+            n = df.select(xp.count().alias("n")).collect(use_physical_planner=phys)
+            assert int(n["n"].iloc[0]) == 3
+
+    def test_scalar_aggregate_arithmetic_over_computed_column(self):
+        from pandas.lazy import (
+            lit,
+            when,
+        )
+
+        df = pd.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, None], "y": [1.0, 2, 3, None, 5]})
+        xp = when(col("y").is_null()).then(lit(float("nan"))).otherwise(col("x"))
+        r = df.select((xp.count() * xp.sum()).alias("r")).collect(
+            use_physical_planner=True
+        )
+        assert float(r["r"].iloc[0]) == 3 * 6.0  # count=3, sum=1+2+3

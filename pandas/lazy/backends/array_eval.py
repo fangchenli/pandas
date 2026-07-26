@@ -49,6 +49,32 @@ if TYPE_CHECKING:
 _NUMEXPR_MIN_ELEMENTS = 100_000
 
 
+def _condition_to_bool_array(condition) -> np.ndarray:
+    """Coerce a when()/case condition to a null-free NumPy bool array.
+
+    Nulls (Arrow null, pandas NA, or ``None`` in an object array) become
+    ``False`` so the row falls through to the otherwise branch, matching
+    pandas semantics and avoiding ``bool(NA)`` errors in ``np.where``.
+    """
+    if isinstance(condition, (pa.Array, pa.ChunkedArray)):
+        import pyarrow.compute as pc
+
+        condition = pc.fill_null(condition, False).to_numpy(zero_copy_only=False)
+    elif hasattr(condition, "fillna"):  # pandas Series / masked ExtensionArray
+        condition = condition.fillna(False)
+        condition = (
+            condition.to_numpy() if hasattr(condition, "to_numpy") else condition
+        )
+    condition = np.asarray(condition)
+    if condition.dtype == object:
+        import pandas as pd
+
+        condition = (
+            pd.array(condition, dtype="boolean").fillna(False).to_numpy(dtype=bool)
+        )
+    return condition.astype(bool, copy=False)
+
+
 def _coerce_temporal_scalar(arg):
     """Coerce a pandas Timestamp/Timedelta scalar to its NumPy equivalent.
 
@@ -58,6 +84,11 @@ def _coerce_temporal_scalar(arg):
     duck-typed ``getattr`` checks are cheap and avoid importing pandas on the
     hot path (a non-temporal scalar returns immediately).
     """
+    # A PyArrow scalar (e.g. a scalar aggregate result) is not a NumPy operand;
+    # unwrap it to its Python value so the NumPy kernels can use it (otherwise
+    # np.multiply(Int64Scalar, DoubleScalar) etc. raise TypeError).
+    if isinstance(arg, pa.Scalar):
+        arg = arg.as_py()
     to_dt64 = getattr(arg, "to_datetime64", None)
     if to_dt64 is not None:
         return to_dt64()
@@ -434,14 +465,19 @@ class ArrayEvaluator:
             if backend == "arrow":
                 import pyarrow.compute as pc
 
+                # A null condition must fall through to the otherwise branch
+                # (treat null as False), matching pandas when() semantics.
+                if isinstance(condition, (pa.Array, pa.ChunkedArray)):
+                    condition = pc.fill_null(condition, False)
                 # Arrow if_else: if_else(condition, if_true, if_false)
                 if not isinstance(value, (pa.Array, pa.ChunkedArray)):
                     value = pa.scalar(value)
                 result = pc.if_else(condition, value, result)
             else:
-                # NumPy where
-                if not isinstance(condition, np.ndarray):
-                    condition = np.asarray(condition)
+                # NumPy where — coerce a nullable-boolean condition so a null
+                # is False (falls through to otherwise) rather than raising
+                # "boolean value of NA is ambiguous".
+                condition = _condition_to_bool_array(condition)
                 if not isinstance(value, np.ndarray):
                     value = np.full_like(result, value)
                 result = np.where(condition, value, result)
@@ -614,6 +650,24 @@ class ArrayEvaluator:
         # float NaN is null); the bare cached pc.is_null does not, so route them
         # to the registered kernels (arrow/core.py) which set that option.
         if func in ("is_null", "is_not_null"):
+            return None
+
+        # Reducing aggregates must skip NaN to match pandas: a bare Arrow
+        # count/sum/mean treats a float NaN as a present value (count = len -
+        # null_count, sum propagates NaN), so a column mixing nulls and NaNs
+        # gives wrong, hash-routing-dependent results. Route these to the
+        # registered kernels (arrow/core.py) which apply _skipna.
+        if func in (
+            "count",
+            "sum",
+            "mean",
+            "min",
+            "max",
+            "std",
+            "var",
+            "median",
+            "product",
+        ):
             return None
 
         fn = get_arrow_function(func)

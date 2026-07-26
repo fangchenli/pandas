@@ -496,9 +496,18 @@ class Expr:
         --------
         >>> ldf.group_by("g").agg(col("x").corr(col("y")).alias("r"))
         """
-        n = self.count()
-        sx, sy = self.sum(), other.sum()
-        sxx, syy, sxy = (self * self).sum(), (other * other).sum(), (self * other).sum()
+        # Pairwise-complete: restrict both sides to the rows where BOTH are
+        # present, so all six leaf sums range over the same rows (matching
+        # ``pandas.Series.corr``). Mask with a float NaN sentinel (skipped by
+        # sum/count) rather than ``* 0`` (which the optimizer folds away) or a
+        # null literal (which makes the masked column object-dtyped and breaks
+        # the grouped-aggregate decomposition).
+        nan = lit(float("nan"))
+        xp = when(other.is_null()).then(nan).otherwise(self)
+        yp = when(self.is_null()).then(nan).otherwise(other)
+        n = xp.count()
+        sx, sy = xp.sum(), yp.sum()
+        sxx, syy, sxy = (xp * xp).sum(), (yp * yp).sum(), (xp * yp).sum()
         numerator = n * sxy - sx * sy
         denominator = ((n * sxx - sx * sx) * (n * syy - sy * sy)) ** 0.5
         return numerator / denominator
