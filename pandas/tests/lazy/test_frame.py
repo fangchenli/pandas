@@ -842,3 +842,62 @@ class TestManipulationVerbs:
         assert out["value"].tolist() == [10, 30, 20, 40]
         # melt is an alias.
         assert self._df().select().melt.__func__ is type(self._df().select()).unpivot
+
+
+class TestSchemaCollisionValidation:
+    """Column-name collisions must fail like pandas instead of silently
+    dropping/duplicating data under optimization or physical execution."""
+
+    def test_duplicate_aggregate_alias_raises(self):
+        df = pd.DataFrame({"g": [1, 1, 2], "v": [1, 2, 3], "w": [10, 20, 30]})
+        with pytest.raises(ValueError, match="Duplicate output column name 'x'"):
+            df.select().group_by("g").agg(
+                col("v").sum().alias("x"), col("w").sum().alias("x")
+            ).collect()
+
+    def test_aggregate_alias_matching_group_key_raises(self):
+        df = pd.DataFrame({"g": [1, 1, 2], "v": [1, 2, 3]})
+        with pytest.raises(ValueError, match="Duplicate output column name 'g'"):
+            df.select().group_by("g").agg(col("v").sum().alias("g")).collect()
+
+    def test_distinct_aggregate_names_ok(self):
+        df = pd.DataFrame({"g": [1, 1, 2], "v": [1, 2, 3], "w": [10, 20, 30]})
+        out = (
+            df.select()
+            .group_by("g")
+            .agg(col("v").sum().alias("vs"), col("w").sum().alias("ws"))
+            .collect()
+        )
+        assert set(out.columns) == {"g", "vs", "ws"}
+
+    def test_join_suffix_collision_raises(self):
+        from pandas.errors import MergeError
+
+        left = pd.DataFrame({"k": [1], "a": [10], "a_x": [100]})
+        right = pd.DataFrame({"k": [1], "a": [1]})
+        # Generated suffix a_x collides with an existing a_x; pandas raises.
+        with pytest.raises(MergeError, match="duplicate columns"):
+            left.select().join(right.select(), on="k").schema
+
+    def test_join_asymmetric_on_schema_matches_pandas(self):
+        left = pd.DataFrame({"k": [1], "x": [5]})
+        right = pd.DataFrame({"y": [1], "k": [9]})
+        lazy_cols = list(
+            left.select().join(right.select(), left_on="k", right_on="y").schema.names
+        )
+        pandas_cols = list(left.merge(right, left_on="k", right_on="y").columns)
+        assert lazy_cols == pandas_cols
+
+    def test_reset_index_name_collision_raises(self):
+        d = pd.DataFrame({"a": [10, 20, 30]})
+        d.index = pd.Index([100, 200, 300], name="a")
+        # Index name 'a' collides with column 'a'; pandas raises on insert.
+        with pytest.raises(ValueError, match="cannot insert a, already exists"):
+            d.select().reset_index().collect()
+        with pytest.raises(ValueError, match="cannot insert a, already exists"):
+            d.select().reset_index().collect(use_physical_planner=True)
+
+    def test_reset_index_no_collision_ok(self):
+        d = pd.DataFrame({"a": [1, 2], "b": [3, 4]}).set_index("a")
+        out = d.select().reset_index().collect(use_physical_planner=True)
+        assert list(out.columns) == ["a", "b"]

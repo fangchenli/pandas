@@ -719,15 +719,29 @@ class Aggregate(LogicalPlan):
         input_schema = self.input.resolve_schema()
         columns: dict[str, LazyDtype] = {}
 
+        def _add(name: str, dtype: LazyDtype) -> None:
+            # Group keys and aggregate outputs share one namespace. A plain
+            # dict would let a duplicate silently overwrite an earlier column
+            # (the logical schema then under-reports, eager emits duplicate
+            # labels, and physical execution raises a cryptic Arrow duplicate-
+            # field error). Reject it up front instead.
+            if name in columns:
+                raise ValueError(
+                    f"Duplicate output column name {name!r} in aggregation; "
+                    "group keys and aggregate outputs must be uniquely named "
+                    "(use .alias() to rename one)."
+                )
+            columns[name] = dtype
+
         # Add group-by columns first
         for expr in self.group_by:
             name = extract_output_name(expr)
-            columns[name] = infer_expr_dtype(expr._ir, input_schema)
+            _add(name, infer_expr_dtype(expr._ir, input_schema))
 
         # Add aggregation result columns
         for expr in self.agg_exprs:
             name = extract_output_name(expr)
-            columns[name] = infer_expr_dtype(expr._ir, input_schema)
+            _add(name, infer_expr_dtype(expr._ir, input_schema))
 
         return Schema(columns)
 
@@ -991,53 +1005,66 @@ class Join(LogicalPlan):
 
     def _resolve_schema_impl(self) -> Schema:
 
+        from pandas.errors import MergeError
+
         left_schema = self.left.resolve_schema()
         right_schema = self.right.resolve_schema()
+        left_names = left_schema.names
+        right_names = right_schema.names
+        left_set = set(left_names)
+        right_set = set(right_names)
         columns: dict[str, LazyDtype] = {}
 
-        # Determine join columns
-        if self.on is not None:
-            join_cols = set(self.on)
-        elif self.left_on is not None and self.right_on is not None:
-            join_cols = set(self.left_on)
-        else:
-            join_cols = set()
+        # Only an ``on`` join collapses a key to a single output column. With
+        # ``left_on``/``right_on`` both key columns are kept and are suffixed
+        # like any other overlap (matching pandas.merge).
+        merged_keys = set(self.on) if self.on is not None else set()
+
+        # pandas suffixes every column present on both sides except the
+        # collapsed ``on`` keys. Deriving the overlap from the real column
+        # sets (not from left_on alone) fixes the asymmetric
+        # left_on/right_on case where a right data column shares a name with
+        # a left key.
+        overlap = (left_set & right_set) - merged_keys
 
         # An outer-family join fills the non-preserved side with NaN/NA for
-        # unmatched rows, so those columns become nullable regardless of the
-        # source dtype. Keeping this truthful stops the optimizer from
-        # rewriting e.g. ``right_col - right_col -> 0`` on a left join and
-        # silently dropping the introduced nulls. (Conservative on the key
-        # columns of a right/outer join, which is safe.)
+        # unmatched rows, so those columns become nullable. Keeping this
+        # truthful stops the optimizer from rewriting ``right_col -
+        # right_col -> 0`` on a left join and dropping the introduced nulls.
         left_becomes_nullable = self.how in ("right", "outer")
         right_becomes_nullable = self.how in ("left", "outer")
 
-        # Add all left columns
-        for name in left_schema.names:
-            dtype = left_schema[name]
-            if left_becomes_nullable:
-                dtype = dtype.after_introducing_nulls()
-            if name in right_schema and name not in join_cols:
-                # Overlapping non-join column gets suffix
-                columns[name + self.suffix[0]] = dtype
-            else:
-                columns[name] = dtype
+        def _add(name: str, dtype: LazyDtype) -> None:
+            # A suffixed name that collides with an existing column silently
+            # overwrote it before, so projection pruning could drop the
+            # original and optimized execution would lose user data. pandas
+            # raises MergeError here; mirror that.
+            if name in columns:
+                raise MergeError(
+                    f"Passing 'suffixes' which cause duplicate columns "
+                    f"{{'{name}'}} is not allowed."
+                )
+            columns[name] = dtype
 
-        # Add right columns (excluding join columns if using 'on')
-        for name in right_schema.names:
-            if self.on is not None and name in join_cols:
-                continue  # Skip, already added from left
+        # Add all left columns
+        for name in left_names:
+            dtype = left_schema[name]
+            if name in merged_keys:
+                # Collapsed key: only a full outer join can leave it unmatched.
+                if self.how == "outer":
+                    dtype = dtype.after_introducing_nulls()
+            elif left_becomes_nullable:
+                dtype = dtype.after_introducing_nulls()
+            _add(name + self.suffix[0] if name in overlap else name, dtype)
+
+        # Add right columns (the collapsed ``on`` keys already came from left)
+        for name in right_names:
+            if name in merged_keys:
+                continue
             dtype = right_schema[name]
             if right_becomes_nullable:
                 dtype = dtype.after_introducing_nulls()
-            if name in left_schema and name not in join_cols:
-                # Overlapping non-join column gets suffix
-                columns[name + self.suffix[1]] = dtype
-            elif self.left_on is not None and name in set(self.right_on or ()):
-                # Right join column with different name
-                columns[name] = dtype
-            elif name not in columns:
-                columns[name] = dtype
+            _add(name + self.suffix[1] if name in overlap else name, dtype)
 
         return Schema(columns)
 
@@ -1201,11 +1228,16 @@ class ResetIndex(LogicalPlan):
             return Schema(dict(input_schema.fields))
 
         # drop=False: materialize the index as leading columns, then clear it.
-        # Index columns come first; a field with the same name (e.g. from
-        # set_index(drop=False)) is not duplicated.
-        new_fields = dict(input_schema.index_fields)
-        for name, dtype in input_schema.fields.items():
-            new_fields.setdefault(name, dtype)
+        # An index name that collides with an existing data column cannot be
+        # inserted; pandas raises here, and silently coalescing them (the old
+        # setdefault) let physical execution overwrite the index array with the
+        # data column and lose the index values. Match pandas.
+        new_fields: dict[str, LazyDtype] = {}
+        for name, dtype in input_schema.index_fields.items():
+            if name in input_schema.fields:
+                raise ValueError(f"cannot insert {name}, already exists")
+            new_fields[name] = dtype
+        new_fields.update(input_schema.fields)
         return Schema(new_fields)
 
     def children(self) -> list[LogicalPlan]:
