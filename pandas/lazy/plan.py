@@ -29,6 +29,20 @@ from pandas.lazy.types import (
 )
 
 
+def _fresh_range_index_fields(data_names) -> dict[str, LazyDtype]:
+    """Index metadata for an operator that emits a fresh default RangeIndex.
+
+    Aggregate and Join produce a brand-new positional index, which a later
+    ``reset_index()`` materializes as a leading integer column (matching
+    eager pandas). The column is named ``"index"`` unless that name is already
+    taken by a data column, in which case pandas falls back to ``"level_0"``.
+    """
+    import numpy as np
+
+    name = "index" if "index" not in data_names else "level_0"
+    return {name: LazyDtype("numeric", np.dtype("int64"), None, False)}
+
+
 def _unify_concat_dtypes(dtypes: list[LazyDtype]) -> LazyDtype:
     """Combine the dtypes of one column across the inputs of a vertical concat.
 
@@ -743,7 +757,9 @@ class Aggregate(LogicalPlan):
             name = extract_output_name(expr)
             _add(name, infer_expr_dtype(expr._ir, input_schema))
 
-        return Schema(columns)
+        # The aggregate output carries a fresh RangeIndex; model it so a
+        # later reset_index() reports the leading column like eager pandas.
+        return Schema(columns, index_fields=_fresh_range_index_fields(set(columns)))
 
     def children(self) -> list[LogicalPlan]:
         return [self.input]
@@ -1066,7 +1082,9 @@ class Join(LogicalPlan):
                 dtype = dtype.after_introducing_nulls()
             _add(name + self.suffix[1] if name in overlap else name, dtype)
 
-        return Schema(columns)
+        # A join produces a fresh RangeIndex; model it so a later
+        # reset_index() reports the leading column like eager pandas.
+        return Schema(columns, index_fields=_fresh_range_index_fields(set(columns)))
 
     def children(self) -> list[LogicalPlan]:
         return [self.left, self.right]

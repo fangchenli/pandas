@@ -184,16 +184,29 @@ class PhysicalResetIndex(PhysicalPlan):
 
         if not self.drop:
             # Add index columns as regular data columns
+            added_index = False
             if index_is_multi:
                 for i, idx_name in enumerate(index_names):
                     idx_col = index_col_name(i)
                     if idx_col in input_arrays:
                         col_name = idx_name if idx_name else f"level_{i}"
                         result[col_name] = input_arrays[idx_col]
+                        added_index = True
             elif INDEX_COL_NAME in input_arrays:
                 idx_name = index_names[0] if index_names else None
                 col_name = idx_name if idx_name else "index"
                 result[col_name] = input_arrays[INDEX_COL_NAME]
+                added_index = True
+
+            if not added_index:
+                # The input carries a fresh, never-materialized RangeIndex
+                # (e.g. the output of an aggregate or join). Eager pandas
+                # inserts it as a leading integer column; synthesize it so the
+                # physical result matches (name mirrors _fresh_range_index_fields).
+                n_rows = len(next(iter(input_arrays.values()))) if input_arrays else 0
+                data_names = {c for c in input_arrays if not is_index_col(c)}
+                col_name = "index" if "index" not in data_names else "level_0"
+                result[col_name] = np.arange(n_rows)
 
         # Copy all non-index columns
         for name, arr in input_arrays.items():

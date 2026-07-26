@@ -586,3 +586,51 @@ class TestEagerIndexContract:
         assert len(result) == 3
         assert list(result["row"]) == [0, 1, 2]
         assert list(result["a"]) == [1, 2, 3]
+
+
+class TestFreshRangeIndexResetIndex:
+    """reset_index() after an operation that produces a fresh RangeIndex
+    (aggregate/join) must add the leading index column like eager pandas, in
+    the logical schema, eager, and physical paths."""
+
+    def _cols(self, ldf):
+        logical = list(ldf.schema.names)
+        eager = list(ldf.collect().columns)
+        phys = list(ldf.collect(use_physical_planner=True).columns)
+        return logical, eager, phys
+
+    def test_reset_index_after_global_aggregate(self):
+        df = pd.DataFrame({"a": [1, 2, 3]})
+        logical, eager, phys = self._cols(df.select().sum().reset_index())
+        assert logical == eager == phys == ["index", "a"]
+
+    def test_reset_index_after_groupby_aggregate(self):
+        df = pd.DataFrame({"g": [1, 1, 2], "v": [10, 20, 30]})
+        ldf = df.select().group_by("g").agg(col("v").sum().alias("v")).reset_index()
+        logical, eager, phys = self._cols(ldf)
+        assert logical == eager == phys == ["index", "g", "v"]
+        e = ldf.collect().sort_values("g").reset_index(drop=True)
+        p = (
+            ldf.collect(use_physical_planner=True)
+            .sort_values("g")
+            .reset_index(drop=True)
+        )
+        tm.assert_frame_equal(e, p, check_dtype=False)
+
+    def test_reset_index_after_join(self):
+        left = pd.DataFrame({"k": [1, 2], "x": [10, 20]})
+        right = pd.DataFrame({"k": [1, 2], "y": [30, 40]})
+        ldf = left.select().join(right.select(), on="k").reset_index()
+        logical, eager, phys = self._cols(ldf)
+        assert logical == eager == phys == ["index", "k", "x", "y"]
+
+    def test_reset_index_name_collision_uses_level_0(self):
+        df = pd.DataFrame({"index": [5, 6, 7], "a": [1, 2, 3]})
+        logical, eager, phys = self._cols(df.select().sum().reset_index())
+        assert logical == eager == phys == ["level_0", "index", "a"]
+
+    def test_aggregate_without_reset_index_unaffected(self):
+        df = pd.DataFrame({"g": [1, 1, 2], "v": [10, 20, 30]})
+        ldf = df.select().group_by("g").agg(col("v").sum().alias("v"))
+        logical, eager, phys = self._cols(ldf)
+        assert logical == eager == phys == ["g", "v"]
