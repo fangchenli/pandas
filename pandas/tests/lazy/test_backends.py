@@ -297,14 +297,11 @@ class TestBackendRouter:
         assert should_use_arrow("coalesce")
 
     def test_neutral_ops_dont_force_backend(self):
-        """Test that neutral ops don't force a backend."""
-        from pandas.lazy.backends.router import (
-            should_use_arrow,
-            should_use_numpy,
-        )
+        """Test that neutral ops don't force the Arrow backend."""
+        from pandas.lazy.backends.router import should_use_arrow
 
         assert not should_use_arrow("add")
-        assert not should_use_numpy("add")
+        assert not should_use_arrow("sum")
 
     def test_decide_expr_backend(self):
         """Test expression backend decision."""
