@@ -1555,6 +1555,10 @@ when pandas runs inside an application that already parallelizes work:
    with pd.option_context("mode.max_threads", 1):
        df = pd.read_csv("large.csv")
 
+The same option governs every operation that pandas runs on threads, not just
+:func:`read_csv`. See :ref:`enhancingperf.parallelism` for the full list and
+for guidance on running pandas inside an already-parallel application.
+
 .. _io.remote:
 
 Reading/writing remote files

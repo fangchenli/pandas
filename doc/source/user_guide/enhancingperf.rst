@@ -435,6 +435,69 @@ before running a JIT function with ``parallel=True``.
 Generally if the you encounter a segfault (``SIGSEGV``) while using Numba, please report the issue
 to the `Numba issue tracker. <https://github.com/numba/numba/issues/new/choose>`__
 
+.. _enhancingperf.parallelism:
+
+Built-in parallelism
+--------------------
+
+A few pandas operations spread their work over several threads when the input
+is large enough to be worth it. This happens automatically; the results are
+always identical to the serial ones.
+
+Operations that may use threads:
+
+* :func:`read_csv` with the C engine, for large uncompressed local files (see
+  :ref:`io.csv.parallel`)
+* :meth:`Index.join` with ``how="inner"`` and :meth:`Index.intersection`, for
+  monotonic numeric indexes of at least one million rows
+* Gathering rows, which underlies :meth:`DataFrame.join`, :func:`merge`,
+  :meth:`DataFrame.reindex` and label-based indexing, for results of at least
+  one million elements
+
+Everything smaller runs serially: below those sizes, starting threads costs
+more than the work saved.
+
+.. _enhancingperf.max_threads:
+
+Controlling the number of threads
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``mode.max_threads`` option sets the ceiling. It defaults to the number of
+CPU cores capped at ``4``, and individual operations may use fewer where extra
+threads do not help. Set it to ``1`` to make pandas single-threaded:
+
+.. code-block:: python
+
+   with pd.option_context("mode.max_threads", 1):
+       result = left.join(right, how="inner")
+
+Or globally, for the lifetime of the process:
+
+.. code-block:: python
+
+   pd.set_option("mode.max_threads", 1)
+
+.. warning::
+
+   ``mode.max_threads`` is the only control over pandas' own thread pools.
+   They are plain Python thread pools, so ``threadpoolctl`` -- commonly used to
+   limit the native OpenMP and BLAS pools underneath NumPy and scikit-learn --
+   does **not** affect them.
+
+Running pandas inside a parallel application
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+If pandas already runs inside something that parallelizes work -- a Dask or
+joblib worker, a process pool, or a web server handling concurrent requests --
+the two layers can oversubscribe the machine: eight worker processes each
+starting four threads is thirty-two threads competing for the same cores.
+
+Set ``mode.max_threads`` to ``1`` in the worker so pandas stays serial and the
+outer layer keeps control of the parallelism.
+
+pandas creates its thread pools per call and shuts them down before returning,
+so no worker threads are alive between calls or across a :func:`os.fork`.
+
 .. _enhancingperf.eval:
 
 Expression evaluation via :func:`~pandas.eval`

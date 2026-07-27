@@ -460,11 +460,18 @@ with cf.config_prefix("mode"):
 
 max_threads_doc = """
 : int or None
-    Maximum number of worker threads for parallel operations (e.g. ``read_csv``
-    for large files).  ``None`` (the default) means use ``min(os.cpu_count(), 4)``.
-    Set to ``1`` to disable parallel execution, or to a fixed number to raise the
-    cap or to limit thread usage when pandas is embedded in a larger parallel
-    workflow.
+    Maximum number of worker threads for parallel operations, such as
+    ``read_csv`` on large files, joins on large monotonic indexes, and gathers
+    of many rows.  ``None`` (the default) means use ``min(os.cpu_count(), 4)``;
+    individual operations may cap this lower where extra threads do not help.
+    Set to ``1`` to disable parallel execution, or to a fixed number to raise
+    the cap.
+
+    This option is the only control over pandas' own thread pools.  Those are
+    plain Python thread pools, so ``threadpoolctl`` -- which limits native
+    OpenMP and BLAS pools -- has no effect on them.  Set this to ``1`` when
+    pandas runs inside something that already parallelizes work, such as a Dask
+    or joblib worker, so the two layers do not oversubscribe the machine.
 """
 
 

@@ -136,12 +136,19 @@ def take_nd(
 # more than it saves: the thread pool alone is ~100us, against a take that is
 # well under that.  Measured break-even is around 200k elements and the win is
 # solid by ~800k, so this leaves margin on machines that have not been measured.
+#
+# take_nd sits under .iloc, reindex and groupby, so it is the most likely of
+# pandas' threaded paths to fire inside somebody else's parallel loop.  The high
+# threshold is the main thing keeping that from oversubscribing -- only gathers
+# big enough to be worth it start any threads at all.  See GH#43313 for the
+# wider discussion of how pandas should expose parallelism.
 _PARALLEL_TAKE_MIN_ELEMENTS = 1_000_000
 
 # A gather is bandwidth-bound rather than compute-bound: measured 2.5-3.0x at
 # two threads, no better at four, and worse at eight.  Taking more than two
 # would burn threads for nothing and oversubscribe callers that are themselves
-# threaded.
+# threaded.  ``mode.max_threads`` lowers this further, and is the only way to:
+# ``threadpoolctl`` limits native OpenMP and BLAS pools, not Python-level ones.
 _MAX_TAKE_WORKERS = 2
 
 
@@ -190,6 +197,8 @@ def _take_in_parallel(
             sub = out[:, start:stop]
         func(arr, indexer[start:stop], sub, fill_value, allow_fill=needs_fill)
 
+    # The pool is created and joined inside this call, so no worker threads
+    # survive it and none are live across a caller's fork().
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         # consume the iterator so worker exceptions propagate here
         list(executor.map(run, range(n_workers)))

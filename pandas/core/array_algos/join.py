@@ -39,12 +39,18 @@ if TYPE_CHECKING:
 # is warm.  A pool is created per call here (as ``read_csv`` does), which is the
 # expensive end of that range, and the measurements come from a single machine,
 # so the threshold is set well above the worst observed crossover.
+#
+# The high threshold is also what keeps this from oversubscribing: only joins
+# large enough to be worth several threads ever start any.  See GH#43313 for the
+# wider discussion of how pandas should expose parallelism.
 _PARALLEL_JOIN_MIN_ROWS = 1_000_000
 
 # Parallel joins see diminishing returns beyond a handful of workers -- the
 # output-writing half is memory-bound and stops scaling well before the scan
 # does -- and a low default avoids oversubscribing the machine.  Users who want
-# more can opt in explicitly via ``mode.max_threads``.
+# more can opt in explicitly via ``mode.max_threads``, which is also how a
+# caller that already parallelizes work (a Dask or joblib worker, say) turns
+# this off; ``threadpoolctl`` does not see Python-level pools.
 _MAX_DEFAULT_WORKERS = 4
 
 
@@ -150,6 +156,9 @@ def inner_join_indexer(
     lviews = [left[a:b] for a, b in pairwise(bounds)]
     rviews = [right[a:b] for a, b in zip(rstart, rstop, strict=True)]
 
+    # The pool is created and joined inside this call, so no worker threads
+    # survive it.  That costs some warm-up on every call, but it keeps pandas
+    # from holding live threads across a caller's fork().
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
         counts = np.fromiter(
             executor.map(libjoin.inner_join_count_range, lviews, rviews),
