@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import functools
+import os
+import sys
 from typing import (
     TYPE_CHECKING,
     cast,
@@ -9,6 +12,8 @@ from typing import (
 import warnings
 
 import numpy as np
+
+from pandas._config import get_option
 
 from pandas._libs import (
     algos as libalgos,
@@ -127,6 +132,69 @@ def take_nd(
     return _take_nd_ndarray(arr, indexer, axis, fill_value, allow_fill)
 
 
+# Below this many output elements, splitting the gather across threads costs
+# more than it saves: the thread pool alone is ~100us, against a take that is
+# well under that.  Measured break-even is around 200k elements and the win is
+# solid by ~800k, so this leaves margin on machines that have not been measured.
+_PARALLEL_TAKE_MIN_ELEMENTS = 1_000_000
+
+# A gather is bandwidth-bound rather than compute-bound: measured 2.5-3.0x at
+# two threads, no better at four, and worse at eight.  Taking more than two
+# would burn threads for nothing and oversubscribe callers that are themselves
+# threaded.
+_MAX_TAKE_WORKERS = 2
+
+
+def _take_n_workers() -> int:
+    """
+    Worker count for a parallel gather, honouring ``mode.max_threads``.
+
+    Only called once the cheap size gate has passed -- reading the option and
+    ``os.cpu_count()`` costs more than a small take does outright.
+    """
+    if sys.platform == "emscripten":
+        # WASM cannot spawn threads, regardless of mode.max_threads.
+        return 1
+    max_threads = get_option("mode.max_threads")
+    if max_threads is not None:
+        return min(max_threads, _MAX_TAKE_WORKERS)
+    return min(os.cpu_count() or 1, _MAX_TAKE_WORKERS)
+
+
+def _take_in_parallel(
+    func,
+    arr: np.ndarray,
+    indexer: npt.NDArray[np.intp],
+    out: np.ndarray,
+    fill_value,
+    needs_fill: bool,
+    axis: AxisInt,
+    n_workers: int,
+) -> None:
+    """
+    Run *func* over row-chunks of *indexer*, each writing a disjoint slice of *out*.
+
+    Splitting the indexer splits the output along the same axis, so the chunks
+    never overlap and no combining step is needed.  The take kernels release the
+    GIL for non-object dtypes, so the chunks genuinely run in parallel.
+    """
+    bounds = np.linspace(0, indexer.shape[0], n_workers + 1).astype(np.intp)
+
+    def run(i: int) -> None:
+        start, stop = int(bounds[i]), int(bounds[i + 1])
+        if start == stop:
+            return
+        if out.ndim == 1 or axis == 0:
+            sub = out[start:stop]
+        else:
+            sub = out[:, start:stop]
+        func(arr, indexer[start:stop], sub, fill_value, allow_fill=needs_fill)
+
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        # consume the iterator so worker exceptions propagate here
+        list(executor.map(run, range(n_workers)))
+
+
 def _take_nd_ndarray(
     arr: np.ndarray,
     indexer: npt.NDArray[np.intp] | None,
@@ -173,7 +241,25 @@ def _take_nd_ndarray(
         _, needs_fill = mask_info
     else:
         needs_fill = allow_fill
-    func(arr, indexer, out, fill_value, allow_fill=needs_fill)
+
+    # Cheap gate first: the overwhelming majority of takes are small, and
+    # resolving a worker count costs more than they do.  Object dtype holds the
+    # GIL inside the kernel, so threads would not help it.
+    if (
+        out.size >= _PARALLEL_TAKE_MIN_ELEMENTS
+        and indexer.shape[0] >= 2
+        and object not in (arr.dtype, out.dtype)
+    ):
+        n_workers = _take_n_workers()
+    else:
+        n_workers = 1
+
+    if n_workers > 1:
+        _take_in_parallel(
+            func, arr, indexer, out, fill_value, needs_fill, axis, n_workers
+        )
+    else:
+        func(arr, indexer, out, fill_value, allow_fill=needs_fill)
 
     if flip_order:
         out = out.T
