@@ -4,6 +4,7 @@ set operations.
 """
 
 from datetime import datetime
+from itertools import pairwise
 import operator
 
 import numpy as np
@@ -17,6 +18,7 @@ from pandas.core.dtypes.cast import find_common_type
 from pandas import (
     CategoricalDtype,
     CategoricalIndex,
+    DatetimeIndex,
     DatetimeTZDtype,
     Index,
     MultiIndex,
@@ -1060,3 +1062,177 @@ def test_union_disjoint_monotonic_sorted():
     result_false = idx1.union(idx2, sort=False)
     expected_false = Index([5, 6, 7, 1, 2, 3])
     tm.assert_index_equal(result_false, expected_false)
+
+
+class TestIntersectionUniqueSorted:
+    # The libjoin merge emits keys in order, so intersection drops duplicates
+    # with a linear scan instead of building a hash table.
+    @pytest.mark.parametrize(
+        "values",
+        [
+            [],
+            [5],
+            [1, 1, 1, 1],
+            [1, 2, 3],
+            [1, 1, 2, 3, 3, 3, 4],
+            [-0.0, 0.0, 1.0],
+            [0.0, -0.0],
+            [1.5, 1.5, 2.5],
+        ],
+    )
+    def test_unique_sorted_matches_unique1d(self, values):
+        from pandas.core.algorithms import (
+            unique1d,
+            unique_sorted,
+        )
+
+        arr = np.array(values)
+        result = unique_sorted(arr)
+        expected = unique1d(arr)
+
+        tm.assert_numpy_array_equal(result, expected)
+        if arr.dtype.kind == "f":
+            # assert_numpy_array_equal considers -0.0 == 0.0, so compare the
+            # sign bits explicitly or a signed-zero change would slip through
+            tm.assert_numpy_array_equal(np.signbit(result), np.signbit(expected))
+
+    @pytest.mark.parametrize(
+        "dtype",
+        [
+            "int64",
+            "int32",
+            "uint64",
+            "float64",
+            "Int64",
+            "Float64",
+            pytest.param("int64[pyarrow]", marks=td.skip_if_no("pyarrow")),
+            pytest.param("float64[pyarrow]", marks=td.skip_if_no("pyarrow")),
+        ],
+    )
+    def test_intersection_drops_duplicates(self, dtype):
+        # duplicates on both sides, and in the merge output
+        left = Index([1, 1, 2, 3, 3, 5], dtype=dtype)
+        right = Index([1, 2, 2, 3, 4], dtype=dtype)
+
+        result = left.intersection(right)
+
+        expected = Index([1, 2, 3], dtype=dtype)
+        tm.assert_index_equal(result, expected)
+
+    @pytest.mark.parametrize(
+        "dtype",
+        [
+            "int64",
+            "float64",
+            "Int64",
+            pytest.param("int64[pyarrow]", marks=td.skip_if_no("pyarrow")),
+        ],
+    )
+    def test_intersection_already_unique(self, dtype):
+        left = Index(range(20), dtype=dtype)
+        right = Index(range(10, 30), dtype=dtype)
+
+        result = left.intersection(right)
+
+        expected = Index(range(10, 20), dtype=dtype)
+        tm.assert_index_equal(result, expected)
+
+    def test_intersection_all_duplicates(self):
+        left = Index([7] * 10)
+        right = Index([7] * 4)
+
+        tm.assert_index_equal(left.intersection(right), Index([7]))
+
+    def test_intersection_empty_result(self):
+        left = Index([1, 1, 2, 2])
+        right = Index([5, 5, 6])
+
+        result = left.intersection(right)
+        tm.assert_index_equal(result, Index([], dtype="int64"))
+
+    def test_intersection_datetime_not_numeric_path(self):
+        # datetimelike dtypes are not numeric, so they keep the
+        # take/drop_duplicates path
+        left = DatetimeIndex(["2020-01-01", "2020-01-01", "2020-01-02"])
+        right = DatetimeIndex(["2020-01-01", "2020-01-03"])
+
+        result = left.intersection(right)
+
+        tm.assert_index_equal(result, DatetimeIndex(["2020-01-01"]))
+
+
+def test_get_join_target_preserves_monotonicity(index):
+    # unique_sorted, used by Index._intersection, relies on the libjoin merge
+    # emitting sorted output.  That follows from _get_join_target() being
+    # sorted -- which is a different array from the index values for masked,
+    # Arrow, datetimelike and categorical dtypes.  _can_use_libjoin only checks
+    # the index itself, so pin the implication here.
+    try:
+        idx = index.sort_values()
+    except TypeError:
+        pytest.skip("index is not sortable")
+
+    if not idx._can_use_libjoin:
+        pytest.skip("does not take the libjoin path")
+
+    target = idx._get_join_target()
+    if not isinstance(target, np.ndarray) or target.size < 2:
+        pytest.skip("no ndarray join target to check")
+
+    if target.dtype == object:
+        monotonic = all(a <= b for a, b in pairwise(target))
+    else:
+        monotonic = bool((target[1:] >= target[:-1]).all())
+
+    assert monotonic, (
+        f"{type(idx).__name__}[{idx.dtype}] is monotonic but its join target "
+        f"is not; unique_sorted would leave duplicates in the result"
+    )
+
+
+class TestIntersectionSignedZero:
+    # -0.0 and 0.0 compare equal, but PyArrow's unique kernel keeps both while
+    # NumPy comparison-based deduplication keeps only the first.  Intersection
+    # must not change which of those a dtype gets, so Arrow-backed values stay
+    # on the hash table.
+    @pytest.mark.parametrize(
+        "dtype, expected, expected_signbits",
+        [
+            ("float64", [0.0], [True]),
+            ("float32", [0.0], [True]),
+            ("Float64", [0.0], [True]),
+            pytest.param(
+                "float64[pyarrow]",
+                [0.0, 0.0],
+                [True, False],
+                marks=td.skip_if_no("pyarrow"),
+            ),
+            pytest.param(
+                "float32[pyarrow]",
+                [0.0, 0.0],
+                [True, False],
+                marks=td.skip_if_no("pyarrow"),
+            ),
+        ],
+    )
+    def test_intersection_signed_zero(self, dtype, expected, expected_signbits):
+        left = Index([-0.0, 0.0, 1.0], dtype=dtype)
+        right = Index([-0.0, 0.0, 2.0], dtype=dtype)
+
+        result = left.intersection(right)
+
+        values = np.asarray(result, dtype="float64")
+        tm.assert_numpy_array_equal(values, np.array(expected, dtype="float64"))
+        # the sign bits are the whole point; assert_numpy_array_equal alone
+        # cannot tell -0.0 from 0.0
+        tm.assert_numpy_array_equal(
+            np.signbit(values), np.array(expected_signbits, dtype=bool)
+        )
+
+    @pytest.mark.parametrize("dtype", ["int64", "Int64", "uint64"])
+    def test_intersection_zero_no_sign_for_integers(self, dtype):
+        # integers have no signed zero, so the fast path applies unchanged
+        left = Index([0, 0, 1], dtype=dtype)
+        right = Index([0, 0, 2], dtype=dtype)
+
+        tm.assert_index_equal(left.intersection(right), Index([0], dtype=dtype))

@@ -500,6 +500,42 @@ def unique_with_mask(values, mask: npt.NDArray[np.bool_] | None = None):
 unique1d = unique
 
 
+def unique_sorted(values: np.ndarray) -> np.ndarray:
+    """
+    Unique values of a non-decreasing array, preserving order.
+
+    Equivalent to :func:`unique1d` for sorted input, but duplicates are adjacent
+    there, so they can be dropped with a linear scan instead of by building a
+    hash table.
+
+    The caller is responsible for having verified that `values` is sorted;
+    sorted arrays contain no NA values (NAs break monotonicity checks), so NA
+    handling is not needed.  ``-0.0`` and ``0.0`` compare equal here exactly as
+    they do in the hash table, so the first of the pair is kept either way.
+
+    Parameters
+    ----------
+    values : ndarray
+        Non-decreasing, free of NAs.
+
+    Returns
+    -------
+    ndarray
+        The unique values, in the same order.  May be `values` itself when it
+        is already unique, so callers must not mutate the result in place.
+    """
+    if values.size <= 1:
+        return values
+
+    keep = np.empty(values.shape, dtype=bool)
+    keep[0] = True
+    np.not_equal(values[1:], values[:-1], out=keep[1:])
+    if keep.all():
+        # already unique; avoid copying
+        return values
+    return values[keep]
+
+
 _MINIMUM_COMP_ARR_LEN = 1_000_000
 
 # Integers with magnitude <= 2**53 are exactly representable as float64; above

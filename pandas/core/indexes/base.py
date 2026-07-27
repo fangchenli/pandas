@@ -415,6 +415,38 @@ class Index(IndexOpsMixin, PandasObject):
         return joined, lidx, ridx
 
     @final
+    def _inner_indexer_unique(self, other: Self) -> ArrayLike:
+        """
+        The unique joined values of an inner join, for intersection.
+
+        Deduplicating before converting back to this index's array type keeps
+        the conversion off the duplicates, which matters for masked and
+        Arrow-backed dtypes where _from_join_target builds a new array.
+
+        unique_sorted requires sorted input.  Callers reach this only when both
+        indexes pass _can_use_libjoin, which requires is_monotonic_increasing
+        and so rules out NAs; the join targets are ordered the same way as the
+        indexes themselves, and the merge walks them in step, so its output is
+        non-decreasing.  test_get_join_target_preserves_monotonicity pins the
+        middle step, which is the one that is not self-evident.
+        """
+        # Caller is responsible for ensuring other.dtype == self.dtype
+        sv = self._get_join_target()
+        ov = other._get_join_target()
+        joined_ndarray, _, _ = libjoin.inner_join_indexer(sv, ov)
+
+        if isinstance(self._values, ArrowExtensionArray):
+            # Arrow-backed values keep the hash table.  PyArrow's unique kernel
+            # treats -0.0 and 0.0 as distinct where an elementwise NumPy
+            # comparison does not, so deduplicating the NumPy target would
+            # silently change what those intersections return.  Arrow has its
+            # own kernel for this (run-end encoding); wiring it up is a
+            # separate change.
+            return algos.unique1d(self._from_join_target(joined_ndarray))
+
+        return self._from_join_target(algos.unique_sorted(joined_ndarray))
+
+    @final
     def _outer_indexer(
         self, other: Self
     ) -> tuple[ArrayLike, npt.NDArray[np.intp], npt.NDArray[np.intp]]:
@@ -3473,21 +3505,31 @@ class Index(IndexOpsMixin, PandasObject):
         intersection specialized to the case with matching dtypes.
         """
         if self._can_use_libjoin and other._can_use_libjoin:
-            try:
-                res_indexer, indexer, _ = self._inner_indexer(other)  # pyright: ignore[reportArgumentType]
-            except TypeError:
-                # non-comparable; should only be for object dtype
-                pass
-            else:
-                # TODO: algos.unique1d should preserve DTA/TDA
-                if is_numeric_dtype(self.dtype):
-                    # This is faster, because Index.unique() checks for uniqueness
-                    # before calculating the unique values.
-                    res = algos.unique1d(res_indexer)
+            res: ArrayLike
+            if is_numeric_dtype(self.dtype):
+                # Both inputs are monotonic increasing, so the merge emits its
+                # keys in order and any duplicates are adjacent; a linear scan
+                # is much cheaper than the hash table algos.unique1d would
+                # build.  Deduplicating inside _inner_indexer_unique also keeps
+                # the conversion back to this index's array type off the
+                # duplicates.
+                try:
+                    res = self._inner_indexer_unique(other)  # pyright: ignore[reportArgumentType]
+                except TypeError:
+                    # non-comparable; should only be for object dtype
+                    pass
                 else:
+                    return ensure_wrapped_if_datetimelike(res)  # type: ignore[no-untyped-call]
+            else:
+                try:
+                    _, indexer, _ = self._inner_indexer(other)  # pyright: ignore[reportArgumentType]
+                except TypeError:
+                    pass
+                else:
+                    # TODO: algos.unique1d should preserve DTA/TDA
                     result = self.take(indexer)
                     res = result.drop_duplicates()  # type: ignore[assignment]
-                return ensure_wrapped_if_datetimelike(res)  # type: ignore[no-untyped-call]
+                    return ensure_wrapped_if_datetimelike(res)  # type: ignore[no-untyped-call]
 
         res_values = self._intersection_via_get_indexer(other, sort=sort)
         res_values = _maybe_try_sort(res_values, sort)  # type: ignore[assignment]
