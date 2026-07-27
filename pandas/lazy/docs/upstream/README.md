@@ -45,7 +45,8 @@ doc** below that a fresh agent can execute end-to-end without prior context.
 | AG7 | Arrow↔NumPy/pandas boundary tax | **SCOPED → not an Arrow gap** (dtype-model mismatch; clean numeric already zero-copy) | — | `AG7-boundary-tax.md` |
 | AG8 | Gandiva expression-JIT unpackaged / not in Acero | **SCOPED → low value** (Acero project already removes the materialization tax; chain-JIT redundant) | — | `../MATERIALIZATION_EXPERIMENT.md` addendum + `../ARROW_GAPS.md` R2 |
 | AG12 | Temporal unit downcast has no floor rounding (`*_temporal` missing `duration` kernel; `cast` truncates toward zero) | **DUP → comment on #50395** (gap #1); gap #2 no issue | 3 | `AG12-arrow-temporal-duration-floor.md` |
-| E–H | pd.merge GIL; FT overhead; np.argsort | **not hand-off-ready** (characterization / needs scoping) | — | tracked in `../ARROW_GAPS.md` + `../PERF_CEILING.md` |
+| E | **pandas** `libjoin` numeric merge-join is single-threaded / GIL-held (GH #51364) — parallelize without Rust; evaluate free-threading (PEP 703) as the answer to the "isolation trap" | **hand-off-ready** — implementation+measurement task (not a bug-find); premise proven by our lazy `nogil` join kernels; nothing filed | 3 | `E-parallel-libjoin-freethreading.md` |
+| F–H | FT overhead; np.argsort; other | **not hand-off-ready** (characterization / needs scoping) | — | tracked in `../ARROW_GAPS.md` + `../PERF_CEILING.md` |
 
 ## Shared playbook (every hand-off assumes these)
 
