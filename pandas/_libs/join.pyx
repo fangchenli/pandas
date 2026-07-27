@@ -298,6 +298,13 @@ def ffill_indexer(const intp_t[:] indexer) -> np.ndarray:
 
 # right might contain non-unique values
 
+# These size their output in a first pass and fill it in a second.  Both passes
+# release the GIL for non-object dtypes, so the pair is no longer atomic with
+# respect to other Python threads: a caller that mutates `left` or `right`
+# between them can make the fill pass emit more pairs than the count pass
+# allocated for.  Callers must not mutate the inputs for the duration of the
+# call -- the same contract every other nogil kernel in _libs relies on.
+
 @cython.wraparound(False)
 @cython.boundscheck(False)
 def left_join_indexer_unique(
@@ -646,22 +653,35 @@ def inner_join_fill_range(
     Py_ssize_t out_offset,
     Py_ssize_t lbase,
     Py_ssize_t rbase,
-) -> None:
+) -> int:
     """
     Write this chunk's pairs into out_* starting at out_offset.
 
     `lbase`/`rbase` are the offsets of these sub-ranges within the full arrays,
-    so the emitted indexers refer to the full arrays.  The caller is
-    responsible for sizing out_* via inner_join_count_range, which guarantees
-    the writes stay inside [out_offset, out_offset + count).
+    so the emitted indexers refer to the full arrays.  Returns the number of
+    pairs written, which the caller should check against the
+    inner_join_count_range it sized the output with.
+
+    Writes are hard-bounded by the length of out_*: these arrays come from the
+    caller, and the merge loop runs with bounds checking off, so a short output
+    must truncate rather than write past the end.
     """
     cdef:
         Py_ssize_t i = 0, j = 0, count = 0
         Py_ssize_t nleft = len(left), nright = len(right)
+        Py_ssize_t capacity
         numeric_t lval, rval
 
-    if nleft == 0 or nright == 0:
-        return
+    if len(out_lindexer) != len(out_rindexer) or len(out_lindexer) != len(out_result):
+        raise ValueError(
+            "out_result, out_lindexer and out_rindexer must be equal length"
+        )
+    if out_offset < 0 or out_offset > len(out_lindexer):
+        raise ValueError("out_offset out of bounds")
+
+    capacity = len(out_lindexer) - out_offset
+    if nleft == 0 or nright == 0 or capacity == 0:
+        return 0
 
     with nogil:
         while True:
@@ -673,6 +693,11 @@ def inner_join_fill_range(
             lval = left[i]
             rval = right[j]
             if lval == rval:
+                if count == capacity:
+                    # output is shorter than the walk needs; stop rather than
+                    # write past the end and let the caller notice via the
+                    # returned count
+                    break
                 out_lindexer[out_offset + count] = lbase + i
                 out_rindexer[out_offset + count] = rbase + j
                 out_result[out_offset + count] = lval
@@ -695,6 +720,8 @@ def inner_join_fill_range(
                 i += 1
             else:
                 j += 1
+
+    return count
 
 
 @cython.wraparound(False)

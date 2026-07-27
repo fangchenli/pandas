@@ -59,18 +59,22 @@ def _n_workers() -> int:
     return min(os.cpu_count() or 1, _MAX_DEFAULT_WORKERS)
 
 
-def _can_parallelize(left: np.ndarray, right: np.ndarray, n_workers: int) -> bool:
-    """Whether the parallel path applies to these inputs."""
-    if n_workers < 2:
+def _can_parallelize(left: np.ndarray, right: np.ndarray) -> bool:
+    """
+    Whether these inputs are worth splitting.
+
+    Deliberately cheap, and checked *before* _n_workers(): the overwhelming
+    majority of joins are small, and reading ``mode.max_threads`` plus
+    ``os.cpu_count()`` costs more than the whole serial merge does at that size.
+    """
+    if min(left.shape[0], right.shape[0]) < _PARALLEL_JOIN_MIN_ROWS:
         return False
     if left.dtype != right.dtype or left.dtype.kind not in "iuf":
         # object dtype holds the GIL in the kernel, so threads would not help
         return False
     if left.ndim != 1 or right.ndim != 1:
         return False
-    if not (left.flags.c_contiguous and right.flags.c_contiguous):
-        return False
-    return min(left.shape[0], right.shape[0]) >= _PARALLEL_JOIN_MIN_ROWS
+    return bool(left.flags.c_contiguous and right.flags.c_contiguous)
 
 
 def _key_boundaries(left: np.ndarray, n_chunks: int) -> npt.NDArray[np.intp]:
@@ -85,9 +89,14 @@ def _key_boundaries(left: np.ndarray, n_chunks: int) -> npt.NDArray[np.intp]:
     """
     n = left.shape[0]
     approx = np.linspace(0, n, n_chunks + 1)[1:-1].astype(np.intp)
-    # searchsorted(side="right") gives the first index past the run of equal
-    # keys containing each split point.
-    snapped = np.searchsorted(left, left[approx], side="right")
+    keys = left[approx]
+    # Either end of the run containing a split point is a valid boundary.
+    # Prefer the end of the run, but fall back to its start when the end would
+    # land past the last element -- otherwise a split point landing anywhere in
+    # the final run is discarded and the whole join silently runs serially.
+    after = np.searchsorted(left, keys, side="right")
+    before = np.searchsorted(left, keys, side="left")
+    snapped = np.where(after < n, after, before)
     inner = np.unique(snapped[(snapped > 0) & (snapped < n)])
     return np.concatenate(
         [
@@ -125,8 +134,11 @@ def inner_join_indexer(
     identical to the serial indexer for every input; the parallel path is used
     only when it is expected to pay off, and falls back silently otherwise.
     """
+    if not _can_parallelize(left, right):
+        return libjoin.inner_join_indexer(left, right)
+
     n_workers = _n_workers()
-    if not _can_parallelize(left, right, n_workers):
+    if n_workers < 2:
         return libjoin.inner_join_indexer(left, right)
 
     bounds = _key_boundaries(left, n_workers)
@@ -154,7 +166,7 @@ def inner_join_indexer(
         rindexer = np.empty(total, dtype=np.intp)
 
         def fill(i: int) -> None:
-            libjoin.inner_join_fill_range(
+            written = libjoin.inner_join_fill_range(
                 lviews[i],
                 rviews[i],
                 result,
@@ -164,6 +176,13 @@ def inner_join_indexer(
                 int(bounds[i]),
                 int(rstart[i]),
             )
+            if written != counts[i]:
+                # the count and fill passes disagree, which can only happen if
+                # the inputs changed underneath us
+                raise ValueError(
+                    f"parallel join chunk {i} wrote {written} pairs, "
+                    f"expected {counts[i]}"
+                )
 
         # consume the iterator so worker exceptions propagate here
         list(executor.map(fill, range(len(lviews))))

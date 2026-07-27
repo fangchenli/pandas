@@ -55,7 +55,7 @@ def inner_join_fill_range(
     out_offset: int,
     lbase: int,
     rbase: int,
-) -> None: ...
+) -> int: ...
 def outer_join_indexer(
     left: np.ndarray,  # ndarray[join_t]
     right: np.ndarray,  # ndarray[join_t]

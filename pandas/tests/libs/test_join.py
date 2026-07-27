@@ -494,3 +494,70 @@ def test_join_indexer_concurrent(indexer, dtype):
                 tm.assert_numpy_array_equal(res_part, exp_part)
         else:
             tm.assert_numpy_array_equal(res, exp)
+
+
+class TestInnerJoinFillRange:
+    def _views(self):
+        left = np.arange(10, dtype=np.int64)
+        right = np.arange(5, 15, dtype=np.int64)
+        return left, right
+
+    def test_returns_pairs_written(self):
+        left, right = self._views()
+        n = libjoin.inner_join_count_range(left, right)
+        result = np.empty(n, dtype=np.int64)
+        lidx = np.empty(n, dtype=np.intp)
+        ridx = np.empty(n, dtype=np.intp)
+
+        written = libjoin.inner_join_fill_range(
+            left, right, result, lidx, ridx, 0, 0, 0
+        )
+        assert written == n
+
+    def test_short_output_truncates_instead_of_overflowing(self):
+        # GH#51364 the fill loop runs with bounds checking off, so a caller that
+        # under-sizes the output must be truncated, not allowed to write past
+        # the end; the short count is how the caller finds out
+        left, right = self._views()
+        n = libjoin.inner_join_count_range(left, right)
+        assert n > 2
+
+        result = np.zeros(2, dtype=np.int64)
+        lidx = np.zeros(2, dtype=np.intp)
+        ridx = np.zeros(2, dtype=np.intp)
+
+        written = libjoin.inner_join_fill_range(
+            left, right, result, lidx, ridx, 0, 0, 0
+        )
+        assert written == 2
+
+    def test_mismatched_output_lengths_raise(self):
+        left, right = self._views()
+        msg = "must be equal length"
+        with pytest.raises(ValueError, match=msg):
+            libjoin.inner_join_fill_range(
+                left,
+                right,
+                np.empty(5, dtype=np.int64),
+                np.empty(4, dtype=np.intp),
+                np.empty(5, dtype=np.intp),
+                0,
+                0,
+                0,
+            )
+
+    @pytest.mark.parametrize("offset", [-1, 6])
+    def test_out_of_bounds_offset_raises(self, offset):
+        left, right = self._views()
+        msg = "out_offset out of bounds"
+        with pytest.raises(ValueError, match=msg):
+            libjoin.inner_join_fill_range(
+                left,
+                right,
+                np.empty(5, dtype=np.int64),
+                np.empty(5, dtype=np.intp),
+                np.empty(5, dtype=np.intp),
+                offset,
+                0,
+                0,
+            )
