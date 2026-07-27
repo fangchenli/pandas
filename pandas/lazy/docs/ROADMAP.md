@@ -961,6 +961,38 @@ grouped top-k (`GroupByHead`). Remaining, roughly by value:
 
 Newest first. Detail in the git log and the docs above.
 
+- **Whole-engine pandas-parity hardening (2026-07 cycle)** — two systematic
+  correctness reviews, each finding first verified with a repro, then fixed with
+  a regression test; every change validated against the full lazy suite and all
+  22 TPC-H SF-3 queries (exact vs DuckDB). **Correctness-only: geo-mean held at
+  ~0.49x throughout** (no performance claims changed). Suite **1732 → 1886**.
+  - *Optimizer/schema review (20 findings).* Nullability soundness so the
+    `col - col → 0` family of rewrites can't fire on NaN-capable columns
+    (outer-join fill, concat widening, shift/diff, stale mutable-source schema);
+    schema column-name-collision errors instead of silent drops (aggregate
+    duplicate aliases, join suffix overwrite + asymmetric `left_on`/`right_on`,
+    `reset_index` collision); eager-vs-physical validation guards (non-boolean
+    filter predicate, missing `set_index` keys, contradictory cross-join `on`);
+    index-aware `Schema` extended to `Aggregate`/`Join` so `reset_index` reports
+    the fresh column; `GroupByHead` eager path + computed-key materialization;
+    reserved `__index` namespace; optimizer recursion through
+    `SetIndex`/`ResetIndex`/`Concat` (unblocks TopK et al.); parquet directory
+    scans.
+  - *Backend-kernel review (arrow + numpy).* Silent data corruption fixed
+    (nullable `Int64` > 2⁵³ precision loss on passthrough, scratch-buffer
+    aliasing in wide expression trees, unmapped-dtype cast stringifying an Arrow
+    column); string ops corrected in **both** backends (`str_slice`/`get`/`match`
+    anchoring/`split` n-handling, char-vs-byte `find` offsets + `start`/`end`);
+    NaN/null semantics (cumulatives keep NaN at the null row, interpolate
+    forward-fills trailing, multi-key group-by skipna, all-NaN group sentinels,
+    group-by `sum` `min_count=0`); datetime + arrow arithmetic
+    (`floor_divide`/`modulo` sign, `dt_is_month_end`, `dt_microsecond`,
+    `n_unique` null-exclusion, exact `median`, NaT-safe `dt_year`); Grace
+    left/right join crash gated to inner-only; numexpr int8/16 + `power` fusion
+    divergence; Bottleneck option-sync + NaN-gated reduction routing; and
+    removal of engine-unused router/memory_pool scaffolding (see the "story"
+    in the git log — over-built initial infra, only the simpler halves were ever
+    wired in).
 - **H2O db-benchmark + numeric-key group-by routing** — added a faithful port
   of the H2O.ai db-benchmark (`benchmarks/bench_h2o.py`, group-by + join vs
   Polars; see `docs/BENCHMARK_SUITES.md`). It immediately exposed that
