@@ -2279,6 +2279,27 @@ class ArrowExtensionArray(
         pa_result = pc.unique(self._pa_array)
         return self._from_pyarrow_array(pa_result)
 
+    def _unique_sorted(self) -> Self:
+        """
+        Compute the unique values of an array known to be sorted.
+
+        Equivalent to :meth:`unique` for sorted input -- duplicates are
+        adjacent there, so run-end encoding collapses them without building a
+        hash table.  The caller is responsible for having verified sortedness.
+
+        Signed zeros and NaNs are treated exactly as :meth:`unique` treats
+        them, since both go through PyArrow's own comparison rather than a
+        NumPy one.
+
+        Returns
+        -------
+        ArrowExtensionArray
+        """
+        # A run cannot be detected across a chunk boundary, so encoding each
+        # chunk separately would leave a duplicate at every seam.
+        combined = self._pa_array.combine_chunks()
+        return self._from_pyarrow_array(pc.run_end_encode(combined).values)
+
     def value_counts(self, dropna: bool = True) -> Series:
         """
         Return a Series containing counts of each unique value.

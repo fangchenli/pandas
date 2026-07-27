@@ -436,13 +436,12 @@ class Index(IndexOpsMixin, PandasObject):
         joined_ndarray, _, _ = libjoin.inner_join_indexer(sv, ov)
 
         if isinstance(self._values, ArrowExtensionArray):
-            # Arrow-backed values keep the hash table.  PyArrow's unique kernel
-            # treats -0.0 and 0.0 as distinct where an elementwise NumPy
-            # comparison does not, so deduplicating the NumPy target would
-            # silently change what those intersections return.  Arrow has its
-            # own kernel for this (run-end encoding); wiring it up is a
-            # separate change.
-            return algos.unique1d(self._from_join_target(joined_ndarray))
+            # Deduplicating the NumPy target would apply NumPy's comparison,
+            # which treats -0.0 and 0.0 as equal where PyArrow's kernels do
+            # not, and would change what these intersections return.  Arrow's
+            # own run-end encoding collapses the same adjacent duplicates under
+            # PyArrow's comparison, so the result matches unique() exactly.
+            return self._from_join_target(joined_ndarray)._unique_sorted()  # type: ignore[union-attr]
 
         return self._from_join_target(algos.unique_sorted(joined_ndarray))
 

@@ -1236,3 +1236,52 @@ class TestIntersectionSignedZero:
         right = Index([0, 0, 2], dtype=dtype)
 
         tm.assert_index_equal(left.intersection(right), Index([0], dtype=dtype))
+
+
+class TestArrowIntersectionRunEndDedup:
+    # Arrow-backed intersections deduplicate with PyArrow's run-end encoding,
+    # which collapses the same adjacent duplicates that unique() would while
+    # keeping PyArrow's own comparison semantics.
+    @pytest.mark.parametrize(
+        "dtype",
+        [
+            pytest.param(d, marks=td.skip_if_no("pyarrow"))
+            for d in ["int64[pyarrow]", "uint32[pyarrow]", "float64[pyarrow]"]
+        ],
+    )
+    def test_matches_unique(self, dtype):
+        left = Index([1, 1, 2, 3, 3, 5], dtype=dtype)
+        right = Index([1, 2, 2, 3, 4], dtype=dtype)
+
+        result = left.intersection(right)
+
+        tm.assert_index_equal(result, Index([1, 2, 3], dtype=dtype))
+
+    @td.skip_if_no("pyarrow")
+    def test_unique_sorted_matches_unique_across_chunks(self):
+        # a run spanning a chunk boundary must not survive as a duplicate
+        import pyarrow as pa
+
+        from pandas.core.arrays import ArrowExtensionArray
+
+        arr = ArrowExtensionArray(
+            pa.chunked_array([pa.array([1.0, 2.0, 2.0]), pa.array([2.0, 3.0])])
+        )
+        assert arr._pa_array.num_chunks == 2
+
+        assert arr._unique_sorted().tolist() == arr.unique().tolist()
+
+    @td.skip_if_no("pyarrow")
+    @pytest.mark.parametrize("dtype", ["float64[pyarrow]", "float32[pyarrow]"])
+    def test_signed_zero_matches_unique(self, dtype):
+        # PyArrow keeps both zeros; run-end encoding must agree with unique()
+        from pandas.core.arrays import ArrowExtensionArray
+
+        left = Index([-0.0, 0.0, 1.0], dtype=dtype)
+        arr = left._values
+        assert isinstance(arr, ArrowExtensionArray)
+
+        tm.assert_numpy_array_equal(
+            np.signbit(np.asarray(arr._unique_sorted(), dtype="float64")),
+            np.signbit(np.asarray(arr.unique(), dtype="float64")),
+        )
