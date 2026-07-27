@@ -1,3 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor
+from itertools import pairwise
+
 import numpy as np
 import pytest
 
@@ -386,3 +389,108 @@ def test_inner_join_indexer2():
 
     exp_ridx = np.array([0, 1, 2, 3], dtype=np.intp)
     tm.assert_almost_equal(ridx, exp_ridx)
+
+
+def _chunked_inner_join(left, right, bounds):
+    """Reference driver: count -> prefix sum -> single alloc -> disjoint fill."""
+    lslices = [left[a:b] for a, b in pairwise(bounds)]
+    kstart = np.array([sl[0] for sl in lslices])
+    kend = np.array([sl[-1] for sl in lslices])
+    rstart = np.searchsorted(right, kstart, side="left")
+    rstop = np.searchsorted(right, kend, side="right")
+    rslices = [right[a:b] for a, b in zip(rstart, rstop, strict=True)]
+
+    counts = [
+        libjoin.inner_join_count_range(ls, rs)
+        for ls, rs in zip(lslices, rslices, strict=True)
+    ]
+    total = sum(counts)
+    result = np.empty(total, dtype=left.dtype)
+    lindexer = np.empty(total, dtype=np.intp)
+    rindexer = np.empty(total, dtype=np.intp)
+
+    offset = 0
+    for idx, (ls, rs) in enumerate(zip(lslices, rslices, strict=True)):
+        libjoin.inner_join_fill_range(
+            ls,
+            rs,
+            result,
+            lindexer,
+            rindexer,
+            offset,
+            int(bounds[idx]),
+            int(rstart[idx]),
+        )
+        offset += counts[idx]
+    return result, lindexer, rindexer
+
+
+@pytest.mark.parametrize("dtype", ["int64", "int32", "uint64", "float64"])
+@pytest.mark.parametrize(
+    "left_vals, right_vals, bounds",
+    [
+        # split on a plain key boundary
+        ([1, 2, 3, 4], [1, 2, 3, 4], [0, 2, 4]),
+        # a run of equal keys ending exactly at the split
+        ([1, 1, 1, 2, 2, 2], [1, 1, 2, 2], [0, 3, 6]),
+        # key present on the left but missing on the right at the boundary
+        ([1, 1, 3, 3], [1, 1, 2, 2, 3, 3], [0, 2, 4]),
+        # right holds keys outside every chunk's range
+        ([2, 2, 5, 5], [0, 2, 2, 4, 5, 5, 9], [0, 2, 4]),
+        # three chunks
+        ([1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 6], [0, 2, 4, 6]),
+    ],
+)
+def test_inner_join_chunked_matches_serial(left_vals, right_vals, bounds, dtype):
+    # GH#51364 splitting on key boundaries and filling disjoint output slices
+    # must reproduce the serial indexer exactly.
+    left = np.array(left_vals, dtype=dtype)
+    right = np.array(right_vals, dtype=dtype)
+
+    expected = libjoin.inner_join_indexer(left, right)
+    result = _chunked_inner_join(left, right, bounds)
+
+    for res, exp in zip(result, expected, strict=True):
+        tm.assert_numpy_array_equal(res, exp)
+
+
+def test_inner_join_count_range_empty():
+    empty = np.array([], dtype=np.int64)
+    values = np.array([1, 2, 3], dtype=np.int64)
+    assert libjoin.inner_join_count_range(empty, values) == 0
+    assert libjoin.inner_join_count_range(values, empty) == 0
+    assert libjoin.inner_join_count_range(empty, empty) == 0
+
+
+@pytest.mark.parametrize(
+    "indexer",
+    [
+        libjoin.left_join_indexer_unique,
+        libjoin.left_join_indexer,
+        libjoin.inner_join_indexer,
+        libjoin.outer_join_indexer,
+    ],
+)
+@pytest.mark.parametrize("dtype", ["int64", "float64", "uint32", "object"])
+def test_join_indexer_concurrent(indexer, dtype):
+    # GH#51364 the non-object merge loops run with the GIL released; make sure
+    # concurrent calls stay correct (nothing in the nogil block may touch a
+    # Python object) and agree with the serial result.
+    pairs = [
+        (
+            np.arange(i, i + 500).astype(dtype),
+            np.arange(i + 250, i + 750).astype(dtype),
+        )
+        for i in range(8)
+    ]
+    expected = [indexer(left, right) for left, right in pairs]
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        result = list(executor.map(lambda pair: indexer(*pair), pairs))
+
+    for res, exp in zip(result, expected, strict=True):
+        if isinstance(exp, tuple):
+            for res_part, exp_part in zip(res, exp, strict=True):
+                tm.assert_numpy_array_equal(res_part, exp_part)
+        else:
+            tm.assert_numpy_array_equal(res, exp)

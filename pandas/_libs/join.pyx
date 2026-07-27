@@ -318,34 +318,35 @@ def left_join_indexer_unique(
     nright = len(right)
 
     indexer = np.empty(nleft, dtype=np.intp)
-    while True:
-        if i == nleft:
-            break
+    with nogil(numeric_object_t is not object):
+        while True:
+            if i == nleft:
+                break
 
-        if j == nright:
-            indexer[i] = -1
-            i += 1
-            continue
+            if j == nright:
+                indexer[i] = -1
+                i += 1
+                continue
 
-        rval = right[j]
+            rval = right[j]
 
-        while i < nleft - 1 and left[i] == rval:
-            indexer[i] = j
-            i += 1
-
-        if left[i] == rval:
-            indexer[i] = j
-            i += 1
             while i < nleft - 1 and left[i] == rval:
                 indexer[i] = j
                 i += 1
-            j += 1
-        elif left[i] > rval:
-            indexer[i] = -1
-            j += 1
-        else:
-            indexer[i] = -1
-            i += 1
+
+            if left[i] == rval:
+                indexer[i] = j
+                i += 1
+                while i < nleft - 1 and left[i] == rval:
+                    indexer[i] = j
+                    i += 1
+                j += 1
+            elif left[i] > rval:
+                indexer[i] = -1
+                j += 1
+            else:
+                indexer[i] = -1
+                i += 1
     return indexer
 
 
@@ -372,37 +373,38 @@ def left_join_indexer(ndarray[numeric_object_t] left, ndarray[numeric_object_t] 
     j = 0
     count = 0
     if nleft > 0:
-        while i < nleft:
-            if j == nright:
-                count += nleft - i
-                break
-
-            lval = left[i]
-            rval = right[j]
-
-            if lval == rval:
-                # This block is identical across
-                #  left_join_indexer, inner_join_indexer, outer_join_indexer
-                count += 1
-                if i < nleft - 1:
-                    if j < nright - 1 and right[j + 1] == rval:
-                        j += 1
-                    else:
-                        i += 1
-                        if left[i] != rval:
-                            j += 1
-                elif j < nright - 1:
-                    j += 1
-                    if lval != right[j]:
-                        i += 1
-                else:
-                    # end of the road
+        with nogil(numeric_object_t is not object):
+            while i < nleft:
+                if j == nright:
+                    count += nleft - i
                     break
-            elif lval < rval:
-                count += 1
-                i += 1
-            else:
-                j += 1
+
+                lval = left[i]
+                rval = right[j]
+
+                if lval == rval:
+                    # This block is identical across
+                    #  left_join_indexer, inner_join_indexer, outer_join_indexer
+                    count += 1
+                    if i < nleft - 1:
+                        if j < nright - 1 and right[j + 1] == rval:
+                            j += 1
+                        else:
+                            i += 1
+                            if left[i] != rval:
+                                j += 1
+                    elif j < nright - 1:
+                        j += 1
+                        if lval != right[j]:
+                            i += 1
+                    else:
+                        # end of the road
+                        break
+                elif lval < rval:
+                    count += 1
+                    i += 1
+                else:
+                    j += 1
 
     # do it again now that result size is known
 
@@ -414,48 +416,49 @@ def left_join_indexer(ndarray[numeric_object_t] left, ndarray[numeric_object_t] 
     j = 0
     count = 0
     if nleft > 0:
-        while i < nleft:
-            if j == nright:
-                while i < nleft:
+        with nogil(numeric_object_t is not object):
+            while i < nleft:
+                if j == nright:
+                    while i < nleft:
+                        lindexer[count] = i
+                        rindexer[count] = -1
+                        result[count] = left[i]
+                        i += 1
+                        count += 1
+                    break
+
+                lval = left[i]
+                rval = right[j]
+
+                if lval == rval:
+                    lindexer[count] = i
+                    rindexer[count] = j
+                    result[count] = lval
+                    count += 1
+                    if i < nleft - 1:
+                        if j < nright - 1 and right[j + 1] == rval:
+                            j += 1
+                        else:
+                            i += 1
+                            if left[i] != rval:
+                                j += 1
+                    elif j < nright - 1:
+                        j += 1
+                        if lval != right[j]:
+                            i += 1
+                    else:
+                        # end of the road
+                        break
+                elif lval < rval:
+                    # i.e. lval not in right; we keep for left_join_indexer
                     lindexer[count] = i
                     rindexer[count] = -1
-                    result[count] = left[i]
-                    i += 1
+                    result[count] = lval
                     count += 1
-                break
-
-            lval = left[i]
-            rval = right[j]
-
-            if lval == rval:
-                lindexer[count] = i
-                rindexer[count] = j
-                result[count] = lval
-                count += 1
-                if i < nleft - 1:
-                    if j < nright - 1 and right[j + 1] == rval:
-                        j += 1
-                    else:
-                        i += 1
-                        if left[i] != rval:
-                            j += 1
-                elif j < nright - 1:
-                    j += 1
-                    if lval != right[j]:
-                        i += 1
+                    i += 1
                 else:
-                    # end of the road
-                    break
-            elif lval < rval:
-                # i.e. lval not in right; we keep for left_join_indexer
-                lindexer[count] = i
-                rindexer[count] = -1
-                result[count] = lval
-                count += 1
-                i += 1
-            else:
-                # i.e. rval not in left; we discard for left_join_indexer
-                j += 1
+                    # i.e. rval not in left; we discard for left_join_indexer
+                    j += 1
 
     return result, lindexer, rindexer
 
@@ -482,36 +485,37 @@ def inner_join_indexer(ndarray[numeric_object_t] left, ndarray[numeric_object_t]
     j = 0
     count = 0
     if nleft > 0 and nright > 0:
-        while True:
-            if i == nleft:
-                break
-            if j == nright:
-                break
-
-            lval = left[i]
-            rval = right[j]
-            if lval == rval:
-                count += 1
-                if i < nleft - 1:
-                    if j < nright - 1 and right[j + 1] == rval:
-                        j += 1
-                    else:
-                        i += 1
-                        if left[i] != rval:
-                            j += 1
-                elif j < nright - 1:
-                    j += 1
-                    if lval != right[j]:
-                        i += 1
-                else:
-                    # end of the road
+        with nogil(numeric_object_t is not object):
+            while True:
+                if i == nleft:
                     break
-            elif lval < rval:
-                # i.e. lval not in right; we discard for inner_indexer
-                i += 1
-            else:
-                # i.e. rval not in left; we discard for inner_indexer
-                j += 1
+                if j == nright:
+                    break
+
+                lval = left[i]
+                rval = right[j]
+                if lval == rval:
+                    count += 1
+                    if i < nleft - 1:
+                        if j < nright - 1 and right[j + 1] == rval:
+                            j += 1
+                        else:
+                            i += 1
+                            if left[i] != rval:
+                                j += 1
+                    elif j < nright - 1:
+                        j += 1
+                        if lval != right[j]:
+                            i += 1
+                    else:
+                        # end of the road
+                        break
+                elif lval < rval:
+                    # i.e. lval not in right; we discard for inner_indexer
+                    i += 1
+                else:
+                    # i.e. rval not in left; we discard for inner_indexer
+                    j += 1
 
     # do it again now that result size is known
 
@@ -523,6 +527,82 @@ def inner_join_indexer(ndarray[numeric_object_t] left, ndarray[numeric_object_t]
     j = 0
     count = 0
     if nleft > 0 and nright > 0:
+        with nogil(numeric_object_t is not object):
+            while True:
+                if i == nleft:
+                    break
+                if j == nright:
+                    break
+
+                lval = left[i]
+                rval = right[j]
+                if lval == rval:
+                    lindexer[count] = i
+                    rindexer[count] = j
+                    result[count] = lval
+                    count += 1
+                    if i < nleft - 1:
+                        if j < nright - 1 and right[j + 1] == rval:
+                            j += 1
+                        else:
+                            i += 1
+                            if left[i] != rval:
+                                j += 1
+                    elif j < nright - 1:
+                        j += 1
+                        if lval != right[j]:
+                            i += 1
+                    else:
+                        # end of the road
+                        break
+                elif lval < rval:
+                    # i.e. lval not in right; we discard for inner_indexer
+                    i += 1
+                else:
+                    # i.e. rval not in left; we discard for inner_indexer
+                    j += 1
+
+    return result, lindexer, rindexer
+
+
+# ----------------------------------------------------------------------
+# Chunked inner_join_indexer (GH#51364)
+#
+# inner_join_indexer walks two sorted arrays in lockstep, so it can be split
+# into independent sub-joins: pick split points on *key boundaries* in `left`
+# and searchsorted them into `right`.  Splitting on a key boundary rather than
+# a raw index is required -- a run of equal keys straddling a split would make
+# the equal-key advance above emit a different number of pairs than the serial
+# walk does.
+#
+# Chunks are counted first and filled second so that every chunk writes into
+# its own disjoint slice of a single output allocation.  Concatenating
+# per-chunk outputs instead costs more than the parallel scan saves.
+#
+# Both kernels release the GIL unconditionally (they are numeric-only, no
+# object dtype) so a caller can run the chunks on a thread pool.
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+def inner_join_count_range(
+    ndarray[numeric_t] left,
+    ndarray[numeric_t] right,
+) -> int:
+    """
+    Number of pairs inner_join_indexer would emit for this pair of sub-ranges.
+
+    Both are monotonic increasing, not necessarily unique.
+    """
+    cdef:
+        Py_ssize_t i = 0, j = 0, count = 0
+        Py_ssize_t nleft = len(left), nright = len(right)
+        numeric_t lval, rval
+
+    if nleft == 0 or nright == 0:
+        return 0
+
+    with nogil:
         while True:
             if i == nleft:
                 break
@@ -532,9 +612,6 @@ def inner_join_indexer(ndarray[numeric_object_t] left, ndarray[numeric_object_t]
             lval = left[i]
             rval = right[j]
             if lval == rval:
-                lindexer[count] = i
-                rindexer[count] = j
-                result[count] = lval
                 count += 1
                 if i < nleft - 1:
                     if j < nright - 1 and right[j + 1] == rval:
@@ -551,13 +628,73 @@ def inner_join_indexer(ndarray[numeric_object_t] left, ndarray[numeric_object_t]
                     # end of the road
                     break
             elif lval < rval:
-                # i.e. lval not in right; we discard for inner_indexer
                 i += 1
             else:
-                # i.e. rval not in left; we discard for inner_indexer
                 j += 1
 
-    return result, lindexer, rindexer
+    return count
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+def inner_join_fill_range(
+    ndarray[numeric_t] left,
+    ndarray[numeric_t] right,
+    ndarray[numeric_t] out_result,
+    ndarray[intp_t] out_lindexer,
+    ndarray[intp_t] out_rindexer,
+    Py_ssize_t out_offset,
+    Py_ssize_t lbase,
+    Py_ssize_t rbase,
+) -> None:
+    """
+    Write this chunk's pairs into out_* starting at out_offset.
+
+    `lbase`/`rbase` are the offsets of these sub-ranges within the full arrays,
+    so the emitted indexers refer to the full arrays.  The caller is
+    responsible for sizing out_* via inner_join_count_range, which guarantees
+    the writes stay inside [out_offset, out_offset + count).
+    """
+    cdef:
+        Py_ssize_t i = 0, j = 0, count = 0
+        Py_ssize_t nleft = len(left), nright = len(right)
+        numeric_t lval, rval
+
+    if nleft == 0 or nright == 0:
+        return
+
+    with nogil:
+        while True:
+            if i == nleft:
+                break
+            if j == nright:
+                break
+
+            lval = left[i]
+            rval = right[j]
+            if lval == rval:
+                out_lindexer[out_offset + count] = lbase + i
+                out_rindexer[out_offset + count] = rbase + j
+                out_result[out_offset + count] = lval
+                count += 1
+                if i < nleft - 1:
+                    if j < nright - 1 and right[j + 1] == rval:
+                        j += 1
+                    else:
+                        i += 1
+                        if left[i] != rval:
+                            j += 1
+                elif j < nright - 1:
+                    j += 1
+                    if lval != right[j]:
+                        i += 1
+                else:
+                    # end of the road
+                    break
+            elif lval < rval:
+                i += 1
+            else:
+                j += 1
 
 
 @cython.wraparound(False)
@@ -581,43 +718,44 @@ def outer_join_indexer(ndarray[numeric_object_t] left, ndarray[numeric_object_t]
     i = 0
     j = 0
     count = 0
-    if nleft == 0:
-        count = nright
-    elif nright == 0:
-        count = nleft
-    else:
-        while True:
-            if i == nleft:
-                count += nright - j
-                break
-            if j == nright:
-                count += nleft - i
-                break
-
-            lval = left[i]
-            rval = right[j]
-            if lval == rval:
-                count += 1
-                if i < nleft - 1:
-                    if j < nright - 1 and right[j + 1] == rval:
-                        j += 1
-                    else:
-                        i += 1
-                        if left[i] != rval:
-                            j += 1
-                elif j < nright - 1:
-                    j += 1
-                    if lval != right[j]:
-                        i += 1
-                else:
-                    # end of the road
+    with nogil(numeric_object_t is not object):
+        if nleft == 0:
+            count = nright
+        elif nright == 0:
+            count = nleft
+        else:
+            while True:
+                if i == nleft:
+                    count += nright - j
                     break
-            elif lval < rval:
-                count += 1
-                i += 1
-            else:
-                count += 1
-                j += 1
+                if j == nright:
+                    count += nleft - i
+                    break
+
+                lval = left[i]
+                rval = right[j]
+                if lval == rval:
+                    count += 1
+                    if i < nleft - 1:
+                        if j < nright - 1 and right[j + 1] == rval:
+                            j += 1
+                        else:
+                            i += 1
+                            if left[i] != rval:
+                                j += 1
+                    elif j < nright - 1:
+                        j += 1
+                        if lval != right[j]:
+                            i += 1
+                    else:
+                        # end of the road
+                        break
+                elif lval < rval:
+                    count += 1
+                    i += 1
+                else:
+                    count += 1
+                    j += 1
 
     lindexer = np.empty(count, dtype=np.intp)
     rindexer = np.empty(count, dtype=np.intp)
@@ -628,71 +766,72 @@ def outer_join_indexer(ndarray[numeric_object_t] left, ndarray[numeric_object_t]
     i = 0
     j = 0
     count = 0
-    if nleft == 0:
-        for j in range(nright):
-            lindexer[j] = -1
-            rindexer[j] = j
-            result[j] = right[j]
-    elif nright == 0:
-        for i in range(nleft):
-            lindexer[i] = i
-            rindexer[i] = -1
-            result[i] = left[i]
-    else:
-        while True:
-            if i == nleft:
-                while j < nright:
-                    lindexer[count] = -1
+    with nogil(numeric_object_t is not object):
+        if nleft == 0:
+            for j in range(nright):
+                lindexer[j] = -1
+                rindexer[j] = j
+                result[j] = right[j]
+        elif nright == 0:
+            for i in range(nleft):
+                lindexer[i] = i
+                rindexer[i] = -1
+                result[i] = left[i]
+        else:
+            while True:
+                if i == nleft:
+                    while j < nright:
+                        lindexer[count] = -1
+                        rindexer[count] = j
+                        result[count] = right[j]
+                        count += 1
+                        j += 1
+                    break
+                if j == nright:
+                    while i < nleft:
+                        lindexer[count] = i
+                        rindexer[count] = -1
+                        result[count] = left[i]
+                        count += 1
+                        i += 1
+                    break
+
+                lval = left[i]
+                rval = right[j]
+
+                if lval == rval:
+                    lindexer[count] = i
                     rindexer[count] = j
-                    result[count] = right[j]
+                    result[count] = lval
                     count += 1
-                    j += 1
-                break
-            if j == nright:
-                while i < nleft:
+                    if i < nleft - 1:
+                        if j < nright - 1 and right[j + 1] == rval:
+                            j += 1
+                        else:
+                            i += 1
+                            if left[i] != rval:
+                                j += 1
+                    elif j < nright - 1:
+                        j += 1
+                        if lval != right[j]:
+                            i += 1
+                    else:
+                        # end of the road
+                        break
+                elif lval < rval:
+                    # i.e. lval not in right; we keep for outer_join_indexer
                     lindexer[count] = i
                     rindexer[count] = -1
-                    result[count] = left[i]
+                    result[count] = lval
                     count += 1
                     i += 1
-                break
-
-            lval = left[i]
-            rval = right[j]
-
-            if lval == rval:
-                lindexer[count] = i
-                rindexer[count] = j
-                result[count] = lval
-                count += 1
-                if i < nleft - 1:
-                    if j < nright - 1 and right[j + 1] == rval:
-                        j += 1
-                    else:
-                        i += 1
-                        if left[i] != rval:
-                            j += 1
-                elif j < nright - 1:
-                    j += 1
-                    if lval != right[j]:
-                        i += 1
                 else:
-                    # end of the road
-                    break
-            elif lval < rval:
-                # i.e. lval not in right; we keep for outer_join_indexer
-                lindexer[count] = i
-                rindexer[count] = -1
-                result[count] = lval
-                count += 1
-                i += 1
-            else:
-                # i.e. rval not in left; we keep for outer_join_indexer
-                lindexer[count] = -1
-                rindexer[count] = j
-                result[count] = rval
-                count += 1
-                j += 1
+                    # i.e. rval not in left; we keep for outer_join_indexer
+                    lindexer[count] = -1
+                    rindexer[count] = j
+                    result[count] = rval
+                    count += 1
+                    j += 1
 
     return result, lindexer, rindexer
 
