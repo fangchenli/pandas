@@ -3483,13 +3483,21 @@ class Index(IndexOpsMixin, PandasObject):
                 pass
             else:
                 # TODO: algos.unique1d should preserve DTA/TDA
-                if is_numeric_dtype(self.dtype):
-                    # This is faster, because Index.unique() checks for uniqueness
-                    # before calculating the unique values.
-                    res = algos.unique1d(res_indexer)
-                else:
+                res: ArrayLike
+                if not is_numeric_dtype(self.dtype):
                     result = self.take(indexer)
                     res = result.drop_duplicates()  # type: ignore[assignment]
+                elif isinstance(res_indexer, np.ndarray):
+                    # Both inputs are monotonic increasing, so the merge emits
+                    # its keys in order and any duplicates are adjacent; a
+                    # linear scan is much cheaper than the hash table
+                    # algos.unique1d would build.  Extension arrays take the
+                    # general path -- _from_join_target has already wrapped
+                    # them, and comparing them elementwise here would not
+                    # obviously match unique1d.
+                    res = _unique_sorted(res_indexer)
+                else:
+                    res = algos.unique1d(res_indexer)
                 return ensure_wrapped_if_datetimelike(res)  # type: ignore[no-untyped-call]
 
         res_values = self._intersection_via_get_indexer(other, sort=sort)
@@ -8465,6 +8473,31 @@ def _unpack_nested_dtype(other: Index) -> DtypeObj:
         if pa.types.is_dictionary(dtype.pyarrow_dtype):
             other = other[:0].astype(ArrowDtype(dtype.pyarrow_dtype.value_type))
     return other.dtype
+
+
+def _unique_sorted(values: np.ndarray) -> np.ndarray:
+    """
+    Unique values of a non-decreasing array, preserving order.
+
+    Equivalent to ``algos.unique1d`` for sorted input, but duplicates are
+    adjacent there, so they can be dropped with a linear scan instead of
+    building a hash table.
+
+    The input must be sorted and free of NAs; ``-0.0`` and ``0.0`` compare
+    equal here exactly as they do in the hash table, so the first of the pair
+    is kept either way.
+    """
+    if values.size <= 1:
+        return values
+
+    keep = np.empty(values.shape, dtype=bool)
+    keep[0] = True
+    np.not_equal(values[1:], values[:-1], out=keep[1:])
+    if keep.all():
+        # already unique -- the merge allocated this array, so it can be
+        # handed back without copying
+        return values
+    return values[keep]
 
 
 def _maybe_try_sort(result: Index | ArrayLike, sort: bool | None) -> Index | ArrayLike:

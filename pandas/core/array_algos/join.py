@@ -12,10 +12,8 @@ Split points must land on a *key* boundary rather than a raw index: a run of
 equal keys straddling a split would make the equal-key advance in the kernel
 emit a different number of pairs than the serial walk does.
 
-The caller that benefits is :meth:`Index.join` with ``how="inner"``, where the
-merge dominates.  :meth:`Index.intersection` reaches the same indexer but then
-runs ``algos.unique1d`` over the whole result, which costs several times the
-merge itself, so it gains comparatively little from this.
+The callers that benefit are :meth:`Index.join` with ``how="inner"`` and
+:meth:`Index.intersection`, both of which are dominated by this merge.
 """
 
 from __future__ import annotations

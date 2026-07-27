@@ -1060,3 +1060,66 @@ def test_union_disjoint_monotonic_sorted():
     result_false = idx1.union(idx2, sort=False)
     expected_false = Index([5, 6, 7, 1, 2, 3])
     tm.assert_index_equal(result_false, expected_false)
+
+
+class TestIntersectionUniqueSorted:
+    # GH#51364 the merge emits keys in order, so intersection drops duplicates
+    # with a linear scan instead of building a hash table.
+    @pytest.mark.parametrize(
+        "values",
+        [
+            [],
+            [5],
+            [1, 1, 1, 1],
+            [1, 2, 3],
+            [1, 1, 2, 3, 3, 3, 4],
+            [-0.0, 0.0, 1.0],
+            [0.0, -0.0],
+            [1.5, 1.5, 2.5],
+        ],
+    )
+    def test_unique_sorted_matches_unique1d(self, values):
+        from pandas.core.algorithms import unique1d
+        from pandas.core.indexes.base import _unique_sorted
+
+        arr = np.array(values)
+        result = _unique_sorted(arr)
+        expected = unique1d(arr)
+
+        tm.assert_numpy_array_equal(result, expected)
+
+    @pytest.mark.parametrize(
+        "dtype", ["int64", "int32", "uint64", "float64", "Int64", "Float64"]
+    )
+    def test_intersection_drops_duplicates(self, dtype):
+        # duplicates on both sides, in the result, and unique-after-intersection
+        left = Index([1, 1, 2, 3, 3, 5], dtype=dtype)
+        right = Index([1, 2, 2, 3, 4], dtype=dtype)
+
+        result = left.intersection(right)
+
+        expected = Index([1, 2, 3], dtype=dtype)
+        tm.assert_index_equal(result, expected)
+
+    @pytest.mark.parametrize("dtype", ["int64", "float64", "Int64"])
+    def test_intersection_already_unique(self, dtype):
+        left = Index(range(20), dtype=dtype)
+        right = Index(range(10, 30), dtype=dtype)
+
+        result = left.intersection(right)
+
+        expected = Index(range(10, 20), dtype=dtype)
+        tm.assert_index_equal(result, expected)
+
+    def test_intersection_all_duplicates(self):
+        left = Index([7] * 10)
+        right = Index([7] * 4)
+
+        tm.assert_index_equal(left.intersection(right), Index([7]))
+
+    def test_intersection_empty_result(self):
+        left = Index([1, 1, 2, 2])
+        right = Index([5, 5, 6])
+
+        result = left.intersection(right)
+        tm.assert_index_equal(result, Index([], dtype="int64"))
