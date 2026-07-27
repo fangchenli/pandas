@@ -303,7 +303,11 @@ def arrow_str_count(
 
 @register_kernel("str_find", "arrow")
 def arrow_str_find(
-    arr: PyArrowArray, pattern: str, regex: bool = False
+    arr: PyArrowArray,
+    pattern: str,
+    start: int = 0,
+    end: int | None = None,
+    regex: bool = False,
 ) -> PyArrowArray:
     """
     Find first occurrence of pattern in strings.
@@ -322,9 +326,28 @@ def arrow_str_find(
     PyArrowArray
         Integer array of positions (-1 if not found).
     """
+    import pyarrow as pa
+
+    chunked = pa.chunked_array([arr]) if isinstance(arr, pa.Array) else arr
+    # pc.find_substring returns a *byte* offset (== char offset only for ASCII)
+    # and supports neither a search window nor regex; take the fast Arrow path
+    # only for the default, ASCII, non-regex case and fall back to pandas (which
+    # is character-based and honours start/end) otherwise.
+    if not regex and start == 0 and end is None:
+        all_ascii = pc.all(
+            pc.equal(pc.utf8_length(chunked), pc.binary_length(chunked))
+        ).as_py()
+        if all_ascii:
+            return pc.find_substring(arr, pattern=pattern)
+
+    import pandas as pd
+
+    series = pd.Series(chunked.to_pandas())
     if regex:
-        return pc.find_substring_regex(arr, pattern=pattern)
-    return pc.find_substring(arr, pattern=pattern)
+        found = series.str.find(pattern)  # pandas str.find is literal; kept for parity
+    else:
+        found = series.str.find(pattern, start, end)
+    return pa.array(found, from_pandas=True)
 
 
 @register_kernel("str_pad", "arrow")

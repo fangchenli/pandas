@@ -391,10 +391,10 @@ def arrow_interpolate_linear(arr: PyArrowArray) -> PyArrowArray:
     all_indices = np.arange(n)
     result = np.interp(all_indices, valid_indices, valid_values)
 
-    # Keep leading/trailing NaN if original had them
+    # Leading NaNs stay NaN; trailing NaNs are forward-filled with the last
+    # valid value (np.interp's edge-clamp already produced that), matching
+    # pandas' default limit_direction="forward" -- so trailing is NOT re-masked.
     if valid_indices[0] > 0:
         result[: valid_indices[0]] = np.nan
-    if valid_indices[-1] < n - 1:
-        result[valid_indices[-1] + 1 :] = np.nan
 
     return pa.array(result)

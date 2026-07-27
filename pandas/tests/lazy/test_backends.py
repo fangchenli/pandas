@@ -2152,8 +2152,9 @@ class TestFillNAKernels:
         assert result_list[1] == 2.0  # interpolated
         assert result_list[2] == 3.0  # interpolated
         assert result_list[3] == 4.0
-        # Trailing NaN should remain NaN
-        assert result_list[4] is None or np.isnan(result_list[4])
+        # Trailing NaN is forward-filled with the last valid value (pandas'
+        # default limit_direction="forward").
+        assert result_list[4] == 4.0
 
     def test_numpy_interpolate_linear(self):
         """Test NumPy linear interpolation."""
@@ -2522,3 +2523,18 @@ class TestArrowArithmeticAndDatetime:
             np.array(["2020-01-15", "2021-06-30"], dtype="datetime64[ns]")
         )
         tm.assert_numpy_array_equal(got, np.array([2020, 2021], dtype="int32"))
+
+
+class TestArrowInterpolateTrailing:
+    """arrow interpolate_linear forward-fills trailing NaN (pandas default),
+    keeping only leading NaN."""
+
+    def test_trailing_forward_filled(self):
+        from pandas.lazy.backends import dispatch_kernel
+
+        arr = pa.array([None, 1.0, 3.0, None, None])
+        result = dispatch_kernel("interpolate_linear", "arrow", arr).to_pylist()
+        want = pd.Series([np.nan, 1.0, 3.0, np.nan, np.nan]).interpolate().tolist()
+        # leading NaN preserved; interior interpolated; trailing forward-filled
+        assert result[0] is None or np.isnan(result[0])
+        assert result[1:] == want[1:]

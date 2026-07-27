@@ -526,3 +526,27 @@ class TestStrReverseRouting:
             use_physical_planner=True
         )["r"]
         assert out.tolist() == ["cba", "yx", ""]
+
+
+class TestStrFindOffsets:
+    """str_find must return character offsets (not byte) and honour start/end,
+    matching pandas in both backends (regression for the arrow byte-offset bug
+    and the missing start/end kwargs)."""
+
+    @pytest.mark.parametrize("dtype", ["object", "string[pyarrow]"])
+    def test_find_non_ascii_char_offset(self, dtype):
+        data = ["éabc", "abc", "aéb"]
+        df = pd.DataFrame({"s": pd.array(data, dtype=dtype)})
+        got = df.select(col("s").str.find("b").alias("r")).collect(
+            use_physical_planner=True
+        )["r"]
+        assert got.tolist() == pd.Series(data).str.find("b").tolist()
+
+    @pytest.mark.parametrize("dtype", ["object", "string[pyarrow]"])
+    def test_find_with_start(self, dtype):
+        data = ["abcabc", "aaa"]
+        df = pd.DataFrame({"s": pd.array(data, dtype=dtype)})
+        got = df.select(col("s").str.find("bc", 3).alias("r")).collect(
+            use_physical_planner=True
+        )["r"]
+        assert got.tolist() == pd.Series(data).str.find("bc", 3).tolist()

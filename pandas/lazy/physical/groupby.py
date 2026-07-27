@@ -1186,6 +1186,12 @@ class PhysicalHashAggregate(PhysicalPlan):
                 else:
                     result[col_name] = chunked
 
+        # acero's hash_sum returns null for a group whose values are all null;
+        # pandas sum (min_count=0) returns 0 there. Fill so the two agree.
+        for out_name, _, func in agg_specs:
+            if func == "sum" and out_name in result:
+                result[out_name] = pc.fill_null(result[out_name], 0)
+
         return result
 
     def _execute_hybrid_groupby(

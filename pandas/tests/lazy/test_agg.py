@@ -776,3 +776,37 @@ class TestGroupByNaNSemantics:
         )
         want = getattr(df.groupby(["a", "b"])["v"], pdm)().to_numpy()
         tm.assert_numpy_array_equal(got, want)
+
+
+class TestGroupBySumAllNaN:
+    """Sum of an all-NaN group is 0 (pandas min_count=0), not NaN, on the
+    arrow/acero physical path (regression)."""
+
+    @pytest.mark.parametrize("engine", ["auto", "numpy", "arrow"])
+    def test_sum_all_nan_group_is_zero(self, engine):
+        df = pd.DataFrame(
+            {"g": [1, 1, 2, 2, 3], "v": [10.0, np.nan, np.nan, np.nan, 5.0]}
+        )
+        got = (
+            df.select()
+            .group_by("g")
+            .agg(col("v").sum().alias("r"))
+            .collect(use_physical_planner=True, engine=engine)
+            .sort_values("g")["r"]
+        )
+        tm.assert_numpy_array_equal(
+            got.to_numpy(), df.groupby("g")["v"].sum().to_numpy()
+        )
+
+    def test_sum_mixed_nan_group_skips(self):
+        df = pd.DataFrame({"g": [1, 1, 2], "v": [10.0, np.nan, 3.0]})
+        got = (
+            df.select()
+            .group_by("g")
+            .agg(col("v").sum().alias("r"))
+            .collect(use_physical_planner=True)
+            .sort_values("g")["r"]
+        )
+        tm.assert_numpy_array_equal(
+            got.to_numpy(), df.groupby("g")["v"].sum().to_numpy()
+        )

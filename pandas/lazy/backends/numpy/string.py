@@ -256,7 +256,13 @@ def numpy_str_count(arr: np.ndarray, pattern: str, regex: bool = False) -> np.nd
 
 
 @register_kernel("str_find", "numpy")
-def numpy_str_find(arr: np.ndarray, pattern: str, regex: bool = False) -> np.ndarray:
+def numpy_str_find(
+    arr: np.ndarray,
+    pattern: str,
+    start: int = 0,
+    end: int | None = None,
+    regex: bool = False,
+) -> np.ndarray:
     """
     Find first occurrence of pattern in strings.
 
@@ -280,10 +286,11 @@ def numpy_str_find(arr: np.ndarray, pattern: str, regex: bool = False) -> np.nda
         compiled = re.compile(pattern)
         result = np.empty(len(arr), dtype=np.int64)
         for i, s in enumerate(arr):
-            match = compiled.search(s)
+            match = compiled.search(s, start, len(s) if end is None else end)
             result[i] = match.start() if match else -1
         return result
-    return np.char.find(arr, pattern)
+    # np.char.find is character-based and honours start/end (character indices).
+    return np.char.find(arr, pattern, start, end)
 
 
 @register_kernel("str_pad", "numpy")
