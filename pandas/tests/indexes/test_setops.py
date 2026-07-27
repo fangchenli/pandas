@@ -1089,7 +1089,17 @@ class TestIntersectionUniqueSorted:
         tm.assert_numpy_array_equal(result, expected)
 
     @pytest.mark.parametrize(
-        "dtype", ["int64", "int32", "uint64", "float64", "Int64", "Float64"]
+        "dtype",
+        [
+            "int64",
+            "int32",
+            "uint64",
+            "float64",
+            "Int64",
+            "Float64",
+            pytest.param("int64[pyarrow]", marks=td.skip_if_no("pyarrow")),
+            pytest.param("float64[pyarrow]", marks=td.skip_if_no("pyarrow")),
+        ],
     )
     def test_intersection_drops_duplicates(self, dtype):
         # duplicates on both sides, in the result, and unique-after-intersection
@@ -1101,7 +1111,15 @@ class TestIntersectionUniqueSorted:
         expected = Index([1, 2, 3], dtype=dtype)
         tm.assert_index_equal(result, expected)
 
-    @pytest.mark.parametrize("dtype", ["int64", "float64", "Int64"])
+    @pytest.mark.parametrize(
+        "dtype",
+        [
+            "int64",
+            "float64",
+            "Int64",
+            pytest.param("int64[pyarrow]", marks=td.skip_if_no("pyarrow")),
+        ],
+    )
     def test_intersection_already_unique(self, dtype):
         left = Index(range(20), dtype=dtype)
         right = Index(range(10, 30), dtype=dtype)
