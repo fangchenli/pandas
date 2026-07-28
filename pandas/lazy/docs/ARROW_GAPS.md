@@ -21,6 +21,7 @@ worked-around** (real, we route around it) · **observed**.
 | AG7 | Acero join/agg wins **die at the Arrow→NumPy round-trip** (boundary tax) | quantified (structural) | high | MATERIALIZATION_EXPERIMENT.md II; PERF_CEILING.md |
 | AG8 | **Gandiva**: optional/often-unshipped pyarrow + **not wired into Acero** (expression codegen unavailable in practice) | observed | low-med | MATERIALIZATION_EXPERIMENT.md F4 (corrected below) |
 | AG9 | `string_view` **kernel coverage** (at-scale/string gains) | **active contribution — OUR PR #50224 merged 2026-07-07** (Grouper view keys, GH-50223); **OUR PR #50479 (GH-50478) OPEN/in review 2026-07-14** (scalar string predicate kernels — the LIKE/substring family; see upstream/AG9-next-string-predicate-kernels.md); #44336 + #50164 open; #50166 + #49964 (view comparison kernels, Periecle) merged | high | upstream/STRING_VIEW_CONTRIBUTION_PLAN.md; upstream/AG9-next-string-predicate-kernels.md |
+| AG20 | Decimal **`product` never widens precision** while `sum` was fixed in pyarrow 21 — a product returns an array whose values need more digits than its own declared type, then **wraps silently** past the physical width | observed, dup-search pending | med (correctness, downstream pandas) | Detail below; pandas PR #63416 |
 | AG12 | Temporal unit **downcast has no floor rounding** — `*_temporal` kernels lack a `duration` kernel; `cast(safe=False)` truncates toward zero, `safe=True` refuses (numpy floors toward −∞) | **dup for gap #1 → #50395 (open)**; gap #2 (rounding-mode on `cast`) no issue | med (correctness, downstream pandas) | upstream/AG12-arrow-temporal-duration-floor.md |
 
 ## Upstream duplicate-search results (apache/arrow, 2026-06-18)
@@ -155,6 +156,33 @@ push-down to the aggregate, not expression JIT. That is the file-able Acero
 enhancement worth scoping (currently characterization-stage, not hand-off-ready).
 
 ## Detail for the non-obvious gaps
+
+- **AG20 (decimal `product` doesn't widen precision).** Measured 2026-07-28 in
+  fresh per-version `uv` envs (`Table.group_by("g").aggregate([("v", "sum"),
+  ("v", "product")])` over `decimal128(10, 2)` and `decimal256(40, 2)`):
+  **`hash_sum` keeps the input precision through pyarrow 20 and widens to the
+  maximum (38 / 76) from 21 onward; `hash_product` keeps the input precision on
+  every version measured, 18 through 25** — i.e. `sum` was fixed five releases
+  ago and `product` was left behind.
+  - **The declared type is a lie, not just narrow.** `decimal128(20, 0)` values
+    `1e19 × 1.2e19` aggregate to a column declared `decimal128(20, 0)` holding a
+    39-digit value. `as_py()` returns the full value, so nothing raises at the
+    Arrow level, but rebuilding an array of that type raises `ArrowInvalid` —
+    the invalid state surfaces only in a downstream consumer.
+  - **Past the physical width it wraps silently.** `1e19³` (int128) and
+    `1e39 × 1e39` (`decimal256`, int256) both return negative garbage with no
+    error and no flag.
+  - **Consumer evidence:** pandas PR #63416 (`GroupBy.prod`/`sum` on `ArrowDtype`
+    decimal) casts product results to max precision itself, gating the same cast
+    for `sum` on `pa_version_under21p0`, and falls back to the non-Arrow path when
+    the value exceeds the maximum. The silent int256 wrap is recorded as an
+    xfail, `test_groupby_prod_exceeds_int256` in
+    `pandas/tests/extension/test_arrow.py`.
+  - **Status: observed. Duplicate search NOT yet done; nothing filed.** Next step
+    is the usual `gh api search/issues` sweep plus a `main`-first check that the
+    gap is live at Arrow HEAD (an AG17-class released-artifact mirage is possible
+    here — `sum` was fixed once already). Filing needs explicit human go-ahead per
+    `upstream/README.md`.
 
 - **AG4 (string-key hashing). VERIFIED** by a standalone benchmark
   (`benchmarks/bench_arrow_string_groupby.py`, 10M rows, pyarrow 23.0.1 /
