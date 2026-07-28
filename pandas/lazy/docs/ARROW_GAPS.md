@@ -21,7 +21,8 @@ worked-around** (real, we route around it) · **observed**.
 | AG7 | Acero join/agg wins **die at the Arrow→NumPy round-trip** (boundary tax) | quantified (structural) | high | MATERIALIZATION_EXPERIMENT.md II; PERF_CEILING.md |
 | AG8 | **Gandiva**: optional/often-unshipped pyarrow + **not wired into Acero** (expression codegen unavailable in practice) | observed | low-med | MATERIALIZATION_EXPERIMENT.md F4 (corrected below) |
 | AG9 | `string_view` **kernel coverage** (at-scale/string gains) | **active contribution — OUR PR #50224 merged 2026-07-07** (Grouper view keys, GH-50223); **OUR PR #50479 (GH-50478) OPEN/in review 2026-07-14** (scalar string predicate kernels — the LIKE/substring family; see upstream/AG9-next-string-predicate-kernels.md); #44336 + #50164 open; #50166 + #49964 (view comparison kernels, Periecle) merged | high | upstream/STRING_VIEW_CONTRIBUTION_PLAN.md; upstream/AG9-next-string-predicate-kernels.md |
-| AG20 | Decimal **`product` never widens precision** while `sum` was fixed in pyarrow 21 — a product returns an array whose values need more digits than its own declared type, then **wraps silently** past the physical width | observed, dup-search pending | med (correctness, downstream pandas) | Detail below; pandas PR #63416 |
+| AG20 | Decimal **`product` never widens precision** while `sum` was fixed in pyarrow 21 — a product returns an array whose values need more digits than its own declared type, then **wraps silently** past the physical width | **non-dup, file-able — the unfixed half of #35166** (closed; its PR #44184 covered `sum` only) | med-high (correctness, downstream pandas) | Detail below; pandas PR #63416 |
+| AG21 | `pc.scatter` unusable for placing group results until **pyarrow 23** — absent before 20, and no `max_index` until 23, so it cannot scatter into an output longer than the input (missing/unobserved groups) | **not a defect — API maturity, already fixed upstream**; do NOT file | low (consumer-side, unblocks when min pyarrow ≥ 23) | Detail below; pandas PR #63416 |
 | AG12 | Temporal unit **downcast has no floor rounding** — `*_temporal` kernels lack a `duration` kernel; `cast(safe=False)` truncates toward zero, `safe=True` refuses (numpy floors toward −∞) | **dup for gap #1 → #50395 (open)**; gap #2 (rounding-mode on `cast`) no issue | med (correctness, downstream pandas) | upstream/AG12-arrow-temporal-duration-floor.md |
 
 ## Upstream duplicate-search results (apache/arrow, 2026-06-18)
@@ -178,11 +179,56 @@ enhancement worth scoping (currently characterization-stage, not hand-off-ready)
     the value exceeds the maximum. The silent int256 wrap is recorded as an
     xfail, `test_groupby_prod_exceeds_int256` in
     `pandas/tests/extension/test_arrow.py`.
-  - **Status: observed. Duplicate search NOT yet done; nothing filed.** Next step
-    is the usual `gh api search/issues` sweep plus a `main`-first check that the
-    gap is live at Arrow HEAD (an AG17-class released-artifact mirage is possible
-    here — `sum` was fixed once already). Filing needs explicit human go-ahead per
-    `upstream/README.md`.
+  - **Also the scalar kernel, not just the hash one:** on 23.0.1 `pc.sum` of
+    `decimal128(1, 0)` returns `decimal128(38, 0)` while `pc.product` returns
+    `decimal128(1, 0)`, and `pc.product` of the `decimal128(20, 0)` pair returns
+    39 digits in a type declared `decimal128(20, 0)`.
+  - **Duplicate search done (apache/arrow, 2026-07-28)** — 7 query phrasings
+    (`decimal product precision in:title`, `hash_product decimal`, `decimal sum
+    precision in:title`, `decimal overflow aggregate`, `product aggregate decimal
+    precision`, `increase precision decimals product`, `decimal multiply precision
+    aggregate`). **No issue covers the product half.** What exists is the *sum*
+    half: **#35166** "pa.compute.sum result for decimal128 doesn't fit into
+    precision/scale" (**closed**), fixed by **PR #44184** "[C++][Compute] Increase
+    precision of decimals in **sum** aggregates" (merged 2025-07-03 → first
+    released in pyarrow 21, which matches the measured 20→21 transition exactly).
+    **#44184's own rationale says the bug applies to "a sum, product, or mean"**,
+    but the change was scoped to sum and #35166 was closed with product still
+    broken. Adjacent but different: **#37536 / GH-37090 "[C++] Add sum_checked
+    aggregate function"** (open) — the overflow-*checking* angle.
+  - **Verdict: non-duplicate and unusually well-positioned to file** — not a new
+    claim to argue, but the unfixed half of an already-accepted, already-fixed
+    bug, with the maintainers' own wording naming `product`. Best action is a
+    comment on **#35166** asking to reopen (or a narrow new issue referencing it
+    and #44184), carrying the repro above.
+  - **Status: observed, non-dup, NOT filed.** Remaining gate before filing: a
+    `main`-first check that the gap is live at Arrow HEAD (an AG17-class
+    released-artifact mirage is plausible here precisely because `sum` was fixed
+    once already), then explicit human go-ahead per `upstream/README.md`.
+
+- **AG21 (`pc.scatter` maturity — why the pandas groupby path scatters in
+  NumPy).** Placing per-group aggregates back into group order is exactly
+  `scatter(values, group_ids, max_index=ngroups - 1)`, but measured 2026-07-28
+  across versions:
+  - **pyarrow 13, 18, 19: `pc.scatter` does not exist.**
+  - **pyarrow 20, 21, 22: exists, but has no `max_index`** — the output length is
+    pinned to `len(indices)`, so it cannot scatter into a *longer* output. That is
+    the case that matters: unobserved categorical groups, or any `ngroups` larger
+    than the number of observed groups.
+  - **pyarrow 23+: `max_index` present**, gaps come back null, and every type we
+    need works — `int64`, `float64`, `bool`, `decimal128`, `string`,
+    `large_string`, and `ChunkedArray`. It would fully replace the hand-rolled
+    scatter.
+  - **Consumer impact:** pandas supports `pyarrow>=13`, so
+    `_groupby_op_pyarrow` in `pandas/core/arrays/arrow/array.py` converts to NumPy
+    to scatter (`np.full`/`np.empty` + fancy indexing + a manual null mask), which
+    is also what forces the Arrow→NumPy→Arrow round-trip on that path (cf. AG7).
+    The code carries a TODO pointing here.
+  - **Verdict: NOT an Arrow defect and nothing to file** — the API landed and was
+    completed upstream; this is a consumer-side version-floor constraint. Recorded
+    so the workaround is deletable on sight: when pandas' minimum pyarrow reaches
+    **23**, replace the NumPy scatter with `pc.scatter` + `fill_null` for the
+    sum/prod identity.
 
 - **AG4 (string-key hashing). VERIFIED** by a standalone benchmark
   (`benchmarks/bench_arrow_string_groupby.py`, 10M rows, pyarrow 23.0.1 /
