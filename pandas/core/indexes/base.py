@@ -130,6 +130,7 @@ from pandas.core import (
 )
 from pandas.core.accessor import Accessor
 import pandas.core.algorithms as algos
+import pandas.core.array_algos.join as array_algos_join
 from pandas.core.array_algos.putmask import validate_putmask
 from pandas.core.arrays import (
     ArrowExtensionArray,
@@ -410,7 +411,9 @@ class Index(IndexOpsMixin, PandasObject):
         # Caller is responsible for ensuring other.dtype == self.dtype
         sv = self._get_join_target()
         ov = other._get_join_target()
-        joined_ndarray, lidx, ridx = libjoin.inner_join_indexer(sv, ov)
+        # runs the merge on a thread pool for large numeric inputs, and
+        # dispatches to libjoin.inner_join_indexer otherwise
+        joined_ndarray, lidx, ridx = array_algos_join.inner_join_indexer(sv, ov)
         joined = self._from_join_target(joined_ndarray)
         return joined, lidx, ridx
 

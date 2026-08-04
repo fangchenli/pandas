@@ -386,3 +386,73 @@ def test_inner_join_indexer2():
 
     exp_ridx = np.array([0, 1, 2, 3], dtype=np.intp)
     tm.assert_almost_equal(ridx, exp_ridx)
+
+
+class TestInnerJoinFillRange:
+    def _views(self):
+        left = np.arange(10, dtype=np.int64)
+        right = np.arange(5, 15, dtype=np.int64)
+        return left, right
+
+    def test_returns_pairs_written(self):
+        left, right = self._views()
+        n = libjoin.inner_join_count_range(left, right)
+        result = np.empty(n, dtype=np.int64)
+        lidx = np.empty(n, dtype=np.intp)
+        ridx = np.empty(n, dtype=np.intp)
+
+        written = libjoin.inner_join_fill_range(left, right, result, lidx, ridx, 0, 0)
+        assert written == n
+
+    def test_short_output_truncates_instead_of_overflowing(self):
+        # GH#51364 the fill loop runs with bounds checking off, so a caller that
+        # under-sizes the output must be truncated, not allowed to write past
+        # the end; the short count is how the caller finds out
+        left, right = self._views()
+        n = libjoin.inner_join_count_range(left, right)
+        assert n > 2
+
+        result = np.zeros(2, dtype=np.int64)
+        lidx = np.zeros(2, dtype=np.intp)
+        ridx = np.zeros(2, dtype=np.intp)
+
+        written = libjoin.inner_join_fill_range(left, right, result, lidx, ridx, 0, 0)
+        assert written == 2
+
+    def test_mismatched_output_lengths_raise(self):
+        left, right = self._views()
+        msg = "must be equal length"
+        with pytest.raises(ValueError, match=msg):
+            libjoin.inner_join_fill_range(
+                left,
+                right,
+                np.empty(5, dtype=np.int64),
+                np.empty(4, dtype=np.intp),
+                np.empty(5, dtype=np.intp),
+                0,
+                0,
+            )
+
+
+@pytest.mark.parametrize("dtype", ["int64", "float64", "uint32"])
+def test_inner_join_range_read_only_input(dtype):
+    # GH#51364 the join target of an Arrow-backed Index is a zero-copy,
+    # read-only view, so neither pass may ask for a writable buffer on the
+    # inputs.  Freshly allocated test arrays are writable and hide this.
+    left = np.arange(10, dtype=dtype)
+    right = np.arange(5, 15, dtype=dtype)
+    left.setflags(write=False)
+    right.setflags(write=False)
+
+    count = libjoin.inner_join_count_range(left, right)
+
+    result = np.empty(count, dtype=dtype)
+    lidx = np.empty(count, dtype=np.intp)
+    ridx = np.empty(count, dtype=np.intp)
+    written = libjoin.inner_join_fill_range(left, right, result, lidx, ridx, 0, 0)
+
+    assert written == count
+    expected = libjoin.inner_join_indexer(left, right)
+    tm.assert_numpy_array_equal(result, expected[0])
+    tm.assert_numpy_array_equal(lidx, expected[1])
+    tm.assert_numpy_array_equal(ridx, expected[2])

@@ -460,13 +460,17 @@ with cf.config_prefix("mode"):
 
 max_threads_doc = """
 : int or None
-    Maximum number of worker threads for parallel operations (e.g. ``read_csv``
-    for large files).  ``None`` (the default) means use ``min(os.cpu_count(), 4)``,
-    further limited to the CPUs available to the process (CPU affinity and cgroup
-    limits); on Windows the default is ``1``, as parallel reading is not faster
-    there.  Set to ``1`` to disable parallel execution, or to a fixed number to
-    raise the cap or to limit thread usage when pandas is embedded in a larger
-    parallel workflow.  Ignored on Emscripten/Pyodide, which cannot spawn threads.
+    Maximum number of worker threads for parallel operations, such as
+    ``read_csv`` on a large file or an inner join between large indexes.
+    ``None`` (the default) lets each operation pick its own worker count, since
+    they differ in how far they scale, bounded by the CPUs available to the
+    process (CPU affinity and cgroup limits).  ``read_csv`` caps its default at
+    4, and is serial on Windows, where parallel reading is not faster.  Set to
+    ``1`` to disable parallel execution, which is how pandas is made
+    single-threaded inside a larger parallel workflow such as a Dask or joblib
+    worker (``threadpoolctl`` cannot do this: it limits native OpenMP and BLAS
+    pools, not pandas' own).  Any other value overrides every per-operation cap.
+    Ignored on Emscripten/Pyodide, which cannot spawn threads.
 """
 
 
