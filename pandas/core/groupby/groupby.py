@@ -1583,13 +1583,22 @@ class GroupBy(BaseGroupBy[NDFrameT]):
                     min_count=min_count,
                     **kwargs,
                 )
-            except NotImplementedError:
+            except NotImplementedError as err:
                 # generally if we have numeric_only=False
                 # and non-applicable functions
                 # try to python agg
                 # TODO: shouldn't min_count matter?
                 if alt is None or how in ["any", "all", "std", "sem"]:
-                    raise  # TODO: re-raise as TypeError?  should not be reached
+                    if not str(err):
+                        # GH#XXXXX the NotImplementedError raised to route to
+                        #  _agg_py_fallback is control flow and carries no
+                        #  message; ArrowDtype reaches this re-raise, so the
+                        #  user would otherwise see an empty traceback.
+                        raise NotImplementedError(
+                            "function is not implemented for this dtype: "
+                            f"{values.dtype}"
+                        ) from err
+                    raise  # TODO: re-raise as TypeError?
             else:
                 if use_bool_fastpath and result.dtype.kind == "f":
                     fill = 0.0 if how == "any" else 1.0

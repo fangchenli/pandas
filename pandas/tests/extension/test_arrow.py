@@ -3959,6 +3959,36 @@ def test_groupby_count_return_arrow_dtype(data_missing):
     tm.assert_frame_equal(result, expected)
 
 
+@pytest.mark.parametrize(
+    "pa_type, how",
+    [
+        (pa_type, how)
+        for pa_type in [
+            pa.binary(),
+            pa.date32(),
+            pa.time32("s"),
+            pa.time64("us"),
+            pa.dictionary(pa.int32(), pa.string()),
+            pa.list_(pa.int64()),
+        ]
+        for how in ["std", "sem", "skew", "any", "all"]
+    ]
+    # decimal has a native std/sem/var path, so only these reach the re-raise
+    + [(pa.decimal128(5, 2), how) for how in ["skew", "any", "all"]],
+    ids=str,
+)
+def test_groupby_unsupported_agg_raises_with_message(pa_type, how):
+    # GH#XXXXX these raised a bare NotImplementedError with an empty message,
+    #  because _to_masked's NotImplementedError doubles as routing control flow
+    #  and was re-raised verbatim to the user.
+    dtype = ArrowDtype(pa_type)
+    ser = pd.Series([None, None], dtype=dtype)
+    msg = f"function is not implemented for this dtype: {re.escape(str(dtype))}"
+
+    with pytest.raises(NotImplementedError, match=msg):
+        getattr(ser.groupby([1, 1]), how)()
+
+
 class TestGroupbyAggPyArrowNative:
     """Tests for PyArrow-native groupby aggregations on decimal and string types."""
 
