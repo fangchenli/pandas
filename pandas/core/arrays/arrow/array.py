@@ -2826,13 +2826,10 @@ class ArrowExtensionArray(
         try:
             result = pyarrow_meth(data_to_reduce, skip_nulls=skipna, **kwargs)
         except (AttributeError, NotImplementedError, TypeError) as err:
-            msg = (
+            raise TypeError(
                 f"'{type(self).__name__}' with dtype {self.dtype} "
-                f"does not support operation '{name}' with pyarrow "
-                f"version {pa.__version__}. '{name}' may be supported by "
-                f"upgrading pyarrow."
-            )
-            raise TypeError(msg) from err
+                f"does not support operation '{name}'"
+            ) from err
         if name == "median":
             # GH 52679: Use quantile instead of approximate_median; returns array
             result = result[0]

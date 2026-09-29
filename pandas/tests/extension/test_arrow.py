@@ -3514,6 +3514,26 @@ def test_date64_std_keeps_milliseconds():
     assert ser.std() == expected == pd.Timedelta(milliseconds=1)
 
 
+@pytest.mark.parametrize(
+    "op_name, arr",
+    [
+        ("var", pa.array([date(2020, 1, 1), date(2020, 1, 3)])),
+        ("var", pa.array([1, 3], pa.timestamp("us"))),
+        ("skew", pa.array([1, 3], pa.duration("us"))),
+        ("prod", pa.array([1, 3], pa.timestamp("us"))),
+        ("any", pa.array(["a", "b"])),
+        ("mean", pa.array([b"a", b"b"])),
+        ("min", pa.array([[1], [2]])),
+    ],
+)
+def test_reduce_unsupported_no_upgrade_hint(op_name, arr):
+    # GH#XXXXX the message suggested upgrading pyarrow, which does not help
+    ser = pd.Series(ArrowExtensionArray(arr))
+    msg = f"does not support operation '{op_name}'$"
+    with pytest.raises(TypeError, match=msg):
+        getattr(ser, op_name)()
+
+
 @pytest.mark.parametrize("unit", ["ns", "us", "ms", "s"])
 def test_duration_from_strings_with_nat(unit):
     # GH51175
