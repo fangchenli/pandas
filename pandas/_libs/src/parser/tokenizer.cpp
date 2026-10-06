@@ -591,7 +591,7 @@ void parser_set_skipfirstnrows(parser_t *self, int64_t nrows) {
 static int parser_buffer_bytes(parser_t *self, size_t nbytes,
                                const char *encoding_errors) {
   int status;
-  size_t bytes_read;
+  size_t bytes_read = 0;
 
   status = 0;
   self->datapos = 0;
