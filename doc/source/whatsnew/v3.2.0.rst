@@ -259,6 +259,7 @@ ExtensionArray
 ^^^^^^^^^^^^^^
 - Bug in :func:`read_csv` and other parsing of strings into a decimal :class:`ArrowDtype` raising ``ArrowInvalid`` instead of parsing the values (:issue:`69838`)
 - Bug in :meth:`Series.mode` and :meth:`DataFrame.mode` with ``dropna=False`` raising ``TypeError`` for ``"boolean"`` dtype (:issue:`70487`)
+- Bug in :meth:`Series.quantile` and :meth:`DataFrame.quantile` with :class:`ArrowDtype` date, time, timestamp and duration columns and ``interpolation="linear"`` or ``"midpoint"`` losing precision for large values such as nanosecond timestamps, and with ``"linear"`` sometimes returning a result one unit too small (:issue:`XXXXX`)
 
 Styler
 ^^^^^^

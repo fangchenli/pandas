@@ -3336,7 +3336,25 @@ class ArrowExtensionArray(
             else:
                 data = data.cast(pa.int64())
 
-        result = pc.quantile(data, q=qs, interpolation=interpolation)
+        if pa.types.is_temporal(pa_dtype) and interpolation in ("linear", "midpoint"):
+            # pc.quantile interpolates on float64 values, which loses precision
+            #  for large values like nanosecond timestamps and can floor an
+            #  integral result down a unit. Instead interpolate from the exact
+            #  neighbors, so only their difference goes through float64.
+            lower = pc.quantile(data, q=qs, interpolation="lower").cast(pa.int64())
+            higher = pc.quantile(data, q=qs, interpolation="higher").cast(pa.int64())
+            diff = pc.subtract_checked(higher, lower)
+            if interpolation == "midpoint":
+                step = pc.divide(diff, 2)
+            else:
+                # as in libgroupby.group_quantile
+                pos = qs * (len(data) - data.null_count - 1)
+                frac = pa.array(pos - np.floor(pos))
+                diff = diff.cast(pa.float64(), safe=False)
+                step = pc.floor(pc.multiply(diff, frac)).cast(pa.int64())
+            result = pc.add_checked(lower, step)
+        else:
+            result = pc.quantile(data, q=qs, interpolation=interpolation)
 
         if pa.types.is_temporal(pa_dtype):
             if pa.types.is_floating(result.type):

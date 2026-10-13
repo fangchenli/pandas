@@ -1223,6 +1223,26 @@ def test_quantile_temporal(pa_type):
     assert result == expected
 
 
+@pytest.mark.parametrize("interpolation", ["linear", "midpoint"])
+def test_quantile_temporal_nanosecond_precision(interpolation):
+    # interpolating on float64 lost precision for nanosecond timestamps
+    ser = pd.Series(
+        [1_700_000_000_000_000_001, 1_700_000_000_000_000_004],
+        dtype=ArrowDtype(pa.timestamp("ns")),
+    )
+    result = ser.quantile(0.5, interpolation=interpolation)
+    assert result == pd.Timestamp(1_700_000_000_000_000_002)
+
+
+def test_quantile_temporal_integral_result():
+    # pc.quantile gives -9.000000000000002 days here, which was floored to -10
+    days = [35, 18, 7, -33, 43, 12]
+    ser = pd.Series(ArrowExtensionArray(pa.array(days, pa.int32()).cast(pa.date32())))
+    result = ser.quantile([0.12])
+    expected = pd.Series([date(1969, 12, 23)], index=[0.12], dtype="date32[pyarrow]")
+    tm.assert_series_equal(result, expected)
+
+
 @pytest.mark.parametrize(
     "pa_type", tm.DATETIME_PYARROW_DTYPES + tm.TIMEDELTA_PYARROW_DTYPES
 )
