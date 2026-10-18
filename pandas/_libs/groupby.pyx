@@ -35,6 +35,7 @@ from pandas._libs cimport util
 from pandas._libs.algos cimport (
     calc_kurt,
     calc_skew,
+    calc_var,
     get_rank_nan_fill_val,
     kth_smallest_c,
     moments_add_value,
@@ -52,6 +53,9 @@ from pandas._libs.dtypes cimport (
     numeric_t,
 )
 from pandas._libs.missing cimport checknull
+from pandas._libs.portable cimport checked_add
+
+from pandas._libs.tslibs.np_datetime import OutOfBoundsTimedelta
 
 
 cdef int64_t NPY_NAT = util.get_nat()
@@ -506,7 +510,10 @@ def group_shift_indexer(
     if periods == 0:
         with nogil:
             for i in range(N):
-                out[i] = i
+                if labels[i] == -1:
+                    out[i] = -1
+                else:
+                    out[i] = i
     else:
         # array of each previous indexer seen
         label_indexer = np.zeros((ngroups, periods), dtype=np.int64)
@@ -731,6 +738,8 @@ def group_sum(
         sum_t val, t, y, nan_val
         sum_t[:, ::1] sumx, compensation
         int64_t[:, ::1] nobs
+        int64_t[:, ::1] carry
+        uint8_t[:, ::1] na_result
         Py_ssize_t len_values = len(values), len_labels = len(labels)
         bint uses_mask = mask is not None
         bint isna_entry, isna_result
@@ -748,6 +757,10 @@ def group_sum(
         assert sum_t is object
         sumx = np.full((<object>out).shape, initial, dtype=object)
         # object code path does not use `compensation`
+
+    if sum_t is int64_t:
+        carry = np.zeros((<object>out).shape, dtype=np.int64)
+        na_result = np.zeros((<object>out).shape, dtype=np.uint8)
 
     N, K = (<object>values).shape
     if uses_mask:
@@ -779,6 +792,16 @@ def group_sum(
                 if not skipna:
                     if uses_mask:
                         isna_result = result_mask[lab, j]
+                    elif sum_t is int64_t and is_datetimelike:
+                        # GH#66551: track NA-ness explicitly rather than reading
+                        #  it back off sumx, which cannot tell a group holding a
+                        #  real NaT from one whose running total merely landed on
+                        #  NPY_NAT.  The latter must keep accumulating.
+                        isna_result = na_result[lab, j]
+                        if isna_entry:
+                            # marked after the read so this entry still falls
+                            #  through to set sumx to nan_val
+                            na_result[lab, j] = 1
                     else:
                         isna_result = _treat_as_na(sumx[lab, j], is_datetimelike)
 
@@ -798,6 +821,17 @@ def group_sum(
                             # i.e. we haven't added anything yet; avoid TypeError
                             #  if e.g. val is a str and sumx[lab, j] is 0
                             t = val
+                        elif sum_t is int64_t and is_datetimelike:
+                            # GH#66551: int64 addition is modular, so a wrapped
+                            #  intermediate does not corrupt the total; keep the
+                            #  wrapped value and track the net carry instead.  The
+                            #  total is representable iff the carry is back to zero
+                            #  at the end, which makes this independent of the
+                            #  order values arrive in.
+                            if checked_add(sumx[lab, j], val, &t):
+                                t = <int64_t>(<uint64_t>sumx[lab, j] +
+                                              <uint64_t>val)
+                                carry[lab, j] += 1 if val > 0 else -1
                         else:
                             t = sumx[lab, j] + val
                         sumx[lab, j] = t
@@ -835,6 +869,19 @@ def group_sum(
                         result_mask[lab, j] = True
                     else:
                         sumx[lab, j] = nan_val
+
+    if sum_t is int64_t:
+        if is_datetimelike:
+            for i in range(ncounts):
+                for j in range(K):
+                    if na_result[i, j] or nobs[i, j] < min_count:
+                        # discarded downstream, so exempt from the bounds check
+                        continue
+                    # representable totals are (NPY_NAT, i8max]
+                    if carry[i, j] != 0 or sumx[i, j] == NPY_NAT:
+                        raise OutOfBoundsTimedelta(
+                            "overflow in timedelta operation"
+                        )
 
     _check_below_mincount(
         out, uses_mask, result_mask, ncounts, K, nobs, min_count, sumx
@@ -930,8 +977,8 @@ def group_var(
 ) -> None:
     cdef:
         Py_ssize_t i, j, N, K, lab, ncounts = len(counts)
-        floating val, ct, oldmean
-        floating[:, ::1] mean
+        float64_t val
+        float64_t[:, ::1] mean, M2
         int64_t[:, ::1] nobs
         Py_ssize_t len_values = len(values), len_labels = len(labels)
         bint isna_entry, isna_result, uses_mask = mask is not None
@@ -944,11 +991,15 @@ def group_var(
         raise ValueError("len(index) != len(labels)")
 
     nobs = np.zeros((<object>out).shape, dtype=np.int64)
-    mean = np.zeros((<object>out).shape, dtype=(<object>out).base.dtype)
+    mean = np.zeros((<object>out).shape, dtype=np.float64)
+    if floating is double:
+        # this avoids memory allocation
+        out[:, :] = 0.0
+        M2 = out
+    else:
+        M2 = np.zeros((<object>out).shape, dtype=np.float64)
 
     N, K = (<object>values).shape
-
-    out[:, :] = 0.0
 
     with nogil:
         for i in range(N):
@@ -978,9 +1029,9 @@ def group_var(
                         # With group_var, we cannot just use _treat_as_na bc
                         #  datetimelike dtypes get cast to float64 instead of
                         #  to int64.
-                        isna_result = out[lab, j] == NPY_NAT
+                        isna_result = M2[lab, j] != M2[lab, j]
                     else:
-                        isna_result = _treat_as_na(out[lab, j], is_datetimelike)
+                        isna_result = _treat_as_na(M2[lab, j], is_datetimelike)
 
                     if isna_result:
                         # If aggregate is already NA, don't add to it. This is
@@ -989,33 +1040,28 @@ def group_var(
                         continue
 
                 if not isna_entry:
-                    nobs[lab, j] += 1
-                    oldmean = mean[lab, j]
-                    mean[lab, j] += (val - oldmean) / nobs[lab, j]
-                    out[lab, j] += (val - mean[lab, j]) * (val - oldmean)
+                    moments_add_value(val, &nobs[lab, j], &mean[lab, j], &M2[lab, j],
+                                      NULL, NULL, 2)
                 elif not skipna:
                     nobs[lab, j] = 0
                     if uses_mask:
                         result_mask[lab, j] = True
                     else:
-                        out[lab, j] = NAN
+                        M2[lab, j] = NAN
 
         for i in range(ncounts):
             for j in range(K):
-                ct = nobs[i, j]
-                if ct <= ddof:
+                if nobs[i, j] <= ddof or nobs[i, j] == 0:
                     if uses_mask:
                         result_mask[i, j] = True
                     else:
                         out[i, j] = NAN
                 else:
+                    out[i, j] = calc_var(nobs[i, j], M2[i, j], ddof)
                     if is_std:
-                        out[i, j] = sqrt(out[i, j] / (ct - ddof))
+                        out[i, j] = sqrt(out[i, j])
                     elif is_sem:
-                        out[i, j] = sqrt(out[i, j] / (ct - ddof) / ct)
-                    else:
-                        # just "var"
-                        out[i, j] /= (ct - ddof)
+                        out[i, j] = sqrt(out[i, j] / <float64_t>nobs[i, j])
 
 
 @cython.wraparound(False)
@@ -2040,7 +2086,12 @@ cdef group_min_max(
 
                 if not isna_entry:
                     nobs[lab, j] += 1
-                    if compute_max:
+                    if (
+                        numeric_t is float32_t or numeric_t is float64_t
+                    ) and val != val:
+                        # unmasked NaN propagates like numpy, GH#59106
+                        group_min_or_max[lab, j] = val
+                    elif compute_max:
                         if val > group_min_or_max[lab, j]:
                             group_min_or_max[lab, j] = val
                     else:
@@ -2339,7 +2390,12 @@ cdef group_cummin_max(
 
                     if not isna_entry:
                         mval = accum[lab, j]
-                        if compute_max:
+                        if (
+                            numeric_t is float32_t or numeric_t is float64_t
+                        ) and val != val:
+                            # unmasked NaN propagates like numpy, GH#59106
+                            accum[lab, j] = mval = val
+                        elif compute_max:
                             if val > mval:
                                 accum[lab, j] = mval = val
                         else:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import abc
 from contextlib import suppress
 import sys
 from typing import (
@@ -17,6 +18,8 @@ import numpy as np
 
 from pandas._libs.indexing import NDFrameIndexerBase
 from pandas._libs.lib import (
+    is_bool,
+    is_bool_array,
     is_np_dtype,
     item_from_zerodim,
 )
@@ -52,14 +55,19 @@ from pandas.core.dtypes.common import (
 )
 from pandas.core.dtypes.concat import concat_compat
 from pandas.core.dtypes.dtypes import (
+    ArrowDtype,
+    BaseMaskedDtype,
     DatetimeTZDtype,
     ExtensionDtype,
     IntervalDtype,
     NumpyEADtype,
     PeriodDtype,
+    SparseDtype,
 )
 from pandas.core.dtypes.generic import (
     ABCDataFrame,
+    ABCExtensionArray,
+    ABCIndex,
     ABCSeries,
 )
 from pandas.core.dtypes.missing import (
@@ -71,6 +79,7 @@ from pandas.core.dtypes.missing import (
 )
 
 from pandas.core import algorithms as algos
+from pandas.core.arrays.string_ import StringDtype
 import pandas.core.common as com
 from pandas.core.construction import (
     array as pd_array,
@@ -112,13 +121,20 @@ if TYPE_CHECKING:
     from pandas.core.arrays import ExtensionArray
     from pandas.core.base import IndexOpsMixin
 
-    _IndexSliceTuple: TypeAlias = tuple[IndexOpsMixin | Scalar | Sequence | slice, ...]
+    _IndexSliceTuple: TypeAlias = tuple[
+        IndexOpsMixin | Scalar | Sequence[Any] | slice, ...
+    ]
 
     _IndexSliceUnion: TypeAlias = (
-        Scalar | Sequence | slice | _IndexSliceTuple | tuple[_IndexSliceTuple, ...]
+        Scalar | Sequence[Any] | slice | _IndexSliceTuple | tuple[_IndexSliceTuple, ...]
     )
 
     _IndexSliceUnionT = TypeVar("_IndexSliceUnionT", bound=_IndexSliceUnion)
+
+    _NDFrameIndexerBase: TypeAlias = NDFrameIndexerBase[Any]
+else:
+    # the cdef class is not subscriptable at runtime
+    _NDFrameIndexerBase = NDFrameIndexerBase
 
 
 # "null slice"
@@ -299,7 +315,7 @@ class IndexingMixin:
         With scalar integers.
 
         >>> df.iloc[0, 1]
-        np.int64(2)
+        2
 
         With lists of integers.
 
@@ -427,7 +443,7 @@ class IndexingMixin:
         Single label for row and column
 
         >>> df.loc["cobra", "shield"]
-        np.int64(2)
+        2
 
         Slice with labels for row and single label for column. As mentioned
         above, note that both the start and stop of the slice are included.
@@ -645,7 +661,7 @@ class IndexingMixin:
         Single tuple for the index with a single label for the column
 
         >>> df.loc[("cobra", "mark i"), "shield"]
-        np.int64(2)
+        2
 
         Slice from index tuple to single label
 
@@ -742,18 +758,18 @@ class IndexingMixin:
         Get value at specified row/column pair
 
         >>> df.at[4, "B"]
-        np.int64(2)
+        2
 
         Set value at specified row/column pair
 
         >>> df.at[4, "B"] = 10
         >>> df.at[4, "B"]
-        np.int64(10)
+        10
 
         Get value within a Series
 
         >>> df.loc[5].at["B"]
-        np.int64(4)
+        4
         """
         return _AtIndexer("at", self)
 
@@ -791,23 +807,23 @@ class IndexingMixin:
         Get value at specified row/column pair
 
         >>> df.iat[1, 2]
-        np.int64(1)
+        1
 
         Set value at specified row/column pair
 
         >>> df.iat[1, 2] = 10
         >>> df.iat[1, 2]
-        np.int64(10)
+        10
 
         Get value within a series
 
         >>> df.loc[0].iat[1]
-        np.int64(2)
+        2
         """
         return _iAtIndexer("iat", self)
 
 
-class _LocationIndexer(NDFrameIndexerBase):
+class _LocationIndexer(_NDFrameIndexerBase):
     _valid_types: str
     axis: AxisInt | None = None
 
@@ -1086,7 +1102,7 @@ class _LocationIndexer(NDFrameIndexerBase):
         raise AbstractMethodError(self)
 
     @final
-    def _expand_ellipsis(self, tup: tuple) -> tuple:
+    def _expand_ellipsis(self, tup: tuple[Any, ...]) -> tuple[Any, ...]:
         """
         If a tuple key includes an Ellipsis, replace it with an appropriate
         number of null slices.
@@ -1107,7 +1123,7 @@ class _LocationIndexer(NDFrameIndexerBase):
         return tup
 
     @final
-    def _validate_tuple_indexer(self, key: tuple) -> tuple:
+    def _validate_tuple_indexer(self, key: tuple[Any, ...]) -> tuple[Any, ...]:
         """
         Check the key for valid keys across my indexer.
         """
@@ -1123,7 +1139,7 @@ class _LocationIndexer(NDFrameIndexerBase):
         return key
 
     @final
-    def _is_nested_tuple_indexer(self, tup: tuple) -> bool:
+    def _is_nested_tuple_indexer(self, tup: tuple[Any, ...]) -> bool:
         """
         Returns
         -------
@@ -1134,14 +1150,14 @@ class _LocationIndexer(NDFrameIndexerBase):
         return False
 
     @final
-    def _convert_tuple(self, key: tuple) -> tuple:
+    def _convert_tuple(self, key: tuple[Any, ...]) -> tuple[Any, ...]:
         # Note: we assume _tupleize_axis_indexer has been called, if necessary.
         self._validate_key_length(key)
         keyidx = [self._convert_to_indexer(k, axis=i) for i, k in enumerate(key)]
         return tuple(keyidx)
 
     @final
-    def _validate_key_length(self, key: tuple) -> tuple:
+    def _validate_key_length(self, key: tuple[Any, ...]) -> tuple[Any, ...]:
         if len(key) > self.ndim:
             if key[0] is Ellipsis:
                 # e.g. Series.iloc[..., 3] reduces to just Series.iloc[3]
@@ -1153,7 +1169,7 @@ class _LocationIndexer(NDFrameIndexerBase):
         return key
 
     @final
-    def _getitem_tuple_same_dim(self, tup: tuple):
+    def _getitem_tuple_same_dim(self, tup: tuple[Any, ...]):
         """
         Index with indexers that should return an object of the same dimension
         as self.obj.
@@ -1181,7 +1197,7 @@ class _LocationIndexer(NDFrameIndexerBase):
         return retval
 
     @final
-    def _getitem_lowerdim(self, tup: tuple):
+    def _getitem_lowerdim(self, tup: tuple[Any, ...]):
         # we can directly get the axis result since the axis is specified
         if self.axis is not None:
             axis = self.obj._get_axis_number(self.axis)
@@ -1243,12 +1259,21 @@ class _LocationIndexer(NDFrameIndexerBase):
                 if com.is_null_slice(new_key):
                     return section
                 # This is an elided recursive call to iloc/loc
-                return getattr(section, self.name)[new_key]
+                result = getattr(section, self.name)[new_key]
+                if (
+                    isinstance(result, (ABCDataFrame, ABCSeries))
+                    and 2 * result.size <= section.size
+                    and _is_view_of_new_data(result, section)
+                ):
+                    # don't let a small view keep the whole temporary alive, GH#69477;
+                    #  a copy isn't worth it for a view of most of the temporary
+                    return result.copy()
+                return result
 
         raise IndexingError("not applicable")
 
     @final
-    def _getitem_nested_tuple(self, tup: tuple):
+    def _getitem_nested_tuple(self, tup: tuple[Any, ...]):
         # we have a nested tuple so have at least 1 multi-index level
         # we should be able to match up the dimensionality here
 
@@ -1335,10 +1360,10 @@ class _LocationIndexer(NDFrameIndexerBase):
             maybe_callable = self._raise_callable_usage(key, maybe_callable)
             return self._getitem_axis(maybe_callable, axis=axis)
 
-    def _is_scalar_access(self, key: tuple):
+    def _is_scalar_access(self, key: tuple[Any, ...]):
         raise NotImplementedError
 
-    def _getitem_tuple(self, tup: tuple):
+    def _getitem_tuple(self, tup: tuple[Any, ...]):
         raise AbstractMethodError(self)
 
     def _getitem_axis(self, key, axis: AxisInt):
@@ -1447,7 +1472,7 @@ class _LocIndexer(_LocationIndexer):
     Single label for row and column
 
     >>> df.loc["cobra", "shield"]
-    np.int64(2)
+    2
 
     Slice with labels for row and single label for column. As mentioned
     above, note that both the start and stop of the slice are included.
@@ -1647,7 +1672,7 @@ class _LocIndexer(_LocationIndexer):
     Single tuple for the index with a single label for the column
 
     >>> df.loc[("cobra", "mark i"), "shield"]
-    np.int64(2)
+    2
 
     Slice from index tuple to single label
 
@@ -1725,14 +1750,7 @@ class _LocIndexer(_LocationIndexer):
         # slice of integers (only if in the labels)
         # boolean not in slice and with boolean index
         ax = self.obj._get_axis(axis)
-        if isinstance(key, bool) and not (
-            is_bool_dtype(ax.dtype)
-            or ax.dtype.name == "boolean"
-            or (
-                isinstance(ax, MultiIndex)
-                and is_bool_dtype(ax.get_level_values(0).dtype)
-            )
-        ):
+        if isinstance(key, bool) and not _holds_bool_label(ax, key):
             raise KeyError(
                 f"{key}: boolean label can not be used without a boolean index"
             )
@@ -1745,7 +1763,7 @@ class _LocIndexer(_LocationIndexer):
     def _has_valid_setitem_indexer(self, indexer) -> bool:
         return True
 
-    def _is_scalar_access(self, key: tuple) -> bool:
+    def _is_scalar_access(self, key: tuple[Any, ...]) -> bool:
         """
         Returns
         -------
@@ -1779,7 +1797,7 @@ class _LocIndexer(_LocationIndexer):
     # -------------------------------------------------------------------
     # MultiIndex Handling
 
-    def _multi_take_opportunity(self, tup: tuple) -> bool:
+    def _multi_take_opportunity(self, tup: tuple[Any, ...]) -> bool:
         """
         Check whether there is the possibility to use ``_multi_take``.
 
@@ -1803,7 +1821,7 @@ class _LocIndexer(_LocationIndexer):
         # just too complicated
         return not any(com.is_bool_indexer(x) for x in tup)
 
-    def _multi_take(self, tup: tuple):
+    def _multi_take(self, tup: tuple[Any, ...]):
         """
         Create the indexers for the passed tuple of keys, and
         executes the take operation. This allows the take operation to be
@@ -1859,7 +1877,7 @@ class _LocIndexer(_LocationIndexer):
             {axis: [keyarr, indexer]}, allow_dups=True
         )
 
-    def _getitem_tuple(self, tup: tuple):
+    def _getitem_tuple(self, tup: tuple[Any, ...]):
         with suppress(IndexingError):
             tup = self._expand_ellipsis(tup)
             return self._getitem_lowerdim(tup)
@@ -1877,7 +1895,7 @@ class _LocIndexer(_LocationIndexer):
         # GH#5567 this will fail if the label is not present in the axis.
         return self.obj.xs(label, axis=axis)
 
-    def _handle_lowerdim_multi_index_axis0(self, tup: tuple):
+    def _handle_lowerdim_multi_index_axis0(self, tup: tuple[Any, ...]):
         # we have an axis0 multi-index, handle or raise
         axis = self.axis or 0
         try:
@@ -2200,7 +2218,7 @@ class _iLocIndexer(_LocationIndexer):
     With scalar integers.
 
     >>> df.iloc[0, 1]
-    np.int64(2)
+    2
 
     With lists of integers.
 
@@ -2323,7 +2341,7 @@ class _iLocIndexer(_LocationIndexer):
 
         return True
 
-    def _is_scalar_access(self, key: tuple) -> bool:
+    def _is_scalar_access(self, key: tuple[Any, ...]) -> bool:
         """
         Returns
         -------
@@ -2360,7 +2378,7 @@ class _iLocIndexer(_LocationIndexer):
 
     # -------------------------------------------------------------------
 
-    def _getitem_tuple(self, tup: tuple):
+    def _getitem_tuple(self, tup: tuple[Any, ...]):
         tup = self._validate_tuple_indexer(tup)
         with suppress(IndexingError):
             return self._getitem_lowerdim(tup)
@@ -2489,7 +2507,9 @@ class _iLocIndexer(_LocationIndexer):
 
         # GH#44103 - setting a scalar row across columns with a list-like
         # value must go through the split path so each column gets its
-        # corresponding scalar value.
+        # corresponding scalar value.  Restricted to ExtensionArray blocks:
+        # the non-split path already handles the others correctly, and forcing
+        # the split path there transposes rectangular nested values (GH#65241).
         if (
             not take_split_path
             and isinstance(indexer, tuple)
@@ -2498,6 +2518,8 @@ class _iLocIndexer(_LocationIndexer):
             and not is_integer(indexer[1])
             and is_list_like(value)
             and not isinstance(value, (ABCSeries, ABCDataFrame))
+            # not take_split_path guarantees exactly one block
+            and self.obj._mgr.blocks[0].is_extension
         ):
             take_split_path = True
 
@@ -2555,9 +2577,23 @@ class _iLocIndexer(_LocationIndexer):
             # GH#42099 list-like (non-array-like): convert to an array first
             #  so we can preserve dtype the same way as the is_array_like path
             arr = sanitize_array(value, Index(range(len(value))), copy=False)
+            if is_integer(indexer[0]) and (
+                is_object_dtype(arr.dtype) or isinstance(arr.dtype, StringDtype)
+            ):
+                # GH#30649 the single cell holds the list-like itself, as in an
+                #  existing object column
+                empty_value = np.full(len(self.obj), np.nan, dtype=object)
+                empty_value[indexer[0]] = value
+                self.obj[key] = empty_value
+                return
             taker = -1 * np.ones(len(self.obj), dtype=np.intp)
             empty_value = algos.take_nd(arr, taker)
-            if isinstance(arr, np.ndarray) and arr.ndim == 1 and len(arr) == 1:
+            if (
+                arr.ndim == 1
+                and len(arr) == 1
+                and (isinstance(arr, np.ndarray) or is_integer(indexer[0]))
+            ):
+                # GH#46268 a length-1 value is unpacked
                 arr = arr[0]
             empty_value[indexer[0]] = arr
             self.obj[key] = empty_value
@@ -2675,22 +2711,19 @@ class _iLocIndexer(_LocationIndexer):
             if isinstance(value, ABCDataFrame):
                 self._setitem_with_indexer_frame_value(indexer, value, name)
 
-            elif _is_2d_value(value) and not (
-                isinstance(value, list)
-                and isinstance(value[0], tuple)
-                and len(value[0]) != len(ilocs)
+            elif self._is_scalar_access(indexer) and is_object_dtype(
+                self.obj.dtypes._values[ilocs[0]]
             ):
+                # We are setting nested data into a single cell, only possible
+                #  for object dtype. Bypasses length checks, and precedes the
+                #  2-D check to match the single-block path. GH#69152
+                self._setitem_single_column(ilocs[0], value, pi)
+
+            elif _is_2d_value_for_columns(value, len(ilocs)):
                 self._setitem_with_indexer_2d_value(indexer, value)
 
             elif len(ilocs) == 1 and lplane_indexer == len(value) and not is_scalar(pi):
                 # We are setting multiple rows in a single column.
-                self._setitem_single_column(ilocs[0], value, pi)
-
-            elif self._is_scalar_access(indexer) and is_object_dtype(
-                self.obj.dtypes._values[ilocs[0]]
-            ):
-                # We are setting nested data into a single cell,
-                # only possible for object dtype. Bypasses length checks.
                 self._setitem_single_column(ilocs[0], value, pi)
 
             elif len(ilocs) == 1 and 0 != lplane_indexer != len(value):
@@ -2745,15 +2778,19 @@ class _iLocIndexer(_LocationIndexer):
         ):
             value = np.asarray(value)
 
+        msg = "Must have equal len keys and value when setting with an ndarray"
         if isinstance(value, list):
-            if any(len(row) != len(ilocs) for row in value):
-                raise ValueError(
-                    "Must have equal len keys and value when setting with an ndarray"
-                )
+            nkeys = len(ilocs)
+            rows = []
+            for row in value:
+                if len(row) != nkeys:
+                    raise ValueError(msg)
+                if type(row) is not list:
+                    row = _positional_row(row)
+                rows.append(row)
+            value = rows
         elif value.shape[1] != len(ilocs):
-            raise ValueError(
-                "Must have equal len keys and value when setting with an ndarray"
-            )
+            raise ValueError(msg)
 
         for i, loc in enumerate(ilocs):
             if isinstance(value, list):
@@ -2931,6 +2968,41 @@ class _iLocIndexer(_LocationIndexer):
                 self._setitem_with_indexer_split_path(indexer, value, name)
                 return
 
+            if (
+                self.ndim == 2
+                and len(indexer) == 2
+                # an integer column key drops the column axis, so the selection
+                #  stays 1-D and numpy broadcasts the value into it just fine
+                and not is_integer(indexer[1])
+                and not is_scalar(indexer[0])
+                and not isinstance(value, ABCDataFrame)
+                and is_list_like_indexer(value)
+                and getattr(value, "ndim", 1) == 1
+                # length_of_indexer below measures only these, and only in
+                #  one dimension; every other row key (masked/Categorical/tuple,
+                #  0-d or 2-D ndarray) has to keep taking the whole-block path,
+                #  which reports its own, clearer errors.  GH#68021
+                and isinstance(
+                    indexer[0], (slice, range, list, np.ndarray, ABCSeries, ABCIndex)
+                )
+                and getattr(indexer[0], "ndim", 1) == 1
+            ):
+                ilocs = self._ensure_iterable_column_indexer(indexer[1])
+                if len(ilocs) == 1 and not _is_2d_value_for_columns(value, 1):
+                    # _ensure_iterable_column_indexer leaves a non-ndarray
+                    #  boolean key alone, so ilocs[0] can be True rather than a
+                    #  position; that is not ours to set column-wise
+                    loc = ilocs[0]
+                    if is_integer(loc):
+                        nrows = length_of_indexer(indexer[0], self.obj.index)
+                        if nrows == len(value):
+                            # GH#68021 the cross-product selection is (N, 1) but
+                            #  the value is 1-D of length N, which numpy cannot
+                            #  broadcast into it.  Set the single column row-wise,
+                            #  as the split path does.
+                            self._setitem_single_column(int(loc), value, indexer[0])
+                            return
+
             indexer = maybe_convert_ix(*indexer)  # e.g. test_setitem_frame_align
 
         if isinstance(value, ABCDataFrame) and name != "iloc":
@@ -3061,10 +3133,10 @@ class _iLocIndexer(_LocationIndexer):
             ilocs = [column_indexer]
         elif isinstance(column_indexer, slice):
             ilocs = range(len(self.obj.columns))[column_indexer]
-        elif (
-            isinstance(column_indexer, np.ndarray) and column_indexer.dtype.kind == "b"
-        ):
-            ilocs = np.arange(len(column_indexer))[column_indexer]
+        elif com.is_bool_indexer(column_indexer):
+            ilocs = np.arange(len(column_indexer))[
+                np.asarray(column_indexer, dtype=bool)
+            ]
         else:
             ilocs = column_indexer
         return ilocs
@@ -3235,7 +3307,7 @@ class _iLocIndexer(_LocationIndexer):
         raise ValueError("Incompatible indexer with DataFrame")
 
 
-class _ScalarAccessIndexer(NDFrameIndexerBase):
+class _ScalarAccessIndexer(_NDFrameIndexerBase):
     """
     Access scalars quickly.
     """
@@ -3325,18 +3397,18 @@ class _AtIndexer(_ScalarAccessIndexer):
     Get value at specified row/column pair
 
     >>> df.at[4, "B"]
-    np.int64(2)
+    2
 
     Set value at specified row/column pair
 
     >>> df.at[4, "B"] = 10
     >>> df.at[4, "B"]
-    np.int64(10)
+    10
 
     Get value within a Series
 
     >>> df.loc[5].at["B"]
-    np.int64(4)
+    4
     """
 
     _takeable = False
@@ -3459,18 +3531,18 @@ class _iAtIndexer(_ScalarAccessIndexer):
     Get value at specified row/column pair
 
     >>> df.iat[1, 2]
-    np.int64(1)
+    1
 
     Set value at specified row/column pair
 
     >>> df.iat[1, 2] = 10
     >>> df.iat[1, 2]
-    np.int64(10)
+    10
 
     Get value within a series
 
     >>> df.loc[0].iat[1]
-    np.int64(2)
+    2
     """
 
     _takeable = True
@@ -3494,16 +3566,79 @@ class _iAtIndexer(_ScalarAccessIndexer):
         return super().__setitem__(key, value)
 
 
+def _positional_row(row):
+    """
+    Return a row of a 2D setitem value that can be indexed by position.
+
+    ``_setitem_with_indexer_2d_value`` extracts each column with ``row[i]``,
+    which is wrong for a Series (indexed by *label*) and for a foreign array
+    such as ``pyarrow.Array`` (``__getitem__`` hands back a boxed scalar).
+    Rows that already index positionally are returned as-is, to skip a copy.
+    Anything else goes through ``np.asarray``, as every row did before GH#64230
+    replaced it with ``row[i]``; ``dtype=object`` is what keeps a heterogeneous
+    row from being collapsed onto one numpy dtype, and ``pd.NA`` from becoming
+    ``nan``.
+    """
+    if isinstance(row, ABCSeries):
+        return row._values
+    if isinstance(row, (tuple, np.ndarray, ABCExtensionArray, ABCIndex)):
+        return row
+    return np.asarray(row, dtype=object)
+
+
+def _is_2d_value_for_columns(value, ncols: int) -> bool:
+    """
+    Whether ``value`` should be treated as a 2-D value for ``ncols`` columns.
+
+    A list of tuples aimed at a single column is per-cell values unless the
+    tuples are length-1 (GH#37629). With more columns it takes the 2-D path
+    whatever the tuple width, which rejects a mismatched one. GH#65264
+    """
+    if not _is_2d_value(value):
+        return False
+    return not (
+        isinstance(value, list)
+        and ncols == 1
+        and isinstance(value[0], tuple)
+        and len(value[0]) != 1
+    )
+
+
+def _is_view_of_new_data(obj: DataFrame | Series, section: DataFrame | Series) -> bool:
+    """
+    Check if ``obj`` views data first allocated by ``section``, i.e. a temporary
+    copy made while indexing rather than the data of the object being indexed.
+    """
+    section_blocks = {id(blk) for blk in section._mgr.blocks}
+    for blk in obj._mgr.blocks:
+        # the first reference is the block the data was created for; checking
+        #  only that one keeps this O(1), unlike has_reference
+        refs = blk.refs.referenced_blocks
+        if refs and id(refs[0]()) in section_blocks:
+            return True
+    return False
+
+
 def _is_2d_value(value) -> bool:
     """Check if value is 2-dimensional, avoiding np.asarray for plain lists."""
     if isinstance(value, list):
         if len(value) == 0:
             return False
         first = value[0]
-        if isinstance(first, np.ndarray):
-            # a 0-d element is a scalar and a 2-D element makes value 3D
-            return first.ndim == 1
-        return isinstance(first, (list, tuple))
+        if isinstance(first, (list, tuple)):
+            return True
+        # A row is anything np.asarray would have stacked into a 2-D array: a
+        #  sized, subscriptable, non-mapping sequence, i.e. ndarray/Series/Index/
+        #  ExtensionArray but also e.g. deque/array.array/range. A 0-d element is
+        #  a scalar and a 2-D element makes value 3D.
+        # Note: deliberately not is_list_like, which also requires __iter__ and
+        #  so would exclude sequences that only implement __len__/__getitem__.
+        return (
+            not isinstance(first, (str, bytes, type, abc.Mapping))
+            and hasattr(first, "__len__")
+            and hasattr(first, "__getitem__")
+            and getattr(first, "ndim", 1) == 1
+        )
     return np.ndim(value) == 2
 
 
@@ -3527,7 +3662,7 @@ def _tuplify(ndim: int, loc: Hashable) -> tuple[Hashable | slice, ...]:
     return tuple(_tup)
 
 
-def _tupleize_axis_indexer(ndim: int, axis: AxisInt, key) -> tuple:
+def _tupleize_axis_indexer(ndim: int, axis: AxisInt, key) -> tuple[Any, ...]:
     """
     If we have an axis, adapt the given key to be axis-independent.
     """
@@ -3588,6 +3723,30 @@ def check_bool_indexer(index: Index, key) -> np.ndarray:
     return check_array_indexer(index, result)
 
 
+def _holds_bool_label(index: Index, key: bool) -> bool:
+    """
+    Check whether a bool ``key`` can be looked up as a label in ``index``.
+
+    For a MultiIndex, the key is matched against the first level.
+    """
+    if isinstance(index, MultiIndex):
+        index = index.levels[0]
+    if is_bool_dtype(index.dtype):
+        return True
+    if index.dtype != object:
+        return False
+    # object-dtype lookups match False to 0 and True to 1, so require that the
+    # matched labels are actually bools, see GH#20432, GH#50165
+    try:
+        loc = index.get_loc(key)
+    except KeyError:
+        return False
+    values = index._values[loc]
+    if isinstance(values, np.ndarray):
+        return is_bool_array(values)
+    return is_bool(values)
+
+
 def convert_missing_indexer(indexer):
     """
     Reverse convert a missing indexer, which is a dict
@@ -3604,7 +3763,9 @@ def convert_missing_indexer(indexer):
     return indexer, False
 
 
-def convert_from_missing_indexer_tuple(indexer: tuple, axes: list[Index]) -> tuple:
+def convert_from_missing_indexer_tuple(
+    indexer: tuple[Any, ...], axes: list[Index]
+) -> tuple[Any, ...]:
     """
     Create a filtered indexer that doesn't have any missing indexers.
     """
@@ -3757,6 +3918,15 @@ def maybe_warn_multiindex_expansion(index: Index, key, target: str, hint: str) -
         )
 
 
+def _as_float64(arr: ArrayLike) -> np.ndarray:
+    """
+    Numpy float64 representation of a numeric array, with NA as NaN.
+    """
+    if isinstance(arr, np.ndarray):
+        return arr.astype(np.float64, copy=False)
+    return arr.to_numpy(dtype=np.float64, na_value=np.nan)
+
+
 def infer_and_maybe_downcast(
     orig: ExtensionArray,
     new_arr,
@@ -3787,13 +3957,29 @@ def infer_and_maybe_downcast(
         and new_arr.dtype.kind == "f"
     ):
         try:
-            converted = new_arr.astype(orig.dtype)
+            floats = _as_float64(new_arr)
+            # GH#66394 an out-of-range float->int cast saturates or wraps
+            #  instead of raising, which the roundtrip check below cannot
+            #  detect, since e.g. 2**63 and 2**63 - 1 are the same float64.
+            if isinstance(dtype, (ArrowDtype, BaseMaskedDtype)):
+                np_dtype = dtype.numpy_dtype
+            elif isinstance(dtype, SparseDtype):
+                np_dtype = dtype.subtype
+            else:
+                # a third-party ExtensionDtype we have no bounds for
+                np_dtype = None
+            if np_dtype is None or floats_fit_integer_dtype(
+                floats[~np.isnan(floats)], np_dtype
+            ):
+                converted = new_arr.astype(orig.dtype)
+                # Only accept the conversion if no values were truncated.  The
+                #  comparison is done in numpy float space because pyarrow
+                #  refuses its own int64->double cast above 2**53, even for
+                #  values that survive it intact.
+                if array_equivalent(_as_float64(converted), floats):
+                    new_arr = converted
         except (ValueError, TypeError):
             pass
-        else:
-            # Only accept the conversion if no values were truncated
-            if (converted.astype(new_arr.dtype) == new_arr).all():
-                new_arr = converted
     elif dtype.kind in "mM" and new_arr.dtype != dtype:
         # GH#66402 inference re-derives the unit from the scalars, which for a
         #  freshly-constructed Timestamp/Timedelta is us.  Restore the original

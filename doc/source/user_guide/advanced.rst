@@ -116,7 +116,7 @@ of the index is up to you:
 
 We've "sparsified" the higher levels of the indexes to make the console output a
 bit easier on the eyes. Note that how the index is displayed can be controlled using the
-``multi_sparse`` option in ``pandas.set_options()``:
+``multi_sparse`` option in ``pandas.set_option()``:
 
 .. ipython:: python
 
@@ -164,6 +164,22 @@ completely analogous way to selecting a column in a regular DataFrame:
    df["bar", "one"]
    df["bar"]["one"]
    s["qux"]
+
+For a ``Series``, ``[]`` selects on the index, so ``s["qux"]`` above performs
+partial selection on the row labels. For a ``DataFrame``, however, ``[]``
+selects *columns*: ``df["bar"]`` works above only because this ``df`` has a
+``MultiIndex`` on its columns. If the ``MultiIndex`` is on the rows instead,
+selecting a partial label with ``[]`` raises a ``KeyError`` — use ``.loc``
+for partial selection on the rows:
+
+.. ipython:: python
+   :okexcept:
+
+   df.T["bar"]
+
+.. ipython:: python
+
+   df.T.loc["bar"]
 
 See :ref:`Cross-section with hierarchical index <advanced.xs>` for how to select
 on a deeper level.
@@ -399,6 +415,15 @@ Using a boolean indexer you can provide selection related to the *values*.
 
    mask = dfmi[("a", "foo")] > 200
    dfmi.loc[idx[mask, :, ["C1", "C3"]], idx[:, "foo"]]
+
+Every label in a list must be present in the index, otherwise a ``KeyError`` is
+raised. To select only the labels that are present, pass a boolean mask built
+with :meth:`Index.isin` and its ``level`` argument instead of the list.
+
+.. ipython:: python
+
+   mask = dfmi.index.isin(["C1", "C3", "C5"], level=2)
+   dfmi.loc[idx[:, :, mask], idx[:, "foo"]]
 
 You can also specify the ``axis`` argument to ``.loc`` to interpret the passed
 slicers on a single axis.

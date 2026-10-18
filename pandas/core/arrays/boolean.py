@@ -54,11 +54,6 @@ class BooleanDtype(BaseMaskedDtype):
     which implements Kleene logic (sometimes called three-value logic) for
     logical operations. See :ref:`boolean.kleene` for more.
 
-    .. warning::
-
-        BooleanDtype is considered experimental. The implementation and
-        parts of the API may change without warning.
-
     Attributes
     ----------
     None
@@ -231,7 +226,7 @@ def coerce_to_array(
 
         # mypy does not narrow the type of mask_values to npt.NDArray[np.bool_]
         # within this branch, it assumes it can also be None
-        mask_values = cast("npt.NDArray[np.bool_]", isna(values_object))
+        mask_values = cast("npt.NDArray[np.bool_]", isna(values_object))  # type: ignore[redundant-cast]
         values = np.zeros(len(values), dtype=bool)
         values[~mask_values] = values_object[~mask_values].astype(bool)
 
@@ -279,11 +274,6 @@ class BooleanArray(BaseMaskedArray):
     To construct a BooleanArray from generic array-like input, use
     :func:`pandas.array` specifying ``dtype="boolean"`` (see examples
     below).
-
-    .. warning::
-
-       BooleanArray is considered experimental. The implementation and
-       parts of the API may change without warning.
 
     Parameters
     ----------
@@ -392,6 +382,7 @@ class BooleanArray(BaseMaskedArray):
 
     def _logical_method(self, other, op):
         assert op.__name__ in {"or_", "ror_", "and_", "rand_", "xor", "rxor"}
+        ops.disallow_datetimelike_logical_op(self, other, op)
         other_is_scalar = lib.is_scalar(other)
         mask = None
 

@@ -70,7 +70,6 @@ MANIFEST.in export-ignore
 pixi.lock export-ignore
 pixi.toml export-ignore
 scripts/** export-ignore
-typings export-ignore
 web export-ignore
 CITATION.cff export-ignore
 codecov.yml export-ignore
@@ -81,6 +80,3 @@ environment.yml export-ignore
 # csv_dir_path fixture checks the existence of the directory
 # exclude the whole directory to avoid running related tests in sdist
 pandas/tests/io/parser/data export-ignore
-
-# Include cibw script in sdist since it's needed for building wheels
-scripts/cibw_before_build.sh -export-ignore

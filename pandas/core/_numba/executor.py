@@ -20,8 +20,8 @@ from pandas.core.util.numba_ import jit_user_function
 
 @functools.cache
 def generate_apply_looper(
-    func: Callable, nogil: bool = True, parallel: bool = False
-) -> Callable:
+    func: Callable[..., Any], nogil: bool = True, parallel: bool = False
+) -> Callable[..., np.ndarray]:
     if TYPE_CHECKING:
         import numba
     else:
@@ -62,12 +62,12 @@ def generate_apply_looper(
 
 @functools.cache
 def make_looper(
-    func: Callable,
+    func: Callable[..., Any],
     result_dtype: np.dtype,
     is_grouped_kernel: bool,
     nogil: bool,
     parallel: bool,
-) -> Callable:
+) -> Callable[..., tuple[np.ndarray, dict[int, np.ndarray]]]:
     if TYPE_CHECKING:
         import numba
     else:
@@ -97,12 +97,7 @@ def make_looper(
     else:
 
         @numba.jit(nogil=nogil, parallel=parallel)
-        # error: Incompatible redefinition (redefinition with type
-        # "Callable[[ndarray[Any, Any], ndarray[Any, Any], ndarray[Any, Any],
-        # int, VarArg(Any)], tuple[ndarray[Any, Any], dict[int, ndarray[Any, Any]]]]",
-        # original type "Callable[[ndarray[Any, Any], ndarray[Any, Any], int, int,
-        # VarArg(Any)], tuple[ndarray[Any, Any], dict[int, ndarray[Any, Any]]]]")
-        def column_looper(  # type: ignore[misc]
+        def column_looper(
             values: np.ndarray,
             start: np.ndarray,
             end: np.ndarray,
@@ -178,7 +173,7 @@ def generate_shared_aggregator(
     is_grouped_kernel: bool,
     nogil: bool,
     parallel: bool,
-) -> Callable:
+) -> Callable[..., np.ndarray]:
     """
     Generate a Numba function that loops over the columns 2D object and applies
     a 1D numba kernel over each column.

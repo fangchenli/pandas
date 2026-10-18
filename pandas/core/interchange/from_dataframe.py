@@ -118,7 +118,10 @@ def from_dataframe(df, allow_copy: bool = True) -> pd.DataFrame:
             )
         else:
             try:
-                return pa.table(df).to_pandas(zero_copy_only=not allow_copy)
+                # zero-copy is only possible without block consolidation
+                return pa.table(df).to_pandas(
+                    zero_copy_only=not allow_copy, split_blocks=not allow_copy
+                )
             except pa.ArrowInvalid as e:
                 raise RuntimeError(e) from e
 
@@ -369,7 +372,7 @@ def string_column_to_ndarray(col: Column) -> tuple[np.ndarray, Any]:
                 null_pos = ~null_pos
 
     # Assemble the strings from the code units
-    str_list: list[None | float | str] = [None] * col.size()
+    str_list: list[float | str | None] = [None] * col.size()
     for i in range(col.size()):
         # Check for missing values
         if null_pos is not None and null_pos[i]:

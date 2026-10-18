@@ -87,6 +87,7 @@ def concat(
     verify_integrity: bool = ...,
     sort: bool = ...,
     copy: bool | lib.NoDefault = ...,
+    union_categories: bool = ...,
 ) -> DataFrame: ...
 
 
@@ -103,6 +104,7 @@ def concat(
     verify_integrity: bool = ...,
     sort: bool = ...,
     copy: bool | lib.NoDefault = ...,
+    union_categories: bool = ...,
 ) -> Series: ...
 
 
@@ -119,6 +121,7 @@ def concat(
     verify_integrity: bool = ...,
     sort: bool = ...,
     copy: bool | lib.NoDefault = ...,
+    union_categories: bool = ...,
 ) -> DataFrame | Series: ...
 
 
@@ -135,6 +138,7 @@ def concat(
     verify_integrity: bool = ...,
     sort: bool = ...,
     copy: bool | lib.NoDefault = ...,
+    union_categories: bool = ...,
 ) -> DataFrame: ...
 
 
@@ -151,6 +155,7 @@ def concat(
     verify_integrity: bool = ...,
     sort: bool = ...,
     copy: bool | lib.NoDefault = ...,
+    union_categories: bool = ...,
 ) -> DataFrame | Series: ...
 
 
@@ -167,6 +172,7 @@ def concat(
     verify_integrity: bool = False,
     sort: bool | lib.NoDefault = lib.no_default,
     copy: bool | lib.NoDefault = lib.no_default,
+    union_categories: bool = False,
 ) -> DataFrame | Series:
     """
     Concatenate pandas objects along a particular axis.
@@ -182,8 +188,11 @@ def concat(
     objs : an iterable or mapping of Series or DataFrame objects
         If a mapping is passed, the keys will be used as the `keys`
         argument, unless it is passed, in which case the values will be
-        selected (see below). Any None objects will be dropped silently unless
+        selected (see below). Any None objects will be dropped unless
         they are all None in which case a ValueError will be raised.
+
+        .. deprecated:: 3.2.0
+            Passing None objects is deprecated.
     axis : {0/'index', 1/'columns'}, default 0
         The axis to concatenate along.
     join : {'inner', 'outer'}, default 'outer'
@@ -220,8 +229,21 @@ def concat(
             pandas 3.0, this method always returns a new object using a lazy
             copy mechanism that defers copies until necessary
             (Copy-on-Write). See the `user guide on Copy-on-Write
-            <https://pandas.pydata.org/docs/dev/user_guide/copy_on_write.html>`__
+            <https://pandas.pydata.org/docs/dev/user_guide/migration.html>`__
             for more details.
+
+    union_categories : bool, default False
+        If True and all values for a given column have categorical dtype,
+        the resulting column will preserve categorical dtype with the
+        union of the categories, rather than casting to the underlying
+        dtype. Categories whose dtypes differ are cast to a common dtype.
+        The result is unordered unless every input is ordered with the
+        same categories (after any casting to a common dtype) in the same
+        order, in which case the result is ordered.
+        Has no effect when concatenating mixed categorical and
+        non-categorical data.
+
+        .. versionadded:: 3.1.0
 
     Returns
     -------
@@ -475,6 +497,7 @@ def concat(
         verify_integrity,
         names,
         axis,
+        union_categories,
     )
 
     # When result is a Series, there is no other axis to sort.
@@ -563,6 +586,7 @@ def _get_result(
     verify_integrity: bool,
     names: list[HashableT] | None,
     axis: AxisInt,
+    union_categories: bool = False,
 ):
     cons: Callable[..., DataFrame | Series]
     sample: DataFrame | Series
@@ -578,7 +602,7 @@ def _get_result(
 
             arrs = [ser._values for ser in objs]
 
-            res = concat_compat(arrs, axis=0)
+            res = concat_compat(arrs, axis=0, union_categories=union_categories)
 
             if ignore_index:
                 new_index: Index = default_index(len(res))
@@ -656,7 +680,11 @@ def _get_result(
             mgrs_indexers.append((obj._mgr, indexers))
 
         new_data = concatenate_managers(
-            mgrs_indexers, result_axes, concat_axis=bm_axis, copy=False
+            mgrs_indexers,
+            result_axes,
+            concat_axis=bm_axis,
+            copy=False,
+            union_categories=union_categories,
         )
 
         out = sample._constructor_from_mgr(new_data, axes=new_data.axes)
@@ -849,6 +877,15 @@ def _clean_keys_and_objs(
 
     if len(clean_objs) == 0:
         raise ValueError("All objects passed were None")
+    if len(clean_objs) < len(objs):
+        # GH#57846
+        warnings.warn(
+            "Passing None in the objects to concat is deprecated and will raise "
+            "in a future version. Filter out the None entries before calling "
+            "concat instead.",
+            Pandas4Warning,
+            stacklevel=find_stack_level(),
+        )
 
     return clean_objs, keys, ndims
 
@@ -871,7 +908,7 @@ def _get_sample_object(
                 return obj, objs
     elif keys is None and names is None and levels is None and not intersect:
         # filter out the empties if we have not multi-index possibilities
-        # note to keep empty Series as it affect to result columns / name
+        # note to keep empty Series as it affects the result columns / name
         if ndims.pop() == 2:
             non_empties = [obj for obj in objs if sum(obj.shape)]
         else:
