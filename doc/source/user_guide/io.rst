@@ -5723,8 +5723,9 @@ included in Python's standard library by default.
 You can find an overview of supported drivers for each SQL dialect in the
 `SQLAlchemy docs <https://docs.sqlalchemy.org/en/latest/dialects/index.html>`__.
 
-If SQLAlchemy is not installed, you can use a :class:`sqlite3.Connection` in place of
-a SQLAlchemy engine, connection, or URI string.
+If SQLAlchemy is not installed, you can use a DB-API 2.0 connection, such as a
+:class:`sqlite3.Connection`, in place of a SQLAlchemy engine, connection, or URI
+string; see :ref:`DB-API connections <io.sql.dbapi2>`.
 
 See also some :ref:`cookbook examples <cookbook.sql>` for some advanced strategies.
 
@@ -6252,27 +6253,46 @@ You can combine SQLAlchemy expressions with parameters passed to :func:`read_sql
     pd.read_sql(expr, engine, params={"date": dt.datetime(2010, 10, 18)})
 
 
-Sqlite fallback
-'''''''''''''''
+.. _io.sql.dbapi2:
 
-The use of sqlite is supported without using SQLAlchemy.
-This mode requires a Python database adapter which respect the `Python
-DB-API <https://www.python.org/dev/peps/pep-0249/>`__.
+DB-API connections
+''''''''''''''''''
 
-You can create connections like so:
+:func:`~pandas.read_sql`, :func:`~pandas.read_sql_query` and :meth:`DataFrame.to_sql`
+also accept any connection that follows the `Python DB-API 2.0
+<https://peps.python.org/pep-0249/>`__ (PEP 249), such as a :class:`sqlite3.Connection`
+or a connection from psycopg2 or pymysql, without SQLAlchemy:
 
 .. code-block:: python
 
    import sqlite3
 
    con = sqlite3.connect(":memory:")
-
-And then issue the following queries:
-
-.. code-block:: python
-
    data.to_sql("data", con)
    pd.read_sql_query("SELECT * FROM data", con)
+
+Without SQLAlchemy, pandas generates the SQL itself and can't adapt it to every
+database, so some things are up to you:
+
+* **Queries and parameters.** :func:`~pandas.read_sql_query` passes the query and
+  ``params`` to the driver unchanged, so use the driver's placeholder style, e.g.
+  ``?`` for sqlite3 and ``%s`` for psycopg2 and pymysql.
+* **Column types.** :meth:`DataFrame.to_sql` creates new tables with ``BIGINT``,
+  ``DOUBLE PRECISION``, ``BOOLEAN``, ``TIMESTAMP``, ``DATE``, ``TIME`` and ``TEXT``
+  columns (sqlite3 connections use sqlite's own type names). Where your database
+  spells a type differently or needs more, e.g. ``VARCHAR(255)`` for an indexed text
+  column in MySQL, pass the SQL type as a string with ``dtype``.
+* **Errors.** Except with sqlite3, errors from the driver propagate unchanged.
+
+Reading a table by name with :func:`~pandas.read_sql_table` requires SQLAlchemy,
+and the ``schema`` argument is ignored. pandas reads the driver's placeholder style
+from the ``paramstyle`` attribute of its module, as PEP 249 specifies, so pass the
+driver's own connection object rather than a wrapper around it.
+
+.. versionchanged:: 3.2.0
+
+   Connections other than sqlite3 used to be handled as sqlite3 connections, with a
+   warning, so writing to most databases failed.
 
 
 .. _io.bigquery:

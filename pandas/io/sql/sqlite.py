@@ -108,6 +108,7 @@ class SQLiteDatabase(DBAPI2Database):
     """
 
     _table_class = SQLiteTable
+    _wrap_driver_errors = True
 
     def _driver_error(self) -> type[Exception]:
         from sqlite3 import Error
@@ -117,8 +118,8 @@ class SQLiteDatabase(DBAPI2Database):
     def _escape_identifier(self, name: object) -> str:
         return _get_valid_sqlite_name(name)
 
-    def _placeholders(self, count: int) -> list[str]:
-        return ["?"] * count
+    def _paramstyle(self) -> str:
+        return "qmark"
 
     def _sql_type_map(self) -> Mapping[str, str]:
         return _SQL_TYPES

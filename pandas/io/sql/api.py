@@ -11,7 +11,6 @@ from typing import (
     Literal,
     overload,
 )
-import warnings
 
 from pandas._libs import lib
 from pandas.compat._optional import (
@@ -19,7 +18,6 @@ from pandas.compat._optional import (
     import_optional_dependency,
 )
 from pandas.util._decorators import set_module
-from pandas.util._exceptions import find_stack_level
 from pandas.util._validators import check_dtype_backend
 
 from pandas.core.api import (
@@ -235,9 +233,10 @@ def read_sql_query(
     ----------
     sql : str SQL query or SQLAlchemy Selectable (select or text object)
         SQL query to be executed.
-    con : SQLAlchemy connectable, str, or sqlite3 connection
+    con : SQLAlchemy connectable, str, or DB-API 2.0 connection
         Using SQLAlchemy makes it possible to use any DB supported by that
-        library. If a DBAPI2 object, only sqlite3 is supported.
+        library. Any other DB-API 2.0 (PEP 249) connection, e.g. from psycopg2 or
+        pymysql, is also accepted; see :ref:`DB-API connections <io.sql.dbapi2>`.
     index_col : str or list of str, optional, default: None
         Column(s) to set as index(MultiIndex).
     coerce_float : bool, default True
@@ -384,12 +383,14 @@ def read_sql(
     ----------
     sql : str or SQLAlchemy Selectable (select or text object)
         SQL query to be executed or a table name.
-    con : ADBC Connection, SQLAlchemy connectable, str, or sqlite3 connection
+    con : ADBC Connection, SQLAlchemy connectable, str, or DB-API 2.0 connection
         ADBC provides high performance I/O with native type support, where available.
         Using SQLAlchemy makes it possible to use any DB supported by that
-        library. If a DBAPI2 object, only sqlite3 is supported. The user is responsible
-        for engine disposal and connection closure for the ADBC connection and
-        SQLAlchemy connectable; str connections are closed automatically. See
+        library. Any other DB-API 2.0 (PEP 249) connection, e.g. from psycopg2 or
+        pymysql, is also accepted; see :ref:`DB-API connections <io.sql.dbapi2>`.
+        The user is responsible for engine disposal and connection closure for the
+        ADBC connection and SQLAlchemy connectable; str connections are closed
+        automatically. See
         `here <https://docs.sqlalchemy.org/en/20/core/connections.html>`_.
 
         .. versionadded:: 2.2.0
@@ -599,12 +600,12 @@ def to_sql(
     frame : DataFrame, Series
     name : str
         Name of SQL table.
-    con : ADBC Connection, SQLAlchemy connectable, str, or sqlite3 connection
-        or sqlite3 DBAPI2 connection
+    con : ADBC Connection, SQLAlchemy connectable, str, or DB-API 2.0 connection
         ADBC provides high performance I/O with native type support, where available.
         Using SQLAlchemy makes it possible to use any DB supported by that
         library.
-        If a DBAPI2 object, only sqlite3 is supported.
+        Any other DB-API 2.0 (PEP 249) connection, e.g. from psycopg2 or
+        pymysql, is also accepted; see :ref:`DB-API connections <io.sql.dbapi2>`.
     schema : str, optional
         Name of SQL schema in database to write to (if database flavor
         supports this). If None, use default schema (default).
@@ -693,11 +694,12 @@ def has_table(table_name: str, con, schema: str | None = None) -> bool:
     ----------
     table_name: string
         Name of SQL table.
-    con: ADBC Connection, SQLAlchemy connectable, str, or sqlite3 connection
+    con: ADBC Connection, SQLAlchemy connectable, str, or DB-API 2.0 connection
         ADBC provides high performance I/O with native type support, where available.
         Using SQLAlchemy makes it possible to use any DB supported by that
         library.
-        If a DBAPI2 object, only sqlite3 is supported.
+        Any other DB-API 2.0 (PEP 249) connection, e.g. from psycopg2 or
+        pymysql, is also accepted; see :ref:`DB-API connections <io.sql.dbapi2>`.
     schema : string, default None
         Name of SQL schema in database to write to (if database flavor supports
         this). If None, use default schema (default).
@@ -743,14 +745,8 @@ def pandasSQL_builder(
     if adbc and isinstance(con, adbc.Connection):
         return ADBCDatabase(con)
 
-    warnings.warn(
-        "pandas only supports SQLAlchemy connectable (engine/connection) or "
-        "database string URI or sqlite3 DBAPI2 connection. Other DBAPI2 "
-        "objects are not tested. Please consider using SQLAlchemy.",
-        UserWarning,
-        stacklevel=find_stack_level(),
-    )
-    return SQLiteDatabase(con)
+    # Any other object is treated as a DB-API 2.0 (PEP 249) connection.
+    return DBAPI2Database(con)
 
 
 def get_schema(
@@ -771,14 +767,15 @@ def get_schema(
         name of SQL table
     keys : string or sequence, default: None
         columns to use a primary key
-    con: ADBC Connection, SQLAlchemy connectable, sqlite3 connection, default: None
+    con: ADBC Connection, SQLAlchemy connectable, DB-API 2.0 connection, default: None
         ADBC provides high performance I/O with native type support, where available.
         Using SQLAlchemy makes it possible to use any DB supported by that
-        library
-        If a DBAPI2 object, only sqlite3 is supported.
+        library.
+        Any other DB-API 2.0 (PEP 249) connection, e.g. from psycopg2 or
+        pymysql, is also accepted; see :ref:`DB-API connections <io.sql.dbapi2>`.
     dtype : dict of column name to SQL type, default None
         Optional specifying the datatype for columns. The SQL type should
-        be a SQLAlchemy type, or a string for sqlite3 fallback connection.
+        be a SQLAlchemy type, or a string for a DB-API 2.0 connection.
     schema: str, default: None
         Optional specifying the schema to be used in creating the table.
     """

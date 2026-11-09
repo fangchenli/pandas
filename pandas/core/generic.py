@@ -2910,16 +2910,19 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
         ----------
         name : str
             Name of SQL table.
-        con : ADBC connection, sqlalchemy.engine.(Engine or Connection) or sqlite3.Connection
+        con : ADBC connection, sqlalchemy.engine.(Engine or Connection) or DB-API 2.0 connection
             ADBC provides high performance I/O with native type support, where available.
             Using SQLAlchemy makes it possible to use any DB supported by that
-            library. Legacy support is provided for sqlite3.Connection objects. The user
+            library. Any other DB-API 2.0 (PEP 249) connection, such as a
+            sqlite3.Connection, is also accepted; see
+            :ref:`DB-API connections <io.sql.dbapi2>`. The user
             is responsible for engine disposal and connection closure for the SQLAlchemy
             connectable. See `here \
                 <https://docs.sqlalchemy.org/en/20/core/connections.html>`_.
             If passing a sqlalchemy.engine.Connection which is already in a transaction,
-            the transaction will not be committed.  If passing a sqlite3.Connection,
-            it will not be possible to roll back the record insertion.
+            the transaction will not be committed.  If passing a DB-API 2.0
+            connection, pandas commits the insertion, so it will not be possible
+            to roll it back.
 
         schema : str, optional
             Specify the schema (if database flavor supports this). If None, use

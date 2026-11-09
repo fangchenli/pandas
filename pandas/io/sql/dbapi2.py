@@ -2,17 +2,21 @@
 Generic DB-API 2.0 (PEP 249) backend for ``read_sql`` / ``to_sql``.
 
 Builds SQL statements as strings and runs them through the connection's
-cursor, without SQLAlchemy. Driver- and dialect-specific details are left to
-subclasses (see ``pandas.io.sql.sqlite``).
+cursor, without SQLAlchemy. This is what pandas uses for any connection that
+is not a SQLAlchemy connectable, an ADBC connection or a ``sqlite3``
+connection. The driver's ``paramstyle`` and ``Error`` class are read from its
+module, as PEP 249 specifies. Anything dialect-specific beyond that (column
+types other than the defaults, placeholders in the user's own queries) is the
+user's responsibility.
 """
 
 from __future__ import annotations
 
-from abc import abstractmethod
 from contextlib import (
     contextmanager,
 )
 import re
+import sys
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -39,6 +43,7 @@ from pandas.core.api import (
 from pandas.io.sql.base import (
     PandasSQL,
     SQLTable,
+    get_unicode_name,
     wrap_result,
 )
 
@@ -49,7 +54,9 @@ if TYPE_CHECKING:
         Hashable,
         Iterator,
         Mapping,
+        Sequence,
     )
+    from types import ModuleType
 
     from sqlalchemy.sql.expression import (
         Select,
@@ -60,6 +67,57 @@ if TYPE_CHECKING:
         DtypeArg,
         DtypeBackend,
     )
+
+_PARAMSTYLES = ("qmark", "numeric", "named", "format", "pyformat")
+
+# Column types used when ``dtype=`` doesn't give one, keyed by
+# ``lib.infer_dtype``. Users of databases that spell these differently
+# (e.g. Oracle, SQL Server) pass their own types via ``dtype=``.
+_SQL_TYPES = {
+    "string": "TEXT",
+    "floating": "DOUBLE PRECISION",
+    "integer": "BIGINT",
+    "datetime": "TIMESTAMP",
+    "date": "DATE",
+    "time": "TIME",
+    "boolean": "BOOLEAN",
+}
+
+# Driver modules for MySQL/MariaDB, which quote identifiers with backticks;
+# double quotes are string literals there unless ANSI_QUOTES is enabled.
+_BACKTICK_DRIVERS = frozenset({"pymysql", "MySQLdb", "mysql.connector", "mariadb"})
+
+
+def _find_driver_module(con) -> ModuleType | None:
+    """
+    Return the DB-API module that ``con`` comes from, or None.
+
+    PEP 249 puts ``paramstyle`` and ``Error`` on the driver module, so walk up
+    from the module defining the connection's class (e.g.
+    ``psycopg2.extensions`` -> ``psycopg2``) to the first one that has both.
+    Only already-imported modules are considered.
+    """
+    parts = type(con).__module__.split(".")
+    for i in range(1, len(parts) + 1):
+        module = sys.modules.get(".".join(parts[:i]))
+        if (
+            getattr(module, "paramstyle", None) in _PARAMSTYLES
+            and getattr(module, "Error", None) is not None
+        ):
+            return module
+    return None
+
+
+def _quote_identifier(name: object, quote: str) -> str:
+    uname = get_unicode_name(name)
+    if not len(uname):
+        raise ValueError("Empty table or column name specified")
+
+    nul_index = uname.find("\x00")
+    if nul_index >= 0:
+        raise ValueError("SQL identifier cannot contain NUL characters")
+
+    return quote + uname.replace(quote, quote + quote) + quote
 
 
 class DBAPI2Table(SQLTable):
@@ -83,6 +141,11 @@ class DBAPI2Table(SQLTable):
     def insert_statement(self, *, num_rows: int) -> str:
         names = list(map(str, self.frame.columns))
         escape = self.pd_sql._escape_identifier
+        if self.pd_sql._paramstyle() in ("format", "pyformat"):
+            # The driver %-formats statements that have parameters, so a
+            # literal % in an identifier has to be doubled.
+            def escape(name: object) -> str:
+                return self.pd_sql._escape_identifier(name).replace("%", "%%")
 
         if self.index is not None:
             for idx in self.index[::-1]:
@@ -91,10 +154,12 @@ class DBAPI2Table(SQLTable):
         bracketed_names = [escape(column) for column in names]
         col_names = ",".join(bracketed_names)
 
+        placeholder = self.pd_sql._placeholder
         num_cols = len(names)
-        placeholders = self.pd_sql._placeholders(num_rows * num_cols)
         wildcards = ",".join(
-            "(" + ",".join(placeholders[row * num_cols : (row + 1) * num_cols]) + ")"
+            "("
+            + ",".join(placeholder(row * num_cols + col) for col in range(num_cols))
+            + ")"
             for row in range(num_rows)
         )
         insert_statement = (
@@ -103,9 +168,10 @@ class DBAPI2Table(SQLTable):
         return insert_statement
 
     def _execute_insert(self, conn, keys, data_iter) -> int:
-        driver_error = self.pd_sql._driver_error()
+        driver_error = self.pd_sql._wrapped_errors()
 
-        data_list = list(data_iter)
+        bind = self.pd_sql._bind
+        data_list = [bind(row) for row in data_iter]
         try:
             conn.executemany(self.insert_statement(num_rows=1), data_list)
         except driver_error as exc:
@@ -115,7 +181,10 @@ class DBAPI2Table(SQLTable):
     def _execute_insert_multi(self, conn, keys, data_iter) -> int:
         data_list = list(data_iter)
         flattened_data = [x for row in data_list for x in row]
-        conn.execute(self.insert_statement(num_rows=len(data_list)), flattened_data)
+        conn.execute(
+            self.insert_statement(num_rows=len(data_list)),
+            self.pd_sql._bind(flattened_data),
+        )
         return conn.rowcount
 
     def _create_table_setup(self):
@@ -209,9 +278,10 @@ class DBAPI2Database(PandasSQL):
     """
     PandasSQL for DB-API 2.0 connections, without SQLAlchemy.
 
-    Subclasses provide the driver- and dialect-specific pieces: the driver's
-    exception class, identifier quoting, the parameter placeholder, SQL type
-    names and ``has_table``.
+    The driver- and dialect-specific pieces (the driver's exception class,
+    identifier quoting, the parameter style, SQL type names and
+    ``has_table``) have generic implementations here that subclasses such as
+    ``SQLiteDatabase`` override.
 
     Parameters
     ----------
@@ -220,32 +290,116 @@ class DBAPI2Database(PandasSQL):
 
     _table_class: type[DBAPI2Table] = DBAPI2Table
 
+    # Whether driver errors raised while executing are re-raised as pandas'
+    # DatabaseError. Off for generic connections, where callers have always
+    # received the driver's own exceptions.
+    _wrap_driver_errors: bool = False
+
     def __init__(self, con) -> None:
         self.con = con
+        self._driver = _find_driver_module(con)
 
-    @abstractmethod
     def _driver_error(self) -> type[Exception]:
         """
         Return the driver's base exception class (PEP 249 ``Error``).
         """
+        # PEP 249 also allows exposing the exception classes on the
+        # connection, which works for wrapped connections too.
+        for source in (self.con, self._driver):
+            error = getattr(source, "Error", None)
+            if isinstance(error, type) and issubclass(error, Exception):
+                return error
+        return Exception
 
-    @abstractmethod
+    def _wrapped_errors(self) -> tuple[type[Exception], ...]:
+        """
+        Return the exception classes to re-raise as DatabaseError.
+        """
+        return (self._driver_error(),) if self._wrap_driver_errors else ()
+
     def _escape_identifier(self, name: object) -> str:
         """
         Quote a table or column name for use in generated SQL.
         """
+        driver = getattr(self._driver, "__name__", None)
+        return _quote_identifier(name, "`" if driver in _BACKTICK_DRIVERS else '"')
 
-    @abstractmethod
-    def _placeholders(self, count: int) -> list[str]:
+    def _paramstyle(self) -> str:
         """
-        Return the parameter placeholders for ``count`` positional values.
+        Return the driver's PEP 249 ``paramstyle``.
         """
+        paramstyle = getattr(self._driver, "paramstyle", None)
+        if paramstyle not in _PARAMSTYLES:
+            con_type = type(self.con)
+            raise ValueError(
+                "Could not determine the DB-API paramstyle for connection type "
+                f"'{con_type.__module__}.{con_type.__qualname__}'. pandas reads "
+                "it from the driver module (PEP 249); pass the driver's own "
+                "connection object rather than a wrapper around it."
+            )
+        return paramstyle
 
-    @abstractmethod
+    def _placeholder(self, position: int) -> str:
+        """
+        Return the parameter placeholder for the 0-based ``position`` in a
+        generated statement.
+        """
+        paramstyle = self._paramstyle()
+        if paramstyle == "qmark":
+            return "?"
+        elif paramstyle == "numeric":
+            return f":{position + 1}"
+        elif paramstyle == "named":
+            return f":p{position}"
+        elif paramstyle == "format":
+            return "%s"
+        return f"%(p{position})s"
+
+    def _bind(self, values: Sequence[Any]) -> Sequence[Any] | dict[str, Any]:
+        """
+        Package positional ``values`` the way ``_placeholder`` refers to them.
+        """
+        if self._paramstyle() in ("named", "pyformat"):
+            return {f"p{i}": value for i, value in enumerate(values)}
+        return values
+
     def _sql_type_map(self) -> Mapping[str, str]:
         """
         Map ``lib.infer_dtype`` results to SQL column type names.
         """
+        return _SQL_TYPES
+
+    def has_table(self, name: str, schema: str | None = None) -> bool:
+        # Ask the database to resolve the name exactly as the CREATE TABLE /
+        # INSERT that follow will (information_schema can't do that portably:
+        # it also lists tables in other schemas and databases). A failed query
+        # aborts the open transaction on some databases (e.g. PostgreSQL), so
+        # run it inside a savepoint to keep the caller's uncommitted work. In
+        # autocommit mode, or without savepoint support, run it directly.
+        driver_error = self._driver_error()
+        probe = f"SELECT 1 FROM {self._escape_identifier(name)} WHERE 1 = 0"
+        savepoint = "pandas_has_table"
+        cur = self.con.cursor()
+        try:
+            try:
+                cur.execute(f"SAVEPOINT {savepoint}")
+            except driver_error:
+                in_savepoint = False
+            else:
+                in_savepoint = True
+
+            try:
+                cur.execute(probe)
+            except driver_error:
+                if in_savepoint:
+                    cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                    cur.execute(f"RELEASE SAVEPOINT {savepoint}")
+                return False
+            if in_savepoint:
+                cur.execute(f"RELEASE SAVEPOINT {savepoint}")
+            return True
+        finally:
+            cur.close()
 
     @contextmanager
     def run_transaction(self):
@@ -260,7 +414,7 @@ class DBAPI2Database(PandasSQL):
             cur.close()
 
     def execute(self, sql: str | Select[Any] | TextClause, params=None):
-        driver_error = self._driver_error()
+        driver_error = self._wrapped_errors()
 
         if not isinstance(sql, str):
             raise TypeError("Query must be a string unless using sqlalchemy.")

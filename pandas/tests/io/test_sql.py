@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import sys
 from types import SimpleNamespace
 from typing import (
     TYPE_CHECKING,
@@ -4210,10 +4211,239 @@ def test_dbapi_params_passed_through_unchanged(params):
         def rollback(self):
             pass
 
-    with tm.assert_produces_warning(UserWarning, match="Other DBAPI2 objects"):
-        sql.read_sql("select 1", Con(), params=params)
+    sql.read_sql("select 1", Con(), params=params)
     assert len(received) == 1
     assert received[0] is params
+
+
+# -----------------------------------------------------------------------------
+# -- Generic DB-API 2.0 connections
+
+
+def _make_fake_dbapi_module(paramstyle, monkeypatch):
+    """
+    Register a PEP 249 driver module that runs on sqlite3 but only accepts
+    ``paramstyle`` placeholders, translating them for sqlite.
+    """
+    import re
+    import types
+
+    name = f"pandas_fake_dbapi_{paramstyle}"
+    module = types.ModuleType(name)
+    module.paramstyle = paramstyle
+    module.Error = sqlite3.Error
+
+    def translate(query, params):
+        if params is None:
+            return query, ()
+        if paramstyle in ("named", "pyformat"):
+            assert isinstance(params, dict), params
+        else:
+            assert not isinstance(params, dict), params
+        if paramstyle == "numeric":
+            query = re.sub(r":(\d+)", r"?\1", query)
+        elif paramstyle == "format":
+            # like pymysql/psycopg2, apply Python %-formatting, so a lone % is
+            # an error and %% is a literal %
+            query = query % (("?",) * len(params))
+        elif paramstyle == "pyformat":
+            query = query % {key: f":{key}" for key in params}
+        return query, params
+
+    class Cursor:
+        def __init__(self, cursor) -> None:
+            self._cursor = cursor
+
+        def execute(self, query, params=None):
+            self._cursor.execute(*translate(query, params))
+
+        def executemany(self, query, seq_of_params):
+            seq_of_params = list(seq_of_params)
+            query = translate(query, seq_of_params[0] if seq_of_params else ())[0]
+            self._cursor.executemany(query, seq_of_params)
+
+        def __getattr__(self, attr):
+            return getattr(self._cursor, attr)
+
+    class Connection:
+        def __init__(self) -> None:
+            self._con = sqlite3.connect(":memory:")
+
+        def cursor(self):
+            return Cursor(self._con.cursor())
+
+        def commit(self):
+            self._con.commit()
+
+        def rollback(self):
+            self._con.rollback()
+
+        def close(self):
+            self._con.close()
+
+    Connection.__module__ = name
+    module.Connection = Connection
+    monkeypatch.setitem(sys.modules, name, module)
+    return module
+
+
+_PARAMSTYLES = ["qmark", "numeric", "named", "format", "pyformat"]
+
+
+@pytest.fixture(params=_PARAMSTYLES)
+def fake_dbapi_conn(request, monkeypatch):
+    module = _make_fake_dbapi_module(request.param, monkeypatch)
+    with contextlib.closing(module.Connection()) as conn:
+        yield conn
+
+
+@pytest.fixture
+def postgresql_psycopg2_raw_conn(postgresql_psycopg2_engine):
+    proxy = postgresql_psycopg2_engine.raw_connection()
+    yield proxy.driver_connection
+    proxy.close()
+
+
+@pytest.fixture
+def mysql_pymysql_raw_conn(mysql_pymysql_engine):
+    proxy = mysql_pymysql_engine.raw_connection()
+    yield proxy.driver_connection
+    proxy.close()
+
+
+def _dbapi2_quote(conn):
+    # MySQL quotes identifiers with backticks
+    return "`" if type(conn).__module__.startswith("pymysql") else '"'
+
+
+raw_dbapi_connectable = [
+    *(f"fake:{paramstyle}" for paramstyle in _PARAMSTYLES),
+    pytest.param("postgresql_psycopg2_raw_conn", marks=pytest.mark.db),
+    pytest.param("mysql_pymysql_raw_conn", marks=pytest.mark.db),
+]
+
+
+def _dbapi2_conn(name, request):
+    # "fake:<paramstyle>" builds a fake driver connection; anything else is
+    # a fixture name
+    if name.startswith("fake:"):
+        monkeypatch = request.getfixturevalue("monkeypatch")
+        conn = _make_fake_dbapi_module(name[5:], monkeypatch).Connection()
+        request.addfinalizer(conn.close)
+        return conn
+    return request.getfixturevalue(name)
+
+
+def test_dbapi2_routes_to_generic_backend(fake_dbapi_conn):
+    with pandasSQL_builder(fake_dbapi_conn) as pandas_sql:
+        assert type(pandas_sql) is sql.DBAPI2Database
+
+
+@pytest.mark.parametrize("conn", raw_dbapi_connectable)
+@pytest.mark.parametrize("method", [None, "multi"])
+def test_dbapi2_to_sql_round_trip(conn, method, request):
+    conn = _dbapi2_conn(conn, request)
+    df = pd.DataFrame(
+        {
+            "int": [1, 2, 3],
+            "float": [0.123456789012, None, -1.5],
+            "str": ["a", None, 'quote"d'],
+            "pct %": [1, 2, 3],
+        }
+    )
+    assert df.to_sql("my tbl %", conn, index=False, method=method) == 3
+    q = _dbapi2_quote(conn)
+    result = sql.read_sql_query(
+        f"SELECT * FROM {q}my tbl %{q} ORDER BY {q}int{q}", conn
+    )
+    tm.assert_frame_equal(result, df, check_dtype=False)
+
+
+@pytest.mark.parametrize("conn", raw_dbapi_connectable)
+def test_dbapi2_column_types(conn, request):
+    conn = _dbapi2_conn(conn, request)
+    df = pd.DataFrame(
+        {
+            "b": [True, False],
+            "i": np.array([2**40, -1], dtype=np.int64),
+            "f": [0.1, 0.123456789012345],
+            "t": pd.to_datetime(["2020-01-02 03:04:05", "2021-06-07 00:00:00"]),
+        }
+    )
+    df.to_sql("types", conn, index=False)
+    q = _dbapi2_quote(conn)
+    result = sql.read_sql_query(f"SELECT * FROM {q}types{q}", conn)
+    # BOOLEAN reads back as integers on sqlite and MySQL
+    tm.assert_series_equal(result["b"].astype(bool), df["b"])
+    tm.assert_series_equal(result["i"], df["i"], check_dtype=False)
+    # DOUBLE PRECISION, not single-precision REAL
+    tm.assert_series_equal(result["f"], df["f"], check_exact=True)
+    tm.assert_series_equal(pd.to_datetime(result["t"]), df["t"], check_dtype=False)
+
+
+@pytest.mark.parametrize("conn", raw_dbapi_connectable)
+def test_dbapi2_if_exists(conn, request):
+    conn = _dbapi2_conn(conn, request)
+    df = pd.DataFrame({"a": [1, 2]})
+    q = _dbapi2_quote(conn)
+    query = f"SELECT a FROM {q}t{q} ORDER BY a"
+
+    assert not sql.has_table("t", conn)
+    df.to_sql("t", conn, index=False)
+    assert sql.has_table("t", conn)
+    with pytest.raises(ValueError, match="Table 't' already exists"):
+        df.to_sql("t", conn, index=False)
+    df.to_sql("t", conn, index=False, if_exists="append")
+    assert sql.read_sql_query(query, conn)["a"].tolist() == [1, 1, 2, 2]
+    pd.DataFrame({"a": [5]}).to_sql("t", conn, index=False, if_exists="replace")
+    assert sql.read_sql_query(query, conn)["a"].tolist() == [5]
+    df.to_sql("t", conn, index=False, if_exists="delete_rows")
+    assert sql.read_sql_query(query, conn)["a"].tolist() == [1, 2]
+
+
+def test_dbapi2_has_table_keeps_pending_transaction(postgresql_psycopg2_raw_conn):
+    # A failed lookup must not abort the caller's open transaction, which on
+    # PostgreSQL would force a rollback of their uncommitted work.
+    conn = postgresql_psycopg2_raw_conn
+    cur = conn.cursor()
+    cur.execute('CREATE TABLE "pending" (a INT)')
+    conn.commit()
+    cur.execute('INSERT INTO "pending" VALUES (1)')
+
+    assert not sql.has_table("does_not_exist", conn)
+
+    cur.execute('SELECT count(*) FROM "pending"')
+    assert cur.fetchall() == [(1,)]
+    conn.rollback()
+    cur.close()
+
+
+@pytest.mark.parametrize("conn", raw_dbapi_connectable)
+def test_dbapi2_read_errors_are_the_drivers(conn, request):
+    # Generic connections have always seen the driver's own exceptions on
+    # read; keep it that way rather than re-raising DatabaseError.
+    conn = _dbapi2_conn(conn, request)
+    error = sys.modules[type(conn).__module__.split(".")[0]].Error
+    with pytest.raises(error) as excinfo:
+        sql.read_sql_query("SELEC 1", conn)
+    assert not isinstance(excinfo.value, sql.DatabaseError)
+    conn.rollback()
+
+
+def test_dbapi2_unknown_paramstyle(sqlite_buildin):
+    # A wrapper around a driver connection hides the driver module: reading
+    # still works, writing needs the paramstyle and says so.
+    class Wrapper:
+        def __init__(self, conn) -> None:
+            self._conn = conn
+
+        def __getattr__(self, attr):
+            return getattr(self._conn, attr)
+
+    conn = Wrapper(sqlite_buildin)
+    assert sql.read_sql_query("SELECT 1 AS a", conn)["a"].tolist() == [1]
+    with pytest.raises(ValueError, match="Could not determine the DB-API paramstyle"):
+        pd.DataFrame({"a": [1]}).to_sql("t", conn)
 
 
 def test_row_object_is_named_tuple(sqlite_engine):
@@ -4910,8 +5140,7 @@ def test_read_sql_pymysql_dict_cursor(mysql_pymysql_engine):
     try:
         conn = raw_conn.driver_connection
         conn.cursorclass = pymysql.cursors.DictCursor
-        with tm.assert_produces_warning(UserWarning, match="pandas only supports"):
-            result = sql.read_sql_query("SELECT * FROM dict_cursor", conn)
+        result = sql.read_sql_query("SELECT * FROM dict_cursor", conn)
     finally:
         # discard rather than return the mutated connection to the pool
         raw_conn.invalidate()
@@ -4931,8 +5160,7 @@ def test_read_sql_psycopg2_dict_cursor_duplicate_columns(postgresql_psycopg2_eng
     try:
         conn = raw_conn.driver_connection
         conn.cursor_factory = extras.DictCursor
-        with tm.assert_produces_warning(UserWarning, match="pandas only supports"):
-            result = sql.read_sql_query(query, conn)
+        result = sql.read_sql_query(query, conn)
     finally:
         raw_conn.invalidate()
     expected = pd.DataFrame([[1, "a", 1, 10]], columns=["id", "x", "id", "y"])
