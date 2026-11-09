@@ -24,7 +24,6 @@ import subprocess
 import sys
 import textwrap
 import threading
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 import warnings
 
@@ -44,13 +43,13 @@ if TYPE_CHECKING:
 
 import pandas as pd
 import pandas._testing as tm
+from pandas.core.util import parallel as _parallel
 
 from pandas.io.parsers import readers as _readers
 from pandas.io.parsers.base_parser import ParserBase
 from pandas.io.parsers.c_parser_wrapper import CParserWrapper
 from pandas.io.parsers.readers import (
     _can_parallelize_csv,
-    _default_n_workers,
     _find_chunk_byte_offsets,
     _find_data_start_offset,
     _read_csv_parallel,
@@ -839,21 +838,20 @@ def test_read_csv_parallel_vs_serial_large_file(tmp_path, monkeypatch):
     assert outcomes == ["used"]
 
 
-@pytest.mark.parametrize("platform_name", ["linux", "darwin", "win32"])
-def test_parallel_on_by_default(tmp_path, monkeypatch, platform_name):
-    """The parallel path is on by default on every threaded platform."""
+def test_parallel_on_by_default(tmp_path, monkeypatch):
+    """The parallel path is on by default wherever threads can start."""
     path = tmp_path / "big.csv"
     _make_large_csv(path)
     monkeypatch.setattr(_readers, "_PARALLEL_READ_MIN_BYTES", 1)
     # Pin the default so the test does not depend on the host's actual core
     # count, or on how many CPUs a container/affinity mask leaves the runner --
     # one usable CPU would make the default serial everywhere.
-    monkeypatch.setattr(_readers.os, "cpu_count", lambda: 4)
-    monkeypatch.setattr(_readers, "available_cpu_count", lambda: None)
+    monkeypatch.setattr(_parallel.os, "cpu_count", lambda: 4)
+    monkeypatch.setattr(_parallel, "available_cpu_count", lambda: None)
 
-    # Stub the parallel reader so this exercises only the platform-gating
-    # decision.  Calling the real one would start threads, which fails on
-    # no-thread platforms such as Pyodide/WASM.
+    # Stub the parallel reader so this exercises only the gating decision.
+    # Calling the real one would start threads, which fails on no-thread
+    # platforms such as Pyodide/WASM.
     calls = []
 
     def stub(*args, **kwargs):
@@ -861,7 +859,8 @@ def test_parallel_on_by_default(tmp_path, monkeypatch, platform_name):
         return pd.DataFrame()
 
     monkeypatch.setattr(_readers, "_read_csv_parallel", stub)
-    monkeypatch.setattr(_readers.sys, "platform", platform_name)
+    # WASM is fixed at import, so a Pyodide run must patch it to look threaded
+    monkeypatch.setattr(_parallel, "WASM", False)
 
     pd.read_csv(path)
     assert len(calls) == 1
@@ -872,8 +871,8 @@ def test_parallel_default_off_on_wasm(tmp_path, monkeypatch):
     path = tmp_path / "big.csv"
     _make_large_csv(path)
     monkeypatch.setattr(_readers, "_PARALLEL_READ_MIN_BYTES", 1)
-    monkeypatch.setattr(_readers.os, "cpu_count", lambda: 4)
-    monkeypatch.setattr(_readers, "available_cpu_count", lambda: None)
+    monkeypatch.setattr(_parallel.os, "cpu_count", lambda: 4)
+    monkeypatch.setattr(_parallel, "available_cpu_count", lambda: None)
 
     calls = []
 
@@ -882,7 +881,7 @@ def test_parallel_default_off_on_wasm(tmp_path, monkeypatch):
         return pd.DataFrame()
 
     monkeypatch.setattr(_readers, "_read_csv_parallel", stub)
-    monkeypatch.setattr(_readers.sys, "platform", "emscripten")
+    monkeypatch.setattr(_parallel, "WASM", True)
 
     pd.read_csv(path)
     assert calls == []
@@ -995,9 +994,6 @@ def test_pool_refusing_work_mid_read_reads_serially(tmp_path, monkeypatch, refus
 
     submitted.clear()
     monkeypatch.setattr(_readers, "ThreadPoolExecutor", Refusing)
-    monkeypatch.setattr(
-        _readers, "_interpreter_shutting_down", lambda: bool(shutting_down)
-    )
     with pd.option_context("mode.max_threads", 3):
         result = pd.read_csv(path)
     assert shutting_down  # the refusal happened
@@ -1041,9 +1037,6 @@ def test_pool_refusing_work_does_not_warn_twice(tmp_path, monkeypatch):
 
     submitted.clear()
     monkeypatch.setattr(_readers, "ThreadPoolExecutor", Refusing)
-    monkeypatch.setattr(
-        _readers, "_interpreter_shutting_down", lambda: bool(shutting_down)
-    )
     result, recorded = _warnings_from(
         _read_forced_parallel, path, monkeypatch, **kwargs
     )
@@ -1098,14 +1091,13 @@ def test_pool_refusing_work_stops_running_workers(tmp_path, monkeypatch):
             accepted.append(1)
             return super().submit(*args, **kwargs)
 
-    def shutting_down():
-        # asked once the refusal is caught: release the held chunk
-        if accepted:
+        def shutdown(self, *args, **kwargs):
+            # leaving the pool, after the refusal was caught: release the held
+            # chunk
             refused.set()
-        return bool(accepted)
+            super().shutdown(*args, **kwargs)
 
     monkeypatch.setattr(_readers, "ThreadPoolExecutor", Refusing)
-    monkeypatch.setattr(_readers, "_interpreter_shutting_down", shutting_down)
     with pd.option_context("mode.max_threads", 4):
         result = pd.read_csv(path)
     tm.assert_frame_equal(result, expected)
@@ -1114,9 +1106,9 @@ def test_pool_refusing_work_stops_running_workers(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(WASM, reason="WASM stays serial, so no pool is started")
-def test_runtime_error_during_shutdown_still_propagates(tmp_path, monkeypatch):
+def test_runtime_error_from_parallel_read_propagates(tmp_path, monkeypatch):
     # Only the pool's refusal falls back to serial.  Any other RuntimeError
-    # from the parallel path is a bug and must surface, shutdown or not.
+    # from the parallel path is a bug and must surface.
     path = tmp_path / "big.csv"
     _make_large_csv(path)
 
@@ -1124,11 +1116,6 @@ def test_runtime_error_during_shutdown_still_propagates(tmp_path, monkeypatch):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(_readers, "_concatenate_chunks", boom)
-    # not shutting down when the worker count is chosen, then shutting down
-    answers = iter([False])
-    monkeypatch.setattr(
-        _readers, "_interpreter_shutting_down", lambda: next(answers, True)
-    )
     with pytest.raises(RuntimeError, match="boom"):
         _read_forced_parallel(path, monkeypatch)
 
@@ -1164,12 +1151,13 @@ def test_parallel_default_thread_cap(tmp_path, monkeypatch):
     path = tmp_path / "big.csv"
     _make_large_csv(path)
     monkeypatch.setattr(_readers, "_PARALLEL_READ_MIN_BYTES", 1)
-    monkeypatch.setattr(_readers.sys, "platform", "linux")
+    # WASM is fixed at import, so a Pyodide run must patch it to look threaded
+    monkeypatch.setattr(_parallel, "WASM", False)
     # More cores than the cap: the default should clamp down to 6.
-    monkeypatch.setattr(_readers.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(_parallel.os, "cpu_count", lambda: 16)
     # Otherwise a CI runner with fewer than 6 usable CPUs clamps below the cap
     # and this test measures the runner, not the cap.
-    monkeypatch.setattr(_readers, "available_cpu_count", lambda: None)
+    monkeypatch.setattr(_parallel, "available_cpu_count", lambda: None)
 
     workers = []
 
@@ -1187,85 +1175,6 @@ def test_parallel_default_thread_cap(tmp_path, monkeypatch):
     with pd.option_context("mode.max_threads", 8):
         pd.read_csv(path)
     assert workers == [8]
-
-
-# ---------------------------------------------------------------------------
-# _default_n_workers
-# ---------------------------------------------------------------------------
-
-
-class TestDefaultNWorkers:
-    """Unit tests for the default worker count."""
-
-    @pytest.mark.parametrize("platform_name", ["linux", "darwin", "win32"])
-    @pytest.mark.parametrize(
-        "cpu_count, available, expected",
-        [
-            (2, None, 2),  # unconstrained, below the cap -> logical CPU count
-            (16, None, 6),  # cap binds
-            (16, 1, 1),  # single-CPU container
-            (16, 2, 2),  # cgroup/affinity tighter than the cap
-            (16, 8, 6),  # allocation looser than the cap -> cap still binds
-            (2, 8, 2),  # allocation looser than the machine
-        ],
-    )
-    def test_combines_cap_and_allocation(
-        self, monkeypatch, cpu_count, available, expected, platform_name
-    ):
-        # Default = min(logical CPUs, available CPUs, _MAX_DEFAULT_WORKERS),
-        # on every threaded platform.
-        assert _readers._MAX_DEFAULT_WORKERS == 6
-        monkeypatch.setattr(_readers.sys, "platform", platform_name)
-        monkeypatch.setattr(_readers.os, "cpu_count", lambda: cpu_count)
-        monkeypatch.setattr(_readers, "available_cpu_count", lambda: available)
-        with pd.option_context("mode.max_threads", None):
-            assert _default_n_workers() == expected
-
-    def test_wasm_is_serial(self, monkeypatch):
-        monkeypatch.setattr(_readers.sys, "platform", "emscripten")
-        # WASM stays serial even if a worker count is requested explicitly.
-        with pd.option_context("mode.max_threads", 8):
-            assert _default_n_workers() == 1
-
-    def test_max_threads_exceeds_cap(self, monkeypatch):
-        # _MAX_DEFAULT_WORKERS and the availability clamp bound the *default*
-        # only.  The mode.max_threads docs promise an explicit setting still
-        # wins.
-        monkeypatch.setattr(_readers.sys, "platform", "linux")
-        monkeypatch.setattr(_readers.os, "cpu_count", lambda: 2)
-        monkeypatch.setattr(_readers, "available_cpu_count", lambda: 1)
-        with pd.option_context("mode.max_threads", 32):
-            assert _default_n_workers() == 32
-
-    @pytest.mark.parametrize("platform_name", ["linux", "win32"])
-    def test_max_threads_wins(self, monkeypatch, platform_name):
-        monkeypatch.setattr(_readers.sys, "platform", platform_name)
-        with pd.option_context("mode.max_threads", 3):
-            assert _default_n_workers() == 3
-
-    @pytest.mark.parametrize(
-        "futures_flag, main_alive, expected",
-        [
-            (True, True, 1),  # a pool thread still busy at exit
-            (True, False, 1),
-            (False, False, 8),  # the flag decides whenever it exists
-            (None, False, 1),  # flag gone: the main-thread check stands in
-            (None, True, 8),
-        ],
-    )
-    def test_shutdown_is_serial(self, monkeypatch, futures_flag, main_alive, expected):
-        # once shutdown has begun, no pool can be started, so even an explicit
-        # worker count must give way.  readers' own references are patched,
-        # not the stdlib modules, which other threads may be using.
-        flag = {} if futures_flag is None else {"_shutdown": futures_flag}
-        main = SimpleNamespace(is_alive=lambda: main_alive)
-        monkeypatch.setattr(_readers.sys, "platform", "linux")
-        monkeypatch.setattr(_readers, "_futures_thread", SimpleNamespace(**flag))
-        monkeypatch.setattr(
-            _readers, "threading", SimpleNamespace(main_thread=lambda: main)
-        )
-        with pd.option_context("mode.max_threads", 8):
-            assert _default_n_workers() == expected
 
 
 # ---------------------------------------------------------------------------

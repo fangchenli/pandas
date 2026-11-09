@@ -24,8 +24,8 @@ def _read_sysfs_int(path: str) -> int | None:
 def _read_sysfs_str(path: str) -> str | None:
     # ValueError as well as OSError, matching _read_sysfs_int: a non-UTF-8 byte
     # raises UnicodeDecodeError, and this feeds available_cpu_count(), which
-    # _default_n_workers calls unguarded -- so it would surface out of read_csv
-    # rather than falling back.
+    # pandas.core.util.parallel.max_workers calls unguarded -- so it would
+    # surface out of read_csv rather than falling back.
     try:
         with open(path, encoding="utf-8") as fh:
             return fh.read().strip()
@@ -80,7 +80,7 @@ def available_cpu_count() -> int | None:
     Windows.  macOS exposes no affinity mask at all; Windows does (via
     ``GetProcessAffinityMask`` and job-object rate limits) but it is not
     implemented here, so a restricted Windows process falls back to the
-    logical CPU count clamped by ``_MAX_DEFAULT_WORKERS``.
+    logical CPU count clamped by the operation's default cap.
     On Linux ``sched_getaffinity`` always succeeds, so an unconstrained box
     reports its full logical CPU count rather than ``None``.
 

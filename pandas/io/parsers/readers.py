@@ -12,7 +12,6 @@ from collections import (
     deque,
 )
 from concurrent.futures import ThreadPoolExecutor
-import concurrent.futures.thread as _futures_thread
 import contextlib
 import csv
 import io
@@ -20,7 +19,6 @@ import mmap
 import os
 import queue
 import re
-import sys
 import threading
 from typing import (
     IO,
@@ -38,11 +36,8 @@ import warnings
 
 import numpy as np
 
-from pandas._config import get_option
-
 from pandas._libs import lib
 from pandas._libs.parsers import STR_NA_VALUES
-from pandas.compat._cpu import available_cpu_count
 from pandas.errors import (
     AbstractMethodError,
     EmptyDataError,
@@ -81,6 +76,7 @@ from pandas.core.indexes.api import (
 )
 from pandas.core.internals.api import _make_block
 from pandas.core.internals.managers import BlockManager
+from pandas.core.util.parallel import max_workers
 
 from pandas.io.common import (
     IOHandles,
@@ -426,7 +422,7 @@ def _read(
     # the GIL-free tokenisation and type-conversion code in parsers.pyx runs truly
     # in parallel.
     if not iterator and chunksize is None and nrows is None:
-        _n_workers = _default_n_workers()
+        _n_workers = max_workers(_MAX_DEFAULT_WORKERS)
         if _n_workers > 1 and _can_parallelize_csv(filepath_or_buffer, kwds):
             _filepath = stringify_path(filepath_or_buffer)
             assert isinstance(_filepath, str)  # guaranteed by _can_parallelize_csv
@@ -451,57 +447,6 @@ def _read(
 
     with parser:
         return parser.read(nrows)
-
-
-def _interpreter_shutting_down() -> bool:
-    """
-    Whether interpreter shutdown has begun, so thread pools refuse new work.
-
-    That covers ``atexit`` handlers, threads still running after the main
-    thread has exited, and work still running in a ``ThreadPoolExecutor``
-    when the script ends.
-    """
-    # threading's shutdown first runs concurrent.futures' exit hook, which sets
-    # this flag and then waits for busy pool threads, and only afterwards marks
-    # the main thread stopped (CPython 3.11 through 3.14).  So the flag covers
-    # all three cases, where the main-thread check misses a pool thread still
-    # running at exit.  The flag is private: should it ever go, fall back to
-    # the public check rather than to never detecting shutdown.
-    flag = getattr(_futures_thread, "_shutdown", None)
-    if flag is not None:
-        return bool(flag)
-    return not threading.main_thread().is_alive()
-
-
-def _default_n_workers() -> int:
-    """
-    Default worker count for a parallel ``read_csv``.
-
-    ``mode.max_threads`` wins whenever it is set, except where no thread pool
-    can be started: on Emscripten, and during interpreter shutdown.  Otherwise
-    it is the smallest of the machine's logical CPU count,
-    ``_MAX_DEFAULT_WORKERS``, and the CPUs actually available to the process
-    (CPU affinity / cgroup limits) -- so that an embedded or
-    containerised pandas does not oversubscribe its allocation.
-    """
-    max_threads = get_option("mode.max_threads")
-    if sys.platform == "emscripten":
-        # WASM cannot spawn threads, regardless of mode.max_threads.
-        return 1
-    if _interpreter_shutting_down():
-        # a pool would raise "cannot schedule new futures after interpreter
-        # shutdown"
-        return 1
-    if max_threads is not None:
-        return max_threads
-    n_workers = min(os.cpu_count() or 1, _MAX_DEFAULT_WORKERS)
-    # os.cpu_count() counts the machine's CPUs, not the ones this process may
-    # use, so it alone would put _MAX_DEFAULT_WORKERS parse threads on a
-    # single-CPU container.
-    available = available_cpu_count()
-    if available is not None:
-        n_workers = min(n_workers, available)
-    return n_workers
 
 
 def _can_parallelize_csv(filepath_or_buffer, kwds: Mapping[str, Any]) -> bool:
@@ -1343,9 +1288,9 @@ def _read_csv_chunks(
         if not refused or err is not refused[0]:
             raise
         # The pool refused work part-way through: shutdown began after
-        # _default_n_workers looked, or a thread could not be started.  Leaving
-        # its ``with`` block waited for the work it had accepted; the caller
-        # now reads serially.
+        # max_workers looked, or a thread could not be started.  Leaving its
+        # ``with`` block waited for the work it had accepted; the caller now
+        # reads serially.
         return None
     finally:
         if not readers_closing:
