@@ -12,6 +12,7 @@ We test correctness (parallel == serial) rather than performance.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import csv
 import io
 import itertools
@@ -19,6 +20,11 @@ import mmap
 import os
 import re
 import sqlite3
+import subprocess
+import sys
+import textwrap
+import threading
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 import warnings
 
@@ -41,6 +47,7 @@ import pandas._testing as tm
 
 from pandas.io.parsers import readers as _readers
 from pandas.io.parsers.base_parser import ParserBase
+from pandas.io.parsers.c_parser_wrapper import CParserWrapper
 from pandas.io.parsers.readers import (
     _can_parallelize_csv,
     _default_n_workers,
@@ -881,6 +888,268 @@ def test_parallel_default_off_on_wasm(tmp_path, monkeypatch):
     assert calls == []
 
 
+@pytest.mark.skipif(WASM, reason="Can't start subprocesses in WASM")
+@pytest.mark.single_cpu
+@pytest.mark.parametrize("where", ["atexit", "late_thread", "busy_pool"])
+def test_read_during_interpreter_shutdown(tmp_path, where):
+    # concurrent.futures refuses new work once shutdown begins, so a read big
+    # enough for the parallel path raised "cannot schedule new futures after
+    # interpreter shutdown" from an atexit handler, from a thread still
+    # running after the main thread exited, or from work still running in a
+    # ThreadPoolExecutor when the script ended.  It must read serially
+    # instead.  busy_pool is the case where the main thread still reports
+    # alive: concurrent.futures waits for its busy threads before threading
+    # marks the main thread stopped.
+    path = tmp_path / "big.csv"
+    _make_large_csv(path)
+    code = textwrap.dedent(
+        f"""\
+        import atexit, threading, time
+        from concurrent.futures import ThreadPoolExecutor
+        import concurrent.futures.thread as cft
+        import pandas as pd
+        from pandas.io.parsers import readers
+
+        # small file, so lower the threshold the parallel path is gated on
+        readers._PARALLEL_READ_MIN_BYTES = 1
+        with pd.option_context("mode.max_threads", 4):
+            expected = pd.read_csv({str(path)!r})  # before shutdown: parallel
+
+        def check():
+            with pd.option_context("mode.max_threads", 4):
+                result = pd.read_csv({str(path)!r})
+            # first field: whether shutdown had really begun by the read
+            print(cft._shutdown, result.equals(expected), len(result))
+
+        def late():
+            # wait for shutdown to begin, rather than sleep and hope
+            deadline = time.monotonic() + 30
+            while not cft._shutdown and time.monotonic() < deadline:
+                time.sleep(0.01)
+            check()
+
+        if "{where}" == "atexit":
+            atexit.register(check)
+        elif "{where}" == "late_thread":
+            threading.Thread(target=late).start()
+        else:
+            # submitted, not waited for: the script ends while it runs
+            ThreadPoolExecutor(1).submit(late)
+        """
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,  # the returncode is asserted below, with stderr shown
+        capture_output=True,
+        encoding="utf-8",
+        timeout=60,  # a hang at exit must fail, not stall the run
+    )
+    # an exception in an atexit handler or a thread leaves the exit code at 0,
+    # so the printed result is what shows the read worked
+    assert proc.returncode == 0, proc.stderr
+    assert "cannot schedule new futures" not in proc.stderr
+    lines = proc.stdout.strip().splitlines()
+    # last line only: a verbose editable install prints rebuild output first
+    assert lines, proc.stderr
+    assert lines[-1] == "True True 10000", proc.stderr
+
+
+@pytest.mark.skipif(WASM, reason="WASM stays serial, so no pool is started")
+@pytest.mark.parametrize("refuse_at", [0, 1, 3, 4, 5, -1])
+def test_pool_refusing_work_mid_read_reads_serially(tmp_path, monkeypatch, refuse_at):
+    # Shutdown can begin after the worker count was chosen, so the pool may
+    # refuse work part-way through a read: before any chunk, among the chunk
+    # parses, or among the closes and copies after them (-1: the last
+    # submission).  The read must still come back whole, read serially.
+    path = tmp_path / "big.csv"
+    _make_large_csv(path)
+    monkeypatch.setattr(_readers, "_PARALLEL_READ_MIN_BYTES", 1)
+    expected = pd.read_csv(path, engine="python")
+
+    submitted = []
+
+    class Counting(ThreadPoolExecutor):
+        def submit(self, *args, **kwargs):
+            submitted.append(1)
+            return super().submit(*args, **kwargs)
+
+    monkeypatch.setattr(_readers, "ThreadPoolExecutor", Counting)
+    with pd.option_context("mode.max_threads", 3):
+        tm.assert_frame_equal(pd.read_csv(path), expected)
+    n_submits = len(submitted)
+    assert n_submits > 5  # every refusal point below is reached
+    refuse_at = refuse_at % n_submits
+
+    shutting_down = []
+
+    class Refusing(ThreadPoolExecutor):
+        def submit(self, *args, **kwargs):
+            if len(submitted) == refuse_at:
+                shutting_down.append(True)
+            if shutting_down:
+                raise RuntimeError(
+                    "cannot schedule new futures after interpreter shutdown"
+                )
+            submitted.append(1)
+            return super().submit(*args, **kwargs)
+
+    submitted.clear()
+    monkeypatch.setattr(_readers, "ThreadPoolExecutor", Refusing)
+    monkeypatch.setattr(
+        _readers, "_interpreter_shutting_down", lambda: bool(shutting_down)
+    )
+    with pd.option_context("mode.max_threads", 3):
+        result = pd.read_csv(path)
+    assert shutting_down  # the refusal happened
+    tm.assert_frame_equal(result, expected)
+
+
+@pytest.mark.skipif(WASM, reason="WASM stays serial, so no pool is started")
+def test_pool_refusing_work_does_not_warn_twice(tmp_path, monkeypatch):
+    # The parallel read raises the warnings it collected on its way out of an
+    # error nothing re-reads.  A refusal at shutdown is re-read serially, which
+    # warns again, so the parallel read must stay quiet.  Refusing the last
+    # submission puts the refusal after every chunk has warned.
+    raw = b"col1,col2\n" + b"".join(f"{i},{i * 2}\n".encode() for i in range(1000))
+    path = tmp_path / "warns.csv"
+    path.write_bytes(raw)
+    kwargs = {"converters": {"col1": int}, "dtype": {"col1": "int64"}}
+
+    submitted = []
+
+    class Counting(ThreadPoolExecutor):
+        def submit(self, *args, **kwargs):
+            submitted.append(1)
+            return super().submit(*args, **kwargs)
+
+    monkeypatch.setattr(_readers, "ThreadPoolExecutor", Counting)
+    _warnings_from(_read_forced_parallel, path, monkeypatch, **kwargs)
+    refuse_at = len(submitted) - 1
+
+    shutting_down = []
+
+    class Refusing(ThreadPoolExecutor):
+        def submit(self, *args, **kwargs):
+            if len(submitted) == refuse_at:
+                shutting_down.append(True)
+            if shutting_down:
+                raise RuntimeError(
+                    "cannot schedule new futures after interpreter shutdown"
+                )
+            submitted.append(1)
+            return super().submit(*args, **kwargs)
+
+    submitted.clear()
+    monkeypatch.setattr(_readers, "ThreadPoolExecutor", Refusing)
+    monkeypatch.setattr(
+        _readers, "_interpreter_shutting_down", lambda: bool(shutting_down)
+    )
+    result, recorded = _warnings_from(
+        _read_forced_parallel, path, monkeypatch, **kwargs
+    )
+    assert shutting_down  # the refusal happened
+    expected, _ = _warnings_from(pd.read_csv, io.BytesIO(raw), **kwargs)
+    tm.assert_frame_equal(result, expected)
+    assert [str(warning.message) for warning in recorded] == [
+        _converter_dtype_warning("col1")
+    ]
+
+
+@pytest.mark.skipif(WASM, reason="WASM stays serial, so no pool is started")
+def test_pool_refusing_work_stops_running_workers(tmp_path, monkeypatch):
+    # When the pool refuses a worker after accepting the first, the accepted
+    # one must stop at its next chunk.  Otherwise leaving the pool waits while
+    # it parses the rest of the file alone, only for the serial re-read to
+    # parse it all again.
+    path = tmp_path / "big.csv"
+    _make_large_csv(path, n_rows=50_000)
+    monkeypatch.setattr(_readers, "_PARALLEL_READ_MIN_BYTES", 1)
+
+    parsed = []
+    refused = threading.Event()
+    real = CParserWrapper._read_arrays
+
+    def spy(self, *args, **kwargs):
+        if threading.current_thread() is not threading.main_thread():
+            parsed.append(1)
+            # hold the first chunk until the refusal has been handled, so the
+            # worker cannot finish the file first
+            refused.wait(timeout=10)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(CParserWrapper, "_read_arrays", spy)
+    with pd.option_context("mode.max_threads", 4):
+        expected = pd.read_csv(path, engine="python")
+        refused.set()
+        pd.read_csv(path)
+    n_chunks = len(parsed)
+    assert n_chunks > 2  # enough chunks for the drain to show
+
+    refused.clear()
+    parsed.clear()
+    accepted = []
+
+    class Refusing(ThreadPoolExecutor):
+        def submit(self, *args, **kwargs):
+            if accepted:
+                raise RuntimeError(
+                    "cannot schedule new futures after interpreter shutdown"
+                )
+            accepted.append(1)
+            return super().submit(*args, **kwargs)
+
+    def shutting_down():
+        # asked once the refusal is caught: release the held chunk
+        if accepted:
+            refused.set()
+        return bool(accepted)
+
+    monkeypatch.setattr(_readers, "ThreadPoolExecutor", Refusing)
+    monkeypatch.setattr(_readers, "_interpreter_shutting_down", shutting_down)
+    with pd.option_context("mode.max_threads", 4):
+        result = pd.read_csv(path)
+    tm.assert_frame_equal(result, expected)
+    # the accepted worker stopped after the chunk it was on, if it had one
+    assert len(parsed) <= 1
+
+
+@pytest.mark.skipif(WASM, reason="WASM stays serial, so no pool is started")
+def test_runtime_error_during_shutdown_still_propagates(tmp_path, monkeypatch):
+    # Only the pool's refusal falls back to serial.  Any other RuntimeError
+    # from the parallel path is a bug and must surface, shutdown or not.
+    path = tmp_path / "big.csv"
+    _make_large_csv(path)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(_readers, "_concatenate_chunks", boom)
+    # not shutting down when the worker count is chosen, then shutting down
+    answers = iter([False])
+    monkeypatch.setattr(
+        _readers, "_interpreter_shutting_down", lambda: next(answers, True)
+    )
+    with pytest.raises(RuntimeError, match="boom"):
+        _read_forced_parallel(path, monkeypatch)
+
+
+@pytest.mark.skipif(WASM, reason="WASM stays serial, so no pool is started")
+def test_runtime_error_outside_shutdown_propagates(tmp_path, monkeypatch):
+    # only a refusal caused by shutdown falls back; anything else is a bug
+    path = tmp_path / "big.csv"
+    _make_large_csv(path)
+    monkeypatch.setattr(_readers, "_PARALLEL_READ_MIN_BYTES", 1)
+
+    class Broken(ThreadPoolExecutor):
+        def submit(self, *args, **kwargs):
+            raise RuntimeError("something else")
+
+    monkeypatch.setattr(_readers, "ThreadPoolExecutor", Broken)
+    with pd.option_context("mode.max_threads", 3):
+        with pytest.raises(RuntimeError, match="something else"):
+            pd.read_csv(path)
+
+
 def test_parallel_default_thread_cap(tmp_path, monkeypatch):
     """The default worker count is capped at 6, regardless of core count."""
     path = tmp_path / "big.csv"
@@ -964,6 +1233,30 @@ class TestDefaultNWorkers:
         monkeypatch.setattr(_readers.sys, "platform", platform_name)
         with pd.option_context("mode.max_threads", 3):
             assert _default_n_workers() == 3
+
+    @pytest.mark.parametrize(
+        "futures_flag, main_alive, expected",
+        [
+            (True, True, 1),  # a pool thread still busy at exit
+            (True, False, 1),
+            (False, False, 8),  # the flag decides whenever it exists
+            (None, False, 1),  # flag gone: the main-thread check stands in
+            (None, True, 8),
+        ],
+    )
+    def test_shutdown_is_serial(self, monkeypatch, futures_flag, main_alive, expected):
+        # once shutdown has begun, no pool can be started, so even an explicit
+        # worker count must give way.  readers' own references are patched,
+        # not the stdlib modules, which other threads may be using.
+        flag = {} if futures_flag is None else {"_shutdown": futures_flag}
+        main = SimpleNamespace(is_alive=lambda: main_alive)
+        monkeypatch.setattr(_readers.sys, "platform", "linux")
+        monkeypatch.setattr(_readers, "_futures_thread", SimpleNamespace(**flag))
+        monkeypatch.setattr(
+            _readers, "threading", SimpleNamespace(main_thread=lambda: main)
+        )
+        with pd.option_context("mode.max_threads", 8):
+            assert _default_n_workers() == expected
 
 
 # ---------------------------------------------------------------------------

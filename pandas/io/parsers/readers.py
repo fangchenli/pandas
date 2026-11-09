@@ -12,6 +12,7 @@ from collections import (
     deque,
 )
 from concurrent.futures import ThreadPoolExecutor
+import concurrent.futures.thread as _futures_thread
 import contextlib
 import csv
 import io
@@ -114,6 +115,7 @@ if TYPE_CHECKING:
         Mapping,
         Sequence,
     )
+    from concurrent.futures import Future
     from types import TracebackType
 
     from pandas._typing import (
@@ -451,19 +453,44 @@ def _read(
         return parser.read(nrows)
 
 
+def _interpreter_shutting_down() -> bool:
+    """
+    Whether interpreter shutdown has begun, so thread pools refuse new work.
+
+    That covers ``atexit`` handlers, threads still running after the main
+    thread has exited, and work still running in a ``ThreadPoolExecutor``
+    when the script ends.
+    """
+    # threading's shutdown first runs concurrent.futures' exit hook, which sets
+    # this flag and then waits for busy pool threads, and only afterwards marks
+    # the main thread stopped (CPython 3.11 through 3.14).  So the flag covers
+    # all three cases, where the main-thread check misses a pool thread still
+    # running at exit.  The flag is private: should it ever go, fall back to
+    # the public check rather than to never detecting shutdown.
+    flag = getattr(_futures_thread, "_shutdown", None)
+    if flag is not None:
+        return bool(flag)
+    return not threading.main_thread().is_alive()
+
+
 def _default_n_workers() -> int:
     """
     Default worker count for a parallel ``read_csv``.
 
-    ``mode.max_threads`` wins whenever it is set (except on Emscripten, which
-    cannot spawn threads at all).  Otherwise it is the smallest of the machine's
-    logical CPU count, ``_MAX_DEFAULT_WORKERS``, and the CPUs actually available
-    to the process (CPU affinity / cgroup limits) -- so that an embedded or
+    ``mode.max_threads`` wins whenever it is set, except where no thread pool
+    can be started: on Emscripten, and during interpreter shutdown.  Otherwise
+    it is the smallest of the machine's logical CPU count,
+    ``_MAX_DEFAULT_WORKERS``, and the CPUs actually available to the process
+    (CPU affinity / cgroup limits) -- so that an embedded or
     containerised pandas does not oversubscribe its allocation.
     """
     max_threads = get_option("mode.max_threads")
     if sys.platform == "emscripten":
         # WASM cannot spawn threads, regardless of mode.max_threads.
+        return 1
+    if _interpreter_shutting_down():
+        # a pool would raise "cannot schedule new futures after interpreter
+        # shutdown"
         return 1
     if max_threads is not None:
         return max_threads
@@ -815,7 +842,8 @@ def _read_csv_parallel(
     python, the one-line sample used to infer column names has no columns,
     ``usecols`` selects different columns in different chunks, per-chunk
     dtype inference disagrees in a way that would not match the serial
-    result, or any chunk fails to parse); the caller then reads serially.
+    result, any chunk fails to parse, or interpreter shutdown begins and the
+    thread pool refuses work); the caller then reads serially.
     """
     warning_sink: list[tuple[str, type[Warning]]] = []
     try:
@@ -1150,6 +1178,24 @@ def _read_csv_chunks(
     index_dicts: list[dict[Any, Any]] = []
     total = 0
     readers_closing = False
+    # The pool refuses work once interpreter shutdown begins, which can happen
+    # mid-read; the refusal is kept so the handler below can tell it from any
+    # other RuntimeError.
+    refused: list[RuntimeError] = []
+
+    def submit(
+        pool: ThreadPoolExecutor, fn: Callable[..., object], *args: object
+    ) -> Future[object]:
+        try:
+            return pool.submit(fn, *args)
+        except RuntimeError as err:
+            # Whatever the cause, this read is over: stop the workers already
+            # running at their next chunk, rather than have leaving the pool
+            # wait while they parse the rest of the file for nothing.
+            chunk_failed.set()
+            if _interpreter_shutting_down():
+                refused.append(err)
+            raise
 
     # mmap the file once and pass zero-copy memoryview slices to each thread
     # instead of having each thread open/seek/read its own copy.  mmap dups
@@ -1167,7 +1213,7 @@ def _read_csv_chunks(
             worker_views = [
                 views.enter_context(memoryview(mm)) for _ in range(n_workers)
             ]
-            for fut in [pool.submit(_worker, mv) for mv in worker_views]:
+            for fut in [submit(pool, _worker, mv) for mv in worker_views]:
                 fut.result()
             if chunk_failed.is_set():
                 # Let the serial read raise: a chunk's error can be an artifact
@@ -1189,7 +1235,7 @@ def _read_csv_chunks(
 
             # Freeing parser buffers costs a few ms of madvise; run it on the
             # pool, overlapped with the gather copies below.
-            close_futures = [pool.submit(reader.close) for reader in workers_readers]
+            close_futures = [submit(pool, reader.close) for reader in workers_readers]
             readers_closing = True
 
             # Zero-row chunks carry empty-meta object dtypes that would
@@ -1280,13 +1326,24 @@ def _read_csv_chunks(
                 # then costs many times the memcpy it schedules.
                 batch = -(-len(copy_jobs) // (n_workers * 4)) or 1
                 copy_futures = [
-                    pool.submit(_copy_pieces, copy_jobs[start : start + batch])
+                    submit(
+                        pool,
+                        _copy_pieces,
+                        copy_jobs[start : start + batch],
+                    )
                     for start in range(0, len(copy_jobs), batch)
                 ]
                 for fut in copy_futures:
                     fut.result()
             for fut in close_futures:
                 fut.result()
+    except RuntimeError as err:
+        if not refused or err is not refused[0]:
+            raise
+        # Shutdown began after _default_n_workers looked, and the pool refused
+        # work part-way through.  Leaving its ``with`` block waited for the
+        # work it had accepted; the caller now reads serially.
+        return None
     finally:
         if not readers_closing:
             for reader in workers_readers:

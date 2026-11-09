@@ -473,7 +473,9 @@ max_threads_doc = """
     further limited to the CPUs available to the process (CPU affinity and cgroup
     limits).  Set to ``1`` to disable parallel execution, or to a fixed number to
     raise the cap or to limit thread usage when pandas is embedded in a larger
-    parallel workflow.  Ignored on Emscripten/Pyodide, which cannot spawn threads.
+    parallel workflow.  Ignored on Emscripten/Pyodide, which cannot spawn threads,
+    and during interpreter shutdown (e.g. in an ``atexit`` handler), when no new
+    thread pool can be started.
 """
 
 
