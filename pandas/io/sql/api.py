@@ -745,6 +745,10 @@ def pandasSQL_builder(
     if adbc and isinstance(con, adbc.Connection):
         return ADBCDatabase(con)
 
+    if getattr(con, "Error", None) is sqlite3.Error:
+        # A wrapper around a sqlite3 connection, e.g. SQLAlchemy's pool proxy
+        return SQLiteDatabase(con)
+
     # Any other object is treated as a DB-API 2.0 (PEP 249) connection.
     return DBAPI2Database(con)
 

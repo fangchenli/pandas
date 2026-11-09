@@ -6278,16 +6278,21 @@ database, so some things are up to you:
   ``params`` to the driver unchanged, so use the driver's placeholder style, e.g.
   ``?`` for sqlite3 and ``%s`` for psycopg2 and pymysql.
 * **Column types.** :meth:`DataFrame.to_sql` creates new tables with ``BIGINT``,
-  ``DOUBLE PRECISION``, ``BOOLEAN``, ``TIMESTAMP``, ``DATE``, ``TIME`` and ``TEXT``
-  columns (sqlite3 connections use sqlite's own type names). Where your database
-  spells a type differently or needs more, e.g. ``VARCHAR(255)`` for an indexed text
-  column in MySQL, pass the SQL type as a string with ``dtype``.
+  ``DOUBLE PRECISION``, ``BOOLEAN``, ``TIMESTAMP``, ``TIMESTAMP WITH TIME ZONE``
+  (for time-zone-aware data), ``DATE``, ``TIME`` and ``TEXT`` columns. MySQL and
+  MariaDB get ``DATETIME(6)`` and ``TIME(6)`` instead, and since they have no
+  time-zone-aware type, time-zone-aware data is stored as wall-clock time. sqlite3
+  connections use sqlite's own type names. Where your database spells a type
+  differently or needs more, e.g. ``VARCHAR(255)`` for an indexed text column in
+  MySQL, pass the SQL type as a string with ``dtype``.
 * **Errors.** Except with sqlite3, errors from the driver propagate unchanged.
 
 Reading a table by name with :func:`~pandas.read_sql_table` requires SQLAlchemy,
 and the ``schema`` argument is ignored. pandas reads the driver's placeholder style
-from the ``paramstyle`` attribute of its module, as PEP 249 specifies, so pass the
-driver's own connection object rather than a wrapper around it.
+from the ``paramstyle`` attribute of its module, as PEP 249 specifies, finding the
+module through the connection's class or its ``Error`` attribute. If you pass a
+wrapper that hides both, writing raises an error; pass the driver's own connection
+object instead.
 
 .. versionchanged:: 3.2.0
 

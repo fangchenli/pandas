@@ -4431,19 +4431,129 @@ def test_dbapi2_read_errors_are_the_drivers(conn, request):
 
 
 def test_dbapi2_unknown_paramstyle(sqlite_buildin):
-    # A wrapper around a driver connection hides the driver module: reading
-    # still works, writing needs the paramstyle and says so.
+    # A wrapper that hides the driver: reading still works, writing needs the
+    # paramstyle and says so before touching any table.
     class Wrapper:
         def __init__(self, conn) -> None:
             self._conn = conn
 
-        def __getattr__(self, attr):
-            return getattr(self._conn, attr)
+        def cursor(self):
+            return self._conn.cursor()
 
+        def commit(self):
+            self._conn.commit()
+
+        def rollback(self):
+            self._conn.rollback()
+
+    sqlite_buildin.execute("CREATE TABLE keep (a INTEGER)")
+    sqlite_buildin.execute("INSERT INTO keep VALUES (42)")
+    sqlite_buildin.commit()
     conn = Wrapper(sqlite_buildin)
-    assert sql.read_sql_query("SELECT 1 AS a", conn)["a"].tolist() == [1]
-    with pytest.raises(ValueError, match="Could not determine the DB-API paramstyle"):
-        pd.DataFrame({"a": [1]}).to_sql("t", conn)
+    with pandasSQL_builder(conn) as pandas_sql:
+        assert type(pandas_sql) is sql.DBAPI2Database
+    assert sql.read_sql_query("SELECT a FROM keep", conn)["a"].tolist() == [42]
+
+    msg = "Could not determine the DB-API paramstyle"
+    with pytest.raises(ValueError, match=msg):
+        pd.DataFrame({"a": [1]}).to_sql("new", conn)
+    with pytest.raises(ValueError, match=msg):
+        pd.DataFrame({"a": [1]}).to_sql("keep", conn, if_exists="replace")
+    assert sql.read_sql_query("SELECT a FROM keep", conn)["a"].tolist() == [42]
+    tables = sqlite_buildin.execute("SELECT name FROM sqlite_master").fetchall()
+    assert tables == [("keep",)]
+
+
+def test_dbapi2_connection_subclass_defined_elsewhere(monkeypatch):
+    # e.g. psycopg2.connect(connection_factory=MyConnection)
+    module = _make_fake_dbapi_module("named", monkeypatch)
+
+    class MyConnection(module.Connection):
+        pass
+
+    assert MyConnection.__module__ == __name__
+    with contextlib.closing(MyConnection()) as conn:
+        pd.DataFrame({"a": [1, 2]}).to_sql("t", conn, index=False)
+        assert sql.read_sql_query('SELECT a FROM "t"', conn)["a"].tolist() == [1, 2]
+
+
+def test_dbapi2_wrapped_sqlite_connection(sqlite_engine):
+    # A proxy that exposes sqlite3's Error keeps the sqlite backend.
+    proxy = sqlite_engine.raw_connection()
+    try:
+        with pandasSQL_builder(proxy) as pandas_sql:
+            assert type(pandas_sql) is sql.SQLiteDatabase
+        assert pd.DataFrame({"a": [1, 2]}).to_sql("t", proxy, index=False) == 2
+        assert sql.read_sql_query("SELECT a FROM t", proxy)["a"].tolist() == [1, 2]
+    finally:
+        proxy.close()
+
+
+@pytest.mark.db
+def test_dbapi2_wrapped_driver_connection(postgresql_psycopg2_engine):
+    # The driver is found through the proxy's Error attribute (PEP 249).
+    proxy = postgresql_psycopg2_engine.raw_connection()
+    try:
+        with pandasSQL_builder(proxy) as pandas_sql:
+            assert type(pandas_sql) is sql.DBAPI2Database
+        assert pd.DataFrame({"a": [1, 2]}).to_sql("t", proxy, index=False) == 2
+        assert sql.read_sql_query('SELECT a FROM "t"', proxy)["a"].tolist() == [1, 2]
+    finally:
+        proxy.close()
+
+
+@pytest.mark.db
+def test_dbapi2_mysql_autocommit(mysql_pymysql_raw_conn):
+    # In autocommit mode MySQL drops the savepoint right after creating it.
+    conn = mysql_pymysql_raw_conn
+    conn.autocommit(True)
+    try:
+        assert not sql.has_table("t", conn)
+        pd.DataFrame({"a": [1]}).to_sql("t", conn, index=False)
+        assert sql.has_table("t", conn)
+        pd.DataFrame({"a": [2]}).to_sql("t", conn, index=False, if_exists="append")
+        assert sql.read_sql_query("SELECT a FROM `t` ORDER BY a", conn)[
+            "a"
+        ].tolist() == [1, 2]
+    finally:
+        conn.autocommit(False)
+
+
+@pytest.mark.db
+def test_dbapi2_mysql_datetimes(mysql_pymysql_raw_conn):
+    # MySQL TIMESTAMP covers only 1970-2038 and drops fractional seconds.
+    conn = mysql_pymysql_raw_conn
+    df = pd.DataFrame(
+        {
+            "t": pd.to_datetime(
+                ["1965-01-01 00:00:00.123456", "2040-06-07 08:09:10.654321"]
+            ),
+            "tm": [time(1, 2, 3, 456789), time(23, 59, 59, 1)],
+        }
+    )
+    df.to_sql("dt", conn, index=False)
+    result = sql.read_sql_query("SELECT * FROM `dt`", conn)
+    tm.assert_series_equal(pd.to_datetime(result["t"]), df["t"], check_dtype=False)
+    result_times = [(pd.Timestamp(0) + td).time() for td in result["tm"]]
+    assert result_times == list(df["tm"])
+
+
+@pytest.mark.db
+def test_dbapi2_postgresql_tz_aware(postgresql_psycopg2_raw_conn):
+    # Written as TIMESTAMP WITH TIME ZONE, so the instants survive whatever
+    # the session time zone is.
+    conn = postgresql_psycopg2_raw_conn
+    cur = conn.cursor()
+    cur.execute("SET TIME ZONE 'America/New_York'")
+    cur.close()
+    ts = pd.Series(
+        pd.to_datetime(["2020-01-01 12:00", "2020-07-01 12:00"]).tz_localize("UTC")
+    )
+    pd.DataFrame({"ts": ts}).to_sql("tz", conn, index=False)
+    result = sql.read_sql_query('SELECT ts FROM "tz"', conn)
+    tm.assert_series_equal(
+        pd.to_datetime(result["ts"], utc=True), ts, check_dtype=False, check_names=False
+    )
 
 
 def test_row_object_is_named_tuple(sqlite_engine):

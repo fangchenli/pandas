@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from contextlib import (
     contextmanager,
+    suppress,
 )
 import re
 import sys
@@ -35,6 +36,7 @@ from pandas.core.dtypes.common import (
     is_dict_like,
     is_list_like,
 )
+from pandas.core.dtypes.dtypes import DatetimeTZDtype
 
 from pandas.core.api import (
     DataFrame,
@@ -78,34 +80,59 @@ _SQL_TYPES = {
     "floating": "DOUBLE PRECISION",
     "integer": "BIGINT",
     "datetime": "TIMESTAMP",
+    "datetimetz": "TIMESTAMP WITH TIME ZONE",
     "date": "DATE",
     "time": "TIME",
     "boolean": "BOOLEAN",
 }
 
-# Driver modules for MySQL/MariaDB, which quote identifiers with backticks;
-# double quotes are string literals there unless ANSI_QUOTES is enabled.
-_BACKTICK_DRIVERS = frozenset({"pymysql", "MySQLdb", "mysql.connector", "mariadb"})
+# Driver modules for MySQL/MariaDB, which quote identifiers with backticks
+# (double quotes are string literals there unless ANSI_QUOTES is enabled).
+_MYSQL_DRIVERS = frozenset({"pymysql", "MySQLdb", "mysql.connector", "mariadb"})
+
+# MySQL's TIMESTAMP only covers 1970-2038, and its DATETIME/TIME default to
+# whole seconds. It has no time-zone-aware type.
+_MYSQL_SQL_TYPES = {
+    **_SQL_TYPES,
+    "datetime": "DATETIME(6)",
+    "datetimetz": "DATETIME(6)",
+    "time": "TIME(6)",
+}
 
 
 def _find_driver_module(con) -> ModuleType | None:
     """
     Return the DB-API module that ``con`` comes from, or None.
 
-    PEP 249 puts ``paramstyle`` and ``Error`` on the driver module, so walk up
-    from the module defining the connection's class (e.g.
-    ``psycopg2.extensions`` -> ``psycopg2``) to the first one that has both.
-    Only already-imported modules are considered.
+    PEP 249 puts ``paramstyle`` and ``Error`` on the driver module. Look for
+    it starting from the modules defining the connection's classes (its own
+    class may be a subclass defined elsewhere), then from the module of
+    ``con.Error``, PEP 249's optional extension, which wrappers such as
+    SQLAlchemy's pool proxy pass through. Each module path is walked from the
+    top (e.g. ``psycopg2.extensions`` -> ``psycopg2``) to the first module
+    that has both attributes. Only already-imported modules are considered.
     """
-    parts = type(con).__module__.split(".")
-    for i in range(1, len(parts) + 1):
-        module = sys.modules.get(".".join(parts[:i]))
-        if (
-            getattr(module, "paramstyle", None) in _PARAMSTYLES
-            and getattr(module, "Error", None) is not None
-        ):
-            return module
+    module_names = [cls.__module__ for cls in type(con).__mro__]
+    error = getattr(con, "Error", None)
+    if isinstance(error, type):
+        module_names.append(error.__module__)
+    for module_name in module_names:
+        parts = module_name.split(".")
+        for i in range(1, len(parts) + 1):
+            module = sys.modules.get(".".join(parts[:i]))
+            if (
+                getattr(module, "paramstyle", None) in _PARAMSTYLES
+                and getattr(module, "Error", None) is not None
+            ):
+                return module
     return None
+
+
+def _is_tz_aware(dtype) -> bool:
+    if isinstance(dtype, DatetimeTZDtype):
+        return True
+    pa_type = getattr(dtype, "pyarrow_dtype", None)
+    return getattr(pa_type, "tz", None) is not None
 
 
 def _quote_identifier(name: object, quote: str) -> str:
@@ -154,12 +181,10 @@ class DBAPI2Table(SQLTable):
         bracketed_names = [escape(column) for column in names]
         col_names = ",".join(bracketed_names)
 
-        placeholder = self.pd_sql._placeholder
         num_cols = len(names)
+        placeholders = self.pd_sql._placeholders(num_rows * num_cols)
         wildcards = ",".join(
-            "("
-            + ",".join(placeholder(row * num_cols + col) for col in range(num_cols))
-            + ")"
+            "(" + ",".join(placeholders[row * num_cols : (row + 1) * num_cols]) + ")"
             for row in range(num_rows)
         )
         insert_statement = (
@@ -170,8 +195,10 @@ class DBAPI2Table(SQLTable):
     def _execute_insert(self, conn, keys, data_iter) -> int:
         driver_error = self.pd_sql._wrapped_errors()
 
-        bind = self.pd_sql._bind
-        data_list = [bind(row) for row in data_iter]
+        bind = self.pd_sql._binder()
+        data_list = (
+            list(data_iter) if bind is None else [bind(row) for row in data_iter]
+        )
         try:
             conn.executemany(self.insert_statement(num_rows=1), data_list)
         except driver_error as exc:
@@ -181,9 +208,10 @@ class DBAPI2Table(SQLTable):
     def _execute_insert_multi(self, conn, keys, data_iter) -> int:
         data_list = list(data_iter)
         flattened_data = [x for row in data_list for x in row]
+        bind = self.pd_sql._binder()
         conn.execute(
             self.insert_statement(num_rows=len(data_list)),
-            self.pd_sql._bind(flattened_data),
+            flattened_data if bind is None else bind(flattened_data),
         )
         return conn.rowcount
 
@@ -268,6 +296,12 @@ class DBAPI2Table(SQLTable):
             raise ValueError("Complex datatypes not supported")
 
         sql_types = self.pd_sql._sql_type_map()
+        if (
+            col_type == "datetime"
+            and "datetimetz" in sql_types
+            and _is_tz_aware(col.dtype)
+        ):
+            col_type = "datetimetz"
         if col_type not in sql_types:
             col_type = "string"
 
@@ -321,8 +355,10 @@ class DBAPI2Database(PandasSQL):
         """
         Quote a table or column name for use in generated SQL.
         """
-        driver = getattr(self._driver, "__name__", None)
-        return _quote_identifier(name, "`" if driver in _BACKTICK_DRIVERS else '"')
+        return _quote_identifier(name, "`" if self._is_mysql() else '"')
+
+    def _is_mysql(self) -> bool:
+        return getattr(self._driver, "__name__", None) in _MYSQL_DRIVERS
 
     def _paramstyle(self) -> str:
         """
@@ -339,35 +375,35 @@ class DBAPI2Database(PandasSQL):
             )
         return paramstyle
 
-    def _placeholder(self, position: int) -> str:
+    def _placeholders(self, count: int) -> list[str]:
         """
-        Return the parameter placeholder for the 0-based ``position`` in a
-        generated statement.
+        Return the parameter placeholders for ``count`` positional values.
         """
         paramstyle = self._paramstyle()
         if paramstyle == "qmark":
-            return "?"
+            return ["?"] * count
         elif paramstyle == "numeric":
-            return f":{position + 1}"
+            return [f":{i + 1}" for i in range(count)]
         elif paramstyle == "named":
-            return f":p{position}"
+            return [f":p{i}" for i in range(count)]
         elif paramstyle == "format":
-            return "%s"
-        return f"%(p{position})s"
+            return ["%s"] * count
+        return [f"%(p{i})s" for i in range(count)]
 
-    def _bind(self, values: Sequence[Any]) -> Sequence[Any] | dict[str, Any]:
+    def _binder(self) -> Callable[[Sequence[Any]], dict[str, Any]] | None:
         """
-        Package positional ``values`` the way ``_placeholder`` refers to them.
+        Return a function packaging positional values the way
+        ``_placeholders`` refers to them, or None if they can be passed as is.
         """
         if self._paramstyle() in ("named", "pyformat"):
-            return {f"p{i}": value for i, value in enumerate(values)}
-        return values
+            return lambda values: {f"p{i}": value for i, value in enumerate(values)}
+        return None
 
     def _sql_type_map(self) -> Mapping[str, str]:
         """
         Map ``lib.infer_dtype`` results to SQL column type names.
         """
-        return _SQL_TYPES
+        return _MYSQL_SQL_TYPES if self._is_mysql() else _SQL_TYPES
 
     def has_table(self, name: str, schema: str | None = None) -> bool:
         # Ask the database to resolve the name exactly as the CREATE TABLE /
@@ -391,13 +427,19 @@ class DBAPI2Database(PandasSQL):
             try:
                 cur.execute(probe)
             except driver_error:
-                if in_savepoint:
-                    cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
-                    cur.execute(f"RELEASE SAVEPOINT {savepoint}")
-                return False
+                exists = False
+            else:
+                exists = True
+
             if in_savepoint:
-                cur.execute(f"RELEASE SAVEPOINT {savepoint}")
-            return True
+                # Some databases drop the savepoint already (MySQL in
+                # autocommit mode) or can't release one (Oracle); there is
+                # nothing to undo in either case.
+                with suppress(driver_error):
+                    if not exists:
+                        cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                    cur.execute(f"RELEASE SAVEPOINT {savepoint}")
+            return exists
         finally:
             cur.close()
 
@@ -605,6 +647,8 @@ class DBAPI2Database(PandasSQL):
                         "strings (e.g. 'TEXT', 'FLOAT')."
                     )
 
+        # Fail before table.create() drops or creates anything.
+        self._paramstyle()
         table = self._table_class(
             name,
             self,
