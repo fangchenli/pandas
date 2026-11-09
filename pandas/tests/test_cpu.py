@@ -71,8 +71,9 @@ def test_available_cpu_count_unconstrained(monkeypatch):
 
 def test_available_cpu_count_does_not_raise():
     # max_workers calls available_cpu_count() bare, so anything escaping
-    # it escapes read_csv.  Every other test mocks both the affinity call and
-    # the cgroup reads; this one runs it against the host.
+    # it escapes read_csv and large monotonic index joins.  Every other test
+    # mocks both the affinity call and the cgroup reads; this one runs it
+    # against the host.
     available_cpu_count.cache_clear()
     try:
         result = available_cpu_count()

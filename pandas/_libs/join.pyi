@@ -42,6 +42,19 @@ def inner_join_indexer(
     npt.NDArray[np.intp],
     npt.NDArray[np.intp],
 ]: ...
+def inner_join_count_range(
+    left: np.ndarray,  # ndarray[numeric_t]
+    right: np.ndarray,  # ndarray[numeric_t]
+) -> int: ...
+def inner_join_fill_range(
+    left: np.ndarray,  # ndarray[numeric_t]
+    right: np.ndarray,  # ndarray[numeric_t]
+    out_result: np.ndarray,  # ndarray[numeric_t]
+    out_lindexer: npt.NDArray[np.intp],
+    out_rindexer: npt.NDArray[np.intp],
+    lbase: int,
+    rbase: int,
+) -> int: ...
 def outer_join_indexer(
     left: np.ndarray,  # ndarray[join_t]
     right: np.ndarray,  # ndarray[join_t]

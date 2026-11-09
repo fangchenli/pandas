@@ -25,7 +25,8 @@ def _read_sysfs_str(path: str) -> str | None:
     # ValueError as well as OSError, matching _read_sysfs_int: a non-UTF-8 byte
     # raises UnicodeDecodeError, and this feeds available_cpu_count(), which
     # pandas.core.util.parallel.max_workers calls unguarded -- so it would
-    # surface out of read_csv rather than falling back.
+    # surface out of read_csv, Index.join and Index.intersection rather than
+    # falling back.
     try:
         with open(path, encoding="utf-8") as fh:
             return fh.read().strip()

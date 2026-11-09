@@ -181,6 +181,30 @@ class JoinIndex:
         self.left.join(self.right, on="jim")
 
 
+class MonotonicIndexJoin:
+    # Index.intersection / Index.join on monotonic numeric indexes go through
+    # libjoin.inner_join_indexer, which is split across a thread pool above
+    # pandas.core.array_algos.join._PARALLEL_JOIN_MIN_ROWS rows.
+    params = [1_000_000, 4_000_000]
+    param_names = ["N"]
+
+    def setup(self, N):
+        self.left = Index(np.arange(N, dtype="int64"))
+        # half the keys match, so the output is large enough for the
+        # materialisation cost to show up alongside the scan
+        self.right = Index(np.arange(0, 2 * N, 2, dtype="int64"))
+        self.disjoint = Index(np.arange(2 * N, 3 * N, dtype="int64"))
+
+    def time_intersection(self, N):
+        self.left.intersection(self.right)
+
+    def time_join_inner(self, N):
+        self.left.join(self.right, how="inner")
+
+    def time_intersection_disjoint(self, N):
+        self.left.intersection(self.disjoint)
+
+
 class JoinMultiindexSubset:
     def setup(self):
         N = 100_000

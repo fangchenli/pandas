@@ -565,6 +565,192 @@ def inner_join_indexer(ndarray[numeric_object_t] left, ndarray[numeric_object_t]
     return result, lindexer, rindexer
 
 
+# ----------------------------------------------------------------------
+# Chunked inner_join_indexer (GH#51364)
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+def inner_join_count_range(
+    ndarray[numeric_t] left,
+    ndarray[numeric_t] right,
+) -> int:
+    """
+    Count the pairs inner_join_indexer would emit for a pair of sub-ranges.
+
+    Paired with inner_join_fill_range: a caller counts every sub-range first,
+    prefix-sums the counts into offsets, allocates the output once, then fills
+    each sub-range into its own disjoint slice.  Sizing that one allocation is
+    why the count comes first.
+
+    The loop below must advance i and j exactly as the filling half does, or
+    the two will disagree about how many pairs a sub-range has.  Disagreeing
+    is not a memory-safety problem -- the filling half is hard-bounded by the
+    length of its output -- but it does produce a short or gap-filled result,
+    so the two bodies are kept textually parallel and are fuzzed against each
+    other.
+
+    Parameters
+    ----------
+    left, right : ndarray[numeric_t]
+        Monotonic increasing, not necessarily unique.  Neither is written to,
+        so read-only arrays are accepted.  Strides are honoured, so views need
+        not be contiguous.
+
+    Returns
+    -------
+    int
+        Pairs the join would emit.
+
+    See Also
+    --------
+    inner_join_fill_range : The filling half of the pair.
+    """
+    cdef:
+        Py_ssize_t i = 0, j = 0, count = 0
+        Py_ssize_t nleft = len(left), nright = len(right)
+        numeric_t lval, rval
+
+    if nleft == 0 or nright == 0:
+        return 0
+
+    # numeric only, so the GIL is never needed; chunks may run on a pool
+    with nogil:
+        while True:
+            if i == nleft:
+                break
+            if j == nright:
+                break
+
+            lval = left[i]
+            rval = right[j]
+            if lval == rval:
+                count += 1
+                if i < nleft - 1:
+                    if j < nright - 1 and right[j + 1] == rval:
+                        j += 1
+                    else:
+                        i += 1
+                        if left[i] != rval:
+                            j += 1
+                elif j < nright - 1:
+                    j += 1
+                    if lval != right[j]:
+                        i += 1
+                else:
+                    # end of the road
+                    break
+            elif lval < rval:
+                i += 1
+            else:
+                j += 1
+
+    return count
+
+
+@cython.wraparound(False)
+@cython.boundscheck(False)
+def inner_join_fill_range(
+    ndarray[numeric_t] left,
+    ndarray[numeric_t] right,
+    ndarray[numeric_t] out_result,
+    ndarray[intp_t] out_lindexer,
+    ndarray[intp_t] out_rindexer,
+    Py_ssize_t lbase,
+    Py_ssize_t rbase,
+) -> int:
+    """
+    Write a sub-range's pairs into caller-owned output.
+
+    Writes start at index 0, so a caller filling one allocation from several
+    sub-ranges passes a slice per sub-range rather than a shared array and an
+    offset.  Disjoint slices then bound each chunk's writes to its own region,
+    which matters because the loop runs with bounds checking off.
+
+    The counting half of the pair, inner_join_count_range, must advance i and
+    j identically; see its docstring.
+
+    Parameters
+    ----------
+    left, right : ndarray[numeric_t]
+        Monotonic increasing, not necessarily unique.  Neither is written to,
+        so read-only arrays are accepted.  Strides are honoured, so views need
+        not be contiguous.
+    out_result : ndarray[numeric_t]
+        Receives the joined key values.
+    out_lindexer, out_rindexer : ndarray[intp_t]
+        Receive positions in the full left and right arrays.  Must be the same
+        length as `out_result`, which bounds how much this may write.
+    lbase, rbase : int
+        Offsets of these sub-ranges within the full arrays, added to the
+        emitted positions so they refer to the full arrays.
+
+    Returns
+    -------
+    int
+        Pairs written.  Compare this against the count the output was sized
+        with: writes are hard-bounded by the length of out_*, because the loop
+        runs with bounds checking off, so a short output truncates and reports
+        a smaller number rather than running past the end.
+
+    See Also
+    --------
+    inner_join_count_range : The counting half of the pair.
+    """
+    cdef:
+        Py_ssize_t i = 0, j = 0, count = 0
+        Py_ssize_t nleft = len(left), nright = len(right)
+        Py_ssize_t capacity
+        numeric_t lval, rval
+
+    if len(out_lindexer) != len(out_rindexer) or len(out_lindexer) != len(out_result):
+        raise ValueError(
+            "out_result, out_lindexer and out_rindexer must be equal length"
+        )
+    if nleft == 0 or nright == 0:
+        return 0
+
+    capacity = len(out_lindexer)
+
+    # numeric only, so the GIL is never needed; chunks may run on a pool
+    with nogil:
+        while True:
+            if i == nleft:
+                break
+            if j == nright:
+                break
+
+            lval = left[i]
+            rval = right[j]
+            if lval == rval:
+                if count == capacity:
+                    break  # short output: truncate rather than overrun
+                out_lindexer[count] = lbase + i
+                out_rindexer[count] = rbase + j
+                out_result[count] = lval
+                count += 1
+                if i < nleft - 1:
+                    if j < nright - 1 and right[j + 1] == rval:
+                        j += 1
+                    else:
+                        i += 1
+                        if left[i] != rval:
+                            j += 1
+                elif j < nright - 1:
+                    j += 1
+                    if lval != right[j]:
+                        i += 1
+                else:
+                    # end of the road
+                    break
+            elif lval < rval:
+                i += 1
+            else:
+                j += 1
+
+    return count
+
+
 @cython.wraparound(False)
 @cython.boundscheck(False)
 def outer_join_indexer(ndarray[numeric_object_t] left, ndarray[numeric_object_t] right):
