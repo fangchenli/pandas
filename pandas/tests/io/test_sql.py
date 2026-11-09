@@ -4211,7 +4211,8 @@ def test_dbapi_params_passed_through_unchanged(params):
         def rollback(self):
             pass
 
-    sql.read_sql("select 1", Con(), params=params)
+    with tm.assert_produces_warning(UserWarning, match="Could not identify the DB-API"):
+        sql.read_sql("select 1", Con(), params=params)
     assert len(received) == 1
     assert received[0] is params
 
@@ -4430,9 +4431,37 @@ def test_dbapi2_read_errors_are_the_drivers(conn, request):
     conn.rollback()
 
 
-def test_dbapi2_unknown_paramstyle(sqlite_buildin):
-    # A wrapper that hides the driver: reading still works, writing needs the
-    # paramstyle and says so before touching any table.
+def test_dbapi2_unknown_driver(sqlite_buildin):
+    # A wrapper that hides its driver keeps being treated as sqlite3, as every
+    # unrecognized connection used to be.
+    class Wrapper:
+        def __init__(self, conn) -> None:
+            self._conn = conn
+
+        def cursor(self):
+            return self._conn.cursor()
+
+        def commit(self):
+            self._conn.commit()
+
+        def rollback(self):
+            self._conn.rollback()
+
+    conn = Wrapper(sqlite_buildin)
+    msg = "Could not identify the DB-API driver"
+    with tm.assert_produces_warning(UserWarning, match=msg):
+        with pandasSQL_builder(conn) as pandas_sql:
+            assert type(pandas_sql) is sql.SQLiteDatabase
+    with tm.assert_produces_warning(UserWarning, match=msg):
+        assert pd.DataFrame({"a": [1, 2]}).to_sql("t", conn, index=False) == 2
+    with tm.assert_produces_warning(UserWarning, match=msg):
+        result = sql.read_sql_query("SELECT a FROM t", conn)
+    assert result["a"].tolist() == [1, 2]
+
+
+def test_dbapi2_unknown_paramstyle_fails_before_writing(sqlite_buildin):
+    # Used directly, the generic backend can't write without the driver's
+    # paramstyle, and must say so before dropping or creating anything.
     class Wrapper:
         def __init__(self, conn) -> None:
             self._conn = conn
@@ -4449,17 +4478,16 @@ def test_dbapi2_unknown_paramstyle(sqlite_buildin):
     sqlite_buildin.execute("CREATE TABLE keep (a INTEGER)")
     sqlite_buildin.execute("INSERT INTO keep VALUES (42)")
     sqlite_buildin.commit()
-    conn = Wrapper(sqlite_buildin)
-    with pandasSQL_builder(conn) as pandas_sql:
-        assert type(pandas_sql) is sql.DBAPI2Database
-    assert sql.read_sql_query("SELECT a FROM keep", conn)["a"].tolist() == [42]
+    pandas_sql = sql.DBAPI2Database(Wrapper(sqlite_buildin))
+    assert pandas_sql.driver is None
+    df = pd.DataFrame({"a": [1]})
 
     msg = "Could not determine the DB-API paramstyle"
     with pytest.raises(ValueError, match=msg):
-        pd.DataFrame({"a": [1]}).to_sql("new", conn)
+        pandas_sql.to_sql(df, "new")
     with pytest.raises(ValueError, match=msg):
-        pd.DataFrame({"a": [1]}).to_sql("keep", conn, if_exists="replace")
-    assert sql.read_sql_query("SELECT a FROM keep", conn)["a"].tolist() == [42]
+        pandas_sql.to_sql(df, "keep", if_exists="replace")
+    assert sqlite_buildin.execute("SELECT a FROM keep").fetchall() == [(42,)]
     tables = sqlite_buildin.execute("SELECT name FROM sqlite_master").fetchall()
     assert tables == [("keep",)]
 

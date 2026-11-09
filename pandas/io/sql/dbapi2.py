@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     from pandas._typing import (
         DtypeArg,
         DtypeBackend,
+        DtypeObj,
     )
 
 _PARAMSTYLES = ("qmark", "numeric", "named", "format", "pyformat")
@@ -100,7 +101,7 @@ _MYSQL_SQL_TYPES = {
 }
 
 
-def _find_driver_module(con) -> ModuleType | None:
+def _find_driver_module(con: object) -> ModuleType | None:
     """
     Return the DB-API module that ``con`` comes from, or None.
 
@@ -128,7 +129,7 @@ def _find_driver_module(con) -> ModuleType | None:
     return None
 
 
-def _is_tz_aware(dtype) -> bool:
+def _is_tz_aware(dtype: DtypeObj) -> bool:
     if isinstance(dtype, DatetimeTZDtype):
         return True
     pa_type = getattr(dtype, "pyarrow_dtype", None)
@@ -331,7 +332,8 @@ class DBAPI2Database(PandasSQL):
 
     def __init__(self, con) -> None:
         self.con = con
-        self._driver = _find_driver_module(con)
+        # The driver's DB-API module, or None if it couldn't be identified
+        self.driver = _find_driver_module(con)
 
     def _driver_error(self) -> type[Exception]:
         """
@@ -339,7 +341,7 @@ class DBAPI2Database(PandasSQL):
         """
         # PEP 249 also allows exposing the exception classes on the
         # connection, which works for wrapped connections too.
-        for source in (self.con, self._driver):
+        for source in (self.con, self.driver):
             error = getattr(source, "Error", None)
             if isinstance(error, type) and issubclass(error, Exception):
                 return error
@@ -358,13 +360,13 @@ class DBAPI2Database(PandasSQL):
         return _quote_identifier(name, "`" if self._is_mysql() else '"')
 
     def _is_mysql(self) -> bool:
-        return getattr(self._driver, "__name__", None) in _MYSQL_DRIVERS
+        return getattr(self.driver, "__name__", None) in _MYSQL_DRIVERS
 
     def _paramstyle(self) -> str:
         """
         Return the driver's PEP 249 ``paramstyle``.
         """
-        paramstyle = getattr(self._driver, "paramstyle", None)
+        paramstyle = getattr(self.driver, "paramstyle", None)
         if paramstyle not in _PARAMSTYLES:
             con_type = type(self.con)
             raise ValueError(
@@ -426,6 +428,9 @@ class DBAPI2Database(PandasSQL):
 
             try:
                 cur.execute(probe)
+                # Unbuffered cursors (e.g. mysql.connector) need the empty
+                # result read before the next statement.
+                cur.fetchall()
             except driver_error:
                 exists = False
             else:

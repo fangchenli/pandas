@@ -11,6 +11,7 @@ from typing import (
     Literal,
     overload,
 )
+import warnings
 
 from pandas._libs import lib
 from pandas.compat._optional import (
@@ -18,6 +19,7 @@ from pandas.compat._optional import (
     import_optional_dependency,
 )
 from pandas.util._decorators import set_module
+from pandas.util._exceptions import find_stack_level
 from pandas.util._validators import check_dtype_backend
 
 from pandas.core.api import (
@@ -745,12 +747,26 @@ def pandasSQL_builder(
     if adbc and isinstance(con, adbc.Connection):
         return ADBCDatabase(con)
 
-    if getattr(con, "Error", None) is sqlite3.Error:
+    # Any other object is treated as a DB-API 2.0 (PEP 249) connection.
+    pandas_sql = DBAPI2Database(con)
+    if pandas_sql.driver is sqlite3:
         # A wrapper around a sqlite3 connection, e.g. SQLAlchemy's pool proxy
         return SQLiteDatabase(con)
-
-    # Any other object is treated as a DB-API 2.0 (PEP 249) connection.
-    return DBAPI2Database(con)
+    if pandas_sql.driver is None:
+        # Without its driver module pandas can't write through the connection,
+        # so keep treating it as sqlite3, which is how pandas treated every
+        # unrecognized connection before.
+        con_type = type(con)
+        warnings.warn(
+            "Could not identify the DB-API driver of connection type "
+            f"'{con_type.__module__}.{con_type.__qualname__}', so it is treated "
+            "as a sqlite3 connection. Pass the driver's own connection object to "
+            "use it as a DB-API 2.0 connection.",
+            UserWarning,
+            stacklevel=find_stack_level(),
+        )
+        return SQLiteDatabase(con)
+    return pandas_sql
 
 
 def get_schema(

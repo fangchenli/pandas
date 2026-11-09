@@ -6290,9 +6290,9 @@ database, so some things are up to you:
 Reading a table by name with :func:`~pandas.read_sql_table` requires SQLAlchemy,
 and the ``schema`` argument is ignored. pandas reads the driver's placeholder style
 from the ``paramstyle`` attribute of its module, as PEP 249 specifies, finding the
-module through the connection's class or its ``Error`` attribute. If you pass a
-wrapper that hides both, writing raises an error; pass the driver's own connection
-object instead.
+module through the connection's class or its ``Error`` attribute. A wrapper that
+hides both is treated as a sqlite3 connection, with a warning; pass the driver's
+own connection object instead.
 
 .. versionchanged:: 3.2.0
 
