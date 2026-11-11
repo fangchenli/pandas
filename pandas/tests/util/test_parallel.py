@@ -1,5 +1,6 @@
-"""Tests for pandas.core.util.parallel, the worker count for pandas' thread pools."""
+"""Tests for pandas.core.util.parallel, the shared helpers for pandas' thread pools."""
 
+from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import sys
 import textwrap
@@ -151,3 +152,36 @@ def test_no_pool_during_interpreter_shutdown(where):
     # last line only: a verbose editable install prints rebuild output first
     assert lines, proc.stderr
     assert lines[-1] == "True 1", proc.stderr
+
+
+class TestPoolRefusal:
+    def test_refusal_is_recognised(self):
+        refusal = parallel.PoolRefusal()
+
+        class Refusing(ThreadPoolExecutor):
+            def submit(self, *args, **kwargs):
+                raise RuntimeError("can't start new thread")
+
+        with Refusing(max_workers=1) as pool:
+            with pytest.raises(RuntimeError, match="can't start new thread") as info:
+                refusal.submit(pool, abs, -1)
+        assert refusal.is_refusal(info.value)
+        # an equal error raised elsewhere is not the refusal
+        assert not refusal.is_refusal(RuntimeError("can't start new thread"))
+
+    def test_error_from_work_is_not_refusal(self):
+        refusal = parallel.PoolRefusal()
+
+        def boom():
+            raise RuntimeError("boom")
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = refusal.submit(pool, boom)
+            with pytest.raises(RuntimeError, match="boom") as info:
+                future.result()
+        assert not refusal.is_refusal(info.value)
+
+    def test_submit_passes_arguments(self):
+        refusal = parallel.PoolRefusal()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            assert refusal.submit(pool, divmod, 7, 2).result() == (3, 1)

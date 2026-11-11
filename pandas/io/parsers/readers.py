@@ -76,7 +76,10 @@ from pandas.core.indexes.api import (
 )
 from pandas.core.internals.api import _make_block
 from pandas.core.internals.managers import BlockManager
-from pandas.core.util.parallel import max_workers
+from pandas.core.util.parallel import (
+    PoolRefusal,
+    max_workers,
+)
 
 from pandas.io.common import (
     IOHandles,
@@ -1124,24 +1127,20 @@ def _read_csv_chunks(
     total = 0
     readers_closing = False
     # The pool refuses work when interpreter shutdown begins, which can happen
-    # mid-read, and when it cannot start a thread ("can't start new thread",
-    # under a process or thread limit).  Those are the only RuntimeErrors its
-    # submit raises here, and either way the file can still be read serially.
-    # The refusal is kept so the handler below can tell it from a RuntimeError
-    # raised by the work itself, which is a bug and must surface.
-    refused: list[RuntimeError] = []
+    # mid-read, and when it cannot start a thread; the file can then still be
+    # read serially (see PoolRefusal).
+    refusal = PoolRefusal()
 
     def submit(
         pool: ThreadPoolExecutor, fn: Callable[..., object], *args: object
     ) -> Future[object]:
         try:
-            return pool.submit(fn, *args)
-        except RuntimeError as err:
+            return refusal.submit(pool, fn, *args)
+        except RuntimeError:
             # This read is over: stop the workers already running at their
             # next chunk, rather than have leaving the pool wait while they
             # parse the rest of the file for nothing.
             chunk_failed.set()
-            refused.append(err)
             raise
 
     # mmap the file once and pass zero-copy memoryview slices to each thread
@@ -1285,7 +1284,7 @@ def _read_csv_chunks(
             for fut in close_futures:
                 fut.result()
     except RuntimeError as err:
-        if not refused or err is not refused[0]:
+        if not refusal.is_refusal(err):
             raise
         # The pool refused work part-way through: shutdown began after
         # max_workers looked, or a thread could not be started.  Leaving its

@@ -5,11 +5,19 @@ from __future__ import annotations
 import concurrent.futures.thread as _futures_thread
 import os
 import threading
+from typing import TYPE_CHECKING
 
 from pandas._config import get_option
 
 from pandas.compat import WASM
 from pandas.compat._cpu import available_cpu_count
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from concurrent.futures import (
+        Executor,
+        Future,
+    )
 
 
 def interpreter_shutting_down() -> bool:
@@ -107,3 +115,91 @@ def max_workers(default_cap: int) -> int:
     if available is not None:
         n_workers = min(n_workers, available)
     return n_workers
+
+
+class PoolRefusal:
+    """
+    Tell a thread pool refusing work apart from errors raised by the work.
+
+    ``ThreadPoolExecutor.submit`` raises ``RuntimeError`` when the pool cannot
+    take work: once interpreter shutdown has begun, which can happen part-way
+    through an operation, and when it cannot start a thread ("can't start new
+    thread", under a process or thread limit such as a container's pids limit).
+    For pandas' own pools, which have no initializer and are not shut down
+    while work is submitted, those are the only ``RuntimeError`` it raises, and
+    either way the operation can still run serially.
+
+    Submit through :meth:`submit`; in the handler around the pool, fall back to
+    serial only if :meth:`is_refusal` says the error is the refusal.  Any other
+    ``RuntimeError``, such as one raised by the work itself, is a bug and must
+    surface.
+
+    See Also
+    --------
+    max_workers : Worker count for one parallel operation; 1 during shutdown.
+
+    Examples
+    --------
+    >>> from concurrent.futures import ThreadPoolExecutor
+    >>> from pandas.core.util.parallel import PoolRefusal
+    >>> refusal = PoolRefusal()
+    >>> try:
+    ...     with ThreadPoolExecutor(max_workers=2) as pool:
+    ...         total = sum(refusal.submit(pool, abs, x).result() for x in [-1, 2])
+    ... except RuntimeError as err:
+    ...     if not refusal.is_refusal(err):
+    ...         raise
+    ...     total = sum(abs(x) for x in [-1, 2])
+    >>> total
+    3
+    """
+
+    def __init__(self) -> None:
+        self._error: RuntimeError | None = None
+
+    def submit(
+        self, pool: Executor, fn: Callable[..., object], /, *args: object
+    ) -> Future[object]:
+        """
+        ``pool.submit(fn, *args)``, remembering a refusal.
+
+        Parameters
+        ----------
+        pool : Executor
+            The pool to submit to.
+        fn : callable
+            The work.
+        *args
+            Arguments for ``fn``.
+
+        Returns
+        -------
+        Future
+            The submitted work.
+
+        Raises
+        ------
+        RuntimeError
+            The pool refused the work; :meth:`is_refusal` is then True for it.
+        """
+        try:
+            return pool.submit(fn, *args)
+        except RuntimeError as err:
+            self._error = err
+            raise
+
+    def is_refusal(self, err: BaseException) -> bool:
+        """
+        Whether ``err`` is the pool refusing work, not an error from the work.
+
+        Parameters
+        ----------
+        err : BaseException
+            The error caught around the pool.
+
+        Returns
+        -------
+        bool
+            True if ``err`` is the error :meth:`submit` raised.
+        """
+        return self._error is not None and err is self._error
