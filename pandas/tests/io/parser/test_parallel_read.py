@@ -1134,20 +1134,29 @@ def test_runtime_error_during_shutdown_still_propagates(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(WASM, reason="WASM stays serial, so no pool is started")
-def test_runtime_error_outside_shutdown_propagates(tmp_path, monkeypatch):
-    # only a refusal caused by shutdown falls back; anything else is a bug
+@pytest.mark.parametrize("threads_allowed", [0, 1, 2])
+def test_pool_unable_to_start_threads_reads_serially(
+    tmp_path, monkeypatch, threads_allowed
+):
+    # Under a process or thread limit (a container's pids limit, ulimit -u),
+    # submit raises "can't start new thread" once the pool tries to start a
+    # thread it cannot have, outside shutdown too.  The read must still come
+    # back whole, read serially.
     path = tmp_path / "big.csv"
     _make_large_csv(path)
     monkeypatch.setattr(_readers, "_PARALLEL_READ_MIN_BYTES", 1)
+    expected = pd.read_csv(path, engine="python")
 
-    class Broken(ThreadPoolExecutor):
-        def submit(self, *args, **kwargs):
-            raise RuntimeError("something else")
+    class Starved(ThreadPoolExecutor):
+        def _adjust_thread_count(self):
+            if len(self._threads) >= threads_allowed:
+                raise RuntimeError("can't start new thread")
+            super()._adjust_thread_count()
 
-    monkeypatch.setattr(_readers, "ThreadPoolExecutor", Broken)
+    monkeypatch.setattr(_readers, "ThreadPoolExecutor", Starved)
     with pd.option_context("mode.max_threads", 3):
-        with pytest.raises(RuntimeError, match="something else"):
-            pd.read_csv(path)
+        result = pd.read_csv(path)
+    tm.assert_frame_equal(result, expected)
 
 
 def test_parallel_default_thread_cap(tmp_path, monkeypatch):

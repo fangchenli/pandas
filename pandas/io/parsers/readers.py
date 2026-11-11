@@ -1178,9 +1178,12 @@ def _read_csv_chunks(
     index_dicts: list[dict[Any, Any]] = []
     total = 0
     readers_closing = False
-    # The pool refuses work once interpreter shutdown begins, which can happen
-    # mid-read; the refusal is kept so the handler below can tell it from any
-    # other RuntimeError.
+    # The pool refuses work when interpreter shutdown begins, which can happen
+    # mid-read, and when it cannot start a thread ("can't start new thread",
+    # under a process or thread limit).  Those are the only RuntimeErrors its
+    # submit raises here, and either way the file can still be read serially.
+    # The refusal is kept so the handler below can tell it from a RuntimeError
+    # raised by the work itself, which is a bug and must surface.
     refused: list[RuntimeError] = []
 
     def submit(
@@ -1189,12 +1192,11 @@ def _read_csv_chunks(
         try:
             return pool.submit(fn, *args)
         except RuntimeError as err:
-            # Whatever the cause, this read is over: stop the workers already
-            # running at their next chunk, rather than have leaving the pool
-            # wait while they parse the rest of the file for nothing.
+            # This read is over: stop the workers already running at their
+            # next chunk, rather than have leaving the pool wait while they
+            # parse the rest of the file for nothing.
             chunk_failed.set()
-            if _interpreter_shutting_down():
-                refused.append(err)
+            refused.append(err)
             raise
 
     # mmap the file once and pass zero-copy memoryview slices to each thread
@@ -1340,9 +1342,10 @@ def _read_csv_chunks(
     except RuntimeError as err:
         if not refused or err is not refused[0]:
             raise
-        # Shutdown began after _default_n_workers looked, and the pool refused
-        # work part-way through.  Leaving its ``with`` block waited for the
-        # work it had accepted; the caller now reads serially.
+        # The pool refused work part-way through: shutdown began after
+        # _default_n_workers looked, or a thread could not be started.  Leaving
+        # its ``with`` block waited for the work it had accepted; the caller
+        # now reads serially.
         return None
     finally:
         if not readers_closing:
