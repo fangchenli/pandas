@@ -74,7 +74,7 @@ import numpy as np
 from pandas._libs import join as libjoin
 
 from pandas.core.util.parallel import (
-    interpreter_shutting_down,
+    PoolRefusal,
     max_workers,
 )
 
@@ -528,10 +528,10 @@ def inner_join_indexer(
         # serial walk's scan, but there is no concurrency to buy with a pool
         return _count_and_fill(map, left.dtype, lviews, rviews, lbases, rbases)
 
-    # The pool refuses work once interpreter shutdown begins, which can happen
-    # mid-join; the refusal is kept so the handler below can tell it from any
-    # other RuntimeError.
-    refused: list[RuntimeError] = []
+    # The pool refuses work when interpreter shutdown begins, which can happen
+    # mid-join, and when it cannot start a thread; the join can then still run
+    # serially (see PoolRefusal).
+    refusal = PoolRefusal()
     try:
         # created and joined here, so no worker threads are live across a fork
         with ThreadPoolExecutor(max_workers=n_workers) as executor:
@@ -539,26 +539,21 @@ def inner_join_indexer(
             def pool_map(
                 fn: Callable[..., object], *iterables: Iterable[object]
             ) -> Iterator[object]:
-                # executor.map, keeping the refusal
-                try:
-                    futures = [
-                        executor.submit(fn, *args)
-                        for args in zip(*iterables, strict=True)
-                    ]
-                except RuntimeError as err:
-                    if interpreter_shutting_down():
-                        refused.append(err)
-                    raise
+                # executor.map, through the refusal check
+                futures = [
+                    refusal.submit(executor, fn, *args)
+                    for args in zip(*iterables, strict=True)
+                ]
                 return (future.result() for future in futures)
 
             return _count_and_fill(pool_map, left.dtype, lviews, rviews, lbases, rbases)
     except RuntimeError as err:
-        if not refused or err is not refused[0]:
+        if not refusal.is_refusal(err):
             raise
-        # Shutdown began after max_workers looked, and the pool refused work
-        # part-way through.  Leaving the ``with`` block waited for the chunks it
-        # had accepted, and those only wrote to outputs the serial pass below
-        # reallocates.
+        # The pool refused work part-way through: shutdown began after
+        # max_workers looked, or a thread could not be started.  Leaving the
+        # ``with`` block waited for the chunks it had accepted, and those only
+        # wrote to outputs the serial pass below reallocates.
         return _count_and_fill(map, left.dtype, lviews, rviews, lbases, rbases)
 
 

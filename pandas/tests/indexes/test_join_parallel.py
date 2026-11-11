@@ -597,35 +597,41 @@ def test_pool_refusing_work_mid_join_runs_serially(
             return super().submit(*args, **kwargs)
 
     monkeypatch.setattr(array_algos_join, "ThreadPoolExecutor", Refusing)
-    monkeypatch.setattr(
-        array_algos_join, "interpreter_shutting_down", lambda: bool(shutting_down)
-    )
     result = array_algos_join.inner_join_indexer(left, right)
     assert shutting_down  # the refusal happened
     for res, exp in zip(result, expected, strict=True):
         tm.assert_numpy_array_equal(res, exp)
 
 
-def test_runtime_error_outside_shutdown_propagates(assert_parallel_ran, monkeypatch):
-    # only a refusal caused by shutdown falls back; anything else is a bug
-    assert_parallel_ran(4, expect_parallel=False)
-
-    class Broken(ThreadPoolExecutor):
-        def submit(self, *args, **kwargs):
-            raise RuntimeError("something else")
-
-    monkeypatch.setattr(array_algos_join, "ThreadPoolExecutor", Broken)
-    left = np.arange(64, dtype=np.int64)
-    with pytest.raises(RuntimeError, match="something else"):
-        array_algos_join.inner_join_indexer(left, left[::2].copy())
-
-
-def test_runtime_error_during_shutdown_still_propagates(
-    assert_parallel_ran, monkeypatch
+@pytest.mark.parametrize("threads_allowed", [0, 1, 3])
+def test_pool_unable_to_start_threads_runs_serially(
+    threads_allowed, assert_parallel_ran, monkeypatch
 ):
+    # Under a process or thread limit (a container's pids limit, ulimit -u),
+    # submit raises "can't start new thread" once the pool tries to start a
+    # thread it cannot have, outside shutdown too.  The join, which never
+    # started threads before it ran on a pool, must still match serial.
+    assert_parallel_ran(4)
+    left = np.arange(64, dtype=np.int64)
+    right = np.arange(0, 128, 2, dtype=np.int64)
+    expected = libjoin.inner_join_indexer(left, right)
+
+    class Starved(ThreadPoolExecutor):
+        def _adjust_thread_count(self):
+            if len(self._threads) >= threads_allowed:
+                raise RuntimeError("can't start new thread")
+            super()._adjust_thread_count()
+
+    monkeypatch.setattr(array_algos_join, "ThreadPoolExecutor", Starved)
+    result = array_algos_join.inner_join_indexer(left, right)
+    for res, exp in zip(result, expected, strict=True):
+        tm.assert_numpy_array_equal(res, exp)
+
+
+def test_runtime_error_from_a_chunk_propagates(assert_parallel_ran, monkeypatch):
     # Only the pool's refusal falls back to serial.  Any other RuntimeError
-    # from a chunk is a bug and must surface, shutdown or not -- even one the
-    # serial rerun would not hit, as here, where only pool threads fail.
+    # from a chunk is a bug and must surface -- even one the serial rerun
+    # would not hit, as here, where only pool threads fail.
     assert_parallel_ran(4)
     real = libjoin.inner_join_fill_range
 
@@ -635,7 +641,6 @@ def test_runtime_error_during_shutdown_still_propagates(
         return real(*args)
 
     monkeypatch.setattr(libjoin, "inner_join_fill_range", boom)
-    monkeypatch.setattr(array_algos_join, "interpreter_shutting_down", lambda: True)
     left = np.arange(64, dtype=np.int64)
     with pytest.raises(RuntimeError, match="boom"):
         array_algos_join.inner_join_indexer(left, left[::2].copy())
