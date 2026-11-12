@@ -102,11 +102,11 @@ Mutation needs an explicit type-validity policy, not just storage detachment. It
 
 Documents an existing non-NumPy extension boundary and the requirements inherited by indexing/alignment. `allow_fill`, negative indexing, fill-value boxing, and conversion must be preserved or explicitly scoped out. External array protocols alone do not replace pandas extension-type semantics.
 
-### R17 PDEP status and the unresolved logical type reference
+### R17 PDEP-13 logical type system
 
-**Verification gap.** [Published pandas roadmap](https://pandas.pydata.org/about/roadmap.html) and local `web/pandas/pdeps/` were inspected. Neither contains the cited PDEP-13 logical type text. A guessed canonical URL was inaccessible; broader official-domain search did not resolve it.
+**Essential; verified draft.** Will Ayd. *PDEP-13: The pandas Logical Type System*, created 2024-04-27, revision 3. [PR 58455](https://github.com/pandas-dev/pandas/pull/58455), [pinned source](https://github.com/WillAyd/pandas/blob/af9da9771ce739c95c7c4c5df922d9f2545ed7c8/web/pandas/pdeps/0013-logical-type-system.md). Full source and selected discussion comments reviewed. Closed unmerged on 2025-04-21; its header retains the draft status “Under discussion.”
 
-Do not assign a status, author, or detailed design to PDEP-13 until its source is supplied. The roadmap's PDEP-16 missing-value work is a separate lead, not a replacement citation. The original proposal is preserved without silently correcting the reference.
+Relevant to backend-independent dtype construction and result typing. See the [logical type comparison](logical_types.md) for provenance, limitations, and our design choices. This resolves the earlier missing-source note; absence from local main was not evidence that the proposal did not exist.
 
 ### R18 Local deferred take experiment
 
@@ -185,4 +185,4 @@ Polars supports both modes. Use eager operation-by-operation runs for the closes
 
 The essential sources cover every named prior-art family in the proposal and add database late materialization, DuckDB encodings, and string-view layouts. Full proof review of Futhark/Repa and the complete Petersohn dissertation remains follow-up work. No numerical result in those sources is treated as a measurement of this runtime.
 
-Before implementing representation-aware kernels, read the full Futhark papers linked from R04 and the scalar/vector function documentation linked from R01. Before supporting additional logical dtypes, resolve R17 and make a concrete compatibility matrix against the pinned pandas source. Retain source versions with any later benchmark report.
+Before implementing representation-aware kernels, read the full Futhark papers linked from R04 and the scalar/vector function documentation linked from R01. Before supporting additional logical dtypes, extend the concrete compatibility matrix against the pinned pandas source; R17 informs the direction but does not specify every rule. Retain source versions with any later benchmark report.

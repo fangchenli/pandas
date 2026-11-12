@@ -16,7 +16,7 @@ The potential contribution is an engineering synthesis: durable representations 
 
 **The clean-sheet advantage is a hypothesis.** An independent implementation makes experiments easier; it also assumes responsibility for dtype resolution, axes, scalar boxing, extension types, and ecosystem contracts. Measure the incremental approach alongside it. Performance comparisons must use equivalent semantics and dtypes.
 
-**Clarify two reference claims.** The inspected main revision does not contain the experimental deferred-take module. The branch provides code and tests, but this review has not reproduced its performance evidence. PDEP-13 is not present in the inspected PDEP directory or published roadmap; its status and text remain unverified. The published roadmap lists a missing-value proposal, PDEP-16, under discussion, which is not evidence for the specific logical-type proposal. [Pandas roadmap](https://pandas.pydata.org/about/roadmap.html).
+**Clarify two reference claims.** The inspected main revision does not contain the experimental deferred-take module. The branch provides code and tests, but this review has not reproduced its performance evidence. PDEP-13 is now verified from the [PR supplied by the user](https://github.com/pandas-dev/pandas/pull/58455): it is Will Ayd's draft, closed unmerged, rather than an accepted specification in main. The [logical type comparison](logical_types.md) records its source and the implications for this prototype.
 
 ## Specify what eager means
 

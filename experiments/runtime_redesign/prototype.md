@@ -6,6 +6,8 @@ Build a standalone Python package inside this experiment, using NumPy and PyArro
 
 The [review](review.md) explains the architectural risks. The [experimental plan](experiments.md) defines the broader evaluation. This design makes the first implementation concrete and narrows its initial semantic surface.
 
+The [unified logical type design](logical_types.md), informed by the now-verified PDEP-13 draft, specifies canonical type identity and operation/result-type binding. This is a unified type layer with a small initial type set, rather than separate backend dtype systems with common names.
+
 ## The first complete experiment
 
 The first usable milestone should support this entire sequence under all three strategies:
@@ -55,7 +57,7 @@ The first release of the experiment is a research API, not a pandas subclass or 
 
 All logical types admit a missing value, denoted `NA`. Missingness is not a backend property. NumPy uses a separate boolean validity array; Arrow uses its validity representation. A scalar read returns a Python scalar or the prototype's `NA` singleton. Reject floats, object values, and unsupported coercions at ingress in the first milestone. This avoids silently deciding the unresolved NaN/type-promotion questions while still testing heterogeneous storage and missing-aware composition.
 
-Use pandas `Int64`, `boolean`, and `string` with `pd.NA` as the initial semantic oracle. Storage is explicit in the prototype and does not change its logical dtype. There is no automatic promotion: a type mismatch raises before changing the object. Int64 arithmetic wraps modulo 2^64 and interprets the result as signed; out-of-range input scalars and assignment values raise. Scalar booleans are not accepted as integer positions or integer assignment values.
+Use pandas `Int64`, `boolean`, and `string` with `pd.NA` as the initial semantic oracle. Storage is explicit in the prototype and does not change its logical dtype. Canonical dtype objects contain only semantic identity; backend and encoding remain physical metadata. There is no automatic promotion: incompatible computation or assignment into an existing column raises before changing the object. Whole-column replacement may install a different supported logical dtype. Int64 arithmetic wraps modulo 2^64 and interprets the result as signed; out-of-range input scalars and assignment values raise. Scalar booleans are not accepted as integer positions or integer assignment values.
 
 Integer addition and comparisons propagate missingness. String equality is exact, case-sensitive, and propagates missingness. Filtering treats missing boolean entries as false. `sum(skipna=True, min_count=0)` returns zero for an empty/all-missing input; insufficient valid entries or any missing value with `skipna=False` returns `NA`. The integer accumulator follows the wrapping contract.
 
@@ -234,7 +236,7 @@ Optimize unique-owner writes only after profiling. Python reference counts are n
 
 ## Computation and backend interfaces
 
-The semantic dispatcher resolves dtype, scalar conversion, axes, and operation options before selecting a physical kernel. Structural descriptors are not used to retain arithmetic expressions. Addition returns a completed value cell, not `Add(left, right)`.
+The semantic dispatcher resolves canonical dtypes, scalar conversion, axes, and operation options, then binds an `OperationSignature` with a logical result type before selecting a physical kernel. Backend output inference cannot override that signature. Structural descriptors are not used to retain arithmetic expressions. Addition returns a completed value cell, not `Add(left, right)`.
 
 The backend interface is deliberately small:
 
@@ -312,6 +314,7 @@ experiments/runtime_redesign/
         src/pdruntime/
             api.py              # Runtime, Array, Series, Frame handles
             types.py            # logical types, NA, validation
+            type_rules.py       # signatures, result types, common types, casts
             maps.py             # ownership, normalization, composition
             values.py           # cells and immutable descriptors
             strategies.py       # eager, compact, tree

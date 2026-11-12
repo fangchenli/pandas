@@ -11,6 +11,7 @@ The proposal merits a bounded experiment. Its strongest opportunity is reducing 
 - [Annotated references](references.md): primary sources, reading priorities, applicability, and limitations.
 - [Experimental plan](experiments.md): correctness cases, controlled baselines, workloads, instrumentation, and decision criteria.
 - [Python prototype design](prototype.md): API, shared ownership model, eager/compact/tree strategies, backend contracts, and implementation milestones.
+- [Unified logical types](logical_types.md): verified PDEP-13 comparison, type identity, operation/result-type rules, and backend-independent contracts.
 
 Start with the review, then the prototype design for the proposed implementation. Compact descriptors and a small tree will be compared early against a shared eager reference. The experimental plan describes the broader evaluation; no runtime implementation has been created yet.
 
@@ -31,7 +32,7 @@ Local source paths in these notes refer to the pinned main revision unless anoth
 
 The review combines local source inspection, primary documentation, and research publications. It makes architectural recommendations, not measured performance claims. The bibliography covers the proposal's named systems and closely related materialization, encoding, and interoperability work; it is not an exhaustive literature survey.
 
-PDEP-13, titled “The pandas Logical Type System” in the proposal, remains unverified: it is absent from the inspected local PDEP directory and published roadmap. Its text or a canonical link is needed before relying on it. This does not establish that no draft exists.
+PDEP-13 has now been verified from the [PR supplied by the user](https://github.com/pandas-dev/pandas/pull/58455). Will Ayd's draft was closed unmerged on 2025-04-21; it is a research reference, not an accepted pandas specification. The [logical type design](logical_types.md) records the pinned source and distinguishes its proposals from our implementation choices.
 
 ## Authorship
 
