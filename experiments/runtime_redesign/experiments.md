@@ -107,6 +107,16 @@ The first computation path should be materialize-then-native. Add direct indexed
 
 The initial materialization policy uses only present state: input encoding, size, ownership, and the next operation's requirements. A future-aware optimal choice may be reported as an offline upper bound, never as a deployable runtime result.
 
+## Third-backend validation
+
+Run the prototype's M3a JAX experiment after the NumPy/Arrow vertical slice and before broadening structural operations. Its purpose is to test the adapter boundary with immutable arrays and explicit devices. Keep it separate from the main representation-performance conclusion.
+
+Use nullable Int64/Boolean import, composed gather, addition, integer sum, and assignment with duplicate read mappings. Compare eager, compact, and tree using identical JAX kernels, then check values, validity, and dtype against the NumPy/Arrow contracts. Cover empty/all-missing outputs, source nulls combined with absent positions, alias isolation, disabled 64-bit mode, and rejected implicit backend/device transfers. JAX remains an optional test dependency; record when this suite is skipped.
+
+Record JAX/jaxlib versions, 64-bit configuration, device, map/mask placement, and compilation state. Run CPU first; accelerator measurements are optional. Synchronize timed native work. Report cold compilation and warmed execution separately, plus transfers and strict-eager wait costs; include ingress and export in full-workflow totals. Count explicit map transfers as well as payload transfers. Native device memory requires device-aware metrics; host RSS alone is insufficient. See [JAX sources R28–R30](references.md).
+
+The boundary passes when the adapter preserves semantics without backend-specific branches throughout handles, type rules, and representation traversal. A small shared numerical helper layer is justified by actual reuse; a public plugin API, whole-Frame JIT, and autodiff remain outside this experiment.
+
 ## Decision criteria
 
 Set numerical thresholds before running the full suite, after learning the measurement noise from a pilot. The following gates define what the evidence must establish:

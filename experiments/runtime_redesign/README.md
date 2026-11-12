@@ -10,7 +10,7 @@ The proposal merits a bounded experiment. Its strongest opportunity is reducing 
 - [Design review](review.md): assessment, semantic gaps, recommended changes, and a proposed initial architecture.
 - [Annotated references](references.md): primary sources, reading priorities, applicability, and limitations.
 - [Experimental plan](experiments.md): correctness cases, controlled baselines, workloads, instrumentation, and decision criteria.
-- [Python prototype design](prototype.md): API, shared ownership model, eager/compact/tree strategies, backend contracts, and implementation milestones.
+- [Python prototype design](prototype.md): API, shared ownership model, eager/compact/tree strategies, backend contracts, an early JAX validation milestone, and implementation milestones.
 - [Unified logical types](logical_types.md): verified PDEP-13 comparison, type identity, operation/result-type rules, and backend-independent contracts.
 
 Start with the review, then the prototype design for the proposed implementation. Compact descriptors and a small tree will be compared early against a shared eager reference. The experimental plan describes the broader evaluation; no runtime implementation has been created yet.

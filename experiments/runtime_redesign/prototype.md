@@ -2,7 +2,7 @@
 
 Date: 2026-11-12. Status: proposed implementation design. This document specifies the prototype; it does not claim that its code or performance results exist.
 
-Build a standalone Python package inside this experiment, using NumPy and PyArrow for bulk operations. One API runs against three representation strategies: eager, compact, and tree. Start with selection, shared maps, eager arithmetic, and isolated mutation. Compare compact and tree strategies before committing to either architecture. Rust is reserved for a later, measured bottleneck.
+Build a standalone Python package inside this experiment, using NumPy and PyArrow for bulk operations. One API runs against three representation strategies: eager, compact, and tree. Start with selection, shared maps, eager arithmetic, and isolated mutation. Compare compact and tree strategies before committing to either architecture. Rust is reserved for a later, measured bottleneck. Design backend boundaries from the start and validate them with a narrow JAX adapter before expanding structural operations; NumPy and Arrow remain the first complete adapters.
 
 The [review](review.md) explains the architectural risks. The [experimental plan](experiments.md) defines the broader evaluation. This design makes the first implementation concrete and narrows its initial semantic surface.
 
@@ -46,7 +46,7 @@ The first release of the experiment is a research API, not a pandas subclass or 
 | Area | Initial contract | Later work |
 | --- | --- | --- |
 | Logical types | Nullable signed int64, nullable boolean, nullable UTF-8 string | Float semantics, smaller integers, timestamps, categoricals, nested and object types |
-| Storage | NumPy values plus validity for integer/boolean; Arrow for all three types | NumPy string storage, Arrow string views as a measured alternative |
+| Storage | NumPy values plus validity for integer/boolean; Arrow for all three types; experimental JAX integer/boolean adapter | NumPy string storage, Arrow string views as a measured alternative |
 | Selection | Positional take, normalized slices, boolean filter, internal missing-aware take | Persistent boolean-map representation and adaptive selection policies |
 | Axes | Ordered flat integer/string labels; duplicate rows allowed | MultiIndex and richer metadata |
 | Columns | Unique string names, ordered slots | Duplicate column labels |
@@ -75,7 +75,7 @@ flowchart TD
     M --> S[Eager or compact or tree strategy]
     S --> V
     V --> R[Immutable representation descriptors]
-    R --> B[NumPy and Arrow adapters]
+    R --> B[Storage and computation adapters]
     F --> K[Eager operation dispatch]
     K --> V
     K --> B
@@ -92,7 +92,7 @@ Objects from different runtimes are rejected by binary operations unless explici
 
 ### Physical storage
 
-`Storage` is an internal immutable view of a backend value: logical dtype, length, backend, physical encoding, and references sufficient to keep its buffers alive. A NumPy storage object has a one-dimensional typed values array and optional validity; Arrow storage has an Array or ChunkedArray of a supported type. Chunk layout belongs to storage.
+`Storage` is an internal immutable view of a backend value: logical dtype, length, backend, device, physical encoding, and references sufficient to keep its buffers alive. A NumPy storage object has a one-dimensional typed values array and optional validity; Arrow storage has an Array or ChunkedArray of a supported type. Chunk layout belongs to storage. An experimental JAX storage object carries numeric values and optional boolean validity on the same device; it need not expose a host buffer or writable memory.
 
 Physical storage may be strided or chunked. It must not contain a private structural selection node. Do not expose its writable buffers through the public API.
 
@@ -109,7 +109,7 @@ This separates semantic mutation from representation caching. Sharing a cell mea
 ### Public method surface
 
 ```text
-Runtime.array(values, *, dtype, backend, validity=None) -> Array
+Runtime.array(values, *, dtype, backend, validity=None, device=None) -> Array
 Runtime.frame(columns, *, index=None) -> Frame
 
 Array / Series:
@@ -133,6 +133,7 @@ Frame:
 Runtime.concat(frames) -> Frame
 All handles: explain_representation(), memory_report()
 Array / Series: to_numpy(), to_arrow()
+Array / Series: to_backend(backend, *, device=None)
 ```
 
 Structural methods return new handles. `set_at`, `set_values`, and `replace_column` mutate only the receiving handle and return `None`. `project` selects/reorders distinct existing names; repeated names raise until duplicate columns are supported. Filtering is explicitly positional; pass a prototype boolean Array or a validated boolean sequence, not an implicitly aligned pandas Series.
@@ -151,7 +152,7 @@ Affine(source_length, start, step, output_length)
 Positions(source_length, positions, present=None)
 ```
 
-`present=None` means every mapping exists. Otherwise it is a boolean array of output length. A false entry means an introduced missing position; its associated integer must never be dereferenced. Source validity stays in the source array and is combined when reading. Normalize missing index slots to zero for deterministic debugging, but do not rely on zero being in bounds for an empty source.
+`present=None` means every mapping exists. Otherwise it is a boolean array of output length in the map adapter's namespace/device. A false entry means an introduced missing position; its associated integer must never be dereferenced. Source validity stays in the source array and is combined when reading. Normalize missing index slots to zero for deterministic debugging, but do not rely on zero being in bounds for an empty source.
 
 Public `take(indices)` uses ordinary negative positional indexing. Reindex uses an internal missing-aware constructor with an explicit presence mask. Never overload the internal meaning of `-1`. A boolean filter initially becomes positions using a native operation; retained masks are a later ablation.
 
@@ -182,7 +183,7 @@ The three strategies use the same vocabulary and semantic rules:
 
 Compact mode starts with no `Segments` support. When segments are added, their children must be normalized, and selection over a segmented source may materialize that source as a documented escape path. Measure this fallback explicitly against tree mode. Do not hide a second general mapping language inside the compact strategy.
 
-Tree mode must not materialize each intermediate array when reading a descendant. Traverse an explicit stack and compose requested positions in bulk toward the leaf, then gather payloads once. Scalar reads can traverse scalar indices; vector reads use NumPy map operations, not a Python loop over rows. A short-lived `ReadContext` memoizes resolution by the immutable map chain and requested selection, so columns traversing that same chain share the resolved map during a frame read. Keep those maps strongly alive until the read finishes, then release the context. There is no persistent map-resolution cache initially. Disable this memoization in an ablation.
+Tree mode must not materialize each intermediate array when reading a descendant. Traverse an explicit stack and compose requested positions in bulk toward the leaf, then gather payloads once. Scalar reads can traverse scalar indices; vector reads use bulk map-adapter operations, not a Python loop over rows. NumPy implements the first map adapter; neither the descriptor algebra nor the traversal requires host-resident index arrays. A short-lived `ReadContext` memoizes resolution by the immutable map chain and requested selection, so columns traversing that same chain share the resolved map during a frame read. Keep those maps strongly alive until the read finishes, then release the context. There is no persistent map-resolution cache initially. Disable this memoization in an ablation.
 
 Initially use the same cheap, validated rewrites in both deferred strategies: identity elimination, canonical typed empties, and total selection of a constant. Missing selection of a nonmissing constant retains validity. More aggressive composition is precisely the difference being measured. Representational depth and segmentation are observable metrics, not silent heuristics.
 
@@ -222,15 +223,15 @@ The first write path always detaches the affected logical column, even if appare
 ```text
 1. Normalize positions and validate values/dtype without changing the target.
 2. Obtain the affected column's logical values.
-3. Create independent writable physical storage for that column.
-4. Apply the update using bulk backend operations.
-5. Freeze/adopt the completed storage in a new value cell.
+3. Request replacement storage with the affected logical column detached.
+4. Apply the update using bulk backend operations: copy-and-write for NumPy, functional replacement for immutable storage.
+5. Wait for completion and adopt the completed storage in a new value cell.
 6. Replace only the target handle's column slot.
 ```
 
 For scalar assignment, duplicate destinations are harmless. Vector assignment initially requires unique destinations and raises otherwise; it does not pretend to implement unspecified scatter ordering. Duplicate positions in a read representation are fully supported and must detach correctly.
 
-For Arrow writes, the adapter may build replacement buffers rather than exposing mutability. Whole-column replacement installs a new cell after length/type validation and does not read the old column. Failure leaves the target's logical contents unchanged. This stronger transaction-like prototype rule should be reported where pandas' failure behavior differs.
+For Arrow and JAX writes, the adapter may build replacement buffers rather than exposing mutability. `replace` must preserve its input and return detached storage in this conservative milestone; it may combine detachment and update to avoid two full copies. Whole-column replacement installs a new cell after length/type validation and does not read the old column. Failure leaves the target's logical contents unchanged. This stronger transaction-like prototype rule should be reported where pandas' failure behavior differs.
 
 Optimize unique-owner writes only after profiling. Python reference counts are not the ownership model.
 
@@ -242,7 +243,8 @@ The backend interface is deliberately small:
 
 ```python
 class Backend:
-    def import_owned(self, values, dtype, validity=None): ...
+    def capabilities(self, signature, input_layouts, device): ...
+    def import_owned(self, values, dtype, validity=None, device=None): ...
     def scalar_at(self, storage, position): ...
     def select(self, storage, row_map): ...
     def copy_owned(self, storage): ...
@@ -252,6 +254,7 @@ class Backend:
     def concat(self, storages): ...
     def export_copy(self, storage, target, options): ...
     def buffers(self, storage): ...
+    def wait(self, storage): ...
 ```
 
 These are signatures to implement, not a commitment to a public extension interface. Return values include storage and optional allocation/copy events. Adapters may loop over columns, chunks, and segments. Elementwise data processing must use native array operations. NumPy validity updates use vectorized masks; Arrow adapters construct validity/index inputs safely, including empty sources with all-missing output.
@@ -261,12 +264,48 @@ Default dispatch rules:
 1. Resolve logical alignment and operation compatibility.
 2. Materialize the participating columns into their preferred physical backend only.
 3. Run a native kernel when the operands share a compatible backend.
-4. For mixed numeric operands, convert the Arrow side to the NumPy nullable representation and use the NumPy kernel. Count the conversion. Strings use Arrow; no implicit object fallback.
+4. For the initial CPU NumPy/Arrow pair, convert mixed numeric operands from Arrow to NumPy nullable storage. Count the conversion. This is a specific policy rule, not a fallback for arbitrary adapters. JAX mixed-backend or mixed-device operations require explicit conversion before dispatch. Strings use Arrow; no implicit object fallback.
 5. Apply the declared null/result-type contract and return completed physical output.
 
-A column's preferred backend is inherited through selection and same-backend computation. Mixed numeric output is NumPy; incompatible concatenation backend choices require an explicit destination. Backend policy is deterministic and identical in all strategies.
+A column's preferred backend is inherited through selection and same-backend computation. Mixed CPU NumPy/Arrow numeric output is NumPy; incompatible concatenation backend choices require an explicit destination. Backend policy is deterministic and identical in all strategies. Unsupported capabilities raise before changing any target handle; never silently route device arrays through `np.asarray`.
 
 `Column.binary_positional(other)` is internal; public Series methods align labels. No expression fusion, no reordering reductions, and no computation over unused parent rows. A future indexed kernel can be registered for a specific operation/type/encoding, but the benchmark must separate it from representation-only gains.
+
+## Additional backends and the Array API
+
+The internal boundary must accommodate additional backends from the first implementation. Keep it private until NumPy, Arrow, and a narrow JAX adapter validate the design. Supporting a backend means supporting a declared subset of logical types and operations; it does not require implementing every DataFrame operation.
+
+The Array API is a numerical function interface, not a backend or a complete DataFrame storage contract. Its scope excludes missing-data support, strings/datetimes, and execution scheduling. Reuse it inside a numerical adapter where its operations match the bound logical contract. Keep Arrow's specialized adapter and native validity. See [R26 and R28–R30](references.md) for the source constraints behind these decisions.
+
+### Validity stays native
+
+NumPy and the experimental JAX adapter represent nullable numbers with values and optional boolean validity. Values and validity use the same namespace/device. Arrow retains its native validity encoding and null-aware kernels; the common interface does not require exporting an Arrow bitmap as a NumPy mask.
+
+A selected position is valid only when its map entry is present and the referenced source value is valid. Evaluate this rule without dereferencing absent entries, including an empty source with all-missing output. The map adapter owns structural presence; the storage adapter owns source validity and combines them during selection. Masked numeric adapters must neutralize invalid lanes where required by an operation, rather than merely masking an unsafe result afterward. Null propagation and reduction options still come from the logical signature.
+
+### Maps and device placement
+
+Identity and affine maps are scalar metadata. Dense positions and presence buffers carry a namespace/device and ownership descriptor. A small internal map adapter supplies validation, composition, subset resolution, and explicit transfer using bulk operations. Start with NumPy, then implement the required JAX subset; do not build a general plugin registry ahead of those examples.
+
+Keep sharing keyed by logical coordinate-map identity. A consumer may need a physical realization of the same map on another device; create it only through a declared transfer, and share it within the operation context. Count transfer bytes and release temporary realizations with the context. Host axes are acceptable initially, but any map transfer needed for a device column must be explicit and measured. No implicit host fallback for map composition or kernel dispatch.
+
+`to_backend(backend, device=None)` is the explicit conversion boundary: return a new handle with completed, detached storage and the same logical dtype, values, and labels. Reject unsupported destinations before publishing a result. The initial implementation may transfer through host storage, with every stage recorded. Scalar reads and validation may transfer scalar results to Python; this is part of their declared contract, not permission to copy full arrays to the host during ordinary computation.
+
+### Capability and completion contracts
+
+Query capabilities using the operation signature, input encodings, device, backend version/configuration, and ownership requirements. The response identifies direct support, required materialization, or unsupported execution. Storage support does not imply support for every computation. A materialization path must satisfy the same dtype and null contract as a direct kernel.
+
+The initial JAX adapter requires 64-bit mode for Int64 and verifies the result dtype. If that mode is unavailable, reject the operation with an actionable error; do not change process-wide JAX configuration or silently narrow values. Record configuration in the environment manifest.
+
+JAX may dispatch asynchronously. The prototype keeps its strict eager computation boundary: `wait` completes native work before publishing computed results or replacement cells. Ownership imports, map validation/composition, and materialization likewise complete their required work before returning; structural payload gathers may still remain deferred. Backend synchronization is distinct from resolving a selection descriptor. Later asynchronous behavior would require a separate error-timing contract and performance experiment.
+
+### Early JAX validation
+
+After the complete NumPy/Arrow vertical slice, add nullable Int64/Boolean import, composed gather, integer addition, sum, and isolated assignment under all three representation strategies. Run CPU JAX first; accelerator execution is optional and must be reported separately. Verify source nulls plus introduced missing positions, empty sources, duplicate gathers, unchanged parents/siblings after writes, dtype preservation, and explicit conversion boundaries. Include a failure case with 64-bit mode disabled in an isolated process.
+
+JAX array support does not imply that a mutable Frame is a valid argument to `jax.jit`, or that arbitrary DataFrame operations support autodiff. JIT requires static shapes for relevant transformed operations, so data-dependent filtering is outside this adapter milestone. Compilation of individual native numerical kernels is compatible with the runtime's eager interface; retaining an unevaluated user computation graph is outside scope.
+
+Measure cold compilation, warmed execution, synchronization, and transfer separately, and include them in the appropriate end-to-end totals. If this small adapter requires changes throughout the semantic or representation layers, revise the boundary before adding more backend features.
 
 ## Axes and structural operations
 
@@ -298,7 +337,7 @@ Use explicit exports first. `to_numpy()` returns a detached array and optional d
 
 Zero-copy export is a later optimization with its own ownership tests. Initially charge export copies consistently across strategies. Identity physical inputs should remain a control so the cost of this conservative choice is visible.
 
-Provide `explain_representation()` and an optional event collector. Events include map creation/composition, payload gather, materialization/cache hit, ingress copy, write detach, backend conversion, and export copy. Events carry counts, byte estimates, reason, and local IDs; they do not retain live values. Timing runs disable detailed events; diagnostic runs replay the same input with collection enabled.
+Provide `explain_representation()` and an optional event collector. Events include map creation/composition, payload gather, materialization/cache hit, ingress copy, write detach, backend conversion, device transfer, synchronization, and export copy. Events carry counts, byte estimates, reason, and local IDs; they do not retain live values. Timing runs disable detailed events; diagnostic runs replay the same input with collection enabled.
 
 Buffer reports deduplicate known underlying allocations, not Python wrapper identities or overlapping view lengths. Exact native allocation attribution is not always available; report that coverage rather than inventing exact bytes. Pair these reports with native allocator counters and fresh-process peak RSS as described in the experimental plan.
 
@@ -324,12 +363,15 @@ experiments/runtime_redesign/
             backends/
                 numpy.py
                 arrow.py
+                array_api.py    # shared numerical helpers where semantics match
+                jax.py          # optional, narrow validation adapter
         tests/
             test_maps.py
             test_ownership.py
             test_strategy_equivalence.py
             test_mutation.py
             test_compute.py
+            test_backend_contracts.py
             test_axes.py
             test_exports.py
         benchmarks/
@@ -351,10 +393,11 @@ Property tests generate valid maps and mutation traces; compare all strategies a
 | M1 physical values | NumPy/Arrow storage, owned ingress, direct access, detached export | External data/mask mutation cannot affect a runtime snapshot |
 | M2 representation comparison | Maps, cells, eager/compact/tree selection and subset reads | Same randomized results; no intermediate payload gather on a tree chain; shared map composition measured |
 | M3 complete vertical slice | Mixed Frame/Series, eager addition/comparison/sum, column detach/replacement | Opening example and ownership/mutation tests pass in every strategy; W02, W05–W09 runnable for supported types |
+| M3a backend boundary validation | Optional JAX Int64/Boolean adapter, map adapter, explicit devices and completion | Gather/add/sum/assignment agree across strategies; no hidden host conversion; dtype/null/alias tests pass |
 | M4 structural workloads | Axes, stable sort, missing reindex, segments, limited join | End-to-end W01, W03, W04, W10, W14 within declared scope |
 | M5 evaluation and next decision | Import-to-export and resident-data results, ablations, memory/lifetime report | Quantify strategy crossovers and decide what, if anything, needs native code |
 
-Begin measurements in M2. M3 is the first complete prototype; M4 is an extension, not a prerequisite for every experiment. Add float64 and Arrow string-view storage as separately identified treatments after their semantic and adapter tests are defined.
+Begin measurements in M2. M3 is the first complete prototype. M3a validates the backend boundary before M4 broadens structural operations; JAX is an optional dependency, but this validation is part of the research plan. M4 is not a prerequisite for the initial representation measurements. Add float64 and Arrow string-view storage as separately identified treatments after their semantic and adapter tests are defined.
 
 ## Decisions deliberately left to measurements
 

@@ -60,7 +60,7 @@ Define these separate notions:
 - **Physical compatibility:** an adapter can interpret a particular storage encoding as that logical type without altering its semantics.
 - **Conversion permission:** a declared conversion rule exists for the requested casting mode; it is not inferred from whichever backend accepts the data.
 
-The physical representation carries backend, encoding, chunking, offsets/strides, validity encoding, and buffer ownership. These fields never participate in logical type hashing. Integer storage in NumPy and Arrow can therefore have equal logical dtypes while requiring different physical dispatch.
+The physical representation carries backend, device, encoding, chunking, offsets/strides, validity encoding, and buffer ownership. These fields never participate in logical type hashing. Integer storage in NumPy and Arrow can therefore have equal logical dtypes while requiring different physical dispatch.
 
 Keep overflow and reduction defaults in the operation contract rather than inventing a separate dtype for each algorithm. If such options become user-configurable, include them in the operation binding/cache key.
 
@@ -82,7 +82,7 @@ The existing prototype spellings `"int64"`, `"boolean"`, and `"utf8"` normalize 
 
 Inferred Python scalar types must not accidentally leak into dispatch. Bind a scalar to its operand's logical domain with range/type checks before constructing a kernel argument. For example, adding Python `1` to Int64 validates it as int64; `True` is not accepted as an integer, and a Python integer outside the int64 range raises. Missing scalar inputs bind to the expected nullable domain.
 
-Keep the explicit `backend=` constructor argument for controlled experiments. It selects physical storage and does not modify `dtype`. Current deterministic dispatch may change storage later; the result still carries the type established by the logical rules.
+Keep the explicit `backend=` constructor argument for controlled experiments. It selects physical storage and does not modify `dtype`. The initial CPU NumPy/Arrow dispatch rule may change storage later. Experimental JAX/device transfers require an explicit conversion. The result still carries the type established by the logical rules.
 
 ## Operation binding before backend dispatch
 
@@ -165,5 +165,7 @@ Before representation benchmarks, require:
 6. Scalar range checks, integer wrapping, equality/ordering, and sum options agree across adapter implementations.
 7. Whole-column replacement can change a schema slot; incompatible in-column assignment cannot.
 8. Type metadata survives serialization independently of backend encoding.
+9. Experimental JAX operations preserve Int64/Boolean semantics and reject unavailable 64-bit support rather than narrowing; device and namespace do not enter type identity.
+10. Arrow validity remains native, while numerical adapters combine masks and structural presence without changing logical null behavior.
 
 These tests are a small semantic system, not a requirement to implement every type in PDEP-13. Add one type family or promotion rule at a time, with its oracle and backend capability tests. The first implementation remains Python; this layer is small metadata and rule resolution, not a reason to introduce a Rust core.

@@ -173,13 +173,31 @@ Defines Python-facing array and stream export protocols and schema requests. Pla
 
 **Supporting.** Consortium for Python Data API Standards. [Python array API standard](https://data-apis.org/array-api/latest/), [purpose and scope](https://data-apis.org/array-api/latest/purpose_and_scope.html), served as 2025.12. Overview and scope inspected.
 
-A numerical interoperability reference, not a specification of pandas axes, heterogeneous tables, null semantics, or shared indirect storage. Its role should stay limited to operations whose semantics and inputs match.
+A numerical interoperability reference, not a specification of pandas axes, heterogeneous tables, null semantics, or shared indirect storage. Its role should stay limited to operations whose semantics and inputs match. Missing-data support, string/datetime types, and execution scheduling are explicitly outside its scope. Use shared numerical helpers behind adapters; the standard cannot replace the logical null contract or device/completion policy.
 
 ### R27 Polars eager and lazy APIs
 
 **Supporting.** Polars maintainers. [Lazy API](https://docs.pola.rs/user-guide/concepts/lazy-api/). Eager/lazy comparison and pushdown example read.
 
 Polars supports both modes. Use eager operation-by-operation runs for the closest workflow comparison, and separately report optimized lazy runs where appropriate. The latter can eliminate computation that this proposal intentionally performs eagerly.
+
+### R28 JAX array and transformation constraints
+
+**Essential for the third-backend experiment.** JAX authors. [JAX: The Sharp Bits](https://docs.jax.dev/en/latest/notebooks/Common_Gotchas_in_JAX.html). Immutable-array updates and dynamic-shape sections reviewed.
+
+JAX arrays use functional updates, fitting replacement of a mutable handle's value cell. Data-dependent boolean selection has restrictions under JIT's static-shape requirements; this does not prohibit ordinary untransformed JAX selection. Distinguish a JAX storage/kernel adapter from whole-DataFrame JIT or autodiff support.
+
+### R29 JAX execution completion
+
+**Essential for the third-backend experiment.** JAX authors. [Asynchronous dispatch](https://docs.jax.dev/en/latest/async_dispatch.html). Dispatch and benchmarking guidance reviewed.
+
+Native work can remain in flight after Python dispatch returns. Use an explicit completion hook to preserve the prototype's strict eager boundary and to measure execution rather than enqueue time. Separate synchronization, transfers, compilation, and warmed execution in reports.
+
+### R30 JAX dtype availability
+
+**Essential for the third-backend experiment.** JAX authors. [Default dtypes and the X64 flag](https://docs.jax.dev/en/latest/101/default_dtypes.html). Default mode and 64-bit enablement sections reviewed.
+
+The documented default disables 64-bit array creation and can narrow requested types with a warning. Our adapter must require and verify exact Int64 support, preserve the user's configuration, and reject incompatible settings. Configuration belongs in capability checks and benchmark manifests, not logical dtype identity.
 
 ## Further reading and source limitations
 
