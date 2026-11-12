@@ -1,0 +1,502 @@
+{
+  "status": "correctness-checked pilot, not a performance conclusion",
+  "timing_runs": 108,
+  "diagnostic_runs": 36,
+  "source_sha256": "aedaee8da1b49a84a17be8c91d694d47c598a2be88ed94840a47beded3005ae4",
+  "diagnostic_event_counts": [
+    {
+      "strategy": "eager",
+      "backend": "numpy",
+      "workload": "W02",
+      "events": {
+        "ingress_copy": 4,
+        "payload_gather": 8,
+        "cache_hit": 2,
+        "kernel": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "eager",
+      "backend": "numpy",
+      "workload": "W05",
+      "events": {
+        "ingress_copy": 4,
+        "payload_gather": 4,
+        "cache_hit": 8,
+        "kernel": 4,
+        "export_copy": 4
+      }
+    },
+    {
+      "strategy": "eager",
+      "backend": "numpy",
+      "workload": "W06",
+      "events": {
+        "ingress_copy": 4,
+        "payload_gather": 4,
+        "cache_hit": 21,
+        "kernel": 20,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "eager",
+      "backend": "numpy",
+      "workload": "W07",
+      "events": {
+        "ingress_copy": 4,
+        "cache_hit": 10,
+        "compaction": 4,
+        "kernel": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "eager",
+      "backend": "numpy",
+      "workload": "W08",
+      "events": {
+        "ingress_copy": 4,
+        "payload_gather": 4,
+        "materialization": 1,
+        "cache_hit": 3,
+        "write_detach": 1,
+        "kernel": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "eager",
+      "backend": "numpy",
+      "workload": "W09",
+      "events": {
+        "ingress_copy": 5,
+        "payload_gather": 4,
+        "materialization": 5,
+        "cache_hit": 7,
+        "write_detach": 5,
+        "kernel": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "eager",
+      "backend": "arrow",
+      "workload": "W02",
+      "events": {
+        "ingress_copy": 5,
+        "payload_gather": 8,
+        "cache_hit": 2,
+        "kernel": 1,
+        "backend_conversion": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "eager",
+      "backend": "arrow",
+      "workload": "W05",
+      "events": {
+        "ingress_copy": 8,
+        "payload_gather": 4,
+        "cache_hit": 8,
+        "kernel": 4,
+        "backend_conversion": 4,
+        "export_copy": 4
+      }
+    },
+    {
+      "strategy": "eager",
+      "backend": "arrow",
+      "workload": "W06",
+      "events": {
+        "ingress_copy": 5,
+        "payload_gather": 4,
+        "cache_hit": 21,
+        "kernel": 20,
+        "backend_conversion": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "eager",
+      "backend": "arrow",
+      "workload": "W07",
+      "events": {
+        "ingress_copy": 5,
+        "cache_hit": 10,
+        "compaction": 4,
+        "kernel": 1,
+        "backend_conversion": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "eager",
+      "backend": "arrow",
+      "workload": "W08",
+      "events": {
+        "ingress_copy": 5,
+        "payload_gather": 4,
+        "materialization": 1,
+        "cache_hit": 3,
+        "write_detach": 1,
+        "kernel": 1,
+        "backend_conversion": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "eager",
+      "backend": "arrow",
+      "workload": "W09",
+      "events": {
+        "ingress_copy": 6,
+        "payload_gather": 4,
+        "materialization": 5,
+        "cache_hit": 7,
+        "write_detach": 5,
+        "kernel": 1,
+        "backend_conversion": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "compact",
+      "backend": "numpy",
+      "workload": "W02",
+      "events": {
+        "ingress_copy": 4,
+        "map_composition": 1,
+        "payload_gather": 1,
+        "materialization": 1,
+        "kernel": 1,
+        "cache_hit": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "compact",
+      "backend": "numpy",
+      "workload": "W05",
+      "events": {
+        "ingress_copy": 4,
+        "payload_gather": 4,
+        "materialization": 4,
+        "kernel": 4,
+        "cache_hit": 4,
+        "export_copy": 4
+      }
+    },
+    {
+      "strategy": "compact",
+      "backend": "numpy",
+      "workload": "W06",
+      "events": {
+        "ingress_copy": 4,
+        "payload_gather": 1,
+        "materialization": 1,
+        "kernel": 20,
+        "cache_hit": 20,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "compact",
+      "backend": "numpy",
+      "workload": "W07",
+      "events": {
+        "ingress_copy": 4,
+        "materialization": 4,
+        "cache_hit": 6,
+        "compaction": 4,
+        "kernel": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "compact",
+      "backend": "numpy",
+      "workload": "W08",
+      "events": {
+        "ingress_copy": 4,
+        "materialization": 2,
+        "payload_gather": 1,
+        "write_detach": 1,
+        "cache_hit": 2,
+        "kernel": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "compact",
+      "backend": "numpy",
+      "workload": "W09",
+      "events": {
+        "ingress_copy": 5,
+        "materialization": 6,
+        "payload_gather": 1,
+        "write_detach": 5,
+        "cache_hit": 6,
+        "kernel": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "compact",
+      "backend": "arrow",
+      "workload": "W02",
+      "events": {
+        "ingress_copy": 5,
+        "map_composition": 1,
+        "payload_gather": 1,
+        "materialization": 1,
+        "kernel": 1,
+        "cache_hit": 1,
+        "backend_conversion": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "compact",
+      "backend": "arrow",
+      "workload": "W05",
+      "events": {
+        "ingress_copy": 8,
+        "payload_gather": 4,
+        "materialization": 4,
+        "kernel": 4,
+        "cache_hit": 4,
+        "backend_conversion": 4,
+        "export_copy": 4
+      }
+    },
+    {
+      "strategy": "compact",
+      "backend": "arrow",
+      "workload": "W06",
+      "events": {
+        "ingress_copy": 5,
+        "payload_gather": 1,
+        "materialization": 1,
+        "kernel": 20,
+        "cache_hit": 20,
+        "backend_conversion": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "compact",
+      "backend": "arrow",
+      "workload": "W07",
+      "events": {
+        "ingress_copy": 5,
+        "materialization": 4,
+        "cache_hit": 6,
+        "compaction": 4,
+        "kernel": 1,
+        "backend_conversion": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "compact",
+      "backend": "arrow",
+      "workload": "W08",
+      "events": {
+        "ingress_copy": 5,
+        "materialization": 2,
+        "payload_gather": 1,
+        "write_detach": 1,
+        "cache_hit": 2,
+        "kernel": 1,
+        "backend_conversion": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "compact",
+      "backend": "arrow",
+      "workload": "W09",
+      "events": {
+        "ingress_copy": 6,
+        "materialization": 6,
+        "payload_gather": 1,
+        "write_detach": 5,
+        "cache_hit": 6,
+        "kernel": 1,
+        "backend_conversion": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "tree",
+      "backend": "numpy",
+      "workload": "W02",
+      "events": {
+        "ingress_copy": 4,
+        "map_composition": 1,
+        "payload_gather": 1,
+        "materialization": 1,
+        "kernel": 1,
+        "cache_hit": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "tree",
+      "backend": "numpy",
+      "workload": "W05",
+      "events": {
+        "ingress_copy": 4,
+        "payload_gather": 4,
+        "materialization": 4,
+        "kernel": 4,
+        "cache_hit": 4,
+        "export_copy": 4
+      }
+    },
+    {
+      "strategy": "tree",
+      "backend": "numpy",
+      "workload": "W06",
+      "events": {
+        "ingress_copy": 4,
+        "payload_gather": 1,
+        "materialization": 1,
+        "kernel": 20,
+        "cache_hit": 20,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "tree",
+      "backend": "numpy",
+      "workload": "W07",
+      "events": {
+        "ingress_copy": 4,
+        "materialization": 4,
+        "cache_hit": 6,
+        "compaction": 4,
+        "kernel": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "tree",
+      "backend": "numpy",
+      "workload": "W08",
+      "events": {
+        "ingress_copy": 4,
+        "materialization": 2,
+        "payload_gather": 1,
+        "write_detach": 1,
+        "cache_hit": 2,
+        "kernel": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "tree",
+      "backend": "numpy",
+      "workload": "W09",
+      "events": {
+        "ingress_copy": 5,
+        "materialization": 6,
+        "payload_gather": 1,
+        "write_detach": 5,
+        "cache_hit": 6,
+        "kernel": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "tree",
+      "backend": "arrow",
+      "workload": "W02",
+      "events": {
+        "ingress_copy": 5,
+        "map_composition": 1,
+        "payload_gather": 1,
+        "materialization": 1,
+        "kernel": 1,
+        "cache_hit": 1,
+        "backend_conversion": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "tree",
+      "backend": "arrow",
+      "workload": "W05",
+      "events": {
+        "ingress_copy": 8,
+        "payload_gather": 4,
+        "materialization": 4,
+        "kernel": 4,
+        "cache_hit": 4,
+        "backend_conversion": 4,
+        "export_copy": 4
+      }
+    },
+    {
+      "strategy": "tree",
+      "backend": "arrow",
+      "workload": "W06",
+      "events": {
+        "ingress_copy": 5,
+        "payload_gather": 1,
+        "materialization": 1,
+        "kernel": 20,
+        "cache_hit": 20,
+        "backend_conversion": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "tree",
+      "backend": "arrow",
+      "workload": "W07",
+      "events": {
+        "ingress_copy": 5,
+        "materialization": 4,
+        "cache_hit": 6,
+        "compaction": 4,
+        "kernel": 1,
+        "backend_conversion": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "tree",
+      "backend": "arrow",
+      "workload": "W08",
+      "events": {
+        "ingress_copy": 5,
+        "materialization": 2,
+        "payload_gather": 1,
+        "write_detach": 1,
+        "cache_hit": 2,
+        "kernel": 1,
+        "backend_conversion": 1,
+        "export_copy": 1
+      }
+    },
+    {
+      "strategy": "tree",
+      "backend": "arrow",
+      "workload": "W09",
+      "events": {
+        "ingress_copy": 6,
+        "materialization": 6,
+        "payload_gather": 1,
+        "write_detach": 5,
+        "cache_hit": 6,
+        "kernel": 1,
+        "backend_conversion": 1,
+        "export_copy": 1
+      }
+    }
+  ]
+}

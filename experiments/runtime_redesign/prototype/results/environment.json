@@ -1,0 +1,35 @@
+{
+  "source_sha256": "aedaee8da1b49a84a17be8c91d694d47c598a2be88ed94840a47beded3005ae4",
+  "python": "3.14.5",
+  "numpy": "2.5.4",
+  "pyarrow": "26.0.1",
+  "pandas": "3.1.1",
+  "pandas_location": "/private/tmp/pdruntime-env/lib/python3.14/site-packages/pandas/__init__.py",
+  "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "base_commit": "d3facb272fc2e62302dd4db9de964b3e5f0342a4",
+  "thread_environment": {
+    "OMP_NUM_THREADS": null,
+    "OPENBLAS_NUM_THREADS": null,
+    "VECLIB_MAXIMUM_THREADS": null
+  },
+  "arrow_cpu_count": 8,
+  "limitations": "pilot only; no pinned-main/deferred-take comparison or peak RSS; IPC ownership copies included; GC included in W07",
+  "test_dependencies": {
+    "pytest": "9.2.0",
+    "hypothesis": "6.170.15"
+  },
+  "validation": {
+    "pytest_passed": 117,
+    "pre_commit": "passed",
+    "editable_install": "passed",
+    "execution_date": "2026-11-12"
+  },
+  "benchmark_parameters": {
+    "rows": 10000,
+    "width": 4,
+    "repeat": 3,
+    "seed": 42,
+    "output": "/private/tmp/pdruntime-m03-isolated-pilot.json"
+  }
+}

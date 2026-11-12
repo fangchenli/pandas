@@ -1,0 +1,13 @@
+# Validated with Python 3.14.5; experimental environment, not minimum versions.
+hypothesis==6.170.15
+iniconfig==2.3.1
+numpy==2.5.4
+packaging==26.3
+pandas==3.1.1
+pluggy==1.7.0
+pyarrow==26.0.1
+pygments==2.21.0
+pytest==9.2.0
+python-dateutil==4.0.0
+sortedcontainers==2.4.0
+tzdata==2026.6

@@ -1,6 +1,6 @@
 # Experimental plan for the pandas runtime redesign
 
-Status: proposed experiments, not results. Date: 2026-11-12.
+Status: broader evaluation plan. M0–M3 correctness tests and W02/W05–W09 smoke runners now exist; no architectural performance conclusion. Date: 2026-11-12.
 
 The first objective is to determine whether structural sharing delivers an advantage after paying for ownership, map composition, real consumption, and mutation. Implement the smallest runtime that can answer that question before broadening API coverage. The supporting evidence and semantic issues are in the [review](review.md) and [references](references.md).
 
@@ -71,6 +71,7 @@ Treat object arrays as a compatibility lane. Check reference semantics without c
 | W13 | Small interactive frames with scalar reads and display | H5 | Python dispatch and object overhead dominate |
 | W14 | Labeled binary arithmetic with unequal axes and independent column maps | H2, H3 | Axis work or forced frame-wide materialization dominates |
 | W15 | Homogeneous frame arithmetic, row-wise sum, consumed transpose, contiguous 2D NumPy export | H3, H5 | Per-column dispatch and packing lose existing 2D throughput |
+| W16 | Restricted nullable Int64 groupby-sum after repeated selection | H3, H5 | Key equality, null groups, or row multiplicity diverge across backends |
 
 For W01–W04, distinguish structural construction from consumption, but report their sum as the primary end-to-end result. A workload that consumes only a subset is legitimate if both implementations expose the same observable output. Also run full-consumption controls. Do not require a deferred implementation to expand genuinely unused columns, or allow it to skip columns the reference actually returns to a terminal consumer.
 
@@ -88,6 +89,8 @@ These are proposed experiment parameters, not promised scalability limits. Avoid
 W15 follows the [PDEP-16 discussion](missing_values.md). Compare the column-based runtime with a direct 2D values-plus-validity reference and pinned pandas under matching semantics. Include all-valid/null-heavy data, contiguous/gathered rows, and a column write with live sibling views. Charge packing, validity transformation, ownership copies, and export. Use Int64 first where supported; Float64 follows its semantic milestone. These controls precede any general replacement claim but need not block M2/M3.
 
 For a later float extension, record the oracle's `future.distinguish_nan_and_na` setting and test both candidate policies separately across construction, assignment, computed NaNs, reductions, and export. The existence of an option in pinned pandas is source evidence, not a substitute for behavior tests.
+
+The [remaining decisions](decisions.md) specify W16 and follow-up bounded-read, axis-cost, and integration experiments. These are scheduled extensions, not prerequisites for the first selection prototype.
 
 ## Instrumentation
 

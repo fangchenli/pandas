@@ -1,6 +1,6 @@
 # Python prototype design for the pandas runtime
 
-Date: 2026-11-12. Status: proposed implementation design. This document specifies the prototype; it does not claim that its code or performance results exist.
+Date: 2026-11-12. Status: design with the M0–M3 vertical slice implemented in [the prototype package](prototype/README.md). Later milestones remain proposals. Test and smoke-check results establish initial correctness, not a performance advantage.
 
 Build a standalone Python package inside this experiment, using NumPy and PyArrow for bulk operations. One API runs against three representation strategies: eager, compact, and tree. Start with selection, shared maps, eager arithmetic, and isolated mutation. Compare compact and tree strategies before committing to either architecture. Rust is reserved for a later, measured bottleneck. Design backend boundaries from the start and validate them with a narrow JAX adapter before expanding structural operations; NumPy and Arrow remain the first complete adapters.
 
@@ -9,6 +9,8 @@ The [review](review.md) explains the architectural risks. The [experimental plan
 The [unified logical type design](logical_types.md), informed by the now-verified PDEP-13 draft, specifies canonical type identity and operation/result-type binding. This is a unified type layer with a small initial type set, rather than separate backend dtype systems with common names.
 
 The [PDEP-16 review](missing_values.md) complements the type design with missing-value rules and a required 2D performance control. PDEP-16 remains an open, incomplete draft; it is not an accepted specification.
+
+The [remaining decisions](decisions.md) separate key semantics from elementwise comparison and custom logical types from compute backends. They schedule bounded reads, axis-cost sweeps, restricted grouping, and a pandas integration experiment after the initial implementation.
 
 ## The first complete experiment
 
@@ -39,7 +41,7 @@ short.materialize()  # same values; resolve pending structural access
 detached = short.compact()  # new frame, copied payloads, no source retention
 ```
 
-This is an API sketch. Constructors, exceptions, and output comparisons will be executable tests in the implementation. The first performance workloads are selection followed by narrow consumption, repeated consumption, and full consumption. Do not make a fast `take()` call the success criterion by itself.
+The opening example is covered by executable conformance tests. The broader API below also includes later structural milestones; see the package README for the implemented surface. The first performance workloads are selection followed by narrow consumption, repeated consumption, and full consumption. Do not make a fast `take()` call the success criterion by itself.
 
 ## Scope and compatibility
 

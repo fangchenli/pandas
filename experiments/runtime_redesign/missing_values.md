@@ -1,6 +1,6 @@
 # Missing-value semantics and PDEP-16
 
-Date: 2026-11-12. Status: research/design refinement; no runtime implementation or new benchmark results. This document complements the [logical type design](logical_types.md) and [prototype](prototype.md).
+Date: 2026-11-12. Status: research/design refinement; the initial scalar and operation rules are covered by prototype tests. Float and 2D experiments remain pending. This document complements the [logical type design](logical_types.md) and [prototype](prototype.md).
 
 PDEP-13 informs type identity and construction. PDEP-16 supplies a complementary missing-value direction. Our runtime needs both, while keeping semantic rules independent of storage, device, and representation strategy.
 

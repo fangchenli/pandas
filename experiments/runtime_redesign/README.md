@@ -1,6 +1,6 @@
 # Pandas runtime redesign research
 
-Research date: 2026-11-12. Status: initial review; no runtime implementation or performance results.
+Research date: 2026-11-12. Status: M0–M3 Python prototype implemented; semantic tests and workload smoke checks available. No architectural performance conclusion yet.
 
 The proposal merits a bounded experiment. Its strongest opportunity is reducing movement of heterogeneous payload columns across structural operations while preserving pandas behavior. The first decision is whether that benefit survives materialization, mutation, and interoperability costs, and exceeds a targeted deferred-take implementation.
 
@@ -13,7 +13,7 @@ The proposal merits a bounded experiment. Its strongest opportunity is reducing 
 - [Python prototype design](prototype.md): API, shared ownership model, eager/compact/tree strategies, backend contracts, an early JAX validation milestone, and implementation milestones.
 - [Unified logical types](logical_types.md): verified PDEP-13 comparison, type identity, operation/result-type rules, and backend-independent contracts.
 
-Start with the review, then the prototype design for the proposed implementation. Compact descriptors and a small tree will be compared early against a shared eager reference. The experimental plan describes the broader evaluation; no runtime implementation has been created yet.
+Start with the review, then the prototype design. The [runnable prototype](prototype/README.md) implements eager, compact, and tree strategies with NumPy/Arrow adapters. The [remaining decisions](decisions.md) record key semantics, custom-type boundaries, and follow-up experiments. The experimental plan describes the broader evaluation; the initial workload smoke checks do not establish a speedup.
 
 The [PDEP-16 review and missing-value contract](missing_values.md) adds operation-specific null rules, float-policy evidence, and 2D workload controls. It distinguishes the open draft from existing pandas behavior.
 

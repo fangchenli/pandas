@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pdruntime-experiment"
+version = "0.0.1"
+description = "Independent pandas representation experiment"
+requires-python = ">=3.11"
+dependencies = ["numpy", "pyarrow", "pandas"]
+
+[project.optional-dependencies]
+test = ["pytest", "hypothesis"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "--strict-markers"
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.isort]
+profile = "black"

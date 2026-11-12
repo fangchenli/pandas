@@ -211,6 +211,12 @@ Connects nullable semantics across types with preservation of 2D capability. Phy
 
 Supports operation-specific null rules and verifies that the pinned code includes `future.distinguish_nan_and_na`, default false. The release notes describe the opt-in floating NaN/NA distinction, integer rejection, and export consequences. These are source/documentation findings; no behavior suite was run for this review. Pin the option alongside dependency versions in future float experiments.
 
+### R33 GroupBy key semantics
+
+**Supporting.** pandas maintainers. [DataFrame.groupby](https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.groupby.html), served as 3.1.1. Parameter descriptions for missing keys, categorical observation, and grouping reviewed.
+
+Key matching needs rules separate from nullable elementwise equality. `dropna` controls whether missing keys form groups, while value-column reduction null handling is separate. Use explicit options in W16; this API reference does not specify a new runtime's hash implementation. The [remaining decisions](decisions.md) record the proposed semantic boundary. R16 covers custom type integration and R25 the interchange boundary.
+
 ## Further reading and source limitations
 
 The essential sources cover every named prior-art family in the proposal and add database late materialization, DuckDB encodings, and string-view layouts. Full proof review of Futhark/Repa and the complete Petersohn dissertation remains follow-up work. No numerical result in those sources is treated as a measurement of this runtime.

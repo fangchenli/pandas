@@ -1,6 +1,6 @@
 # Unified logical types for the prototype
 
-Date: 2026-11-12. Status: design refinement following review of PDEP-13; no runtime implementation yet. This document complements the [prototype design](prototype.md).
+Date: 2026-11-12. Status: design refinement following review of PDEP-13; the initial three-type rules are implemented in the prototype. This document complements the [prototype design](prototype.md).
 
 The prototype should have a unified logical type system from its first implementation, with only three initially implemented types. “Small set of types” must not mean “backend-specific type inference with common names.” Constructors, operations, representation changes, mutation, and exports should all use the same logical type objects and rules.
 
