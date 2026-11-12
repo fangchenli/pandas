@@ -18,6 +18,8 @@ The potential contribution is an engineering synthesis: durable representations 
 
 **Clarify two reference claims.** The inspected main revision does not contain the experimental deferred-take module. The branch provides code and tests, but this review has not reproduced its performance evidence. PDEP-13 is now verified from the [PR supplied by the user](https://github.com/pandas-dev/pandas/pull/58455): it is Will Ayd's draft, closed unmerged, rather than an accepted specification in main. The [logical type comparison](logical_types.md) records its source and the implications for this prototype.
 
+PDEP-16 adds a complementary constraint: consistent missing-value behavior should not implicitly sacrifice 2D numerical workloads. Its [dedicated review](missing_values.md) records the open draft and discussion, keeps float policy separate from storage validity, and adds W15 controls before any general runtime replacement claim.
+
 ## Specify what eager means
 
 Define a successful operation as fixing the result's shape, axes, dtype, validity, and logical values relative to an owned snapshot. Sorting, predicate evaluation, label lookup, join matching, validation, and result-type decisions finish during that operation. Only access to an already determined sequence is represented indirectly.

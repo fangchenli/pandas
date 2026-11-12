@@ -15,6 +15,8 @@ The proposal merits a bounded experiment. Its strongest opportunity is reducing 
 
 Start with the review, then the prototype design for the proposed implementation. Compact descriptors and a small tree will be compared early against a shared eager reference. The experimental plan describes the broader evaluation; no runtime implementation has been created yet.
 
+The [PDEP-16 review and missing-value contract](missing_values.md) adds operation-specific null rules, float-policy evidence, and 2D workload controls. It distinguishes the open draft from existing pandas behavior.
+
 ## Repository provenance
 
 | Item | Pinned revision |

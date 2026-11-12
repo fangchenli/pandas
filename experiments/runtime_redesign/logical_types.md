@@ -4,6 +4,8 @@ Date: 2026-11-12. Status: design refinement following review of PDEP-13; no runt
 
 The prototype should have a unified logical type system from its first implementation, with only three initially implemented types. “Small set of types” must not mean “backend-specific type inference with common names.” Constructors, operations, representation changes, mutation, and exports should all use the same logical type objects and rules.
 
+PDEP-16 is a complementary reference for missing-value behavior. The [missing-value review](missing_values.md) records its pinned source, incomplete/open status, and implications for operation signatures and 2D evaluation. Our physical null encodings remain backend-specific.
+
 ## PDEP-13 source and status
 
 Will Ayd's [PDEP-13 pull request](https://github.com/pandas-dev/pandas/pull/58455) was opened on 2024-04-27 and closed unmerged on 2025-04-21. The author said the work was inactive when closing it; closure should not be described as a formal rejection of its principles. The source header still says “Under discussion,” which is distinct from the PR's current state. [Closure comment](https://github.com/pandas-dev/pandas/pull/58455#issuecomment-2817496880).
@@ -167,5 +169,6 @@ Before representation benchmarks, require:
 8. Type metadata survives serialization independently of backend encoding.
 9. Experimental JAX operations preserve Int64/Boolean semantics and reject unavailable 64-bit support rather than narrowing; device and namespace do not enter type identity.
 10. Arrow validity remains native, while numerical adapters combine masks and structural presence without changing logical null behavior.
+11. Missing scalar reads expose the same `NA` singleton across adapters, scalar truth testing raises, and pandas conversion maps the singleton to/from `pd.NA`. Future Boolean operators must pass Kleene truth tables rather than reuse the addition validity rule.
 
 These tests are a small semantic system, not a requirement to implement every type in PDEP-13. Add one type family or promotion rule at a time, with its oracle and backend capability tests. The first implementation remains Python; this layer is small metadata and rule resolution, not a reason to introduce a Rust core.

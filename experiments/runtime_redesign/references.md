@@ -199,6 +199,18 @@ Native work can remain in flight after Python dispatch returns. Use an explicit 
 
 The documented default disables 64-bit array creation and can narrow requested types with a warning. Our adapter must require and verify exact Int64 support, preserve the user's configuration, and reject incompatible settings. Configuration belongs in capability checks and benchmark manifests, not logical dtype identity.
 
+### R31 PDEP-16 consistent missing values
+
+**Essential; incomplete draft.** Patrick Hoefler and Joris Van den Bossche. *PDEP-16: Consistent missing value handling (with a single NA scalar)*, revision 1, created March 2024. [PR 58988](https://github.com/pandas-dev/pandas/pull/58988), [pinned source](https://github.com/phofl/pandas/blob/d7dcbdb90d4d2e1658c34cff16dc99990aa6cdb0/web/pandas/pdeps/0016-consistent-missing-values.md). Open and unmerged when inspected; header says Under discussion. Full 107-line source matched to the diff; substantive bodies of the 28 returned discussion entries reviewed.
+
+Connects nullable semantics across types with preservation of 2D capability. Physical null encoding is left to implementations. The [dedicated review](missing_values.md) separates draft policy, discussion positions, existing pandas source, and our design decisions. Detailed semantic/compatibility sections are placeholders, so this cannot serve as an executable specification by itself.
+
+### R32 Pinned pandas null semantics and NaN option
+
+**Essential.** pandas source at `f1cc1a1bc979b83e641facf72ec6526593d61420`: [missing-data guide](../../doc/source/user_guide/missing_data.rst), [Boolean guide](../../doc/source/user_guide/boolean.rst), [3.0 release notes](../../doc/source/whatsnew/v3.0.0.rst), [configuration](../../pandas/core/config_init.py), and [FloatingArray](../../pandas/core/arrays/floating.py). Relevant scalar, filtering, Kleene, and NaN-option sections read.
+
+Supports operation-specific null rules and verifies that the pinned code includes `future.distinguish_nan_and_na`, default false. The release notes describe the opt-in floating NaN/NA distinction, integer rejection, and export consequences. These are source/documentation findings; no behavior suite was run for this review. Pin the option alongside dependency versions in future float experiments.
+
 ## Further reading and source limitations
 
 The essential sources cover every named prior-art family in the proposal and add database late materialization, DuckDB encodings, and string-view layouts. Full proof review of Futhark/Repa and the complete Petersohn dissertation remains follow-up work. No numerical result in those sources is treated as a measurement of this runtime.

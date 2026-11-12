@@ -8,6 +8,8 @@ The [review](review.md) explains the architectural risks. The [experimental plan
 
 The [unified logical type design](logical_types.md), informed by the now-verified PDEP-13 draft, specifies canonical type identity and operation/result-type binding. This is a unified type layer with a small initial type set, rather than separate backend dtype systems with common names.
 
+The [PDEP-16 review](missing_values.md) complements the type design with missing-value rules and a required 2D performance control. PDEP-16 remains an open, incomplete draft; it is not an accepted specification.
+
 ## The first complete experiment
 
 The first usable milestone should support this entire sequence under all three strategies:
@@ -55,11 +57,11 @@ The first release of the experiment is a research API, not a pandas subclass or 
 | Structural methods | Stable single-key sort, unique-source reindex, same-schema concat, limited equijoin | General pandas merge/reindex options |
 | Interoperability | Explicit NumPy/Arrow/pandas conversion and simple serialization | General automatic protocol integration |
 
-All logical types admit a missing value, denoted `NA`. Missingness is not a backend property. NumPy uses a separate boolean validity array; Arrow uses its validity representation. A scalar read returns a Python scalar or the prototype's `NA` singleton. Reject floats, object values, and unsupported coercions at ingress in the first milestone. This avoids silently deciding the unresolved NaN/type-promotion questions while still testing heterogeneous storage and missing-aware composition.
+All logical types admit a missing value, denoted `NA`. Missingness is not a backend property. NumPy uses a separate boolean validity array; Arrow uses its validity representation. A scalar read returns a Python scalar or the prototype's `NA` singleton; `bool(NA)` raises `TypeError`. pandas adapters translate the singleton to and from `pd.NA`. Reject floats, object values, and unsupported coercions at ingress in the first milestone. This avoids silently deciding the unresolved NaN/type-promotion questions while still testing heterogeneous storage and missing-aware composition.
 
 Use pandas `Int64`, `boolean`, and `string` with `pd.NA` as the initial semantic oracle. Storage is explicit in the prototype and does not change its logical dtype. Canonical dtype objects contain only semantic identity; backend and encoding remain physical metadata. There is no automatic promotion: incompatible computation or assignment into an existing column raises before changing the object. Whole-column replacement may install a different supported logical dtype. Int64 arithmetic wraps modulo 2^64 and interprets the result as signed; out-of-range input scalars and assignment values raise. Scalar booleans are not accepted as integer positions or integer assignment values.
 
-Integer addition and comparisons propagate missingness. String equality is exact, case-sensitive, and propagates missingness. Filtering treats missing boolean entries as false. `sum(skipna=True, min_count=0)` returns zero for an empty/all-missing input; insufficient valid entries or any missing value with `skipna=False` returns `NA`. The integer accumulator follows the wrapping contract.
+Integer addition and comparisons propagate missingness. String equality is exact, case-sensitive, and propagates missingness. Filtering treats missing boolean entries as false. `sum(skipna=True, min_count=0)` returns zero for an empty/all-missing input; insufficient valid entries or any missing value with `skipna=False` returns `NA`. The integer accumulator follows the wrapping contract. These rules are operation-specific: future Boolean AND/OR must use Kleene logic, not unconditional validity intersection. Boolean operators remain a later extension, with truth tables recorded in the PDEP-16 review.
 
 Adapters must pass reduction options explicitly: Arrow's documented `sum` default uses `min_count=1`, whereas this API chooses zero. Its unchecked `add` documents wrapping overflow; NumPy documents modular integer summation. These are candidate native implementations, subject to conformance tests at pinned versions. [Arrow add](https://arrow.apache.org/docs/python/generated/pyarrow.compute.add.html), [Arrow sum](https://arrow.apache.org/docs/python/generated/pyarrow.compute.sum.html), [NumPy sum](https://numpy.org/doc/stable/reference/generated/numpy.sum.html).
 
@@ -92,7 +94,7 @@ Objects from different runtimes are rejected by binary operations unless explici
 
 ### Physical storage
 
-`Storage` is an internal immutable view of a backend value: logical dtype, length, backend, device, physical encoding, and references sufficient to keep its buffers alive. A NumPy storage object has a one-dimensional typed values array and optional validity; Arrow storage has an Array or ChunkedArray of a supported type. Chunk layout belongs to storage. An experimental JAX storage object carries numeric values and optional boolean validity on the same device; it need not expose a host buffer or writable memory.
+`Storage` is an internal immutable view of a backend value: logical dtype, length, backend, device, physical encoding, and references sufficient to keep its buffers alive. A NumPy storage object has a one-dimensional typed values array and optional validity; Arrow storage has an Array or ChunkedArray of a supported type. Chunk layout belongs to storage. Multiple column views may retain one physical allocation; one logical cell per column does not require one owner per column. Grouped 2D execution remains an evaluation question, not an initial implementation requirement. An experimental JAX storage object carries numeric values and optional boolean validity on the same device; it need not expose a host buffer or writable memory.
 
 Physical storage may be strided or chunked. It must not contain a private structural selection node. Do not expose its writable buffers through the public API.
 
@@ -395,7 +397,7 @@ Property tests generate valid maps and mutation traces; compare all strategies a
 | M3 complete vertical slice | Mixed Frame/Series, eager addition/comparison/sum, column detach/replacement | Opening example and ownership/mutation tests pass in every strategy; W02, W05–W09 runnable for supported types |
 | M3a backend boundary validation | Optional JAX Int64/Boolean adapter, map adapter, explicit devices and completion | Gather/add/sum/assignment agree across strategies; no hidden host conversion; dtype/null/alias tests pass |
 | M4 structural workloads | Axes, stable sort, missing reindex, segments, limited join | End-to-end W01, W03, W04, W10, W14 within declared scope |
-| M5 evaluation and next decision | Import-to-export and resident-data results, ablations, memory/lifetime report | Quantify strategy crossovers and decide what, if anything, needs native code |
+| M5 evaluation and next decision | Import-to-export and resident-data results, ablations, memory/lifetime report | Quantify strategy crossovers and decide what, if anything, needs native code; include W15 before any general replacement claim |
 
 Begin measurements in M2. M3 is the first complete prototype. M3a validates the backend boundary before M4 broadens structural operations; JAX is an optional dependency, but this validation is part of the research plan. M4 is not a prerequisite for the initial representation measurements. Add float64 and Arrow string-view storage as separately identified treatments after their semantic and adapter tests are defined.
 
