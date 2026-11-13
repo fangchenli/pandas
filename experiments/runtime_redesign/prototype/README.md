@@ -31,8 +31,8 @@ assert df.column("price").to_list() == [10, 20, 30]
 
 - Nullable Int64, Boolean, and Arrow UTF-8; canonical type identity, scalar checks, explicit result binding, wrapping integer addition/sum.
 - Owned ingress, negative positional indexing, slices, missing-aware internal maps, filtering, constants through `Runtime.full`, composition, and subset/scalar reads.
-- Flat integer/string axes, shared maps across columns, Series alignment on equal or unique compatible axes, projection, and detached pandas export.
-- Addition, equality, integer comparison/sum, mixed CPU NumPy/Arrow numeric dispatch, scalar/vector assignment, and column replacement.
+- Flat integer/string axes, shared maps across columns, Series alignment on equal or unique compatible axes, projection, and detached pandas export (Arrow strings are wrapped as `ArrowStringArray`, not boxed).
+- Addition, equality, integer comparison/sum, mixed CPU NumPy/Arrow numeric dispatch, scalar/vector assignment, and column replacement. Scalar operands broadcast natively instead of materializing a constant column. `Frame.replace_column` aligns a Series on labels, as pandas column assignment does; an Array is positional.
 - Cell-based snapshot isolation, synchronized materialization with retry after failure, explicit compaction, native-buffer reports, and optional event counters.
 - Detached NumPy `(values, validity)` and Arrow exports, explicit CPU backend conversion, correctness-checked W02 and W05–W09 runners.
 
@@ -42,7 +42,7 @@ Public entry points are the handles and factory functions exported from `pdrunti
 
 JAX, GPU execution, general custom dtype registration, key kernels, joins, sorting, public reindexing, concatenation/segments, Float64, Boolean AND/OR, and serialization remain later milestones. The package layout combines the initial adapters in `backends.py` and strategy logic in `execution.py`; split modules when another adapter warrants it.
 
-Ingress validates Python iterables element by element; native input arrays and selection/computation use bulk kernels. The first NumPy ingress path shares Arrow's typed input validation before copying into NumPy-owned storage. Arrow ingress, compaction, and detached Arrow export use an IPC copy boundary to guarantee independent ownership. This is deliberately conservative and can be expensive. It is measured identically across strategies; it is not evidence about an optimized ownership path.
+Ingress validates Python iterables element by element; native input arrays and selection/computation use bulk kernels. The first NumPy ingress path shares Arrow's typed input validation before copying into NumPy-owned storage. Arrow ingress, compaction, and detached Arrow export use an IPC copy boundary to guarantee independent ownership. This is deliberately conservative; a pilot measurement found it runs at roughly memcpy speed and is 3–7x faster than an identity `take` copy. Gather results (selection, Arrow replacement) are already freshly allocated and are not copied again. It is measured identically across strategies; it is not evidence about an optimized ownership path.
 
 Copy events report logical buffer-byte estimates, not exact memory traffic through IPC or native allocation counts. Memory reports cover known underlying buffer owners and map arrays; they exclude allocator overhead, Python metadata, and some logical-size details. Frame reports list axis bytes separately. Peak RSS and device memory measurements are future work.
 
@@ -50,9 +50,9 @@ The supplied pilot runner compares representation strategies with identical adap
 
 ## Validation record
 
-The initial run passed 117 pytest cases, including generated cases, all repository pre-commit checks, and editable installation. At 10,000 rows and four columns, 108 timing runs and 36 separate diagnostic runs passed value checks. The timing run was performed after the test process finished.
+The current suite has 132 pytest cases. The initial run passed 117 pytest cases, including generated cases, all repository pre-commit checks, and editable installation. At 10,000 rows and four columns, 108 timing runs and 36 separate diagnostic runs passed value checks. The timing run was performed after the test process finished.
 
-See [environment and source fingerprint](results/environment.json), [diagnostic summary](results/smoke_summary.json), [raw pilot observations](results/pilot_observations.jsonl), and [tested dependency versions](requirements-tested.txt). These records use the installed pandas 3.1.1 wheel as the semantic oracle, not a build of pinned pandas main. They do not establish an architectural performance advantage.
+See [environment and source fingerprint](results/environment.json), [diagnostic summary](results/smoke_summary.json), [raw pilot observations](results/pilot_observations.jsonl), and [tested dependency versions](requirements-tested.txt). These records use the installed pandas 3.1.1 wheel as the semantic oracle, not a build of pinned pandas main. They do not establish an architectural performance advantage. They predate the scalar-broadcast, filter, column-alignment, and export fixes, so their source fingerprint no longer matches `src/`.
 
 ## Follow-up experiments
 

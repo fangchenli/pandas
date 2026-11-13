@@ -99,11 +99,11 @@ def test_missing_selection_and_empty_source(runtime, backend):
     row_map = runtime.maps.positions(
         3, [2, 999, 1], [True, False, True], negative=False
     )
-    result = array.select_map(row_map).take([2, 1, 0, 1])
+    result = array._select_map(row_map).take([2, 1, 0, 1])
     assert plain(result) == [None, None, 3, None]
     empty = runtime.array([], dtype="int64", backend=backend)
     absent = runtime.maps.positions(0, [999, -200], [False, False], negative=False)
-    assert plain(empty.select_map(absent)) == [None, None]
+    assert plain(empty._select_map(absent)) == [None, None]
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -310,7 +310,7 @@ def test_filter_constants_and_dtype_rules(runtime, backend):
     assert plain(array.filter([True, None, False])) == [1]
     full = runtime.full(3, 7, dtype="int64", backend=backend)
     row_map = runtime.maps.positions(3, [2, 999], [True, False], negative=False)
-    assert plain(full.select_map(row_map)) == [7, None]
+    assert plain(full._select_map(row_map)) == [7, None]
     assert hash(array.dtype) == hash(array.take([0]).to_backend("arrow").dtype)
     with pytest.raises(TypeError):
         bool(NA)

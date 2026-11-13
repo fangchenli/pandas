@@ -1,10 +1,24 @@
-"""Owned flat pandas axes; label matching does not touch payload storage."""
+"""Owned flat pandas axes; label matching does not touch payload storage.
+
+pandas Index objects are immutable, so handles share them internally. Public
+accessors return deep copies so callers cannot reach the underlying arrays.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 
+from pdruntime.maps import Affine, Identity, Positions
 
-def axis(values, size):
+if TYPE_CHECKING:
+    from pdruntime.maps import NumpyMaps, RowMap
+
+
+def axis(values: Iterable[object] | None, size: int) -> pd.Index:
     if values is None:
         return pd.RangeIndex(size)
     result = pd.Index(values, copy=True)
@@ -17,9 +31,26 @@ def axis(values, size):
     return result
 
 
-def align(left, right, maps):
+def take(index: pd.Index, row_map: RowMap, maps: NumpyMaps) -> pd.Index:
+    """Labels for a public selection, which never introduces missing rows."""
+    if row_map.present is not None:
+        raise ValueError("public label selection requires present positions")
+    match row_map:
+        case Identity():
+            return index
+        case Affine():
+            return index[maps.slice_object(row_map)]
+        case Positions(positions=positions):
+            return index.take(positions)
+    raise TypeError(f"not a row map: {row_map!r}")
+
+
+def align(
+    left: pd.Index, right: pd.Index, maps: NumpyMaps
+) -> tuple[pd.Index, RowMap, RowMap]:
+    """Outer-join labels as pandas binary operations do; return both row maps."""
     if left.equals(right):
-        return left.copy(deep=True), maps.identity(len(left)), maps.identity(len(right))
+        return left, maps.identity(len(left)), maps.identity(len(right))
     if not left.is_unique or not right.is_unique:
         raise ValueError("unequal axes must be unique for alignment")
     if len(left) and len(right) and left.inferred_type != right.inferred_type:
@@ -32,3 +63,13 @@ def align(left, right, maps):
         maps.positions(len(left), li, li >= 0, negative=False),
         maps.positions(len(right), ri, ri >= 0, negative=False),
     )
+
+
+def reindexer(source: pd.Index, target: pd.Index, maps: NumpyMaps) -> RowMap:
+    """Map ``target`` labels onto ``source`` positions; absent labels are missing."""
+    if source.equals(target):
+        return maps.identity(len(source))
+    if not source.is_unique:
+        raise ValueError("cannot reindex from an axis with duplicate labels")
+    indexer = source.get_indexer(target)
+    return maps.positions(len(source), indexer, indexer >= 0, negative=False)

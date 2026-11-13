@@ -1,31 +1,50 @@
 """Validated row maps. NumPy is the first internal map adapter."""
 
+from __future__ import annotations
+
+from collections.abc import Sequence
 from dataclasses import dataclass
-from numbers import Integral
+from typing import ClassVar, TypeAlias
 
 import numpy as np
+import numpy.typing as npt
+
+from pdruntime.types import is_integer
+
+IntArray: TypeAlias = npt.NDArray[np.int64]
+BoolArray: TypeAlias = npt.NDArray[np.bool_]
 
 
-def owned(array, dtype=None):
+def owned(array: npt.ArrayLike, dtype: npt.DTypeLike = None) -> np.ndarray:
+    """Copy into a runtime-owned, read-only array."""
     result = np.array(array, dtype=dtype, copy=True)
     result.flags.writeable = False
     return result
 
 
-def length(value):
-    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+def frozen(array: np.ndarray) -> np.ndarray:
+    """Mark a freshly allocated array read-only without copying it."""
+    array.flags.writeable = False
+    return array
+
+
+def check_length(value: object) -> int:
+    if not is_integer(value):
         raise TypeError("length must be an integer")
     if value < 0:
         raise ValueError("length must be nonnegative")
     return int(value)
 
 
+# Maps compare by identity: sharing is keyed on the map object, never on equal
+# contents, because equal positions need not denote the same row ordering.
 @dataclass(frozen=True, eq=False)
 class Identity:
     source_length: int
+    present: ClassVar[None] = None
 
     @property
-    def output_length(self):
+    def output_length(self) -> int:
         return self.source_length
 
 
@@ -35,48 +54,54 @@ class Affine:
     start: int
     step: int
     output_length: int
+    present: ClassVar[None] = None
 
 
 @dataclass(frozen=True, eq=False)
 class Positions:
+    """Dense positions; ``present`` marks introduced missing rows when not None."""
+
     source_length: int
-    positions: np.ndarray
-    present: np.ndarray | None = None
+    positions: IntArray
+    present: BoolArray | None = None
 
     @property
-    def output_length(self):
+    def output_length(self) -> int:
         return len(self.positions)
+
+
+RowMap: TypeAlias = Identity | Affine | Positions
 
 
 class NumpyMaps:
     namespace = "numpy"
     device = "cpu"
 
-    def identity(self, n):
-        return Identity(length(n))
+    def identity(self, n: int) -> Identity:
+        return Identity(check_length(n))
 
-    def positions(self, n, indices, present=None, *, negative=True):
-        n = length(n)
+    def positions(
+        self,
+        n: int,
+        indices: npt.ArrayLike,
+        present: npt.ArrayLike | None = None,
+        *,
+        negative: bool = True,
+    ) -> Positions:
+        n = check_length(n)
         # Reject Python mixtures such as [True, 1] before NumPy erases bool identity.
-        if isinstance(indices, (list, tuple)):
-            if any(isinstance(x, (bool, np.bool_)) for x in indices):
-                raise TypeError("boolean values are not positions")
+        if isinstance(indices, (list, tuple)) and any(
+            isinstance(x, (bool, np.bool_)) for x in indices
+        ):
+            raise TypeError("boolean values are not positions")
         a = np.asarray(indices)
         if a.ndim != 1:
             raise ValueError("positions must be one-dimensional")
+        if isinstance(indices, (list, tuple)) and not len(a):
+            a = a.astype(np.int64)  # np.asarray([]) is float64
         if a.dtype.kind not in "iu":
-            if len(a) or not isinstance(indices, (list, tuple)):
-                raise TypeError("positions must be integers")
-        if present is None:
-            valid = np.ones(len(a), dtype=bool)
-        else:
-            valid = np.asarray(present)
-            if isinstance(present, (list, tuple)) and not present:
-                valid = np.empty(0, dtype=bool)
-            if valid.dtype.kind != "b":
-                raise TypeError("map presence must be boolean")
-            if valid.shape != a.shape:
-                raise ValueError("map presence length mismatch")
+            raise TypeError("positions must be integers")
+        valid = self._presence(present, len(a))
         selected = a[valid]
         lower = -n if negative else 0
         if np.any(selected < lower) or np.any(selected >= n):
@@ -85,85 +110,95 @@ class NumpyMaps:
         result[valid] = selected.astype(np.int64)
         if negative:
             result[result < 0] += n
-        return Positions(n, owned(result), None if valid.all() else owned(valid))
+        return Positions(n, frozen(result), None if valid.all() else owned(valid))
 
-    def slice(self, n, value):
-        n = length(n)
+    @staticmethod
+    def _presence(present: npt.ArrayLike | None, size: int) -> BoolArray:
+        if present is None:
+            return np.ones(size, dtype=bool)
+        if isinstance(present, Sequence) and not present:
+            valid = np.empty(0, dtype=bool)
+        else:
+            valid = np.asarray(present)
+        if valid.dtype.kind != "b":
+            raise TypeError("map presence must be boolean")
+        if valid.shape != (size,):
+            raise ValueError("map presence length mismatch")
+        return valid
+
+    def slice(self, n: int, value: slice) -> Identity | Affine:
+        n = check_length(n)
         if not isinstance(value, slice):
             raise TypeError("expected a slice")
-        for component in (value.start, value.stop, value.step):
-            if component is not None and (
-                isinstance(component, (bool, np.bool_))
-                or not isinstance(component, Integral)
-            ):
-                raise TypeError("slice components must be integers")
+        components = (value.start, value.stop, value.step)
+        if any(c is not None and not is_integer(c) for c in components):
+            raise TypeError("slice components must be integers")
         start, stop, step = value.indices(n)
         size = len(range(start, stop, step))
         if start == 0 and step == 1 and size == n:
             return Identity(n)
         return Affine(n, start, step, size)
 
-    def dense(self, row_map):
-        if isinstance(row_map, Positions):
-            return row_map.positions, row_map.present
-        if isinstance(row_map, Identity):
-            return np.arange(row_map.output_length, dtype=np.int64), None
-        return (
-            row_map.start
-            + row_map.step * np.arange(row_map.output_length, dtype=np.int64),
-            None,
-        )
+    def dense(self, row_map: RowMap) -> tuple[IntArray, BoolArray | None]:
+        match row_map:
+            case Positions(positions=positions, present=present):
+                return positions, present
+            case Identity(output_length=size):
+                return np.arange(size, dtype=np.int64), None
+            case Affine(start=start, step=step, output_length=size):
+                return start + step * np.arange(size, dtype=np.int64), None
+        raise TypeError(f"not a row map: {row_map!r}")
 
-    def at(self, row_map, index):
-        if isinstance(row_map, Identity):
-            return index
-        if isinstance(row_map, Affine):
-            return row_map.start + row_map.step * index
-        if row_map.present is not None and not row_map.present[index]:
-            return None
-        return int(row_map.positions[index])
+    def at(self, row_map: RowMap, index: int) -> int | None:
+        """Source position for one output position, or None if it is missing."""
+        match row_map:
+            case Identity():
+                return index
+            case Affine(start=start, step=step):
+                return start + step * index
+            case Positions(positions=positions, present=present):
+                if present is not None and not present[index]:
+                    return None
+                return int(positions[index])
+        raise TypeError(f"not a row map: {row_map!r}")
 
-    def compose(self, inner, outer, context=None):
+    def compose(self, inner: RowMap, outer: RowMap) -> RowMap:
+        """The map equivalent to ``inner[outer]``; missing entries propagate."""
         if outer.source_length != inner.output_length:
             raise ValueError("map coordinate lengths differ")
-        if isinstance(inner, Identity):
-            return outer
-        if isinstance(outer, Identity):
-            return inner
-        key = (inner, outer)
-        if context is not None and key in context:
-            return context[key]
-        if isinstance(inner, Affine) and isinstance(outer, Affine):
-            result = Affine(
-                inner.source_length,
-                inner.start + inner.step * outer.start,
-                inner.step * outer.step,
-                outer.output_length,
-            )
+        match inner, outer:
+            case Identity(), _:
+                return outer
+            case _, Identity():
+                return inner
+            case Affine(), Affine():
+                return Affine(
+                    inner.source_length,
+                    inner.start + inner.step * outer.start,
+                    inner.step * outer.step,
+                    outer.output_length,
+                )
+        indices, present = self.dense(outer)
+        valid = np.ones(len(indices), dtype=bool) if present is None else present.copy()
+        slots = np.flatnonzero(valid)
+        parents = indices[slots]
+        positions = np.zeros(len(indices), dtype=np.int64)
+        if isinstance(inner, Affine):
+            positions[slots] = inner.start + inner.step * parents
         else:
-            indices, present = self.dense(outer)
-            valid = (
-                np.ones(len(indices), dtype=bool) if present is None else present.copy()
-            )
-            positions = np.zeros(len(indices), dtype=np.int64)
-            if isinstance(inner, Affine):
-                positions[valid] = inner.start + inner.step * indices[valid]
-            else:
-                slots = np.flatnonzero(valid)
-                parent_indices = indices[slots]
-                if inner.present is not None:
-                    valid[slots] &= inner.present[parent_indices]
-                positions[valid] = inner.positions[indices[valid]]
-            result = Positions(
-                inner.source_length,
-                owned(positions),
-                None if valid.all() else owned(valid),
-            )
-        if context is not None:
-            context[key] = result
-        return result
+            if inner.present is not None:
+                # Test presence before dereferencing: absent slots hold no position.
+                parent_present = inner.present[parents]
+                valid[slots] = parent_present
+                slots, parents = slots[parent_present], parents[parent_present]
+            positions[slots] = inner.positions[parents]
+        return Positions(
+            inner.source_length,
+            frozen(positions),
+            None if valid.all() else frozen(valid),
+        )
 
-    def slice_object(self, row_map):
+    def slice_object(self, row_map: Affine) -> slice:
         stop = row_map.start + row_map.step * row_map.output_length
         return slice(
             row_map.start,

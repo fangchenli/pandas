@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import pyarrow as pa
 import pytest
 
@@ -92,3 +93,77 @@ def test_string_null_exports_and_snapshots(strategy):
     assert selected.to_list() == [NA, "a", "a"]
     array.set_at(0, "changed")
     assert selected.to_list() == [NA, "a", "a"]
+
+
+@pytest.mark.parametrize("strategy", ["eager", "compact", "tree"])
+@pytest.mark.parametrize("backend", ["numpy", "arrow"])
+def test_scalar_operands_broadcast_without_constant_arrays(strategy, backend):
+    runtime = Runtime(strategy=strategy, metrics=True)
+    array = runtime.array([1, None, 3], dtype="int64", backend=backend)
+    runtime.metrics.clear()
+    assert array.add(1).to_list() == [2, NA, 4]
+    assert array.lt(2).to_list() == [True, NA, False]
+    assert runtime.metrics.count("materialization") == 0
+    assert array.add(NA).to_list() == [NA, NA, NA]
+    assert array.eq(NA).dtype == array.eq(1).dtype
+    strings = runtime.array(["a", None], dtype="utf8", backend="arrow")
+    assert strings.eq("a").to_list() == [True, NA]
+    assert strings.eq(NA).to_list() == [NA, NA]
+
+
+@pytest.mark.parametrize("backend", ["numpy", "arrow"])
+def test_filter_is_not_an_export(backend):
+    runtime = Runtime(metrics=True)
+    array = runtime.array([1, 2, 3], dtype="int64", backend=backend)
+    predicate = array.lt(3)
+    runtime.metrics.clear()
+    assert array.filter(predicate).to_list() == [1, 2]
+    assert runtime.metrics.count("export_copy") == 0
+
+
+@pytest.mark.parametrize("strategy", ["eager", "compact", "tree"])
+def test_replace_column_aligns_series_labels(strategy):
+    runtime = Runtime(strategy=strategy)
+    values = runtime.array([1, 2, 3], dtype="int64", backend="numpy")
+    frame = runtime.frame({"v": values, "w": values}, index=["a", "b", "c"])
+    oracle = frame.to_pandas()
+
+    reversed_series = frame.take([2, 1, 0]).column("v")
+    frame.replace_column("v", reversed_series)
+    oracle["v"] = oracle["v"].iloc[[2, 1, 0]]
+    assert frame.column("v").to_list() == [1, 2, 3]
+
+    partial = frame.take([2, 0]).column("w")  # labels c, a
+    frame.replace_column("w", partial)
+    oracle["w"] = oracle["w"].iloc[[2, 0]]
+    assert frame.column("w").to_list() == [1, NA, 3]
+    pd.testing.assert_frame_equal(frame.to_pandas(), oracle)
+
+    frame.replace_column("v", runtime.array([7, 8, 9], dtype="int64", backend="arrow"))
+    assert frame.column("v").to_list() == [7, 8, 9]  # Arrays stay positional
+
+    duplicated = runtime.frame({"v": values}, index=["a", "a", "b"]).column("v")
+    with pytest.raises(ValueError, match="duplicate"):
+        frame.replace_column("v", duplicated)
+
+
+@pytest.mark.parametrize("strategy", ["eager", "compact", "tree"])
+def test_string_pandas_export_wraps_arrow(strategy):
+    runtime = Runtime(strategy=strategy)
+    array = runtime.array(["a", None, "ccc"], dtype="utf8", backend="arrow")
+    frame = runtime.frame({"s": array}, index=[10, 20, 30])
+    actual = frame.take([2, 1, 0]).to_pandas()["s"]
+    expected = pd.Series(["ccc", None, "a"], index=[30, 20, 10], dtype=pd.StringDtype())
+    pd.testing.assert_series_equal(actual, expected, check_names=False)
+    empty = runtime.frame({"s": array}).take([]).to_pandas()
+    assert empty["s"].dtype == pd.StringDtype()
+
+
+def test_missing_singleton_survives_copy_and_pickle():
+    import copy
+    import pickle
+
+    assert copy.copy(NA) is NA
+    assert copy.deepcopy([NA])[0] is NA
+    assert pickle.loads(pickle.dumps(NA)) is NA
+    assert type(NA)() is NA
