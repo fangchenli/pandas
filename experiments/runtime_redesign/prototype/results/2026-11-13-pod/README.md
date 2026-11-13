@@ -1,5 +1,7 @@
 # Pod evaluation, 2026-11-13
 
+**Superseded** by [pod evaluation 2](../2026-11-13-pod-2/README.md). This run's prototype figures include two prototype bugs, fixed in `414a04649b`: an Arrow ingress copy that kept a doubled buffer alive, and a slow map composition path. Its pandas figures and its W04 finding stand. Kept as the record behind the first version of the report.
+
 Prototype strategies against released pandas and the deferred-take pandas PR
 (pandas-dev/pandas#72023), from `benchmarks/compare_pandas.sh`.
 
