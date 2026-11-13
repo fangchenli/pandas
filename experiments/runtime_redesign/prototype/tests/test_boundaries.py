@@ -318,3 +318,13 @@ def test_strings_use_large_offsets():
     array = runtime.array(pa.array(["a", "bb"]), dtype="utf8", backend="arrow")
     assert array.to_arrow().type == pa.large_string()
     assert array.take([1, 0]).eq("bb").to_list() == [True, False]
+
+
+def test_arrow_ingress_copy_allocates_only_what_it_keeps():
+    # 40,000 strings of 50 bytes: 2 MB of characters and 320 KB of offsets.
+    # A growing IPC sink doubled its capacity, and the copy kept all of it.
+    values = pa.array(["x" * 50] * 40_000, type=pa.large_string())
+    before = pa.total_allocated_bytes()
+    array = Runtime().array(values, dtype="utf8")
+    held = pa.total_allocated_bytes() - before
+    assert array.to_arrow().nbytes <= held < 1.1 * values.nbytes

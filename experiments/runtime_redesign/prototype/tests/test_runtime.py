@@ -432,3 +432,21 @@ def test_affine_composition():
     result = maps.compose(inner, outer)
     assert isinstance(result, Affine)
     assert maps.dense(result)[0].tolist() == list(range(10))[::-2][1::2]
+
+
+@settings(max_examples=60, deadline=None)
+@given(
+    st.lists(st.integers(0, 9), max_size=12),
+    st.one_of(st.none(), st.integers(-14, 14)),
+    st.one_of(st.none(), st.integers(-14, 14)),
+    st.integers(-3, 3).filter(bool),
+)
+def test_positions_then_slice_composition(first, start, stop, step):
+    # Positions without missing rows compose with a slice as a strided view.
+    maps = NumpyMaps()
+    inner = maps.positions(10, first, negative=False)
+    outer = maps.slice(len(first), slice(start, stop, step))
+    composed = maps.compose(inner, outer)
+    expected = first[start:stop:step]
+    assert maps.dense(composed)[0].tolist() == expected
+    assert composed.output_length == len(expected)

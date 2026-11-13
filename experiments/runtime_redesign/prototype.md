@@ -1,5 +1,7 @@
 # Python prototype design for the pandas runtime
 
+Status update, 2026-11-13: superseded for planning by the [M5 decision report](report.md), which records what was built, measured and decided. This document is kept as written for the record.
+
 Date: 2026-11-12. Status: design with the M0–M3 vertical slice implemented in [the prototype package](prototype/README.md). Later milestones remain proposals. Test and smoke-check results establish initial correctness, not a performance advantage.
 
 Build a standalone Python package inside this experiment, using NumPy and PyArrow for bulk operations. One API runs against three representation strategies: eager, compact, and tree. Start with selection, shared maps, eager arithmetic, and isolated mutation. Compare compact and tree strategies before committing to either architecture. Rust is reserved for a later, measured bottleneck. Design backend boundaries from the start and validate them with a narrow JAX adapter before expanding structural operations; NumPy and Arrow remain the first complete adapters.

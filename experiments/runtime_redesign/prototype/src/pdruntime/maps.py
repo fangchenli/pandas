@@ -178,6 +178,14 @@ class NumpyMaps:
                     inner.step * outer.step,
                     outer.output_length,
                 )
+            case Positions(present=None), Affine():
+                # a strided view of the inner positions: no gather, no copy
+                view = inner.positions[self.slice_object(outer)]
+                return Positions(inner.source_length, frozen(view))
+            case Positions(present=None), Positions(present=None):
+                # nothing missing on either side: one gather
+                gathered = inner.positions[outer.positions]
+                return Positions(inner.source_length, frozen(gathered))
         indices, present = self.dense(outer)
         valid = np.ones(len(indices), dtype=bool) if present is None else present.copy()
         slots = np.flatnonzero(valid)

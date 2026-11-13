@@ -108,10 +108,19 @@ def as_chunks(array: pa.Array | pa.ChunkedArray) -> pa.ChunkedArray:
 def arrow_copy(array: pa.Array | pa.ChunkedArray) -> pa.ChunkedArray:
     """IPC is a verifiable detached-copy boundary that runs at memcpy speed."""
     table = pa.table({"values": as_chunks(array)})
-    sink = pa.BufferOutputStream()
+    # The result's buffers are slices of the stream buffer, which keeps all of
+    # it alive. A growing BufferOutputStream doubles its capacity (40 MB of
+    # strings held 64 MB), so measure the stream first and allocate it exactly.
+    size = pa.MockOutputStream()
+    _write_stream(size, table)
+    buffer = pa.allocate_buffer(size.size())
+    _write_stream(pa.FixedSizeBufferWriter(buffer), table)
+    return pa.ipc.open_stream(buffer).read_all().column(0)
+
+
+def _write_stream(sink: pa.NativeFile, table: pa.Table) -> None:
     with pa.ipc.new_stream(sink, table.schema) as writer:
         writer.write_table(table)
-    return pa.ipc.open_stream(sink.getvalue()).read_all().column(0)
 
 
 def arrow_input(values, dtype: LogicalType, validity=None) -> pa.ChunkedArray:

@@ -1,5 +1,7 @@
 # Remaining architecture decisions and experiments
 
+Status update, 2026-11-13: superseded for planning by the [M5 decision report](report.md), which records what was built, measured and decided. This document is kept as written for the record.
+
 Date: 2026-11-12. These decisions complement the representation, backend, and missing-value designs. Implement M0–M3 first, then use the following experiments to test boundaries before broadening compatibility.
 
 ## Key semantics belong to logical operations

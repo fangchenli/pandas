@@ -1,5 +1,7 @@
 # Review of the pandas runtime redesign
 
+Status update, 2026-11-13: superseded for planning by the [M5 decision report](report.md), which records what was built, measured and decided. This document is kept as written for the record.
+
 Date: 2026-11-12. Assessment: proceed with a constrained research prototype, with an explicit semantic contract and controlled baselines. There is not yet evidence that a new runtime is simpler or faster than an incremental change to pandas.
 
 ## What is compelling

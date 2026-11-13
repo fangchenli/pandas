@@ -39,4 +39,9 @@ PDEP-13 has now been verified from the [PR supplied by the user](https://github.
 
 ## Authorship
 
-`proposal.md` is user-supplied text. `report.md` was generated with Claude Code (Claude Opus 5.5). The other documents are agent-generated research and analysis produced with the Codex harness, GPT-6 family; the exact model variant and reasoning-effort setting are not exposed in this session. Before external contribution, apply the repository's [automated contributions policy](../../doc/source/development/contributing.rst): human review and revision, agent disclosure, and explicit quotation of any verbatim agent text used in community discussion.
+`proposal.md` is user-supplied text. Everything else is agent-generated, by two harnesses:
+
+- Codex harness, GPT-6 family (exact model variant and reasoning effort not exposed): the research documents (`review.md`, `references.md`, `experiments.md`, `prototype.md`, `logical_types.md`, `missing_values.md`, `decisions.md`) and the first M0–M3 prototype (`98269289d6`).
+- Claude Code, Claude Opus 5.5: all later prototype code, tests and benchmarks (from `67a7f1dedd`: review fixes, type-layer cleanups, M4, the Arrow default, joins, the pandas comparison), the pod results, `report.md`, and later edits to `prototype.md`, `logical_types.md`, `experiments.md` and this README.
+
+Each commit's `Co-Authored-By` trailer identifies Claude's commits; Codex commits carry none. Before external contribution, apply the repository's [automated contributions policy](../../doc/source/development/contributing.rst): human review and revision, agent disclosure, and explicit quotation of any verbatim agent text used in community discussion.

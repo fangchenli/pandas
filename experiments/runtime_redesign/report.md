@@ -94,7 +94,7 @@ Expressiveness did not limit the prototype: every measured workload fit its repr
 
 In compact mode a column is a buffer (`Physical`), a `Constant`, a `Segments` laid end to end, or one `Select` of one of those by a row map. A row map is `Identity`, `Affine` or dense `Positions` with an optional mask for missing rows. Tree mode expresses the same set and differs only in when maps compose.
 
-`Select` over `Segments` picks each output row from any of several same-typed sources, a one-row `Constant` included, or leaves it missing. `test_concat_then_take_picks_rows_across_sources` checks three such picks under every strategy and both backends: `where(cond, a, b)`, a reindex with a non-NA fill, and a sparse write as a patch. So without new node types the representation covers:
+`Select` over `Segments` picks each output row from any of several same-typed sources, a one-row `Constant` included, or leaves it missing. `test_concat_then_take_picks_rows_across_sources` checks three such picks under every strategy and both backends: `where(cond, a, b)`, a reindex with a non-NA fill, and a sparse write as a patch. By the same construction, without new node types, the representation can express the following; only the three cases above are tested:
 
 - row selection: take, filter, slice, sort, head, sample, deduplication;
 - missing rows: reindex, shift, unstack and pivot, both sides of left and outer joins;
