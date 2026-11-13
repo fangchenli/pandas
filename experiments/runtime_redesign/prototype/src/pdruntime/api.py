@@ -75,7 +75,7 @@ class Runtime:
     ) -> Array:
         dtype = normalize_dtype(dtype)
         if not self.backend(backend).supports(dtype):
-            raise TypeError(f"{backend} does not support {dtype.kind}")
+            raise TypeError(f"{backend} does not support {dtype}")
         scalar = validate_scalar(value, dtype)
         cell = ValueCell(dtype, check_length(size), backend, Constant(scalar))
         return Array(self, cell)
@@ -143,7 +143,7 @@ class Array:
 
     def __repr__(self) -> str:
         return (
-            f"{type(self).__name__}(dtype={self.dtype.kind}, length={len(self)}, "
+            f"{type(self).__name__}(dtype={self.dtype}, length={len(self)}, "
             f"backend={self.cell.backend})"
         )
 

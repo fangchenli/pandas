@@ -38,20 +38,19 @@ Separating storage metadata from the dtype object is our architectural choice. T
 
 ## Type identity and physical metadata
 
-Use an immutable, hashable `LogicalType` with a canonical structural key:
+Use one immutable, hashable class per type family, with semantic parameters as named, keyword-only, validated fields. A `TypeKind` enum supplies the stable family identifier, and a derived structural key gives the class-independent identity used for serialization:
 
 ```text
-LogicalType(kind, parameters, missing_policy)
-
-initial keys:
-    (signed_integer, (64,), NA)
-    (boolean, (), NA)
-    (utf8, (), NA)
+SignedInteger(bits=64)  key: (signed_integer, ((bits, 64),), NA)
+Boolean()               key: (boolean, (), NA)
+Utf8()                  key: (utf8, (), NA)
 ```
+
+Each class shares a `missing_policy` field from the `LogicalType` base, which is abstract. A family rejects parameters it cannot support at construction: `SignedInteger(bits=32)` raises until 32-bit integers have operations and backend support. This follows the pyarrow and pandas precedent of typed families with named parameters, such as a timestamp's unit and timezone, rather than an untyped kind string with positional parameters.
 
 All initial types admit missing values. A column currently containing no missing values still has the same dtype. There is no schema-level non-nullability guarantee in this milestone, so selection/reindexing can introduce missingness without changing its dtype.
 
-`parameters` contains only semantic parameters and is recursively immutable. Future examples include timestamp unit/timezone, decimal precision/scale, or a list's element type. These are examples for the identity model, not accepted initial constructor arguments. Do not create apparently supported types whose operations all fail later.
+A family's fields contain only semantic parameters and are recursively immutable. Future examples include timestamp unit/timezone, decimal precision/scale, or a list's element type. These are examples for the identity model, not accepted initial constructor arguments. Do not create apparently supported types whose operations all fail later.
 
 `missing_policy` names behavior, not a pointer to `np.nan` or a physical null encoding. Initially its sole supported value is `NA`; its rules are the prototype's declared nullable semantics. If a legacy policy is later implemented, its distinction must survive type equality, operation binding, and serialization.
 
@@ -71,7 +70,7 @@ Keep overflow and reduction defaults in the operation contract rather than inven
 Provide small factory functions and canonical aliases:
 
 ```python
-int64()  # LogicalType(signed_integer, (64,), NA)
+int64()  # SignedInteger(bits=64)
 boolean()
 utf8()
 

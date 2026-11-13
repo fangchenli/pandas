@@ -167,3 +167,25 @@ def test_missing_singleton_survives_copy_and_pickle():
     assert copy.deepcopy([NA])[0] is NA
     assert pickle.loads(pickle.dumps(NA)) is NA
     assert type(NA)() is NA
+
+
+def test_logical_types_have_named_validated_parameters():
+    from pdruntime import Boolean, LogicalType, SignedInteger, Utf8, boolean, int64
+
+    assert int64() == SignedInteger(bits=64) == SignedInteger()
+    assert int64() != boolean() and hash(int64()) != hash(boolean())
+    assert Boolean() == boolean() and Utf8() != Boolean()
+    assert str(int64()) == "int64" and repr(int64()) == "SignedInteger(bits=64)"
+    assert int64().key == ("signed_integer", (("bits", 64),), "NA")
+    assert boolean().key == ("boolean", (), "NA")
+    runtime = Runtime()
+    array = runtime.array([1], dtype=SignedInteger(bits=64), backend="numpy")
+    assert array.dtype is int64()  # normalized to the canonical instance
+    with pytest.raises(TypeError, match="width"):
+        SignedInteger(bits=32)  # declared types must be fully supported
+    with pytest.raises(TypeError):
+        SignedInteger(64)  # parameters are keyword-only
+    with pytest.raises(TypeError, match="abstract"):
+        LogicalType()
+    with pytest.raises(AttributeError):
+        int64().bits = 8  # frozen
