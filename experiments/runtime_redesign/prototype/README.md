@@ -57,7 +57,7 @@ The supplied pilot runner compares representation strategies with identical adap
 
 ## Validation record
 
-The current suite has 287 pytest cases.
+The current suite has 293 pytest cases.
 
 The [2026-11-13 pod evaluation](results/2026-11-13-pod/README.md) compares every strategy, and a NumPy-default ablation, with pandas 3.1.1 and the deferred-take PR (pandas-dev/pandas#72023) at 1M rows; every arm returned identical results. With the PR's frame-level selection sharing, the prototype keeps a 1.2–1.7x lead on narrow reads and sort-prefix, ties on full consumption, deep filters and alignment, and loses on join and append. Its large reindex lead reflects a path the PR does not yet defer. Tested dependency versions are in [requirements-tested.txt](requirements-tested.txt). The earlier 10,000-row pilot records, which predated several fixes, were removed.
 

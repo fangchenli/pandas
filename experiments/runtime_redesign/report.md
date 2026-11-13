@@ -88,6 +88,34 @@ This is Arrow memory still alive after the source frame is dropped and the resul
 | H4 mutation | Correctness covered by the test suite (snapshot isolation, copy-on-write, duplicate gathers); cost not measured at scale; retention measured above |
 | H5 simplicity | About 2,200 lines of source and 287 tests for Int64, Boolean and UTF-8. The `Segments` and join map costs are where complexity showed up as time. |
 
+## Expressiveness
+
+Expressiveness did not limit the prototype: every measured workload fit its representation. The costs were in time, from dense maps and second gathers through `Segments`.
+
+In compact mode a column is a buffer (`Physical`), a `Constant`, a `Segments` laid end to end, or one `Select` of one of those by a row map. A row map is `Identity`, `Affine` or dense `Positions` with an optional mask for missing rows. Tree mode expresses the same set and differs only in when maps compose.
+
+`Select` over `Segments` picks each output row from any of several same-typed sources, a one-row `Constant` included, or leaves it missing. `test_concat_then_take_picks_rows_across_sources` checks three such picks under every strategy and both backends: `where(cond, a, b)`, a reindex with a non-NA fill, and a sparse write as a patch. So without new node types the representation covers:
+
+- row selection: take, filter, slice, sort, head, sample, deduplication;
+- missing rows: reindex, shift, unstack and pivot, both sides of left and outer joins;
+- repeats: many-to-many and cross joins, `repeat`;
+- appends: concat;
+- row-wise choice between sources: `where`, `mask`, `combine_first`, `fillna` with another column, `update`, the coalesced key of an outer join;
+- melt and stack, as columns laid end to end and then reordered;
+- categoricals, as a `Select` of the categories by the codes.
+
+It cannot express:
+
+1. computed values (arithmetic, casts, string operations), which always produce a buffer, by design;
+2. one column over sources of different types or backends, since `Segments` requires them equal;
+3. operations across columns or in 2D: transpose, `axis=1` reductions, a homogeneous block for `to_numpy` (W15);
+4. nested types, such as `explode` or list and struct columns;
+5. deferred or hierarchical axes: labels are flat and eager, with no MultiIndex.
+
+Some row selections it can express cost more than they need to. A dense position array stores a filter keeping 999,000 of 1M rows in 8 MB, where #72023 keeps a 125 KB mask. Repeats and sorted runs are not compressed, and a patch-style write needs an O(n) map per write. The prototype implements none of these: a write copies the whole column.
+
+For pandas, the multi-source pick is a design target for #72023's `PendingTake`, which holds one parent and one selection. The missing-row follow-up covers reindex and left joins. A selection over several parents would add `where` and `combine_first`, and cheap sparse writes, without other new machinery.
+
 ## Not measured
 
 These planned items were not run. None of them could rescue the general-runtime case, because that case already fails the first criterion.

@@ -453,6 +453,44 @@ def test_segments_descriptor_records_offsets():
     assert np.array_equal(selected.column("a").to_numpy()[0], [3, 1])
 
 
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_concat_then_take_picks_rows_across_sources(runtime, backend):
+    """Select over Segments expresses row-wise picks across same-typed sources.
+
+    ``where(cond, a, b)``, a non-NA reindex fill and a sparse patch are each one
+    take of a concatenation, with no new node type: a source row, another
+    source's row, or a constant's single row.
+    """
+    a = make_frame(
+        runtime, {"x": [1, None, 3, 4], "s": ["a", "b", None, "d"]}, backend=backend
+    )
+    b = make_frame(
+        runtime, {"x": [10, 20, 30, 40], "s": ["w", "x", "y", "z"]}, backend=backend
+    )
+    fill = runtime.frame(
+        {
+            "x": runtime.full(1, 0, dtype="int64", backend=backend),
+            "s": runtime.full(1, "?", dtype="utf8"),
+        }
+    )
+    pool = runtime.concat([a, b, fill])
+    cond = np.array([True, False, True, False])
+    where = pool.take(np.where(cond, np.arange(4), 4 + np.arange(4)))
+    filled = pool.take([3, 8, 0, 8])  # reindex [3, absent, 0, absent], fill 0/"?"
+    patched = pool.take([0, 1, 4, 3])  # row 2 of a overwritten by b's row 0
+    if runtime.execution.strategy == "compact":
+        # before any read: one map over one Segments, nothing gathered
+        state = where.cells[0].state
+        assert isinstance(state, Select)
+        assert isinstance(state.source.state, Segments)
+    assert plain(where.column("x")) == [1, 20, 3, 40]
+    assert plain(where.column("s")) == ["a", "x", None, "z"]
+    assert plain(filled.column("x")) == [4, 0, 1, 0]
+    assert plain(filled.column("s")) == ["d", "?", "a", "?"]
+    assert plain(patched.column("x")) == [1, None, 10, 4]
+    assert plain(patched.column("s")) == ["a", "b", "w", "d"]
+
+
 # Review regressions
 
 
