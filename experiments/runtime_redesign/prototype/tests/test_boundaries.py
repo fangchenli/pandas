@@ -189,3 +189,48 @@ def test_logical_types_have_named_validated_parameters():
         LogicalType()
     with pytest.raises(AttributeError):
         int64().bits = 8  # frozen
+
+
+@pytest.mark.parametrize("backend", ["numpy", "arrow"])
+def test_core_rejects_pandas_missing_value(backend):
+    runtime = Runtime()
+    array = runtime.array([1, None, 3], dtype="int64", backend=backend)
+    assert array.to_list() == [1, NA, 3]  # None remains a missing input
+    with pytest.raises(TypeError):
+        runtime.array([1, pd.NA], dtype="int64", backend=backend)
+    with pytest.raises(TypeError):
+        runtime.full(2, pd.NA, dtype="int64", backend=backend)
+    with pytest.raises(TypeError):
+        array.add(pd.NA)
+    with pytest.raises(TypeError):
+        array.set_at(0, pd.NA)
+    with pytest.raises(TypeError, match="neither a scalar nor a sequence"):
+        array.set_values([0, 1], pd.NA)
+    with pytest.raises(TypeError):
+        array.set_values([0, 1], [5, pd.NA])
+    assert array.to_list() == [1, NA, 3]  # failed writes changed nothing
+    # Export still maps the runtime's NA to pd.NA at the pandas boundary.
+    frame = runtime.frame({"a": array})
+    assert frame.to_pandas()["a"].iloc[1] is pd.NA
+
+
+def test_type_layer_does_not_import_pandas():
+    # The package still imports pandas for axes; the type modules must not.
+    import ast
+    from pathlib import Path
+
+    import pdruntime
+
+    for name in ("types.py", "type_rules.py"):
+        tree = ast.parse((Path(pdruntime.__file__).parent / name).read_text())
+        imported = {
+            alias.name.split(".")[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        } | {
+            node.module.split(".")[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module
+        }
+        assert "pandas" not in imported, name

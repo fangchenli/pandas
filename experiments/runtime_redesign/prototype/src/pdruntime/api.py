@@ -295,6 +295,8 @@ class Array:
         if is_scalar(values):
             scalar = validate_scalar(values, self.dtype)
             update = adapter.full(self.dtype, scalar, len(positions), None)
+        elif not isinstance(values, Iterable):
+            raise TypeError(f"value {values!r} is neither a scalar nor a sequence")
         else:
             if len(np.unique(positions)) != len(positions):
                 raise ValueError("vector assignment requires unique destinations")

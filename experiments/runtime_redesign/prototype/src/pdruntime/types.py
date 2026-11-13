@@ -8,7 +8,6 @@ from numbers import Integral, Number
 from typing import ClassVar, Final, TypeAlias
 
 import numpy as np
-import pandas as pd
 
 
 class Missing:
@@ -138,7 +137,8 @@ def is_integer(value: object) -> bool:
 
 
 def is_missing(value: object) -> bool:
-    return value is NA or value is None or value is pd.NA
+    """Only the runtime's NA and None. pd.NA belongs to the pandas boundary."""
+    return value is NA or value is None
 
 
 def is_scalar(value: object) -> bool:
