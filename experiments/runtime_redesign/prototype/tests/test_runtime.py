@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pytest
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 from pdruntime import NA, Runtime, boolean, int64
@@ -435,6 +435,7 @@ def test_affine_composition():
 
 
 @settings(max_examples=60, deadline=None)
+@example(first=[0], start=-14, stop=None, step=-1)  # empty, descending from -1
 @given(
     st.lists(st.integers(0, 9), max_size=12),
     st.one_of(st.none(), st.integers(-14, 14)),

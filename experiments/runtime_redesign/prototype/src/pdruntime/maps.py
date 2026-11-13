@@ -207,6 +207,10 @@ class NumpyMaps:
         )
 
     def slice_object(self, row_map: Affine) -> slice:
+        if row_map.output_length == 0:
+            # an empty descending range can start at -1, which as a slice
+            # start would mean the last element
+            return slice(0, 0)
         stop = row_map.start + row_map.step * row_map.output_length
         return slice(
             row_map.start,
