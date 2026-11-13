@@ -18,6 +18,7 @@ from pdruntime.types import (
     UTF8,
     LogicalType,
     Scalar,
+    is_scalar,
     validate_scalar,
 )
 
@@ -65,6 +66,10 @@ class Backend(Protocol):
     """The private adapter contract shared by every storage backend."""
 
     name: str
+    scalar_types: tuple[type, ...]  # native scalar classes this adapter unboxes
+
+    @staticmethod
+    def unbox(value: object) -> Scalar | float: ...
 
     def supports(self, dtype: LogicalType) -> bool: ...
     def capabilities(
@@ -125,7 +130,7 @@ def arrow_input(values, dtype: LogicalType, validity=None) -> pa.ChunkedArray:
         case _:
             # Python iterable ingress necessarily validates/boxes scalars. Native
             # arrays and all computation/selection paths use bulk kernels.
-            checked = (validate_scalar(value, dtype) for value in values)
+            checked = (validate_scalar(python_scalar(v), dtype) for v in values)
             result = pa.array(
                 [None if value is NA else value for value in checked], type=target
             )
@@ -146,6 +151,11 @@ def _validity(valid: BoolArray | None) -> BoolArray | None:
 
 class NumpyBackend:
     name = "numpy"
+    scalar_types = (np.generic,)
+
+    @staticmethod
+    def unbox(value: np.generic) -> Scalar | float:
+        return value.item()
 
     def __init__(self, maps: NumpyMaps, metrics: Metrics) -> None:
         self.maps = maps
@@ -308,6 +318,11 @@ def _and(left: BoolArray | None, right: BoolArray | None) -> BoolArray | None:
 
 class ArrowBackend:
     name = "arrow"
+    scalar_types = (pa.Scalar,)
+
+    @staticmethod
+    def unbox(value: pa.Scalar) -> Scalar | float:
+        return value.as_py() if value.is_valid else NA
 
     def __init__(self, maps: NumpyMaps, metrics: Metrics) -> None:
         self.maps = maps
@@ -428,8 +443,25 @@ class ArrowBackend:
         return None
 
 
+ADAPTERS: Final = (NumpyBackend, ArrowBackend)
+
+
+def python_scalar(value: object) -> object:
+    """Unbox a backend-native scalar; other values pass through unchanged.
+
+    The result is then validated against a logical type, so an unboxed value
+    of the wrong kind (``np.float64``, ``pa.scalar(True)`` for Int64) still
+    raises. Recognition depends only on the value, not on a runtime.
+    """
+    for adapter in ADAPTERS:
+        if isinstance(value, adapter.scalar_types):
+            unboxed = adapter.unbox(value)
+            # Nested scalars unbox to lists/dicts and must not become vectors.
+            if not is_scalar(unboxed):
+                raise TypeError(f"{type(value).__name__} is not a supported scalar")
+            return unboxed
+    return value
+
+
 def make_backends(maps: NumpyMaps, metrics: Metrics) -> dict[str, Backend]:
-    return {
-        "numpy": NumpyBackend(maps, metrics),
-        "arrow": ArrowBackend(maps, metrics),
-    }
+    return {adapter.name: adapter(maps, metrics) for adapter in ADAPTERS}

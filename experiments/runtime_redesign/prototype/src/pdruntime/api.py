@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 from pdruntime import axes
-from pdruntime.backends import Storage, arrow_copy, make_backends
+from pdruntime.backends import Storage, arrow_copy, make_backends, python_scalar
 from pdruntime.execution import Execution, Strategy
 from pdruntime.maps import NumpyMaps, check_length
 from pdruntime.metrics import Metrics
@@ -76,7 +76,7 @@ class Runtime:
         dtype = normalize_dtype(dtype)
         if not self.backend(backend).supports(dtype):
             raise TypeError(f"{backend} does not support {dtype}")
-        scalar = validate_scalar(value, dtype)
+        scalar = validate_scalar(python_scalar(value), dtype)
         cell = ValueCell(dtype, check_length(size), backend, Constant(scalar))
         return Array(self, cell)
 
@@ -245,7 +245,7 @@ class Array:
             right = execution.ensure_physical(other.cell, cache)
         else:
             signature = runtime.types.bind(operation, (self.dtype, self.dtype))
-            right = validate_scalar(other, self.dtype)
+            right = validate_scalar(python_scalar(other), self.dtype)
         left = execution.ensure_physical(self.cell, cache)
         backend = left.backend
         if isinstance(right, Storage) and right.backend != backend:
@@ -292,6 +292,7 @@ class Array:
         adapter = runtime.backend(self.cell.backend)
         # Validate everything before materializing or changing the target.
         positions = runtime.maps.positions(len(self), rows).positions
+        values = python_scalar(values)
         if is_scalar(values):
             scalar = validate_scalar(values, self.dtype)
             update = adapter.full(self.dtype, scalar, len(positions), None)
@@ -310,6 +311,7 @@ class Array:
         self.cell = runtime.execution.physical_cell(result)
 
     def set_at(self, position: int, value: object) -> None:
+        value = python_scalar(value)
         if not is_scalar(value):
             raise TypeError("set_at requires a scalar value")
         self.set_values([position], value)

@@ -1,4 +1,8 @@
-"""Logical identity and scalar validation, independent of physical storage."""
+"""Logical identity and scalar validation, independent of physical storage.
+
+This module imports no backend. Adapters unbox their native scalars (NumPy,
+Arrow, ...) into the canonical Python domain before validation here.
+"""
 
 from __future__ import annotations
 
@@ -6,8 +10,6 @@ from dataclasses import dataclass, field, fields
 from enum import StrEnum
 from numbers import Integral, Number
 from typing import ClassVar, Final, TypeAlias
-
-import numpy as np
 
 
 class Missing:
@@ -132,8 +134,11 @@ def normalize_dtype(spec: str | LogicalType) -> LogicalType:
 
 
 def is_integer(value: object) -> bool:
-    """True for integral values other than booleans."""
-    return isinstance(value, Integral) and not isinstance(value, (bool, np.bool_))
+    """True for integral values other than booleans.
+
+    ``Integral`` also admits NumPy integers, which register themselves with it.
+    """
+    return isinstance(value, Integral) and not isinstance(value, bool)
 
 
 def is_missing(value: object) -> bool:
@@ -142,7 +147,7 @@ def is_missing(value: object) -> bool:
 
 
 def is_scalar(value: object) -> bool:
-    return is_missing(value) or isinstance(value, (Number, str, np.bool_))
+    return is_missing(value) or isinstance(value, (Number, str))
 
 
 def validate_scalar(value: object, dtype: LogicalType) -> Scalar:
@@ -153,7 +158,7 @@ def validate_scalar(value: object, dtype: LogicalType) -> Scalar:
             if int(value) not in dtype.value_range:
                 raise TypeError(f"integer value is outside {dtype.name} range")
             return int(value)
-        case Boolean() if isinstance(value, (bool, np.bool_)):
+        case Boolean() if isinstance(value, bool):
             return bool(value)
         case Utf8() if isinstance(value, str):
             return str(value)

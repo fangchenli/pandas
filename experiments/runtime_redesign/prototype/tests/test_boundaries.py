@@ -214,8 +214,8 @@ def test_core_rejects_pandas_missing_value(backend):
     assert frame.to_pandas()["a"].iloc[1] is pd.NA
 
 
-def test_type_layer_does_not_import_pandas():
-    # The package still imports pandas for axes; the type modules must not.
+def test_type_layer_imports_no_backend():
+    # The package imports backends and pandas (axes); the type modules must not.
     import ast
     from pathlib import Path
 
@@ -233,4 +233,64 @@ def test_type_layer_does_not_import_pandas():
             for node in ast.walk(tree)
             if isinstance(node, ast.ImportFrom) and node.module
         }
-        assert "pandas" not in imported, name
+        assert not imported & {"pandas", "numpy", "pyarrow"}, name
+
+
+SCALAR_SOURCES = {
+    "numpy": (np.int64(5), np.True_, np.str_("a")),
+    "arrow": (
+        pa.scalar(5, pa.int8()),
+        pa.scalar(True),
+        pa.scalar("a", pa.large_string()),
+    ),
+}
+
+
+@pytest.mark.parametrize("source", ["numpy", "arrow"])
+@pytest.mark.parametrize("backend", ["numpy", "arrow"])
+def test_backend_native_scalars_unbox_before_validation(backend, source):
+    runtime = Runtime()
+    integer, boolean, string = SCALAR_SOURCES[source]
+    numbers = runtime.array([1, None], dtype="int64", backend=backend)
+    flags = runtime.array([True, False], dtype="boolean", backend=backend)
+    strings = runtime.array(["a", "b"], dtype="utf8", backend="arrow")
+
+    assert numbers.add(integer).to_list() == [6, NA]
+    assert numbers.lt(integer).to_list() == [True, NA]
+    assert flags.eq(boolean).to_list() == [True, False]
+    assert strings.eq(string).to_list() == [True, False]
+    assert runtime.full(2, integer, dtype="int64", backend=backend).to_list() == [5, 5]
+
+    numbers.set_at(1, integer)
+    assert numbers.to_list() == [1, 5]
+    numbers.set_values([0, 1], integer)
+    assert numbers.to_list() == [5, 5]
+    numbers.set_values([0, 1], [integer, None])
+    assert numbers.to_list() == [5, NA]
+    mixed = runtime.array([boolean, None, False], dtype="boolean", backend=backend)
+    assert mixed.to_list() == [True, NA, False]
+
+
+@pytest.mark.parametrize("backend", ["numpy", "arrow"])
+def test_unboxed_scalars_still_obey_logical_types(backend):
+    runtime = Runtime()
+    numbers = runtime.array([1, 2], dtype="int64", backend=backend)
+    strings = runtime.array(["a", "b"], dtype="utf8", backend="arrow")
+    assert numbers.add(pa.scalar(None, pa.int64())).to_list() == [NA, NA]
+    assert numbers.add(pa.scalar(None)).to_list() == [NA, NA]
+    for bad in (
+        np.float64(5),
+        pa.scalar(1.5),
+        np.True_,
+        pa.scalar(True),
+        pa.scalar(2**64 - 1, pa.uint64()),
+    ):
+        with pytest.raises(TypeError):
+            numbers.add(bad)
+    with pytest.raises(TypeError):
+        strings.eq(pa.scalar(b"a"))
+    with pytest.raises(TypeError, match="not a supported scalar"):
+        numbers.set_values([0, 1], pa.scalar([1, 2]))  # never a vector
+    with pytest.raises(TypeError):
+        numbers.set_at(0, np.datetime64("2026-01-01"))
+    assert numbers.to_list() == [1, 2]
