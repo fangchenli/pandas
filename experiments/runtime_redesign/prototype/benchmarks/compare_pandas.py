@@ -15,10 +15,15 @@ Structural workloads (W01, W03, W04, W10, W14 from the experimental plan)
 resolve their keys and labels inside the timed run, as pandas does.
 
 Arms:
-    pandas            pandas as installed (eager unless it defers natively)
-    pandas-eager      the deferred-take build with ``defer`` patched to gather
-    pandas-deferred   the deferred-take build as is
-    proto-<strategy>  the prototype with the eager, compact, or tree strategy
+    pandas                  pandas as installed (eager unless it defers natively)
+    pandas-eager            the deferred-take build with ``defer`` patched to gather
+    pandas-deferred         the deferred-take build as is
+    pandas-unshared         the deferred-take build with frame-level selection
+                            sharing patched off (each column composes its own)
+    proto-<strategy>        the prototype (eager, compact, or tree) on its Arrow
+                            default backend
+    proto-<strategy>-numpy  the same with Int64 columns on NumPy, as pandas'
+                            Int64 is (the NumPy-first ablation)
 """
 
 from __future__ import annotations
@@ -45,6 +50,11 @@ PREFIX = 100  # W01 keeps the first rows of a full sort.
 DIMENSION_KEYS = 500  # W03 dimension keys cover half of the fact keys (0-999).
 DIMENSION_STRINGS = 4
 CHUNKS = 16  # W10 appends this many slices one at a time.
+# W11 alternates filters keeping about 90% and reversing slices: a long chain
+# whose result is read only at a few positions, where resolving maps at read
+# time (tree) should beat composing them at every step (compact).
+CHAIN_STEPS = (("i0", 900), ("i1", 900), ("i2", 900), ("i3", 900)) * 2
+SCALAR_POSITIONS = 11
 
 
 def make_data(rows: int, ints: int, strings: int, seed: int):
@@ -140,6 +150,22 @@ def append_chunks(ops, frame, plan):
     return ops.take(result, plan["take_all"])
 
 
+def chain_reversals(ops, frame, plan):
+    for column, threshold in CHAIN_STEPS:
+        frame = ops.reverse(ops.filter(frame, column, threshold))
+    return frame
+
+
+def consume_scalars(ops, frame, plan):
+    last = ops.length(frame) - 1
+    positions = [last * k // (SCALAR_POSITIONS - 1) for k in range(SCALAR_POSITIONS)]
+    return [
+        ops.scalar(frame, name, position)
+        for name in ops.columns(frame)
+        for position in positions
+    ]
+
+
 def unequal_axes(ops, frame, plan):
     return ops.take(frame, plan["take_all"]), ops.filter(frame, "i2", 500)
 
@@ -180,6 +206,7 @@ WORKLOADS: dict[str, Workload] = {
     "W03_join": Workload(join_project, consume_join),
     "W04_reindex": Workload(reindex_missing, consume_added),
     "W10_append": Workload(append_chunks, consume_two),
+    "W11_chain_scalars": Workload(chain_reversals, consume_scalars),
     "W14_align": Workload(unequal_axes, consume_aligned),
 }
 
@@ -210,6 +237,12 @@ class PandasOps:
 
         self.pd = pd
         self.deferral = deferral
+        if deferral == "unshared":
+            from contextlib import nullcontext
+
+            import pandas.core.internals.managers as managers
+
+            managers.shared_selections = nullcontext
         if deferral == "off":
             import pandas.core.arrays.arrow.array as arrow_array
 
@@ -237,7 +270,7 @@ class PandasOps:
         """Fail loudly if the arm does not defer the way it claims to."""
         array = frame.take([0, 1])[string_name].array
         pending = getattr(array, "_pending_take", None) is not None
-        expected = self.deferral == "on"
+        expected = self.deferral in ("on", "unshared")
         if pending != expected:
             raise RuntimeError(f"deferral={self.deferral} but pending={pending}")
 
@@ -265,6 +298,13 @@ class PandasOps:
     def head(self, frame, size):
         return frame.iloc[:size]
 
+    def reverse(self, frame):
+        return frame.iloc[::-1]
+
+    def scalar(self, frame, column, position):
+        value = frame[column].iat[position]
+        return value if isinstance(value, str) else int(value)
+
     def join(self, frame, dimension, key):
         return frame.merge(dimension, on=key, how="inner")
 
@@ -285,17 +325,15 @@ class PandasOps:
 
 
 class PrototypeOps:
-    def __init__(self, strategy: str):
+    def __init__(self, strategy: str, backend: str):
         from pdruntime import Runtime
 
-        self.runtime = Runtime(strategy=strategy)
+        self.runtime = Runtime(strategy=strategy, backend=backend)
 
     def build(self, int_columns, string_columns):
         rt = self.runtime
-        columns = {
-            name: rt.array(v, dtype="int64", backend="numpy")
-            for name, v in int_columns.items()
-        }
+        # Int64 starts on the runtime's default backend; UTF-8 is always Arrow.
+        columns = {name: rt.array(v, dtype="int64") for name, v in int_columns.items()}
         for name, values in string_columns.items():
             columns[name] = rt.array(values, dtype="utf8", backend="arrow")
         return rt.frame(columns)
@@ -325,6 +363,12 @@ class PrototypeOps:
     def head(self, frame, size):
         return frame.slice(slice(0, size))
 
+    def reverse(self, frame):
+        return frame.slice(slice(None, None, -1))
+
+    def scalar(self, frame, column, position):
+        return frame.column(column).scalar_at(position)
+
     def join(self, frame, dimension, key):
         return frame.join(dimension, on=key, how="inner")
 
@@ -352,8 +396,11 @@ def make_ops(arm: str):
         return PandasOps("off")
     if arm == "pandas-deferred":
         return PandasOps("on")
+    if arm == "pandas-unshared":
+        return PandasOps("unshared")
     if arm.startswith("proto-"):
-        return PrototypeOps(arm.removeprefix("proto-"))
+        strategy, _, backend = arm.removeprefix("proto-").partition("-")
+        return PrototypeOps(strategy, backend or "arrow")
     raise ValueError(arm)
 
 

@@ -4,5 +4,3 @@ __pycache__/
 .hypothesis/
 .venv/
 results/*.json
-!results/environment.json
-!results/smoke_summary.json

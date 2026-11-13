@@ -17,10 +17,14 @@ from pathlib import Path
 ARMS = (
     "pandas",
     "pandas-eager",
+    "pandas-unshared",
     "pandas-deferred",
     "proto-eager",
     "proto-compact",
     "proto-tree",
+    "proto-eager-numpy",
+    "proto-compact-numpy",
+    "proto-tree-numpy",
 )
 
 

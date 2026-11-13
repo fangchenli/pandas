@@ -53,13 +53,13 @@ Missing input is `NA` or `None`; `pd.NA` is rejected because the core type layer
 
 Copy events report logical buffer-byte estimates, not exact memory traffic through IPC or native allocation counts. Memory reports cover known underlying buffer owners and map arrays; they exclude allocator overhead, Python metadata, and some logical-size details. Frame reports list axis bytes separately. Peak RSS and device memory measurements are future work.
 
-The supplied pilot runner compares representation strategies with identical adapters and validates full values outside timed regions. Timing includes the named workload's actual consumers and a detached export of the consumed columns. Diagnostic event collection runs separately. It does not compare against pinned pandas main, the deferred-take branch, or external engines, and does not justify a general speedup claim. The installed pandas version and import location are recorded as the semantic oracle.
+The supplied pilot runner compares representation strategies with identical adapters and validates full values outside timed regions. Timing includes the named workload's actual consumers and a detached export of the consumed columns. Diagnostic event collection runs separately. It does not compare against pandas; `benchmarks/compare_pandas.py` does (see the validation record below). The installed pandas version and import location are recorded as the semantic oracle.
 
 ## Validation record
 
-The current suite has 287 pytest cases. The initial run passed 117 pytest cases, including generated cases, all repository pre-commit checks, and editable installation. At 10,000 rows and four columns, 108 timing runs and 36 separate diagnostic runs passed value checks. The timing run was performed after the test process finished.
+The current suite has 287 pytest cases.
 
-See [environment and source fingerprint](results/environment.json), [diagnostic summary](results/smoke_summary.json), [raw pilot observations](results/pilot_observations.jsonl), and [tested dependency versions](requirements-tested.txt). These records use the installed pandas 3.1.1 wheel as the semantic oracle, not a build of pinned pandas main. They do not establish an architectural performance advantage. They predate the scalar-broadcast, filter, column-alignment, and export fixes, so their source fingerprint no longer matches `src/`.
+The [2026-11-13 pod evaluation](results/2026-11-13-pod/README.md) compares every strategy, and a NumPy-default ablation, with pandas 3.1.1 and the deferred-take PR (pandas-dev/pandas#72023) at 1M rows; every arm returned identical results. With the PR's frame-level selection sharing, the prototype keeps a 1.2–1.7x lead on narrow reads and sort-prefix, ties on full consumption, deep filters and alignment, and loses on join and append. Its large reindex lead reflects a path the PR does not yet defer. Tested dependency versions are in [requirements-tested.txt](requirements-tested.txt). The earlier 10,000-row pilot records, which predated several fixes, were removed.
 
 ## Follow-up experiments
 

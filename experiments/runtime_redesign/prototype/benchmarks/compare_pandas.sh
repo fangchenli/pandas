@@ -15,7 +15,13 @@ here="$(cd "$(dirname "$0")" && pwd)"
 script="$here/compare_pandas.py"
 src="$here/../src"
 
-arms=(pandas pandas-eager pandas-deferred proto-eager proto-compact proto-tree)
+arms=(
+    pandas pandas-eager pandas-unshared pandas-deferred
+    proto-eager proto-compact proto-tree
+    proto-eager-numpy proto-compact-numpy proto-tree-numpy
+)
+# ARMS="a b" runs a subset, e.g. without a deferred-take build.
+[[ -n "${ARMS:-}" ]] && read -r -a arms <<<"$ARMS"
 run_arm() {
     local arm="$1"
     shift
