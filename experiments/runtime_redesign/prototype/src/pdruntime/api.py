@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
-from pdruntime import axes
+from pdruntime import axes, keys
 from pdruntime.backends import Storage, arrow_copy, make_backends, python_scalar
 from pdruntime.execution import Execution, Strategy
 from pdruntime.maps import NumpyMaps, check_length
@@ -97,6 +97,30 @@ class Runtime:
         if any(cell.length != size for cell in cells):
             raise ValueError("column lengths differ")
         return Frame(self, names, cells, axes.axis(index, size))
+
+    def concat(self, frames: Iterable[Frame]) -> Frame:
+        """Frames end to end; columns, dtypes and backends must match in order."""
+        frames = list(frames)
+        if not frames:
+            raise ValueError("concat requires at least one frame")
+        if any(not isinstance(f, Frame) or f.runtime is not self for f in frames):
+            raise TypeError("concat requires Frames from this runtime")
+        first = frames[0]
+        for frame in frames[1:]:
+            if frame.names != first.names:
+                raise ValueError("concat requires identical ordered columns")
+            for left, right in zip(first.cells, frame.cells, strict=True):
+                if left.dtype != right.dtype:
+                    raise TypeError("concat requires matching column dtypes")
+                if left.backend != right.backend:
+                    raise TypeError("mixed-backend concat needs a destination backend")
+        index = axes.concat([frame._index for frame in frames])
+        layouts = {}  # columns with equal child lengths share one offsets array
+        cells = tuple(
+            self.execution.concat([frame.cells[slot] for frame in frames], layouts)
+            for slot in range(len(first.names))
+        )
+        return Frame(self, first.names, cells, index)
 
     def _check_owned(self, value: object, message: str) -> None:
         if not isinstance(value, Array) or value.runtime is not self:
@@ -433,7 +457,11 @@ class Frame:
     # Structural selection: one shared map and composition cache for all columns.
 
     def _select_map(self, row_map: RowMap) -> Frame:
-        index = axes.take(self._index, row_map, self.runtime.maps)
+        return self._with_map(
+            row_map, axes.take(self._index, row_map, self.runtime.maps)
+        )
+
+    def _with_map(self, row_map: RowMap, index: pd.Index) -> Frame:
         cache = {}
         cells = tuple(
             self.runtime.execution.select(cell, row_map, cache) for cell in self.cells
@@ -451,6 +479,94 @@ class Frame:
         return self._select_map(
             self.runtime.maps.positions(len(self), positions, negative=False)
         )
+
+    # Structural operations: keys and labels are resolved before returning.
+
+    def _int64_key(
+        self, name: str, purpose: str
+    ) -> tuple[np.ndarray, BoolArray | None]:
+        series = self.column(name)
+        if series.dtype != INT64:
+            raise TypeError(f"{purpose} keys must be Int64")
+        storage, adapter = series._physical()
+        values, valid = adapter.key_values(storage)
+        self.runtime.metrics.record("key_values", purpose=purpose, rows=len(values))
+        return values, valid
+
+    def sort_values(self, name: str) -> Frame:
+        """Stable ascending order by one Int64 column; missing keys sort last."""
+        order = keys.sort_order(*self._int64_key(name, "sort"))
+        return self._select_map(
+            self.runtime.maps.positions(len(self), order, negative=False)
+        )
+
+    def reindex(self, labels: Iterable[object]) -> Frame:
+        """Rows for ``labels``; absent labels are missing in every column."""
+        target = axes.labels(labels)
+        return self._with_map(
+            axes.reindexer(self._index, target, self.runtime.maps), target
+        )
+
+    def join(
+        self,
+        right: Frame,
+        *,
+        on: str,
+        how: str = "inner",
+        suffixes: tuple[str, str] = ("_x", "_y"),
+    ) -> Frame:
+        """Equijoin on one non-null Int64 key whose right values are unique.
+
+        Rows follow the left input order under a fresh RangeIndex, as
+        ``pandas.merge`` orders them. Left and right columns keep separate maps
+        into their own sources. Under compact and tree, neither side's payload
+        is gathered here; eager gathers both, as for any selection.
+        """
+        runtime = self.runtime
+        if not isinstance(right, Frame) or right.runtime is not runtime:
+            raise TypeError("join requires a Frame from the same runtime")
+        if how not in ("inner", "left"):
+            raise ValueError("join supports how='inner' or how='left' only")
+        if not (
+            isinstance(suffixes, tuple)
+            and len(suffixes) == 2
+            and all(isinstance(suffix, str) for suffix in suffixes)
+        ):
+            raise TypeError("suffixes must be a pair of strings")
+        maps = runtime.maps
+        match = keys.match_unique(self._join_key(on), right._join_key(on), maps)
+        runtime.metrics.record("key_match", rows=len(self) + len(right))
+        if how == "left" or match.present is None:
+            left_map, right_map = maps.identity(len(self)), match
+        else:
+            rows = np.flatnonzero(match.present)
+            left_map = maps.positions(len(self), rows, negative=False)
+            right_map = maps.positions(
+                len(right), match.positions[rows], negative=False
+            )
+        others = [name for name in right.names if name != on]
+        overlap = set(self.names).intersection(others)
+        names = (
+            *(name + suffixes[0] if name in overlap else name for name in self.names),
+            *(name + suffixes[1] if name in overlap else name for name in others),
+        )
+        if len(set(names)) != len(names):
+            raise ValueError("suffixes produce duplicate column names")
+        execution, cache = runtime.execution, {}
+        cells = (
+            *(execution.select(cell, left_map, cache) for cell in self.cells),
+            *(
+                execution.select(right.cells[right._slot(name)], right_map, cache)
+                for name in others
+            ),
+        )
+        return Frame(runtime, names, cells, pd.RangeIndex(left_map.output_length))
+
+    def _join_key(self, name: str) -> np.ndarray:
+        values, valid = self._int64_key(name, "join")
+        if valid is not None:
+            raise ValueError("join keys must not be missing")
+        return values
 
     # Mutation: only this frame's slot changes.
 

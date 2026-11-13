@@ -11,6 +11,9 @@ chain's result keeps alive once its source frame is dropped, before and after
 consumption. It counts the Arrow memory pool only: string payloads in every
 arm, but not NumPy-backed Int64 values or validity.
 
+Structural workloads (W01, W03, W04, W10, W14 from the experimental plan)
+resolve their keys and labels inside the timed run, as pandas does.
+
 Arms:
     pandas            pandas as installed (eager unless it defers natively)
     pandas-eager      the deferred-take build with ``defer`` patched to gather
@@ -29,6 +32,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +41,10 @@ import pyarrow as pa
 VOCABULARY = 10_000
 STRING_WIDTH = 32
 LITERAL_INDEX = 7
+PREFIX = 100  # W01 keeps the first rows of a full sort.
+DIMENSION_KEYS = 500  # W03 dimension keys cover half of the fact keys (0-999).
+DIMENSION_STRINGS = 4
+CHUNKS = 16  # W10 appends this many slices one at a time.
 
 
 def make_data(rows: int, ints: int, strings: int, seed: int):
@@ -51,6 +59,19 @@ def make_data(rows: int, ints: int, strings: int, seed: int):
         for k in range(strings)
     }
     return int_columns, string_columns, vocabulary[LITERAL_INDEX].as_py()
+
+
+def make_dimension(strings: int, seed: int):
+    """A unique-key dimension table whose string payload the join carries."""
+    rng = np.random.default_rng(seed)
+    letters = rng.integers(97, 123, size=(VOCABULARY, STRING_WIDTH), dtype=np.uint8)
+    vocabulary = pa.array([bytes(row).decode() for row in letters])
+    keys = rng.permutation(DIMENSION_KEYS).astype(np.int64)
+    payload = {
+        f"d{k}": vocabulary.take(pa.array(rng.integers(0, VOCABULARY, len(keys))))
+        for k in range(strings)
+    }
+    return {"i0": keys}, payload
 
 
 def random_half(size: int, seed: int) -> np.ndarray:
@@ -82,6 +103,52 @@ def int_take(ops, frame, plan):
     return ops.take(ops.project(frame, plan["int_names"]), plan["take_all"])
 
 
+def sort_prefix(ops, frame, plan):
+    return ops.head(ops.sort(frame, "i0"), PREFIX)
+
+
+def join_project(ops, frame, plan):
+    joined = ops.join(frame, plan["dimension"], "i0")
+    return ops.project(joined, ("i2", "s0", "d0"))
+
+
+def consume_join(ops, frame, plan):
+    return [
+        ops.sum(frame, "i2"),
+        ops.eq_count(frame, "s0", plan["literal"]),
+        ops.eq_count(frame, "d0", plan["dimension_literal"]),
+    ]
+
+
+def reindex_missing(ops, frame, plan):
+    return ops.reindex(frame, plan["reindex_labels"])
+
+
+def consume_added(ops, frame, plan):
+    return [
+        ops.add_sum(frame, "i0", frame, "i1"),
+        ops.eq_count(frame, "s0", plan["literal"]),
+    ]
+
+
+def append_chunks(ops, frame, plan):
+    bounds = np.linspace(0, ops.length(frame), CHUNKS + 1, dtype=np.int64)
+    pieces = [ops.rows(frame, start, stop) for start, stop in pairwise(bounds)]
+    result = pieces[0]
+    for piece in pieces[1:]:
+        result = ops.concat([result, piece])
+    return ops.take(result, plan["take_all"])
+
+
+def unequal_axes(ops, frame, plan):
+    return ops.take(frame, plan["take_all"]), ops.filter(frame, "i2", 500)
+
+
+def consume_aligned(ops, frames, plan):
+    left, right = frames
+    return [ops.add_sum(left, "i0", right, "i1")]
+
+
 def consume_two(ops, frame, plan):
     return [ops.sum(frame, "i2"), ops.eq_count(frame, "s0", plan["literal"])]
 
@@ -109,6 +176,11 @@ WORKLOADS: dict[str, Workload] = {
     "full": Workload(filter_take_filter, consume_all),
     "deep": Workload(deep_filters, consume_two),
     "gather_ints": Workload(int_take, consume_all),
+    "W01_sort_prefix": Workload(sort_prefix, consume_two),
+    "W03_join": Workload(join_project, consume_join),
+    "W04_reindex": Workload(reindex_missing, consume_added),
+    "W10_append": Workload(append_chunks, consume_two),
+    "W14_align": Workload(unequal_axes, consume_aligned),
 }
 
 
@@ -181,6 +253,30 @@ class PandasOps:
     def columns(self, frame):
         return list(frame.columns)
 
+    def length(self, frame):
+        return len(frame)
+
+    def rows(self, frame, start, stop):
+        return frame.iloc[start:stop]
+
+    def sort(self, frame, column):
+        return frame.sort_values(column, kind="stable")
+
+    def head(self, frame, size):
+        return frame.iloc[:size]
+
+    def join(self, frame, dimension, key):
+        return frame.merge(dimension, on=key, how="inner")
+
+    def reindex(self, frame, labels):
+        return frame.reindex(labels)
+
+    def concat(self, frames):
+        return self.pd.concat(frames)
+
+    def add_sum(self, left, a, right, b):
+        return int((left[a] + right[b]).sum())
+
     def sum(self, frame, column):
         return int(frame[column].sum())
 
@@ -216,6 +312,30 @@ class PrototypeOps:
 
     def columns(self, frame):
         return list(frame.columns)
+
+    def length(self, frame):
+        return len(frame)
+
+    def rows(self, frame, start, stop):
+        return frame.slice(slice(start, stop))
+
+    def sort(self, frame, column):
+        return frame.sort_values(column)
+
+    def head(self, frame, size):
+        return frame.slice(slice(0, size))
+
+    def join(self, frame, dimension, key):
+        return frame.join(dimension, on=key, how="inner")
+
+    def reindex(self, frame, labels):
+        return frame.reindex(labels)
+
+    def concat(self, frames):
+        return self.runtime.concat(frames)
+
+    def add_sum(self, left, a, right, b):
+        return left.column(a).add(right.column(b)).sum()
 
     def sum(self, frame, column):
         return frame.column(column).sum()
@@ -270,13 +390,21 @@ def main() -> None:
         args.rows, args.ints, args.strings, args.seed
     )
     kept = int(np.count_nonzero(int_columns["i0"] < 500))
+    absent = np.arange(args.rows, args.rows + args.rows // 10)
+    dimension_ints, dimension_strings = make_dimension(DIMENSION_STRINGS, args.seed + 3)
     plan = {
         "literal": literal,
+        "dimension_literal": dimension_strings["d0"][LITERAL_INDEX].as_py(),
         "int_names": tuple(int_columns),
         "take_after_i0_lt_500": random_half(kept, args.seed + 1),
         "take_all": random_half(args.rows, args.seed + 2),
+        # Half the existing labels in random order, plus absent labels.
+        "reindex_labels": np.random.default_rng(args.seed + 4).permutation(
+            np.concatenate([random_half(args.rows, args.seed + 5), absent])
+        ),
     }
     ops = make_ops(args.arm)
+    plan["dimension"] = ops.build(dimension_ints, dimension_strings)
     started = time.perf_counter()
     columns = (int_columns, string_columns)
     frame = ops.build(*columns)

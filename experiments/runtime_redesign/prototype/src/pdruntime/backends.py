@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Protocol
 
@@ -85,6 +85,8 @@ class Backend(Protocol):
     ) -> Storage: ...
     def scalar_at(self, storage: Storage, position: int) -> Scalar: ...
     def select(self, storage: Storage, row_map: RowMap) -> Storage: ...
+    def concat(self, dtype: LogicalType, parts: Sequence[Storage]) -> Storage: ...
+    def key_values(self, storage: Storage) -> tuple[np.ndarray, BoolArray | None]: ...
     def mask(self, storage: Storage) -> BoolArray: ...
     def copy_owned(self, storage: Storage) -> Storage: ...
     def binary(
@@ -230,6 +232,30 @@ class NumpyBackend:
         result = Storage(storage.dtype, self.name, data, _validity(valid))
         self.metrics.record("payload_gather", rows=len(data), bytes=self.nbytes(result))
         return result
+
+    def concat(self, dtype, parts) -> Storage:
+        if not parts:
+            return self.empty(dtype)
+        if len(parts) == 1:
+            return parts[0]
+        data = frozen(np.concatenate([part.data for part in parts]))
+        valid = None
+        if any(part.validity is not None for part in parts):
+            valid = np.concatenate(
+                [
+                    np.ones(len(part), dtype=bool)
+                    if part.validity is None
+                    else part.validity
+                    for part in parts
+                ]
+            )
+        result = Storage(dtype, self.name, data, _validity(valid))
+        self.metrics.record("segment_concat", rows=len(data), bytes=self.nbytes(result))
+        return result
+
+    def key_values(self, storage) -> tuple[np.ndarray, BoolArray | None]:
+        """Read-only key values; storage is immutable, so no copy is needed."""
+        return storage.data, storage.validity
 
     def mask(self, storage) -> BoolArray:
         if storage.validity is None:
@@ -378,6 +404,26 @@ class ArrowBackend:
             "payload_gather", rows=len(output), bytes=self.nbytes(output)
         )
         return output
+
+    def concat(self, dtype, parts) -> Storage:
+        if not parts:
+            return self.empty(dtype)
+        if len(parts) == 1:
+            return parts[0]
+        # Chunk layout belongs to storage: concatenation shares the parts' chunks.
+        chunks = [chunk for part in parts for chunk in part.data.chunks]
+        result = Storage(
+            dtype, self.name, pa.chunked_array(chunks, type=ARROW_TYPES[dtype])
+        )
+        self.metrics.record("segment_concat", rows=len(result), bytes=0)
+        return result
+
+    def key_values(self, storage) -> tuple[np.ndarray, BoolArray | None]:
+        """Read-only key values: a zero-copy view when one null-free chunk allows."""
+        data = storage.data
+        if data.num_chunks == 1 and data.null_count == 0:
+            return data.chunk(0).to_numpy(), None
+        return self.to_numpy(storage)
 
     def mask(self, storage) -> BoolArray:
         return pc.fill_null(storage.data, False).to_numpy(zero_copy_only=False)

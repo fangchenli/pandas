@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, TypeAlias
 
 if TYPE_CHECKING:
     from pdruntime.backends import Storage
-    from pdruntime.maps import RowMap
+    from pdruntime.maps import IntArray, RowMap
     from pdruntime.types import LogicalType, Scalar
 
 
@@ -28,7 +28,16 @@ class Constant:
     scalar: Scalar
 
 
-State: TypeAlias = "Physical | Select | Constant"
+# Holds an array, so it compares by identity, as the row maps do.
+@dataclass(frozen=True, eq=False)
+class Segments:
+    """Children laid end to end; ``offsets`` holds cumulative starts and the total."""
+
+    children: tuple[ValueCell, ...]
+    offsets: IntArray
+
+
+State: TypeAlias = "Physical | Select | Constant | Segments"
 
 
 @dataclass(eq=False)
