@@ -6,6 +6,11 @@ structural chain (predicates, filters, takes) and its consumers. Consumers
 compute on the selected values (an Int64 sum, a string equality count), so
 every arm must produce those values and none pays an export copy.
 
+After timing, an untimed run on a fresh frame records the Arrow memory the
+chain's result keeps alive once its source frame is dropped, before and after
+consumption. It counts the Arrow memory pool only: string payloads in every
+arm, but not NumPy-backed Int64 values or validity.
+
 Arms:
     pandas            pandas as installed (eager unless it defers natively)
     pandas-eager      the deferred-take build with ``defer`` patched to gather
@@ -23,6 +28,7 @@ import statistics
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -52,50 +58,78 @@ def random_half(size: int, seed: int) -> np.ndarray:
     return np.random.default_rng(seed).permutation(size)[: size // 2]
 
 
-# Workloads take an ``ops`` adapter and return their consumed results.
+# A workload is a selection chain and the consumers of its result. Both take
+# an ``ops`` adapter, so the same code runs against every arm.
 
 
-def narrow(ops, frame, plan):
+def filter_take_filter(ops, frame, plan):
     f = ops.filter(frame, "i0", 500)
     f = ops.take(f, plan["take_after_i0_lt_500"])
-    f = ops.filter(f, "i1", 500)
-    return [ops.sum(f, "i2"), ops.eq_count(f, "s0", plan["literal"])]
-
-
-def full(ops, frame, plan):
-    f = ops.filter(frame, "i0", 500)
-    f = ops.take(f, plan["take_after_i0_lt_500"])
-    f = ops.filter(f, "i1", 500)
-    return [
-        ops.sum(f, name)
-        if name.startswith("i")
-        else ops.eq_count(f, name, plan["literal"])
-        for name in ops.columns(f)
-    ]
+    return ops.filter(f, "i1", 500)
 
 
 # Five filters keeping about 90% each (the last 8/9 of what remains).
 DEEP_FILTERS = (("i0", 900), ("i1", 900), ("i2", 900), ("i3", 900), ("i0", 800))
 
 
-def deep(ops, frame, plan):
-    f = frame
+def deep_filters(ops, frame, plan):
     for column, threshold in DEEP_FILTERS:
-        f = ops.filter(f, column, threshold)
-    return [ops.sum(f, "i2"), ops.eq_count(f, "s0", plan["literal"])]
+        frame = ops.filter(frame, column, threshold)
+    return frame
 
 
-def gather_ints(ops, frame, plan):
-    f = ops.take(ops.project(frame, plan["int_names"]), plan["take_all"])
-    return [ops.sum(f, name) for name in plan["int_names"]]
+def int_take(ops, frame, plan):
+    return ops.take(ops.project(frame, plan["int_names"]), plan["take_all"])
 
 
-WORKLOADS: dict[str, Callable] = {
-    "narrow": narrow,
-    "full": full,
-    "deep": deep,
-    "gather_ints": gather_ints,
+def consume_two(ops, frame, plan):
+    return [ops.sum(frame, "i2"), ops.eq_count(frame, "s0", plan["literal"])]
+
+
+def consume_all(ops, frame, plan):
+    return [
+        ops.sum(frame, name)
+        if name.startswith("i")
+        else ops.eq_count(frame, name, plan["literal"])
+        for name in ops.columns(frame)
+    ]
+
+
+@dataclass(frozen=True)
+class Workload:
+    chain: Callable
+    consume: Callable
+
+    def __call__(self, ops, frame, plan):
+        return self.consume(ops, self.chain(ops, frame, plan), plan)
+
+
+WORKLOADS: dict[str, Workload] = {
+    "narrow": Workload(filter_take_filter, consume_two),
+    "full": Workload(filter_take_filter, consume_all),
+    "deep": Workload(deep_filters, consume_two),
+    "gather_ints": Workload(int_take, consume_all),
 }
+
+
+def retained_arrow_bytes(ops, workload, columns, plan) -> dict[str, int]:
+    """Arrow bytes a chain result keeps alive once its source is dropped."""
+    gc.collect()
+    base = pa.total_allocated_bytes()
+    frame = ops.build(*columns)
+    source = pa.total_allocated_bytes() - base
+    selected = workload.chain(ops, frame, plan)
+    del frame
+    gc.collect()
+    before = pa.total_allocated_bytes() - base
+    workload.consume(ops, selected, plan)
+    gc.collect()
+    after = pa.total_allocated_bytes() - base
+    return {
+        "source": source,
+        "retained_before_consume": before,
+        "retained_after_consume": after,
+    }
 
 
 class PandasOps:
@@ -157,10 +191,8 @@ class PandasOps:
 class PrototypeOps:
     def __init__(self, strategy: str):
         from pdruntime import Runtime
-        from pdruntime.api import Array
 
         self.runtime = Runtime(strategy=strategy)
-        self.Array = Array
 
     def build(self, int_columns, string_columns):
         rt = self.runtime
@@ -173,10 +205,8 @@ class PrototypeOps:
         return rt.frame(columns)
 
     def filter(self, frame, column, threshold):
-        predicate = frame.column(column).lt(threshold)
-        # Frame.filter rejects a Series (filtering is positional) and has no
-        # public Series-to-Array conversion yet; rewrap the cell, no copy.
-        return frame.filter(self.Array(self.runtime, predicate.cell))
+        # Filtering is positional, so pass the predicate's unlabeled values.
+        return frame.filter(frame.column(column).lt(threshold).array)
 
     def take(self, frame, positions):
         return frame.take(positions)
@@ -248,7 +278,8 @@ def main() -> None:
     }
     ops = make_ops(args.arm)
     started = time.perf_counter()
-    frame = ops.build(int_columns, string_columns)
+    columns = (int_columns, string_columns)
+    frame = ops.build(*columns)
     build_seconds = time.perf_counter() - started
     env = environment(args.arm)
 
@@ -263,6 +294,7 @@ def main() -> None:
                 repeated = workload(ops, frame, plan)
                 seconds.append(time.perf_counter() - started)
                 assert repeated == result
+            memory = retained_arrow_bytes(ops, workload, columns, plan)
             record = {
                 **env,
                 "workload": name,
@@ -273,11 +305,13 @@ def main() -> None:
                 "seconds": seconds,
                 "median_seconds": statistics.median(seconds),
                 "result": result,
+                "arrow_bytes": memory,
             }
             out.write(json.dumps(record) + "\n")
             print(
                 f"{args.arm:16s} {name:12s} strings={args.strings:<3d} "
-                f"median {record['median_seconds'] * 1e3:8.1f} ms",
+                f"median {record['median_seconds'] * 1e3:8.1f} ms  retained "
+                f"{memory['retained_before_consume'] / 2**20:7.1f} MB",
                 file=sys.stderr,
             )
 

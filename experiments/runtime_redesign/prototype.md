@@ -137,6 +137,7 @@ Frame:
 Runtime.concat(frames) -> Frame
 All handles: explain_representation(), memory_report()
 Array / Series: to_numpy(), to_arrow()
+Series.array -> Array                      # unlabeled values, shared cell
 Array / Series: to_backend(backend, *, device=None)
 ```
 

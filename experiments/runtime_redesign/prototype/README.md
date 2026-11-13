@@ -31,7 +31,7 @@ assert df.column("price").to_list() == [10, 20, 30]
 
 - Nullable Int64, Boolean, and Arrow UTF-8; canonical type identity, scalar checks, explicit result binding, wrapping integer addition/sum.
 - Owned ingress, negative positional indexing, slices, missing-aware internal maps, filtering, constants through `Runtime.full`, composition, and subset/scalar reads.
-- Flat integer/string axes, shared maps across columns, Series alignment on equal or unique compatible axes, projection, and detached pandas export (Arrow strings are wrapped as `ArrowStringArray`, not boxed).
+- Flat integer/string axes, shared maps across columns, Series alignment on equal or unique compatible axes, projection, and detached pandas export (Arrow strings are wrapped as `ArrowStringArray`, not boxed). UTF-8 is stored as Arrow `large_string`, matching pandas' `StringDtype('pyarrow')`. `Series.array` returns the unlabeled values without copying, for positional operations such as `Frame.filter`.
 - Addition, equality, integer comparison/sum, mixed CPU NumPy/Arrow numeric dispatch, scalar/vector assignment, and column replacement. Scalar operands broadcast natively instead of materializing a constant column. NumPy and Arrow scalars are accepted wherever a Python scalar is, against either backend; each adapter unboxes its own scalar types. `Frame.replace_column` aligns a Series on labels, as pandas column assignment does; an Array is positional.
 - Cell-based snapshot isolation, synchronized materialization with retry after failure, explicit compaction, native-buffer reports, and optional event counters.
 - Detached NumPy `(values, validity)` and Arrow exports, explicit CPU backend conversion, correctness-checked W02 and W05–W09 runners.

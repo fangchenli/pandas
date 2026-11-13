@@ -27,7 +27,8 @@ if TYPE_CHECKING:
     from pdruntime.metrics import Metrics
     from pdruntime.type_rules import OperationSignature
 
-ARROW_TYPES: Final = {INT64: pa.int64(), BOOLEAN: pa.bool_(), UTF8: pa.string()}
+# UTF-8 uses 64-bit offsets, as pandas' StringDtype('pyarrow') does.
+ARROW_TYPES: Final = {INT64: pa.int64(), BOOLEAN: pa.bool_(), UTF8: pa.large_string()}
 NUMPY_TYPES: Final = {INT64: np.dtype("int64"), BOOLEAN: np.dtype("bool")}
 FILL_VALUES: Final[dict[LogicalType, Scalar]] = {INT64: 0, BOOLEAN: False, UTF8: ""}
 

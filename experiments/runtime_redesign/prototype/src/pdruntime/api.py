@@ -344,6 +344,16 @@ class Series(Array):
     def index(self) -> pd.Index:
         return self._index.copy(deep=True)
 
+    @property
+    def array(self) -> Array:
+        """The values without labels, as ``pandas.Series.array`` is.
+
+        The Array shares this Series' value cell without copying. Cells are
+        immutable and writes replace a handle's cell, so writing to either
+        handle never changes the other.
+        """
+        return Array(self.runtime, self.cell)
+
     def _wrap(self, cell: ValueCell) -> Series:
         return Series(self.runtime, cell, self._index, self.name)
 

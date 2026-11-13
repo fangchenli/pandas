@@ -294,3 +294,27 @@ def test_unboxed_scalars_still_obey_logical_types(backend):
     with pytest.raises(TypeError):
         numbers.set_at(0, np.datetime64("2026-01-01"))
     assert numbers.to_list() == [1, 2]
+
+
+def test_series_array_shares_values_without_labels():
+    runtime = Runtime(metrics=True)
+    frame = runtime.frame(
+        {"a": runtime.array([1, 2, 3], dtype="int64", backend="numpy")},
+        index=["x", "y", "z"],
+    )
+    series = frame.column("a")
+    array = series.array
+    assert type(array).__name__ == "Array" and array.cell is series.cell
+    runtime.metrics.clear()
+    assert frame.filter(series.lt(3).array).column("a").to_list() == [1, 2]
+    assert runtime.metrics.count("ingress_copy") == 0  # no predicate copy
+    array.set_at(0, 99)
+    assert series.to_list() == [1, 2, 3]  # writes replace only that handle
+    assert frame.column("a").to_list() == [1, 2, 3]
+
+
+def test_strings_use_large_offsets():
+    runtime = Runtime()
+    array = runtime.array(pa.array(["a", "bb"]), dtype="utf8", backend="arrow")
+    assert array.to_arrow().type == pa.large_string()
+    assert array.take([1, 0]).eq("bb").to_list() == [True, False]
