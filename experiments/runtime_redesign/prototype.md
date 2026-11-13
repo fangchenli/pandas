@@ -113,7 +113,8 @@ This separates semantic mutation from representation caching. Sharing a cell mea
 ### Public method surface
 
 ```text
-Runtime.array(values, *, dtype, backend, validity=None, device=None) -> Array
+Runtime(*, strategy="compact", backend="arrow", metrics=False)
+Runtime.array(values, *, dtype, backend=None, validity=None, device=None) -> Array
 Runtime.frame(columns, *, index=None) -> Frame
 
 Array / Series:
@@ -269,10 +270,10 @@ Default dispatch rules:
 1. Resolve logical alignment and operation compatibility.
 2. Materialize the participating columns into their preferred physical backend only.
 3. Run a native kernel when the operands share a compatible backend.
-4. For the initial CPU NumPy/Arrow pair, convert mixed numeric operands from Arrow to NumPy nullable storage. Count the conversion. This is a specific policy rule, not a fallback for arbitrary adapters. JAX mixed-backend or mixed-device operations require explicit conversion before dispatch. Strings use Arrow; no implicit object fallback.
+4. For the initial CPU NumPy/Arrow pair, convert mixed numeric operands to the runtime's default backend, Arrow unless `Runtime(backend="numpy")` selects the NumPy-first ablation. Count the conversion. This is a specific policy rule, not a fallback for arbitrary adapters. JAX mixed-backend or mixed-device operations require explicit conversion before dispatch. Strings use Arrow; no implicit object fallback.
 5. Apply the declared null/result-type contract and return completed physical output.
 
-A column's preferred backend is inherited through selection and same-backend computation. Mixed CPU NumPy/Arrow numeric output is NumPy; incompatible concatenation backend choices require an explicit destination. Backend policy is deterministic and identical in all strategies. Unsupported capabilities raise before changing any target handle; never silently route device arrays through `np.asarray`.
+A column's preferred backend is inherited through selection and same-backend computation. Mixed CPU NumPy/Arrow numeric output uses the runtime's default backend (Arrow by default); incompatible concatenation backend choices require an explicit destination. Backend policy is deterministic and identical in all strategies. Unsupported capabilities raise before changing any target handle; never silently route device arrays through `np.asarray`.
 
 `Column.binary_positional(other)` is internal; public Series methods align labels. No expression fusion, no reordering reductions, and no computation over unused parent rows. A future indexed kernel can be registered for a specific operation/type/encoding, but the benchmark must separate it from representation-only gains.
 
@@ -332,7 +333,7 @@ Structural methods produce maps eagerly:
 
 Start sorting with one int64 key, ascending order, stable ties, and nulls last. Start reindex with missing fill only; non-null fill is explicitly unsupported. Start concat with identical physical backend per corresponding column; mixed-backend concat requires a destination argument later.
 
-The first join supports inner/left equijoins on one non-null int64 key, with a unique right key, left input order, explicit suffixes, and a fresh RangeIndex. Use a pandas key-only adapter to produce left/right positions, excluding payload columns. This is an intentional scope restriction, not an implementation of general `merge`. Measure key matching separately and include it in the full workload time. Expand to duplicate right keys and many-to-many maps only after memory tests.
+The first join supports inner/left equijoins on one non-null int64 key, left key order, explicit suffixes, and a fresh RangeIndex; right keys may repeat. Use a pandas key-only adapter to produce left/right positions, excluding payload columns. This is an intentional scope restriction, not an implementation of general `merge`. Measure key matching separately and include it in the full workload time. Expand to duplicate right keys and many-to-many maps only after memory tests. The prototype now does: one public `Index.join` call matches unique and duplicate keys, and a memory test checks that a many-to-many join grows two output-length position maps while retaining each source payload once.
 
 Selecting after a join composes the new outer map separately with each distinct side map. Replacing a joined column installs data already in the output coordinate order; it need not inherit either source map. This is why a Frame owns per-column cells rather than one mandatory frame-wide map.
 

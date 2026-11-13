@@ -186,6 +186,94 @@ def test_join_keeps_independent_side_maps(runtime):
     assert plain(joined.column("t")) == ["z", "x", None, "x", "w"]
 
 
+@pytest.mark.parametrize("how", ["inner", "left"])
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_join_with_duplicate_keys_matches_pandas_merge(runtime, backend, how):
+    left_data = {"k": [2, 1, 2, 7, 1], "v": [1, 2, 3, 4, 5]}
+    right_data = {"k": [1, 2, 1, 2, 2, 9], "w": [10, 20, None, 40, 50, 60]}
+    right_data["t"] = ["a", "b", "c", None, "e", "f"]
+    left = make_frame(runtime, left_data, backend=backend)
+    right = make_frame(runtime, right_data, backend=backend)
+    result = left.join(right, on="k", how=how)
+    expected = oracle(left_data).merge(oracle(right_data), on="k", how=how)
+    pd.testing.assert_frame_equal(result.to_pandas(), expected)
+    # A self-join repeats both sides.
+    self_joined = left.join(left, on="k", how=how).to_pandas()
+    expected = oracle(left_data).merge(oracle(left_data), on="k", how=how)
+    pd.testing.assert_frame_equal(self_joined, expected)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("how", ["inner", "left"])
+@pytest.mark.parametrize("strategy", STRATEGIES)
+@settings(max_examples=40, deadline=None)
+@given(
+    st.lists(st.integers(0, 4), max_size=12),
+    st.lists(st.integers(0, 4), max_size=12),
+)
+def test_random_join_matches_pandas_merge(
+    strategy, how, backend, left_keys, right_keys
+):
+    runtime = Runtime(strategy=strategy)
+    left_data = {"k": left_keys, "v": list(range(len(left_keys)))}
+    right_data = {"k": right_keys, "w": [10 * i for i in range(len(right_keys))]}
+    result = make_frame(runtime, left_data, backend=backend).join(
+        make_frame(runtime, right_data, backend=backend), on="k", how=how
+    )
+    expected = oracle(left_data).merge(oracle(right_data), on="k", how=how)
+    pd.testing.assert_frame_equal(result.to_pandas(), expected)
+
+
+@pytest.mark.parametrize("how", ["inner", "left"])
+def test_join_keeps_identity_left_map_when_rows_match_once(runtime, how):
+    left = make_frame(runtime, {"k": [1, 2], "v": [3, 4]})
+    # Duplicate right keys exist, but no left row matches more than once.
+    right = make_frame(runtime, {"k": [5, 5, 1, 2], "w": [0, 0, 10, 20]})
+    runtime.metrics.clear()
+    joined = left.join(right, on="k", how=how)
+    assert joined.cells[:2] == left.cells  # no left selection at all
+    assert plain(joined.column("w")) == [10, 20]
+    (event,) = [e for e in runtime.metrics.events if e["kind"] == "key_match"]
+    assert event["rows"] == 6 and event["output_rows"] == 2
+
+
+def test_many_to_many_join_multiplies_maps_not_payload(runtime):
+    """The memory test the design asks for before many-to-many maps."""
+    size = 1000
+    keys = np.repeat(np.arange(10), size // 10)  # each key appears 100 times
+    strings = [f"value-{i:05d}" for i in range(size)]
+    left = runtime.frame(
+        {
+            "k": runtime.array(keys, dtype="int64", backend="numpy"),
+            "s": runtime.array(strings, dtype="utf8"),
+        }
+    )
+    right = runtime.frame(
+        {
+            "k": runtime.array(keys, dtype="int64", backend="numpy"),
+            "t": runtime.array(strings, dtype="utf8"),
+        }
+    )
+    joined = left.join(right, on="k")
+    rows = 10 * 100 * 100
+    assert len(joined) == rows
+    report = joined.memory_report()
+    # The output keeps one key column, the left one.
+    sources = (
+        left.memory_report()["known_retained_payload_bytes"]
+        + right.project(["t"]).memory_report()["known_retained_payload_bytes"]
+    )
+    if runtime.execution.strategy == "eager":
+        assert report["map_bytes"] == 0
+        assert report["known_retained_payload_bytes"] > 50 * sources
+    else:
+        # Two int64 position arrays of output length, and the sources once.
+        assert report["map_bytes"] == 2 * 8 * rows
+        assert report["known_retained_payload_bytes"] == sources
+    values, valid = joined.column("t").eq("value-00999").to_numpy()
+    assert valid is None and values.sum() == 100
+
+
 def test_join_with_no_matches_and_empty_sides(runtime):
     left = make_frame(runtime, {"k": [1, 2], "v": [5, 6]})
     right = make_frame(runtime, {"k": [7], "w": [8]})
@@ -197,8 +285,6 @@ def test_join_with_no_matches_and_empty_sides(runtime):
 
 def test_join_rejects_unsupported_cases(runtime):
     left = make_frame(runtime, LEFT)
-    with pytest.raises(ValueError, match="unique right keys"):
-        left.join(left, on="k")
     with pytest.raises(ValueError, match="how"):
         left.join(make_frame(runtime, RIGHT), on="k", how="outer")
     with pytest.raises(ValueError, match="duplicate column names"):

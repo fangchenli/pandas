@@ -7,7 +7,8 @@ name = "pdruntime-experiment"
 version = "0.0.1"
 description = "Independent pandas representation experiment"
 requires-python = ">=3.11"
-dependencies = ["numpy", "pyarrow", "pandas"]
+# pandas >= 2.2 keeps left key order in sort=False joins (GH#54611).
+dependencies = ["numpy", "pyarrow", "pandas>=2.2"]
 
 [project.optional-dependencies]
 test = ["pytest", "hypothesis"]

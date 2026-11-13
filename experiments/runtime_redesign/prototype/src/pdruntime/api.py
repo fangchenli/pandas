@@ -38,16 +38,41 @@ if TYPE_CHECKING:
     from pdruntime.maps import BoolArray, RowMap
 
 
+MIXED_CPU_BACKENDS = frozenset({"numpy", "arrow"})
+
+
 class Runtime:
-    def __init__(self, *, strategy: Strategy = "compact", metrics: bool = False):
+    """Owns the strategy, the backends, and the default backend.
+
+    ``backend`` is where arrays start when a constructor names none, and where
+    a numeric operation on mixed NumPy/Arrow operands runs. Arrow is the
+    default, so frames stay on one backend end to end; ``backend="numpy"``
+    keeps the NumPy-first policy as an ablation.
+    """
+
+    def __init__(
+        self,
+        *,
+        strategy: Strategy = "compact",
+        backend: str = "arrow",
+        metrics: bool = False,
+    ):
         self.metrics = Metrics(metrics)
         self.maps = NumpyMaps()
         self.types = TypeRules()
         self.backends = make_backends(self.maps, self.metrics)
         self.execution = Execution(strategy, self.maps, self.backends, self.metrics)
+        self._default_backend = self.backend(backend).name
+
+    @property
+    def default_backend(self) -> str:
+        return self._default_backend
 
     def __repr__(self) -> str:
-        return f"Runtime(strategy={self.execution.strategy!r})"
+        return (
+            f"Runtime(strategy={self.execution.strategy!r}, "
+            f"backend={self.default_backend!r})"
+        )
 
     def backend(self, name: str) -> Backend:
         try:
@@ -60,20 +85,26 @@ class Runtime:
         values: Iterable[object],
         *,
         dtype: LogicalType | str,
-        backend: str,
+        backend: str | None = None,
         validity: Sequence[bool] | BoolArray | None = None,
         device: str | None = None,
     ) -> Array:
         dtype = normalize_dtype(dtype)
-        adapter = self.backend(backend)
+        adapter = self.backend(self._backend_for(dtype, backend))
         storage = adapter.import_owned(values, dtype, validity, device)
         adapter.wait(storage)
         return Array(self, self.execution.physical_cell(storage))
 
     def full(
-        self, size: int, value: object, *, dtype: LogicalType | str, backend="numpy"
+        self,
+        size: int,
+        value: object,
+        *,
+        dtype: LogicalType | str,
+        backend: str | None = None,
     ) -> Array:
         dtype = normalize_dtype(dtype)
+        backend = self._backend_for(dtype, backend)
         if not self.backend(backend).supports(dtype):
             raise TypeError(f"{backend} does not support {dtype}")
         scalar = validate_scalar(python_scalar(value), dtype)
@@ -122,6 +153,17 @@ class Runtime:
         )
         return Frame(self, first.names, cells, index)
 
+    def _backend_for(self, dtype: LogicalType, backend: str | None) -> str:
+        """A named backend as given; otherwise the default if it supports
+        ``dtype``, else the first adapter that does (Arrow for UTF-8)."""
+        if backend is not None:
+            return backend
+        names = (self.default_backend, *self.backends)
+        for name in names:
+            if self.backends[name].supports(dtype):
+                return name
+        raise TypeError(f"no backend supports {dtype}")
+
     def _check_owned(self, value: object, message: str) -> None:
         if not isinstance(value, Array) or value.runtime is not self:
             raise TypeError(message)
@@ -148,6 +190,7 @@ class Runtime:
                 raise TypeError("filter requires Boolean from the same runtime")
             predicate = values
         else:
+            # A throwaway control mask: NumPy is already the positions' form.
             predicate = self.array(values, dtype=BOOLEAN, backend="numpy")
         if len(predicate) != size:
             raise ValueError("filter length mismatch")
@@ -275,7 +318,13 @@ class Array:
         if isinstance(right, Storage) and right.backend != backend:
             if self.dtype == UTF8:
                 raise TypeError("strings require Arrow")
-            backend = "numpy"  # The initial mixed CPU numeric policy.
+            # A specific rule for the CPU NumPy/Arrow pair, not a fallback for
+            # arbitrary adapters: other mixes need an explicit conversion.
+            backends = {left.backend, right.backend, runtime.default_backend}
+            devices = {left.device, right.device}
+            if not backends <= MIXED_CPU_BACKENDS or devices != {"cpu"}:
+                raise TypeError("mixed backends require an explicit conversion")
+            backend = runtime.default_backend
             if left.backend != backend:
                 left = runtime._convert(left, backend)
             if right.backend != backend:
@@ -515,10 +564,12 @@ class Frame:
         how: str = "inner",
         suffixes: tuple[str, str] = ("_x", "_y"),
     ) -> Frame:
-        """Equijoin on one non-null Int64 key whose right values are unique.
+        """Inner or left equijoin on one non-null Int64 key.
 
-        Rows follow the left input order under a fresh RangeIndex, as
-        ``pandas.merge`` orders them. Left and right columns keep separate maps
+        Right keys may repeat, so a left row can match several right rows.
+        Rows follow the left keys' order, then the right keys' order, under a
+        fresh RangeIndex, as ``pandas.merge`` orders them. Left and right
+        columns keep separate maps
         into their own sources. Under compact and tree, neither side's payload
         is gathered here; eager gathers both, as for any selection.
         """
@@ -533,17 +584,14 @@ class Frame:
             and all(isinstance(suffix, str) for suffix in suffixes)
         ):
             raise TypeError("suffixes must be a pair of strings")
-        maps = runtime.maps
-        match = keys.match_unique(self._join_key(on), right._join_key(on), maps)
-        runtime.metrics.record("key_match", rows=len(self) + len(right))
-        if how == "left" or match.present is None:
-            left_map, right_map = maps.identity(len(self)), match
-        else:
-            rows = np.flatnonzero(match.present)
-            left_map = maps.positions(len(self), rows, negative=False)
-            right_map = maps.positions(
-                len(right), match.positions[rows], negative=False
-            )
+        left_map, right_map = keys.join_maps(
+            self._join_key(on), right._join_key(on), how, runtime.maps
+        )
+        runtime.metrics.record(
+            "key_match",
+            rows=len(self) + len(right),
+            output_rows=left_map.output_length,
+        )
         others = [name for name in right.names if name != on]
         overlap = set(self.names).intersection(others)
         names = (

@@ -132,8 +132,64 @@ def test_mixed_backend_and_alignment(runtime):
     actual = left.column("a").add(right.column("a"))
     expected = left.to_pandas()["a"] + right.to_pandas()["a"]
     pd.testing.assert_series_equal(actual.to_pandas(), expected)
-    assert actual.storage_info()["backend"] == "numpy"
+    assert actual.storage_info()["backend"] == "arrow"
     assert actual.dtype == int64()
+
+
+@pytest.mark.parametrize("default", BACKENDS)
+def test_default_backend_and_mixed_numeric_policy(default):
+    runtime = Runtime(backend=default, metrics=True)
+    assert runtime.array([1], dtype="int64").storage_info()["backend"] == default
+    assert runtime.full(2, True, dtype="boolean").storage_info()["backend"] == default
+    # UTF-8 has only an Arrow adapter, so an unnamed backend falls back to it.
+    assert runtime.array(["a"], dtype="utf8").storage_info()["backend"] == "arrow"
+    assert runtime.full(1, "a", dtype="utf8").storage_info()["backend"] == "arrow"
+    numpy = runtime.array([1, None], dtype="int64", backend="numpy")
+    arrow = runtime.array([10, 20], dtype="int64", backend="arrow")
+    runtime.metrics.clear()
+    total = numpy.add(arrow)
+    assert plain(total) == [11, None]
+    # Mixed operands run on the default backend; only the other side converts.
+    assert total.storage_info()["backend"] == default
+    assert runtime.metrics.count("backend_conversion") == 1
+    same = numpy.add(numpy)  # same-backend operands keep their backend
+    assert same.storage_info()["backend"] == "numpy"
+    assert repr(runtime) == f"Runtime(strategy='compact', backend='{default}')"
+
+
+def test_unknown_default_backend_is_rejected():
+    with pytest.raises(TypeError, match="unsupported backend"):
+        Runtime(backend="jax")
+    with pytest.raises(AttributeError):
+        Runtime().default_backend = "numpy"
+
+
+@pytest.mark.parametrize("default", BACKENDS)
+def test_default_backend_filter_and_alignment(default):
+    runtime = Runtime(backend=default, metrics=True)
+    frame = runtime.frame(
+        {"a": runtime.array([1, 2, 3], dtype="int64")}, index=["x", "y", "z"]
+    )
+    for predicate in ([True, None, True], np.array([True, False, True])):
+        assert plain(frame.filter(predicate).column("a")) == [1, 3]
+    other = runtime.frame(
+        {"a": runtime.array([10, 20], dtype="int64", backend="numpy")},
+        index=["z", "w"],
+    )
+    total = frame.column("a").add(other.column("a"))
+    expected = frame.to_pandas()["a"] + other.to_pandas()["a"]
+    pd.testing.assert_series_equal(total.to_pandas(), expected)
+    assert total.storage_info()["backend"] == default
+
+
+def test_mixed_policy_is_limited_to_cpu_numpy_arrow(monkeypatch):
+    runtime = Runtime()
+    numpy = runtime.array([1], dtype="int64", backend="numpy")
+    arrow = runtime.array([2], dtype="int64", backend="arrow")
+    # Another adapter's storage must not be converted implicitly.
+    monkeypatch.setattr(runtime, "_default_backend", "jax")
+    with pytest.raises(TypeError, match="explicit conversion"):
+        numpy.add(arrow)
 
 
 def test_duplicate_axis_and_axis_ownership(runtime):

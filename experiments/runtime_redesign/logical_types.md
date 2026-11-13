@@ -137,9 +137,9 @@ For example, two integer columns with identical labels but different storage bac
 ```text
 bind(add, (Int64, Int64), options) → Int64 result
 physical selection              → materialize each selected input
-mixed-backend policy            → convert Arrow input to NumPy nullable storage
+mixed-backend policy            → convert the NumPy input to the default (Arrow) storage
 native addition                 → values and validity
-new ValueCell                   → dtype Int64, physical NumPy storage
+new ValueCell                   → dtype Int64, physical Arrow storage
 ```
 
 The physical dispatcher may choose a different implementation in a later experiment without changing the binding. A string equality result is Boolean regardless of the string storage encoding. Broader result-type examples can be added as operations enter scope; they are not prerequisites for the first prototype.
