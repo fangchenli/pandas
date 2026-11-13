@@ -1,6 +1,6 @@
 # Experimental plan for the pandas runtime redesign
 
-Status: broader evaluation plan. M0–M3 correctness tests and W02/W05–W09 smoke runners now exist; no architectural performance conclusion. Date: 2026-11-12.
+Status: broader evaluation plan, dated 2026-11-12. The measured subset and its conclusion are in the [M5 decision report](report.md); the items it lists as not measured remain open.
 
 The first objective is to determine whether structural sharing delivers an advantage after paying for ownership, map composition, real consumption, and mutation. Implement the smallest runtime that can answer that question before broadening API coverage. The supporting evidence and semantic issues are in the [review](review.md) and [references](references.md).
 

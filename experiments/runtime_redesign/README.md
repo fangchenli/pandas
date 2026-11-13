@@ -1,6 +1,6 @@
 # Pandas runtime redesign research
 
-Research date: 2026-11-12. Status: M0–M3 Python prototype implemented; semantic tests and workload smoke checks available. No architectural performance conclusion yet.
+Research date: 2026-11-12. Status: M0–M4 Python prototype implemented and evaluated against deferred-take pandas (2026-11-13). The [M5 decision report](report.md) concludes against a general runtime replacement and for the incremental deferred-take route.
 
 The proposal merits a bounded experiment. Its strongest opportunity is reducing movement of heterogeneous payload columns across structural operations while preserving pandas behavior. The first decision is whether that benefit survives materialization, mutation, and interoperability costs, and exceeds a targeted deferred-take implementation.
 
@@ -10,6 +10,7 @@ The proposal merits a bounded experiment. Its strongest opportunity is reducing 
 - [Design review](review.md): assessment, semantic gaps, recommended changes, and a proposed initial architecture.
 - [Annotated references](references.md): primary sources, reading priorities, applicability, and limitations.
 - [Experimental plan](experiments.md): correctness cases, controlled baselines, workloads, instrumentation, and decision criteria.
+- [M5 decision report](report.md): measured findings, retained memory, hypotheses, what was not measured, and when to reopen.
 - [Python prototype design](prototype.md): API, shared ownership model, eager/compact/tree strategies, backend contracts, an early JAX validation milestone, and implementation milestones.
 - [Unified logical types](logical_types.md): verified PDEP-13 comparison, type identity, operation/result-type rules, and backend-independent contracts.
 
@@ -38,4 +39,4 @@ PDEP-13 has now been verified from the [PR supplied by the user](https://github.
 
 ## Authorship
 
-`proposal.md` is user-supplied text. The other documents are agent-generated research and analysis produced with the Codex harness, GPT-6 family; the exact model variant and reasoning-effort setting are not exposed in this session. Before external contribution, apply the repository's [automated contributions policy](../../doc/source/development/contributing.rst): human review and revision, agent disclosure, and explicit quotation of any verbatim agent text used in community discussion.
+`proposal.md` is user-supplied text. `report.md` was generated with Claude Code (Claude Opus 5.5). The other documents are agent-generated research and analysis produced with the Codex harness, GPT-6 family; the exact model variant and reasoning-effort setting are not exposed in this session. Before external contribution, apply the repository's [automated contributions policy](../../doc/source/development/contributing.rst): human review and revision, agent disclosure, and explicit quotation of any verbatim agent text used in community discussion.

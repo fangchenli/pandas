@@ -63,4 +63,4 @@ The [2026-11-13 pod evaluation](results/2026-11-13-pod/README.md) compares every
 
 ## Follow-up experiments
 
-Validate the third-backend boundary with the narrow JAX adapter (M3a), then add structural operations (M4). W15 covers 2D regressions before any general replacement claim; the [remaining decisions](../decisions.md) specify key semantics, custom types, bounded reads, axis costs, and a pandas integration experiment.
+The [M5 decision report](../report.md) closes the evaluation for the measured scope and keeps this package as a reference implementation. The JAX adapter (M3a), W15, and the [remaining decisions](../decisions.md) experiments (key semantics, custom types, bounded reads, axis costs, pandas integration) are not scheduled; the report lists when to reopen them.
