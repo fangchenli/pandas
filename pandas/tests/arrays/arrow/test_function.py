@@ -94,6 +94,67 @@ def test_where_mask_temporal_reinterpretation_raises(meth):
         getattr(ser, meth)(np.array([True, False, True]), other)
 
 
+@pytest.mark.parametrize(
+    "pa_type", [pa.bool_(), pa.int64(), pa.string(), pa.large_string(), pa.binary()]
+)
+@pytest.mark.parametrize("meth", ["where", "mask"])
+def test_where_mask_arrow_other_chunks_not_aligned(pa_type, meth):
+    # _where picks with one pc.if_else, which gives wrong values for boolean
+    #  chunks that don't line up with the other input's (apache/arrow#47825)
+    #  and for sliced varbinary chunks with a null scalar (GH#64320)
+    n = 20
+
+    def make(i):
+        if i % 5 == 4:
+            return None
+        if pa.types.is_boolean(pa_type):
+            # True in the first chunk, which the boolean bug zeroes
+            return i < 4 or i % 3 == 0
+        if pa.types.is_integer(pa_type):
+            return i
+        # lengths that grow, so a misread offset shows
+        if pa.types.is_binary(pa_type):
+            return b"x" * i
+        return "x" * i
+
+    left = [make(i) for i in range(n)]
+    right = [make(i + 1) for i in range(n)]
+    # chunks of 3 and 17, both with a non-zero offset; copy=False keeps them
+    full = pa.array([make(1)] * 5 + left, type=pa_type)
+    arr = ArrowExtensionArray(pa.chunked_array([full[5:8], full[8:]]))
+    ser = pd.Series(arr, copy=False)
+    other = pd.Series(ArrowExtensionArray(pa.array(right, type=pa_type)))
+    cond = np.arange(n) % 2 == 0
+
+    keep = cond if meth == "where" else ~cond
+    for value, fill in [(other, right), (None, [None] * n)]:
+        result = getattr(ser, meth)(cond, value)
+        result.array._pa_array.validate(full=True)
+        values = [x if k else y for k, x, y in zip(keep, left, fill, strict=True)]
+        expected = pd.Series(ArrowExtensionArray(pa.array(values, type=pa_type)))
+        tm.assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize("meth", ["where", "mask"])
+def test_where_mask_arrow_scalar_other(meth):
+    ser = pd.Series([1, None, 3, 4], dtype="int64[pyarrow]")
+    cond = np.array([True, False, False, True])
+    if meth == "where":
+        expected = [1, 10, 10, 4]
+    else:
+        expected = [10, None, 3, 10]
+
+    result = getattr(ser, meth)(cond, 10)
+    tm.assert_series_equal(result, pd.Series(expected, dtype="int64[pyarrow]"))
+
+    result = getattr(ser, meth)(cond, pd.NA)
+    expected = [None if x == 10 else x for x in expected]
+    tm.assert_series_equal(result, pd.Series(expected, dtype="int64[pyarrow]"))
+
+    with pytest.raises(TypeError, match="Invalid value '1.5'"):
+        getattr(ser, meth)(cond, 1.5)
+
+
 @pytest.mark.parametrize("limit", [None, 1])
 def test_fillna_string_self_agrees_with_limit_path(limit):
     # GH#68419 fillna shares _validate_setitem_value with __setitem__, so the

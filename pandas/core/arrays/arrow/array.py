@@ -38,6 +38,7 @@ from pandas.compat import (
     PYARROW_MIN_VERSION,
     pa_version_under18p0,
     pa_version_under21p0,
+    pa_version_under23p0,
     pa_version_under25p0,
 )
 from pandas.compat.numpy import function as nv
@@ -1961,13 +1962,24 @@ class ArrowExtensionArray(
         return self._from_pyarrow_array(_copy_pyarrow_buffers(self._pa_array))
 
     def _where(self, mask: npt.NDArray[np.bool_], value) -> Self:
-        # __setitem__ replaces _pa_array rather than writing into its buffers,
-        #  so the base class's copy is unnecessary
-        result = self._from_pyarrow_array(self._pa_array)
-        if is_list_like(value):
-            value = value[~mask]
-        result[~mask] = value
-        return result
+        if (
+            isinstance(value, ArrowExtensionArray)
+            and value.dtype == self.dtype
+            and value._pa_array.type == self._pa_array.type
+            and len(value) == len(self)
+        ):
+            # pick from both arrays in one pass instead of filtering value
+            #  and then replacing with a mask
+            pa_value = value._pa_array
+        elif not is_list_like(value):
+            pa_value = self._validate_setitem_value(value)
+        else:
+            # __setitem__ replaces _pa_array rather than writing into its
+            #  buffers, so the base class's copy is unnecessary
+            result = self._from_pyarrow_array(self._pa_array)
+            result[~mask] = value[~mask]
+            return result
+        return self._from_pyarrow_array(self._if_else(mask, self._pa_array, pa_value))
 
     @overload
     def view(self, dtype: None = ...) -> Self: ...
@@ -3774,18 +3786,28 @@ class ArrowExtensionArray(
         pa.Array
         """
 
-        # TODO: Remove this part when pa.if_else is fixed (GH#64320)
-        def _maybe_combine(arr):
-            if not isinstance(arr, pa.ChunkedArray) or not _is_varbinary_type(arr.type):
-                return arr
-            if not any(chunk.offset != 0 for chunk in arr.chunks):
+        def _needs_combine(arr, other) -> bool:
+            if not isinstance(arr, pa.ChunkedArray):
+                return False
+            if _is_varbinary_type(arr.type):
+                # TODO: Remove this when pa.if_else is fixed (GH#64320)
+                return any(chunk.offset != 0 for chunk in arr.chunks)
+            if pa_version_under23p0 and pa.types.is_boolean(arr.type):
+                # pc.if_else gives wrong values for two boolean arrays whose
+                #  chunks don't line up (fixed in pyarrow 23.0,
+                #  https://github.com/apache/arrow/issues/47825)
+                return arr.num_chunks > 1 and is_list_like(other)
+            return False
+
+        def _maybe_combine(arr, other):
+            if not _needs_combine(arr, other):
                 return arr
             try:
                 return arr.combine_chunks()
             except (pa.ArrowInvalid, pa.ArrowCapacityError, MemoryError):
                 return None
 
-        left_c, right_c = _maybe_combine(left), _maybe_combine(right)
+        left_c, right_c = _maybe_combine(left, right), _maybe_combine(right, left)
         if left_c is not None and right_c is not None:
             try:
                 return pc.if_else(cond, left_c, right_c)
