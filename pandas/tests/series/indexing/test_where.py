@@ -536,3 +536,33 @@ def test_mask_nullable_na_cond_from_self(dtype):
     result = ser.mask(ser <= 2, -99)
     expected = pd.Series([-99, -99, None, 4], dtype=dtype)
     tm.assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize("method", ["where", "mask"])
+def test_where_mask_masked_other_same_dtype(method, any_numeric_ea_dtype):
+    # NA in the values and in other is kept where it is picked
+    dtype = any_numeric_ea_dtype
+    ser = pd.Series([1, None, 3, None], dtype=dtype)
+    other = pd.Series([None, 20, 30, None], dtype=dtype)
+    cond = np.array([True, False, False, True])
+
+    result = getattr(ser, method)(cond, other)
+    if method == "where":
+        expected = pd.Series([1, 20, 30, None], dtype=dtype)
+    else:
+        expected = pd.Series([None, None, 3, None], dtype=dtype)
+    tm.assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize("method", ["where", "mask"])
+def test_where_mask_masked_other_same_dtype_boolean(method):
+    ser = pd.Series([True, None, False, None], dtype="boolean")
+    other = pd.Series([None, False, True, None], dtype="boolean")
+    cond = np.array([True, False, False, True])
+
+    result = getattr(ser, method)(cond, other)
+    if method == "where":
+        expected = pd.Series([True, False, True, None], dtype="boolean")
+    else:
+        expected = pd.Series([None, None, False, None], dtype="boolean")
+    tm.assert_series_equal(result, expected)
