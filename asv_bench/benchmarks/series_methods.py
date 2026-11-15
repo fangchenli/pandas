@@ -93,6 +93,34 @@ class WhereSeriesOther:
         self.s.where(self.cond, self.other)
 
 
+class WhereArrow:
+    params = (
+        ["int64[pyarrow]", "bool[pyarrow]", "string[pyarrow]"],
+        ["array", "scalar", "na"],
+    )
+    param_names = ["dtype", "other"]
+
+    def setup(self, dtype, other):
+        N = 10**6
+        values = np.random.randint(0, 100, N)
+        if dtype == "bool[pyarrow]":
+            values = values > 50
+        elif dtype == "string[pyarrow]":
+            values = values.astype(str)
+        self.s = Series(values, dtype=dtype)
+        if other == "array":
+            self.other = Series(values[::-1], dtype=dtype)
+            self.other[::10] = NA
+        elif other == "scalar":
+            self.other = self.s.iloc[0]
+        else:
+            self.other = NA
+        self.cond = np.random.randn(N) < 0
+
+    def time_where(self, dtype, other):
+        self.s.where(self.cond, self.other)
+
+
 class Fillna:
     params = [
         [
