@@ -155,6 +155,66 @@ def test_where_mask_arrow_scalar_other(meth):
         getattr(ser, meth)(cond, 1.5)
 
 
+@pytest.mark.parametrize("chunked", [False, True])
+@pytest.mark.parametrize("value", ["z", None, "array"])
+@pytest.mark.parametrize("meth", ["where", "mask"])
+def test_where_mask_dictionary_keeps_missing(meth, value, chunked):
+    # a kept missing value was replaced by a dictionary value
+    arr = pa.array(["a", "b", None, "a"]).dictionary_encode()
+    if chunked:
+        arr = pa.chunked_array([arr[:1], arr[1:]])
+    ser = pd.Series(ArrowExtensionArray(arr), copy=False)
+    cond = np.array([True, False, True, False])
+    if meth == "mask":
+        cond = ~cond
+    if value == "array":
+        other = pa.array(["c", "d", None, "e"]).dictionary_encode()
+        value = pd.Series(ArrowExtensionArray(other))
+        fill = ["d", "e"]
+    else:
+        fill = [value, value]
+
+    result = getattr(ser, meth)(cond, value)
+    expected = ["a", fill[0], None, fill[1]]
+    assert result.isna().tolist() == [x is None for x in expected]
+    assert result.dtype == ser.dtype
+    assert [None if pd.isna(x) else x for x in result] == expected
+
+
+@pytest.mark.parametrize(
+    "pa_type",
+    [
+        pa.list_(pa.int64()),
+        pa.large_list(pa.string()),
+        pa.list_(pa.int64(), 2),
+        pa.struct([("a", pa.int64())]),
+        pa.map_(pa.string(), pa.int64()),
+    ],
+)
+@pytest.mark.parametrize("value", ["", "zz", b"", b"zz"])
+@pytest.mark.parametrize(
+    "method", ["where", "mask", "fillna", "setitem_mask", "setitem_list", "setitem_int"]
+)
+def test_nested_str_bytes_value_raises(pa_type, value, method):
+    # pyarrow reads a str or bytes as a sequence, e.g. b"zz" -> [122, 122]
+    ser = pd.Series([None, None, None], dtype=ArrowDtype(pa_type))
+    cond = np.array([True, False, False])
+    msg = re.escape(f"Invalid value '{value!s}' for dtype '{ser.dtype}'")
+    with pytest.raises(TypeError, match=msg):
+        if method == "where":
+            ser.where(cond, value)
+        elif method == "mask":
+            ser.mask(~cond, value)
+        elif method == "fillna":
+            ser.fillna(value)
+        elif method == "setitem_mask":
+            ser[~cond] = value
+        elif method == "setitem_list":
+            ser.iloc[[1, 2]] = value
+        else:
+            ser.iloc[1] = value
+
+
 @pytest.mark.parametrize("limit", [None, 1])
 def test_fillna_string_self_agrees_with_limit_path(limit):
     # GH#68419 fillna shares _validate_setitem_value with __setitem__, so the

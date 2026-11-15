@@ -3692,6 +3692,10 @@ class ArrowExtensionArray(
             bad = _first_truncated_to_integer(value)
             if bad is not None:
                 raise TypeError(f"Invalid value '{bad!s}' for dtype '{self.dtype}'")
+        if pa.types.is_nested(pa_type) and isinstance(value, (str, bytes)):
+            # pyarrow reads these as a sequence of characters or byte values,
+            #  e.g. b"z" -> [122] for list<int64>
+            raise TypeError(f"Invalid value '{value!s}' for dtype '{self.dtype}'")
         self_temporal = _is_temporal_pa_type(pa_type)
         if self_temporal is not None:
             value_temporal = _is_temporal_value(value)
