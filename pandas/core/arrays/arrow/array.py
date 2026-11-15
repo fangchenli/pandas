@@ -3790,7 +3790,9 @@ class ArrowExtensionArray(
         pa.Array
         """
 
-        def _maybe_combine(arr: ArrayLike | Scalar) -> ArrayLike | Scalar | None:
+        def _maybe_combine(
+            arr: pa.Array | pa.ChunkedArray | pa.Scalar,
+        ) -> pa.Array | pa.ChunkedArray | pa.Scalar | None:
             if not isinstance(arr, pa.ChunkedArray):
                 return arr
             try:
