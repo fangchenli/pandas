@@ -155,6 +155,24 @@ def test_where_mask_arrow_scalar_other(meth):
         getattr(ser, meth)(cond, 1.5)
 
 
+@pytest.mark.parametrize("other", [True, False, None])
+@pytest.mark.parametrize("meth", ["where", "mask"])
+def test_where_mask_bool_chunks_scalar_other(meth, other):
+    # the boolean chunk bug (apache/arrow#47825) also hits a scalar other,
+    #  here with a second chunk sliced from a separate array
+    left = [True, True, False, None, None, None, False, True, None]
+    second = pa.array([False] * 3 + left[3:])[3:]
+    arr = ArrowExtensionArray(pa.chunked_array([pa.array(left[:3]), second]))
+    ser = pd.Series(arr, copy=False)
+    cond = np.array([False, True, False, True, False, True, False, False, False])
+
+    result = getattr(ser, meth)(cond, other)
+    keep = cond if meth == "where" else ~cond
+    values = [x if k else other for k, x in zip(keep, left, strict=True)]
+    expected = pd.Series(values, dtype="bool[pyarrow]")
+    tm.assert_series_equal(result, expected)
+
+
 @pytest.mark.parametrize("chunked", [False, True])
 @pytest.mark.parametrize("value", ["z", None, "array"])
 @pytest.mark.parametrize("meth", ["where", "mask"])

@@ -3790,9 +3790,7 @@ class ArrowExtensionArray(
         pa.Array
         """
 
-        def _maybe_combine(
-            arr: ArrayLike | Scalar, other: ArrayLike | Scalar
-        ) -> ArrayLike | Scalar | None:
+        def _maybe_combine(arr: ArrayLike | Scalar) -> ArrayLike | Scalar | None:
             if not isinstance(arr, pa.ChunkedArray):
                 return arr
             try:
@@ -3810,17 +3808,17 @@ class ArrowExtensionArray(
                     pa_version_under23p0
                     and pa.types.is_boolean(arr.type)
                     and arr.num_chunks > 1
-                    and is_list_like(other)
                 ):
-                    # pc.if_else gives wrong values for two boolean arrays whose
-                    #  chunks don't line up (fixed in pyarrow 23.0,
+                    # pc.if_else gives wrong values for boolean chunks that
+                    #  don't line up with cond's or the other input's, even
+                    #  with a scalar other (fixed in pyarrow 23.0,
                     #  https://github.com/apache/arrow/issues/47825)
                     return arr.combine_chunks()
             except (pa.ArrowInvalid, pa.ArrowCapacityError, MemoryError):
                 return None
             return arr
 
-        left_c, right_c = _maybe_combine(left, right), _maybe_combine(right, left)
+        left_c, right_c = _maybe_combine(left), _maybe_combine(right)
         if left_c is not None and right_c is not None:
             try:
                 return pc.if_else(cond, left_c, right_c)
