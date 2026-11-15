@@ -39,6 +39,7 @@ from pandas.compat import (
     pa_version_under18p0,
     pa_version_under21p0,
     pa_version_under23p0,
+    pa_version_under24p0,
     pa_version_under25p0,
 )
 from pandas.compat.numpy import function as nv
@@ -336,8 +337,9 @@ def _is_varbinary_type(pa_type: pa.DataType) -> bool:
     """
     Whether this is one of string, large_string, binary and large_binary.
 
-    pc.if_else misreads a non-zero offset for exactly these four, silently
-    truncating values (GH#64320, https://github.com/apache/arrow/issues/49410).
+    pc.if_else misreads a non-zero offset for exactly these four before
+    pyarrow 24.0, silently truncating values (GH#64320,
+    https://github.com/apache/arrow/issues/49410).
     Other offset-carrying layouts such as list and map are unaffected.
     """
     return (
@@ -3796,8 +3798,9 @@ class ArrowExtensionArray(
             if not isinstance(arr, pa.ChunkedArray):
                 return arr
             try:
-                if _is_varbinary_type(arr.type):
-                    # TODO: Remove this when pa.if_else is fixed (GH#64320)
+                if pa_version_under24p0 and _is_varbinary_type(arr.type):
+                    # pc.if_else misreads sliced chunks (GH#64320, fixed in
+                    #  pyarrow 24.0, https://github.com/apache/arrow/issues/49410)
                     if any(chunk.offset != 0 for chunk in arr.chunks):
                         # copy only the sliced chunks; combining all of them
                         #  can overflow the 32-bit offsets of string data

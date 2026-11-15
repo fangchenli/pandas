@@ -19,6 +19,7 @@ try:
     pa_version_under21p0 = _palv < Version("21.0.0")
     pa_version_under22p0 = _palv < Version("22.0.0")
     pa_version_under23p0 = _palv < Version("23.0.0")
+    pa_version_under24p0 = _palv < Version("24.0.0")
     pa_version_under25p0 = _palv < Version("25.0.0")
     pa_version_under26p0 = _palv < Version("26.0.0")
     PYARROW_INSTALLED = True
@@ -31,6 +32,7 @@ except ImportError:
     pa_version_under21p0 = True
     pa_version_under22p0 = True
     pa_version_under23p0 = True
+    pa_version_under24p0 = True
     pa_version_under25p0 = True
     pa_version_under26p0 = True
     PYARROW_INSTALLED = False
