@@ -3790,26 +3790,35 @@ class ArrowExtensionArray(
         pa.Array
         """
 
-        def _needs_combine(arr, other) -> bool:
+        def _maybe_combine(
+            arr: ArrayLike | Scalar, other: ArrayLike | Scalar
+        ) -> ArrayLike | Scalar | None:
             if not isinstance(arr, pa.ChunkedArray):
-                return False
-            if _is_varbinary_type(arr.type):
-                # TODO: Remove this when pa.if_else is fixed (GH#64320)
-                return any(chunk.offset != 0 for chunk in arr.chunks)
-            if pa_version_under23p0 and pa.types.is_boolean(arr.type):
-                # pc.if_else gives wrong values for two boolean arrays whose
-                #  chunks don't line up (fixed in pyarrow 23.0,
-                #  https://github.com/apache/arrow/issues/47825)
-                return arr.num_chunks > 1 and is_list_like(other)
-            return False
-
-        def _maybe_combine(arr, other):
-            if not _needs_combine(arr, other):
                 return arr
             try:
-                return arr.combine_chunks()
+                if _is_varbinary_type(arr.type):
+                    # TODO: Remove this when pa.if_else is fixed (GH#64320)
+                    if any(chunk.offset != 0 for chunk in arr.chunks):
+                        # copy only the sliced chunks; combining all of them
+                        #  can overflow the 32-bit offsets of string data
+                        chunks = [
+                            pa.concat_arrays([chunk]) if chunk.offset else chunk
+                            for chunk in arr.chunks
+                        ]
+                        return pa.chunked_array(chunks, type=arr.type)
+                elif (
+                    pa_version_under23p0
+                    and pa.types.is_boolean(arr.type)
+                    and arr.num_chunks > 1
+                    and is_list_like(other)
+                ):
+                    # pc.if_else gives wrong values for two boolean arrays whose
+                    #  chunks don't line up (fixed in pyarrow 23.0,
+                    #  https://github.com/apache/arrow/issues/47825)
+                    return arr.combine_chunks()
             except (pa.ArrowInvalid, pa.ArrowCapacityError, MemoryError):
                 return None
+            return arr
 
         left_c, right_c = _maybe_combine(left, right), _maybe_combine(right, left)
         if left_c is not None and right_c is not None:
