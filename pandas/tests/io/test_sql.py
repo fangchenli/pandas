@@ -47,6 +47,7 @@ from pandas.io.sql import (
     read_sql_query,
     read_sql_table,
 )
+from pandas.io.sql.dbapi2 import DBAPI2Database
 from pandas.io.sql.sqlite import _get_valid_sqlite_name
 
 if TYPE_CHECKING:
@@ -4337,7 +4338,7 @@ def _dbapi2_conn(name, request):
 
 def test_dbapi2_routes_to_generic_backend(fake_dbapi_conn):
     with pandasSQL_builder(fake_dbapi_conn) as pandas_sql:
-        assert type(pandas_sql) is sql.DBAPI2Database
+        assert type(pandas_sql) is DBAPI2Database
 
 
 @pytest.mark.parametrize("conn", raw_dbapi_connectable)
@@ -4478,7 +4479,7 @@ def test_dbapi2_unknown_paramstyle_fails_before_writing(sqlite_buildin):
     sqlite_buildin.execute("CREATE TABLE keep (a INTEGER)")
     sqlite_buildin.execute("INSERT INTO keep VALUES (42)")
     sqlite_buildin.commit()
-    pandas_sql = sql.DBAPI2Database(Wrapper(sqlite_buildin))
+    pandas_sql = DBAPI2Database(Wrapper(sqlite_buildin))
     assert pandas_sql.driver is None
     df = pd.DataFrame({"a": [1]})
 
@@ -4523,7 +4524,7 @@ def test_dbapi2_wrapped_driver_connection(postgresql_psycopg2_engine):
     proxy = postgresql_psycopg2_engine.raw_connection()
     try:
         with pandasSQL_builder(proxy) as pandas_sql:
-            assert type(pandas_sql) is sql.DBAPI2Database
+            assert type(pandas_sql) is DBAPI2Database
         assert pd.DataFrame({"a": [1, 2]}).to_sql("t", proxy, index=False) == 2
         assert sql.read_sql_query('SELECT a FROM "t"', proxy)["a"].tolist() == [1, 2]
     finally:
