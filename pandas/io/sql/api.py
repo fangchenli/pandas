@@ -107,7 +107,7 @@ def read_sql_table(
         Name of SQL table in database.
     con : SQLAlchemy connectable or str
         A database URI could be provided as str.
-        SQLite DBAPI connection mode not supported.
+        DB-API 2.0 connections are not supported.
     schema : str, default None
         Name of SQL schema in database to query (if database flavor
         supports this). Uses default schema if None (default).
