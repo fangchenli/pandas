@@ -39,7 +39,7 @@ _SQL_TYPES = {
 
 
 def _get_valid_sqlite_name(name: object) -> str:
-    return quote_identifier(name, '"')
+    return quote_identifier(name)
 
 
 class SQLiteTable(DBAPI2Table):
@@ -102,9 +102,6 @@ class SQLiteDatabase(DBAPI2Database):
         import sqlite3
 
         super().__init__(con, sqlite3)
-
-    def _escape_identifier(self, name: object) -> str:
-        return _get_valid_sqlite_name(name)
 
     def _table_identifier(self, name: object, schema: str | None = None) -> str:
         # Only get_schema passes a schema, which it has always left unquoted

@@ -4222,7 +4222,7 @@ def test_dbapi_params_passed_through_unchanged(params):
 # -- Generic DB-API 2.0 connections
 
 
-def _make_fake_dbapi_module(paramstyle, monkeypatch, percent_format=True):
+def _make_fake_dbapi_module(paramstyle, monkeypatch):
     """
     Register a PEP 249 driver module that runs on sqlite3 but only accepts
     ``paramstyle`` placeholders, translating them for sqlite.
@@ -4231,8 +4231,6 @@ def _make_fake_dbapi_module(paramstyle, monkeypatch, percent_format=True):
     import types
 
     name = f"pandas_fake_dbapi_{paramstyle}"
-    if not percent_format:
-        name += "_literal_percent"
     module = types.ModuleType(name)
     module.paramstyle = paramstyle
     module.Error = sqlite3.Error
@@ -4246,9 +4244,6 @@ def _make_fake_dbapi_module(paramstyle, monkeypatch, percent_format=True):
             assert not isinstance(params, dict), params
         if paramstyle == "numeric":
             query = re.sub(r":(\d+)", r"?\1", query)
-        elif not percent_format:
-            # like mysql.connector/pg8000, replace only the placeholders
-            query = re.sub(r"%\((\w+)\)s", r":\1", query.replace("%s", "?"))
         elif paramstyle == "format":
             # like pymysql/psycopg2, apply Python %-formatting, so a lone % is
             # an error and %% is a literal %
@@ -4307,13 +4302,13 @@ def postgresql_psycopg2_raw_conn(postgresql_psycopg2_engine):
 @pytest.fixture
 def mysql_pymysql_raw_conn(mysql_pymysql_engine):
     proxy = mysql_pymysql_engine.raw_connection()
-    yield proxy.driver_connection
-    proxy.close()
-
-
-def _dbapi2_quote(conn):
-    # MySQL quotes identifiers with backticks
-    return "`" if type(conn).__module__.startswith("pymysql") else '"'
+    conn = proxy.driver_connection
+    # MySQL only takes standard double-quoted names in this mode
+    with conn.cursor() as cur:
+        cur.execute("SET SESSION sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')")
+    yield conn
+    # discard rather than return the changed connection to the pool
+    proxy.invalidate()
 
 
 raw_dbapi_connectable = [
@@ -4354,27 +4349,8 @@ def test_dbapi2_to_sql_round_trip(conn, method, request):
         }
     )
     assert df.to_sql("my tbl %", conn, index=False, method=method) == 3
-    q = _dbapi2_quote(conn)
-    result = sql.read_sql_query(
-        f"SELECT * FROM {q}my tbl %{q} ORDER BY {q}int{q}", conn
-    )
+    result = sql.read_sql_query('SELECT * FROM "my tbl %" ORDER BY "int"', conn)
     tm.assert_frame_equal(result, df, check_dtype=False)
-
-
-@pytest.mark.parametrize("paramstyle", ["format", "pyformat"])
-@pytest.mark.parametrize("method", [None, "multi"])
-def test_dbapi2_literal_percent_driver(paramstyle, method, monkeypatch):
-    # Some drivers replace the placeholders themselves rather than %-format
-    # the statement, so a % in a name must reach them as is
-    module = _make_fake_dbapi_module(paramstyle, monkeypatch, percent_format=False)
-    monkeypatch.setattr(
-        "pandas.io.sql.dbapi2._LITERAL_PERCENT_DRIVERS", {module.__name__}
-    )
-    df = pd.DataFrame({"pct %": [1, 2, 3]})
-    with contextlib.closing(module.Connection()) as conn:
-        assert df.to_sql("my tbl %", conn, index=False, method=method) == 3
-        result = sql.read_sql_query('SELECT * FROM "my tbl %"', conn)
-    tm.assert_frame_equal(result, df)
 
 
 @pytest.mark.parametrize("conn", raw_dbapi_connectable)
@@ -4389,8 +4365,7 @@ def test_dbapi2_column_types(conn, request):
         }
     )
     df.to_sql("types", conn, index=False)
-    q = _dbapi2_quote(conn)
-    result = sql.read_sql_query(f"SELECT * FROM {q}types{q}", conn)
+    result = sql.read_sql_query('SELECT * FROM "types"', conn)
     # BOOLEAN reads back as integers on sqlite and MySQL
     tm.assert_series_equal(result["b"].astype(bool), df["b"])
     tm.assert_series_equal(result["i"], df["i"], check_dtype=False)
@@ -4403,8 +4378,7 @@ def test_dbapi2_column_types(conn, request):
 def test_dbapi2_if_exists(conn, request):
     conn = _dbapi2_conn(conn, request)
     df = pd.DataFrame({"a": [1, 2]})
-    q = _dbapi2_quote(conn)
-    query = f"SELECT a FROM {q}t{q} ORDER BY a"
+    query = 'SELECT a FROM "t" ORDER BY a'
 
     assert not sql.has_table("t", conn)
     df.to_sql("t", conn, index=False)
@@ -4424,10 +4398,7 @@ def test_dbapi2_to_sql_index(conn, request):
     conn = _dbapi2_conn(conn, request)
     df = pd.DataFrame({"a": [1.5, 2.5]}, index=pd.Index([10, 20], name="idx"))
     assert df.to_sql("t", conn) == 2
-    q = _dbapi2_quote(conn)
-    result = sql.read_sql_query(
-        f"SELECT * FROM {q}t{q} ORDER BY idx", conn, index_col="idx"
-    )
+    result = sql.read_sql_query('SELECT * FROM "t" ORDER BY idx', conn, index_col="idx")
     tm.assert_frame_equal(result, df)
 
 
@@ -4451,7 +4422,6 @@ def test_dbapi2_schema(conn, request):
     for stmt in setup:
         cur.execute(stmt)
     conn.commit()
-    q = _dbapi2_quote(conn)
     try:
         df = pd.DataFrame({"a": [1]})
         df.to_sql("t", conn, index=False)
@@ -4464,9 +4434,9 @@ def test_dbapi2_schema(conn, request):
         new = pd.DataFrame({"a": [9]})
         for if_exists in ["replace", "delete_rows", "append"]:
             new.to_sql("t", conn, schema="other", if_exists=if_exists, index=False)
-        result = sql.read_sql_query(f"SELECT a FROM {q}t{q}", conn)
+        result = sql.read_sql_query('SELECT a FROM "t"', conn)
         tm.assert_frame_equal(result, df)
-        result = sql.read_sql_query(f"SELECT a FROM {q}other{q}.{q}t{q}", conn)
+        result = sql.read_sql_query('SELECT a FROM "other"."t"', conn)
         tm.assert_frame_equal(result, pd.DataFrame({"a": [9, 9]}))
     finally:
         if teardown is not None:
@@ -4511,13 +4481,6 @@ def test_dbapi2_has_table_raises_other_errors_postgresql(postgresql_psycopg2_raw
     conn.rollback()
     assert sql.has_table("t", conn)
     cur.close()
-
-
-@pytest.mark.db
-def test_dbapi2_has_table_raises_other_errors_mysql(mysql_pymysql_raw_conn):
-    pymysql = pytest.importorskip("pymysql")
-    with pytest.raises(pymysql.err.OperationalError, match="is too long"):
-        sql.has_table("t" * 65, mysql_pymysql_raw_conn)
 
 
 @pytest.mark.db
@@ -4672,16 +4635,16 @@ def test_dbapi2_mysql_autocommit(mysql_pymysql_raw_conn):
         pd.DataFrame({"a": [1]}).to_sql("t", conn, index=False)
         assert sql.has_table("t", conn)
         pd.DataFrame({"a": [2]}).to_sql("t", conn, index=False, if_exists="append")
-        assert sql.read_sql_query("SELECT a FROM `t` ORDER BY a", conn)[
-            "a"
-        ].tolist() == [1, 2]
+        result = sql.read_sql_query('SELECT a FROM "t" ORDER BY a', conn)
+        assert result["a"].tolist() == [1, 2]
     finally:
         conn.autocommit(False)
 
 
 @pytest.mark.db
 def test_dbapi2_mysql_datetimes(mysql_pymysql_raw_conn):
-    # MySQL TIMESTAMP covers only 1970-2038 and drops fractional seconds.
+    # MySQL TIMESTAMP covers only 1970-2038 and drops fractional seconds, so
+    # the types are the user's to choose there.
     conn = mysql_pymysql_raw_conn
     df = pd.DataFrame(
         {
@@ -4691,8 +4654,8 @@ def test_dbapi2_mysql_datetimes(mysql_pymysql_raw_conn):
             "tm": [time(1, 2, 3, 456789), time(23, 59, 59, 1)],
         }
     )
-    df.to_sql("dt", conn, index=False)
-    result = sql.read_sql_query("SELECT * FROM `dt`", conn)
+    df.to_sql("dt", conn, index=False, dtype={"t": "DATETIME(6)", "tm": "TIME(6)"})
+    result = sql.read_sql_query('SELECT * FROM "dt"', conn)
     tm.assert_series_equal(pd.to_datetime(result["t"]), df["t"], check_dtype=False)
     result_times = [(pd.Timestamp(0) + td).time() for td in result["tm"]]
     assert result_times == list(df["tm"])

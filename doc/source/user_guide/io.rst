@@ -6279,14 +6279,15 @@ database, so some things are up to you:
   ``?`` for sqlite3 and ``%s`` for psycopg2 and pymysql.
 * **Column types.** :meth:`DataFrame.to_sql` creates new tables with ``BIGINT``,
   ``DOUBLE PRECISION``, ``BOOLEAN``, ``TIMESTAMP``, ``TIMESTAMP WITH TIME ZONE``
-  (for time-zone-aware data), ``DATE``, ``TIME`` and ``TEXT`` columns. MySQL and
-  MariaDB get ``DATETIME(6)`` and ``TIME(6)`` instead, and since they have no
-  time-zone-aware type, time-zone-aware data is stored as wall-clock time. sqlite3
+  (for time-zone-aware data), ``DATE``, ``TIME`` and ``TEXT`` columns. sqlite3
   connections use sqlite's own type names. Where your database spells a type
-  differently or needs more, e.g. ``VARCHAR(255)`` for an indexed text column in
-  MySQL, pass the SQL type as a string with ``dtype``.
-* **Names.** Table and column names are always quoted, so they keep their case,
-  which matters on databases that fold unquoted names to upper case.
+  differently or needs more, pass the SQL type as a string with ``dtype``, e.g.
+  ``DATETIME(6)`` for a datetime column or ``VARCHAR(255)`` for an indexed text
+  column in MySQL.
+* **Names.** Table and column names are always written in double quotes, as in
+  standard SQL, so they keep their case. MySQL only accepts that in its
+  ``ANSI_QUOTES`` SQL mode, which you can set on the connection with
+  ``SET SESSION sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')``.
 * **Errors.** Except with sqlite3, errors from the driver propagate unchanged.
 * **Transactions.** :meth:`DataFrame.to_sql` commits when it is done. If it fails
   after changing anything, it rolls back, which includes your own uncommitted

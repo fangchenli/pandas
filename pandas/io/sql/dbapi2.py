@@ -74,8 +74,8 @@ if TYPE_CHECKING:
 _PARAMSTYLES = ("qmark", "numeric", "named", "format", "pyformat")
 
 # Column types used when ``dtype=`` doesn't give one, keyed by
-# ``lib.infer_dtype``. Users of databases that spell these differently
-# (e.g. Oracle, SQL Server) pass their own types via ``dtype=``.
+# ``lib.infer_dtype``. Users of databases that spell these differently pass
+# their own types via ``dtype=``.
 _SQL_TYPES = {
     "string": "TEXT",
     "floating": "DOUBLE PRECISION",
@@ -86,28 +86,6 @@ _SQL_TYPES = {
     "time": "TIME",
     "boolean": "BOOLEAN",
 }
-
-# Driver modules for MySQL/MariaDB, which quote identifiers with backticks
-# (double quotes are string literals there unless ANSI_QUOTES is enabled).
-_MYSQL_DRIVERS = frozenset({"pymysql", "MySQLdb", "mysql.connector"})
-
-# MySQL error numbers for a table, or the database it is looked up in, that
-# doesn't exist
-_MYSQL_MISSING_TABLE_ERRNOS = frozenset({1049, 1146})
-
-# MySQL's TIMESTAMP only covers 1970-2038, and its DATETIME/TIME default to
-# whole seconds. It has no time-zone-aware type.
-_MYSQL_SQL_TYPES = {
-    **_SQL_TYPES,
-    "datetime": "DATETIME(6)",
-    "datetimetz": "DATETIME(6)",
-    "time": "TIME(6)",
-}
-
-# Drivers with a "format" or "pyformat" paramstyle that substitute the
-# placeholders themselves instead of %-formatting the statement, so a literal
-# % in it must not be doubled.
-_LITERAL_PERCENT_DRIVERS = frozenset({"mysql.connector", "pg8000"})
 
 
 def find_driver_module(con: object) -> ModuleType | None:
@@ -152,9 +130,9 @@ def _is_tz_aware(dtype: DtypeObj) -> bool:
     return getattr(pa_type, "tz", None) is not None
 
 
-def quote_identifier(name: object, quote: str) -> str:
+def quote_identifier(name: object) -> str:
     """
-    Wrap a table or column name in ``quote``, doubling any ``quote`` inside it.
+    Wrap a table or column name in double quotes, as standard SQL does.
     """
     uname = get_unicode_name(name)
     if not len(uname):
@@ -164,7 +142,7 @@ def quote_identifier(name: object, quote: str) -> str:
     if nul_index >= 0:
         raise ValueError("SQL identifier cannot contain NUL characters")
 
-    return quote + uname.replace(quote, quote + quote) + quote
+    return '"' + uname.replace('"', '""') + '"'
 
 
 class DBAPI2Table(SQLTable):
@@ -369,7 +347,7 @@ class DBAPI2Database(PandasSQL):
         """
         Quote a table or column name for use in generated SQL.
         """
-        return quote_identifier(name, "`" if self._is_mysql() else '"')
+        return quote_identifier(name)
 
     def _table_identifier(self, name: object, schema: str | None = None) -> str:
         """
@@ -379,9 +357,6 @@ class DBAPI2Database(PandasSQL):
         if schema:
             return f"{self._escape_identifier(schema)}.{table_name}"
         return table_name
-
-    def _is_mysql(self) -> bool:
-        return self.driver.__name__ in _MYSQL_DRIVERS
 
     def _paramstyle(self) -> str:
         """
@@ -393,12 +368,9 @@ class DBAPI2Database(PandasSQL):
         """
         Whether a literal % in a statement that has parameters is doubled.
 
-        Most "format" and "pyformat" drivers %-format such statements.
+        Drivers with these paramstyles usually %-format such statements.
         """
-        return (
-            self._paramstyle() in ("format", "pyformat")
-            and self.driver.__name__ not in _LITERAL_PERCENT_DRIVERS
-        )
+        return self._paramstyle() in ("format", "pyformat")
 
     def _placeholders(self, count: int) -> list[str]:
         """
@@ -436,7 +408,7 @@ class DBAPI2Database(PandasSQL):
         """
         Map ``lib.infer_dtype`` results to SQL column type names.
         """
-        return _MYSQL_SQL_TYPES if self._is_mysql() else _SQL_TYPES
+        return _SQL_TYPES
 
     def has_table(self, name: str, schema: str | None = None) -> bool:
         # Ask the database to resolve the name exactly as the CREATE TABLE /
@@ -462,16 +434,15 @@ class DBAPI2Database(PandasSQL):
             failure = None
             try:
                 cur.execute(probe)
-                # Unbuffered cursors (e.g. mysql.connector) need the empty
-                # result read before the next statement.
+                # Some cursors need the (empty) result read before the next
+                # statement.
                 cur.fetchall()
             except driver_error as exc:
                 failure = exc
 
             if in_savepoint:
-                # Some databases drop the savepoint already (MySQL in
-                # autocommit mode) or can't release one (Oracle); there is
-                # nothing to undo in either case.
+                # Some databases have dropped the savepoint already, or
+                # can't release one; there is nothing to undo in either case.
                 with suppress(driver_error):
                     if failure is not None:
                         cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
@@ -490,29 +461,19 @@ class DBAPI2Database(PandasSQL):
         """
         Whether a table exists, given that selecting from it raised ``exc``.
 
-        Decided by the error code where the driver attaches one: None if the
-        error is about something else. Without a code, the table is taken to
-        be missing.
+        Decided by the SQLSTATE where the driver attaches one: None if the
+        error is about something else. Without one, the table is taken to be
+        missing.
         """
-        if self._is_mysql():
-            errno = getattr(exc, "errno", None)
-            if errno is None and exc.args:
-                errno = exc.args[0]
-            if isinstance(errno, int):
-                return False if errno in _MYSQL_MISSING_TABLE_ERRNOS else None
-
         sqlstate = getattr(exc, "sqlstate", None) or getattr(exc, "pgcode", None)
-        if sqlstate is None and exc.args and isinstance(exc.args[0], dict):
-            # pg8000 passes on the fields of the server's error message
-            sqlstate = exc.args[0].get("C")
         if not (isinstance(sqlstate, str) and len(sqlstate) == 5):
             return False
         if sqlstate == "42501":
             # Insufficient privilege: the table was found, but may not be
             # read. Writing to it may still be allowed.
             return True
-        # Class 42 has every dialect's "undefined table" code, and 3F is an
-        # undefined schema
+        # Class 42 has the "undefined table" codes, and 3F is an undefined
+        # schema
         return False if sqlstate[:2] in ("42", "3F") else None
 
     @contextmanager
