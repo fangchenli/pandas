@@ -6293,7 +6293,7 @@ database, so some things are up to you:
   string literals in your own queries need single quotes.
 * **Errors.** Except with sqlite3, errors from the driver propagate unchanged.
 * **Transactions.** :meth:`DataFrame.to_sql` commits when it is done. If it fails
-  after changing anything, it rolls back, which includes your own uncommitted
+  once it has started writing, it rolls back, which includes your own uncommitted
   work on the connection. Where dropping or creating a table can't be rolled
   back, as with a default sqlite3 connection or in MySQL, a failed
   ``if_exists="replace"`` still loses the old table.

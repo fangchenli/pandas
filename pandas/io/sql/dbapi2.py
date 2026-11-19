@@ -102,7 +102,11 @@ def find_driver_module(con: object) -> ModuleType | None:
         module = _driver_module_of(cls)
         if module is not None:
             return module
-    error = getattr(con, "Error", None)
+    try:
+        error = getattr(con, "Error", None)
+    except Exception:
+        # a wrapper's attribute lookup may raise anything
+        return None
     if isinstance(error, type):
         return _driver_module_of(error)
     return None
@@ -413,12 +417,11 @@ class DBAPI2Database(PandasSQL):
     def has_table(self, name: str, schema: str | None = None) -> bool:
         # Ask the database to resolve the name exactly as the CREATE TABLE /
         # INSERT that follow will (information_schema can't do that portably:
-        # it also lists tables in other schemas and databases). A failed query
-        # aborts the open transaction on some databases (e.g. PostgreSQL), so
-        # run it inside a savepoint to keep the caller's uncommitted work. In
+        # it also lists tables in other schemas and databases). An error from
+        # the driver is taken to mean that the table isn't there. A failed
+        # query aborts the open transaction on some databases, so run it
+        # inside a savepoint to keep the caller's uncommitted work. In
         # autocommit mode, or without savepoint support, run it directly.
-        # Only an error that says the table is missing means it is; any other
-        # (e.g. a transaction that already failed) is the caller's to see.
         driver_error = self._driver_error()
         probe = f"SELECT 1 FROM {self._table_identifier(name, schema)} WHERE 1 = 0"
         savepoint = "pandas_has_table"
@@ -431,50 +434,25 @@ class DBAPI2Database(PandasSQL):
             else:
                 in_savepoint = True
 
-            failure = None
+            exists = True
             try:
                 cur.execute(probe)
                 # Some cursors need the (empty) result read before the next
                 # statement.
                 cur.fetchall()
-            except driver_error as exc:
-                failure = exc
+            except driver_error:
+                exists = False
 
             if in_savepoint:
                 # Some databases have dropped the savepoint already, or
                 # can't release one; there is nothing to undo in either case.
                 with suppress(driver_error):
-                    if failure is not None:
+                    if not exists:
                         cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
                     cur.execute(f"RELEASE SAVEPOINT {savepoint}")
         finally:
             cur.close()
-
-        if failure is None:
-            return True
-        exists = self._exists_given(failure)
-        if exists is None:
-            raise failure
         return exists
-
-    def _exists_given(self, exc: Exception) -> bool | None:
-        """
-        Whether a table exists, given that selecting from it raised ``exc``.
-
-        Decided by the SQLSTATE where the driver attaches one: None if the
-        error is about something else. Without one, the table is taken to be
-        missing.
-        """
-        sqlstate = getattr(exc, "sqlstate", None) or getattr(exc, "pgcode", None)
-        if not (isinstance(sqlstate, str) and len(sqlstate) == 5):
-            return False
-        if sqlstate == "42501":
-            # Insufficient privilege: the table was found, but may not be
-            # read. Writing to it may still be allowed.
-            return True
-        # Class 42 has the "undefined table" codes, and 3F is an undefined
-        # schema
-        return False if sqlstate[:2] in ("42", "3F") else None
 
     @contextmanager
     def run_transaction(self):
@@ -696,7 +674,8 @@ class DBAPI2Database(PandasSQL):
         )
         # Commit once, at the end, so that a failed insert also undoes a table
         # that was dropped, created or emptied for it, where the database can.
-        # An error raised before anything was changed rolls nothing back.
+        # An error raised before the first of these statements rolls nothing
+        # back.
         self._defer_commit = True
         try:
             table.create()

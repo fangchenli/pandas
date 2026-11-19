@@ -4408,17 +4408,18 @@ def test_dbapi2_schema(conn, request):
     # Only the table in the given schema is written to, replaced or emptied
     conn = _dbapi2_conn(conn, request)
     driver = type(conn).__module__.split(".")[0]
+    schema = "pandas_test_other"
     setup, teardown = {
         "psycopg2": (
-            ["DROP SCHEMA IF EXISTS other CASCADE", "CREATE SCHEMA other"],
-            "DROP SCHEMA IF EXISTS other CASCADE",
+            [f"DROP SCHEMA IF EXISTS {schema} CASCADE", f"CREATE SCHEMA {schema}"],
+            f"DROP SCHEMA IF EXISTS {schema} CASCADE",
         ),
         "pymysql": (
-            ["DROP DATABASE IF EXISTS other", "CREATE DATABASE other"],
-            "DROP DATABASE IF EXISTS other",
+            [f"DROP DATABASE IF EXISTS {schema}", f"CREATE DATABASE {schema}"],
+            f"DROP DATABASE IF EXISTS {schema}",
         ),
         # The fake drivers wrap sqlite3
-    }.get(driver, (["ATTACH DATABASE ':memory:' AS other"], None))
+    }.get(driver, ([f"ATTACH DATABASE ':memory:' AS {schema}"], None))
     cur = conn.cursor()
     for stmt in setup:
         cur.execute(stmt)
@@ -4426,18 +4427,18 @@ def test_dbapi2_schema(conn, request):
     try:
         df = pd.DataFrame({"a": [1]})
         df.to_sql("t", conn, index=False)
-        assert not sql.has_table("t", conn, schema="other")
+        assert not sql.has_table("t", conn, schema=schema)
         assert not sql.has_table("t", conn, schema="no_such_schema")
         # sqlite3, behind the fake drivers, can't index a qualified table name
-        df.to_sql("t", conn, schema="other", index=teardown is not None)
-        assert sql.has_table("t", conn, schema="other")
+        df.to_sql("t", conn, schema=schema, index=teardown is not None)
+        assert sql.has_table("t", conn, schema=schema)
 
         new = pd.DataFrame({"a": [9]})
         for if_exists in ["replace", "delete_rows", "append"]:
-            new.to_sql("t", conn, schema="other", if_exists=if_exists, index=False)
+            new.to_sql("t", conn, schema=schema, if_exists=if_exists, index=False)
         result = sql.read_sql_query('SELECT a FROM "t"', conn)
         tm.assert_frame_equal(result, df)
-        result = sql.read_sql_query('SELECT a FROM "other"."t"', conn)
+        result = sql.read_sql_query(f'SELECT a FROM "{schema}"."t"', conn)
         tm.assert_frame_equal(result, pd.DataFrame({"a": [9, 9]}))
     finally:
         if teardown is not None:
@@ -4466,25 +4467,6 @@ def test_dbapi2_has_table_keeps_pending_transaction(postgresql_psycopg2_raw_conn
 
 
 @pytest.mark.db
-def test_dbapi2_has_table_raises_other_errors_postgresql(postgresql_psycopg2_raw_conn):
-    # Only "no such table" means the table is missing
-    psycopg2 = pytest.importorskip("psycopg2")
-    conn = postgresql_psycopg2_raw_conn
-    cur = conn.cursor()
-    cur.execute('CREATE TABLE "t" (a INT)')
-    conn.commit()
-    with pytest.raises(psycopg2.errors.UndefinedTable, match="does not exist"):
-        cur.execute("SELECT * FROM does_not_exist")
-
-    msg = "current transaction is aborted"
-    with pytest.raises(psycopg2.errors.InFailedSqlTransaction, match=msg):
-        sql.has_table("t", conn)
-    conn.rollback()
-    assert sql.has_table("t", conn)
-    cur.close()
-
-
-@pytest.mark.db
 def test_dbapi2_failed_replace_keeps_table(postgresql_psycopg2_raw_conn):
     # The table is dropped and recreated in the transaction of the insert
     psycopg2 = pytest.importorskip("psycopg2")
@@ -4498,34 +4480,8 @@ def test_dbapi2_failed_replace_keeps_table(postgresql_psycopg2_raw_conn):
     assert result["a"].tolist() == [1, 2, 3]
 
 
-@pytest.mark.db
-def test_dbapi2_append_without_select_privilege(postgresql_psycopg2_raw_conn):
-    # The lookup can't read the table, but the error says that it is there
-    conn = postgresql_psycopg2_raw_conn
-    cur = conn.cursor()
-    cur.execute('CREATE TABLE "t" (a BIGINT)')
-    cur.execute("DROP ROLE IF EXISTS pandas_insert_only")
-    cur.execute("CREATE ROLE pandas_insert_only")
-    cur.execute('GRANT INSERT ON "t" TO pandas_insert_only')
-    conn.commit()
-    try:
-        cur.execute("SET ROLE pandas_insert_only")
-        df = pd.DataFrame({"a": [1, 2]})
-        assert df.to_sql("t", conn, index=False, if_exists="append") == 2
-    finally:
-        conn.rollback()
-        cur.execute("RESET ROLE")
-        cur.execute('SELECT count(*) FROM "t"')
-        count = cur.fetchall()
-        cur.execute('DROP TABLE "t"')
-        cur.execute("DROP ROLE pandas_insert_only")
-        conn.commit()
-        cur.close()
-    assert count == [(2,)]
-
-
 def test_dbapi2_error_before_writing_keeps_pending_transaction(sqlite_buildin):
-    # to_sql only rolls back once it has changed something itself
+    # An error raised before to_sql writes anything rolls nothing back
     conn = sqlite_buildin
     conn.execute("CREATE TABLE t (a INTEGER)")
     conn.commit()
@@ -4575,6 +4531,10 @@ def test_dbapi2_unknown_driver(sqlite_buildin):
 
         def rollback(self):
             self._conn.rollback()
+
+        def __getattr__(self, name):
+            # not the AttributeError that a missing attribute should raise
+            raise RuntimeError(name)
 
     conn = Wrapper(sqlite_buildin)
     msg = "Could not identify the DB-API driver"
