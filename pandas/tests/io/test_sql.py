@@ -4491,9 +4491,12 @@ def test_dbapi2_error_before_writing_keeps_pending_transaction(sqlite_buildin):
     with pytest.raises(ValueError, match="Table 't' already exists"):
         df.to_sql("t", conn, index=False)
     with pytest.raises(ValueError, match="chunksize argument should be non-zero"):
-        df.to_sql("t", conn, index=False, if_exists="append", chunksize=0)
+        df.to_sql("new", conn, index=False, chunksize=0)
+    with pytest.raises(ValueError, match="Invalid parameter `method`: mult"):
+        df.to_sql("new", conn, index=False, method="mult")
     assert conn.in_transaction
     assert conn.execute("SELECT a FROM t").fetchall() == [(1,)]
+    assert not sql.has_table("new", conn)
 
 
 @pytest.mark.db

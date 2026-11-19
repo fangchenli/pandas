@@ -113,11 +113,11 @@ def find_driver_module(con: object) -> ModuleType | None:
 
 
 def _driver_module_of(cls: type) -> ModuleType | None:
-    # Walk the module path of ``cls`` from the top (e.g. ``psycopg2.extensions``
-    # -> ``psycopg2``) to the first module that looks like a DB-API module.
+    # Walk up the module path of ``cls`` (e.g. ``psycopg2.extensions`` ->
+    # ``psycopg2``) to the first module that looks like a DB-API module.
     # Only already-imported modules are considered.
     parts = cls.__module__.split(".")
-    for i in range(1, len(parts) + 1):
+    for i in range(len(parts), 0, -1):
         module = sys.modules.get(".".join(parts[:i]))
         if (
             getattr(module, "paramstyle", None) in _PARAMSTYLES
@@ -314,6 +314,9 @@ class DBAPI2Database(PandasSQL):
     Parameters
     ----------
     con : DB-API 2.0 connection object
+    driver : module
+        The DB-API 2.0 module of ``con``, which has its ``paramstyle`` and
+        ``Error``.
     """
 
     _table_class: type[DBAPI2Table] = DBAPI2Table
@@ -420,8 +423,9 @@ class DBAPI2Database(PandasSQL):
         # it also lists tables in other schemas and databases). An error from
         # the driver is taken to mean that the table isn't there. A failed
         # query aborts the open transaction on some databases, so run it
-        # inside a savepoint to keep the caller's uncommitted work. In
-        # autocommit mode, or without savepoint support, run it directly.
+        # inside a savepoint to keep the caller's uncommitted work. If the
+        # SAVEPOINT itself fails (autocommit mode, no savepoint support), run
+        # it directly.
         driver_error = self._driver_error()
         probe = f"SELECT 1 FROM {self._table_identifier(name, schema)} WHERE 1 = 0"
         savepoint = "pandas_has_table"
@@ -672,6 +676,12 @@ class DBAPI2Database(PandasSQL):
             schema=schema if self._to_sql_uses_schema else None,
             dtype=dtype,
         )
+        # Reject these before anything is written, not when inserting
+        if not (method is None or method == "multi" or callable(method)):
+            raise ValueError(f"Invalid parameter `method`: {method}")
+        if chunksize == 0 and len(frame) > 0:
+            raise ValueError("chunksize argument should be non-zero")
+
         # Commit once, at the end, so that a failed insert also undoes a table
         # that was dropped, created or emptied for it, where the database can.
         # An error raised before the first of these statements rolls nothing

@@ -6284,13 +6284,15 @@ database, so some things are up to you:
   differently or needs more, pass the SQL type as a string with ``dtype``. In
   MySQL, for example, ``TIMESTAMP`` and ``TIME`` round to whole seconds,
   ``TIMESTAMP`` only covers 1970 to 2038 and there is no time-zone-aware type, so
-  use ``DATETIME(6)`` and ``TIME(6)`` there, and ``VARCHAR(255)`` for an indexed
-  text column.
+  use ``DATETIME(6)`` and ``TIME(6)`` there.
 * **Names.** Table and column names are always written in double quotes, as in
   standard SQL, so they keep their case. MySQL only accepts that in its
   ``ANSI_QUOTES`` SQL mode, which you can set on the connection with
   ``SET SESSION sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')``. In that mode,
-  string literals in your own queries need single quotes.
+  string literals in your own queries need single quotes. For drivers with the
+  ``format`` or ``pyformat`` placeholder style, a ``%`` in a name is written as
+  ``%%``, which most of them turn back into ``%``; with one that doesn't, avoid
+  ``%`` in names.
 * **Errors.** Except with sqlite3, errors from the driver propagate unchanged.
 * **Transactions.** :meth:`DataFrame.to_sql` commits when it is done. If it fails
   once it has started writing, it rolls back, which includes your own uncommitted
