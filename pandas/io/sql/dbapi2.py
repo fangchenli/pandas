@@ -116,25 +116,32 @@ def find_driver_module(con: object) -> ModuleType | None:
 
     PEP 249 puts ``paramstyle`` and ``Error`` on the driver module. Look for
     it starting from the modules defining the connection's classes (its own
-    class may be a subclass defined elsewhere), then from the module of
-    ``con.Error``, PEP 249's optional extension, which wrappers such as
-    SQLAlchemy's pool proxy pass through. Each module path is walked from the
-    top (e.g. ``psycopg2.extensions`` -> ``psycopg2``) to the first module
-    that has both attributes. Only already-imported modules are considered.
+    class may be a subclass defined elsewhere). Failing that, use the module
+    of ``con.Error``, PEP 249's optional extension, which wrappers such as
+    SQLAlchemy's pool proxy pass through.
     """
-    module_names = [cls.__module__ for cls in type(con).__mro__]
+    for cls in type(con).__mro__:
+        module = _driver_module_of(cls)
+        if module is not None:
+            return module
     error = getattr(con, "Error", None)
     if isinstance(error, type):
-        module_names.append(error.__module__)
-    for module_name in module_names:
-        parts = module_name.split(".")
-        for i in range(1, len(parts) + 1):
-            module = sys.modules.get(".".join(parts[:i]))
-            if (
-                getattr(module, "paramstyle", None) in _PARAMSTYLES
-                and getattr(module, "Error", None) is not None
-            ):
-                return module
+        return _driver_module_of(error)
+    return None
+
+
+def _driver_module_of(cls: type) -> ModuleType | None:
+    # Walk the module path of ``cls`` from the top (e.g. ``psycopg2.extensions``
+    # -> ``psycopg2``) to the first module that looks like a DB-API module.
+    # Only already-imported modules are considered.
+    parts = cls.__module__.split(".")
+    for i in range(1, len(parts) + 1):
+        module = sys.modules.get(".".join(parts[:i]))
+        if (
+            getattr(module, "paramstyle", None) in _PARAMSTYLES
+            and getattr(module, "Error", None) is not None
+        ):
+            return module
     return None
 
 
@@ -341,19 +348,16 @@ class DBAPI2Database(PandasSQL):
         self.con = con
         # The driver's DB-API module, which has ``paramstyle`` and ``Error``
         self.driver = driver
-        self._transaction_depth = 0
+        # to_sql commits once, at its end: whether it is running, and whether
+        # it has changed anything yet
+        self._defer_commit = False
+        self._uncommitted = False
 
     def _driver_error(self) -> type[Exception]:
         """
         Return the driver's base exception class (PEP 249 ``Error``).
         """
-        # PEP 249 also allows exposing the exception classes on the
-        # connection, which works for wrapped connections too.
-        for source in (self.con, self.driver):
-            error = getattr(source, "Error", None)
-            if isinstance(error, type) and issubclass(error, Exception):
-                return error
-        return Exception
+        return self.driver.Error
 
     def _wrapped_errors(self) -> tuple[type[Exception], ...]:
         """
@@ -442,8 +446,7 @@ class DBAPI2Database(PandasSQL):
         # run it inside a savepoint to keep the caller's uncommitted work. In
         # autocommit mode, or without savepoint support, run it directly.
         # Only an error that says the table is missing means it is; any other
-        # (no permission to read it, a transaction that already failed) is
-        # the caller's to see.
+        # (e.g. a transaction that already failed) is the caller's to see.
         driver_error = self._driver_error()
         probe = f"SELECT 1 FROM {self._table_identifier(name, schema)} WHERE 1 = 0"
         savepoint = "pandas_has_table"
@@ -478,47 +481,54 @@ class DBAPI2Database(PandasSQL):
 
         if failure is None:
             return True
-        if self._is_missing_table_error(failure):
-            return False
-        raise failure
+        exists = self._exists_given(failure)
+        if exists is None:
+            raise failure
+        return exists
 
-    def _is_missing_table_error(self, exc: Exception) -> bool:
+    def _exists_given(self, exc: Exception) -> bool | None:
         """
-        Whether ``exc``, raised by selecting from a table, means it is missing.
+        Whether a table exists, given that selecting from it raised ``exc``.
 
-        Decided by the error code where the driver attaches one. Without a
-        code, the table is taken to be missing.
+        Decided by the error code where the driver attaches one: None if the
+        error is about something else. Without a code, the table is taken to
+        be missing.
         """
         if self._is_mysql():
             errno = getattr(exc, "errno", None)
             if errno is None and exc.args:
                 errno = exc.args[0]
             if isinstance(errno, int):
-                return errno in _MYSQL_MISSING_TABLE_ERRNOS
+                return False if errno in _MYSQL_MISSING_TABLE_ERRNOS else None
 
         sqlstate = getattr(exc, "sqlstate", None) or getattr(exc, "pgcode", None)
-        if isinstance(sqlstate, str) and len(sqlstate) == 5:
-            # Class 42 has every dialect's "undefined table" code, and 3F is
-            # an undefined schema; 42501 is insufficient privilege
-            return sqlstate[:2] in ("42", "3F") and sqlstate != "42501"
-        return True
+        if sqlstate is None and exc.args and isinstance(exc.args[0], dict):
+            # pg8000 passes on the fields of the server's error message
+            sqlstate = exc.args[0].get("C")
+        if not (isinstance(sqlstate, str) and len(sqlstate) == 5):
+            return False
+        if sqlstate == "42501":
+            # Insufficient privilege: the table was found, but may not be
+            # read. Writing to it may still be allowed.
+            return True
+        # Class 42 has every dialect's "undefined table" code, and 3F is an
+        # undefined schema
+        return False if sqlstate[:2] in ("42", "3F") else None
 
     @contextmanager
     def run_transaction(self):
-        # Only the outermost block commits or rolls back
-        outermost = self._transaction_depth == 0
-        self._transaction_depth += 1
         cur = self.con.cursor()
         try:
             yield cur
-            if outermost:
+            if self._defer_commit:
+                self._uncommitted = True
+            else:
                 self.con.commit()
         except Exception:
-            if outermost:
-                self.con.rollback()
+            self.con.rollback()
+            self._uncommitted = False
             raise
         finally:
-            self._transaction_depth -= 1
             cur.close()
 
     def execute(self, sql: str | Select[Any] | TextClause, params=None):
@@ -723,23 +733,38 @@ class DBAPI2Database(PandasSQL):
             schema=schema if self._to_sql_uses_schema else None,
             dtype=dtype,
         )
-        # One transaction, so that a failed insert also undoes a table that was
-        # dropped, created or emptied for it, where the database can
-        with self.run_transaction():
+        # Commit once, at the end, so that a failed insert also undoes a table
+        # that was dropped, created or emptied for it, where the database can.
+        # An error raised before anything was changed rolls nothing back.
+        self._defer_commit = True
+        try:
             table.create()
-            return table.insert(chunksize, method)
+            total_inserted = table.insert(chunksize, method)
+        except Exception:
+            if self._uncommitted:
+                self.con.rollback()
+            raise
+        else:
+            if self._uncommitted:
+                self.con.commit()
+        finally:
+            self._defer_commit = False
+            self._uncommitted = False
+        return total_inserted
 
     def get_table(self, table_name: str, schema: str | None = None) -> None:
         return None  # not supported in fallback mode
 
     def drop_table(self, name: str, schema: str | None = None) -> None:
         drop_sql = f"DROP TABLE {self._table_identifier(name, schema)}"
-        self.execute(drop_sql).close()
+        with self.run_transaction():
+            self.execute(drop_sql).close()
 
     def delete_rows(self, name: str, schema: str | None = None) -> None:
         delete_sql = f"DELETE FROM {self._table_identifier(name, schema)}"
         if self.has_table(name, schema):
-            self.execute(delete_sql).close()
+            with self.run_transaction():
+                self.execute(delete_sql).close()
 
     def _create_sql_schema(
         self,

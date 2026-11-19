@@ -4297,13 +4297,6 @@ def _make_fake_dbapi_module(paramstyle, monkeypatch, percent_format=True):
 _PARAMSTYLES = ["qmark", "numeric", "named", "format", "pyformat"]
 
 
-@pytest.fixture(params=_PARAMSTYLES)
-def fake_dbapi_conn(request, monkeypatch):
-    module = _make_fake_dbapi_module(request.param, monkeypatch)
-    with contextlib.closing(module.Connection()) as conn:
-        yield conn
-
-
 @pytest.fixture
 def postgresql_psycopg2_raw_conn(postgresql_psycopg2_engine):
     proxy = postgresql_psycopg2_engine.raw_connection()
@@ -4341,8 +4334,10 @@ def _dbapi2_conn(name, request):
     return request.getfixturevalue(name)
 
 
-def test_dbapi2_routes_to_generic_backend(fake_dbapi_conn):
-    with pandasSQL_builder(fake_dbapi_conn) as pandas_sql:
+@pytest.mark.parametrize("conn", raw_dbapi_connectable)
+def test_dbapi2_routes_to_generic_backend(conn, request):
+    conn = _dbapi2_conn(conn, request)
+    with pandasSQL_builder(conn) as pandas_sql:
         assert type(pandas_sql) is DBAPI2Database
 
 
@@ -4537,6 +4532,48 @@ def test_dbapi2_failed_replace_keeps_table(postgresql_psycopg2_raw_conn):
         too_big.to_sql("t", conn, index=False, if_exists="replace")
     result = sql.read_sql_query('SELECT a FROM "t" ORDER BY a', conn)
     assert result["a"].tolist() == [1, 2, 3]
+
+
+@pytest.mark.db
+def test_dbapi2_append_without_select_privilege(postgresql_psycopg2_raw_conn):
+    # The lookup can't read the table, but the error says that it is there
+    conn = postgresql_psycopg2_raw_conn
+    cur = conn.cursor()
+    cur.execute('CREATE TABLE "t" (a BIGINT)')
+    cur.execute("DROP ROLE IF EXISTS pandas_insert_only")
+    cur.execute("CREATE ROLE pandas_insert_only")
+    cur.execute('GRANT INSERT ON "t" TO pandas_insert_only')
+    conn.commit()
+    try:
+        cur.execute("SET ROLE pandas_insert_only")
+        df = pd.DataFrame({"a": [1, 2]})
+        assert df.to_sql("t", conn, index=False, if_exists="append") == 2
+    finally:
+        conn.rollback()
+        cur.execute("RESET ROLE")
+        cur.execute('SELECT count(*) FROM "t"')
+        count = cur.fetchall()
+        cur.execute('DROP TABLE "t"')
+        cur.execute("DROP ROLE pandas_insert_only")
+        conn.commit()
+        cur.close()
+    assert count == [(2,)]
+
+
+def test_dbapi2_error_before_writing_keeps_pending_transaction(sqlite_buildin):
+    # to_sql only rolls back once it has changed something itself
+    conn = sqlite_buildin
+    conn.execute("CREATE TABLE t (a INTEGER)")
+    conn.commit()
+    conn.execute("INSERT INTO t VALUES (1)")
+
+    df = pd.DataFrame({"a": [2]})
+    with pytest.raises(ValueError, match="Table 't' already exists"):
+        df.to_sql("t", conn, index=False)
+    with pytest.raises(ValueError, match="chunksize argument should be non-zero"):
+        df.to_sql("t", conn, index=False, if_exists="append", chunksize=0)
+    assert conn.in_transaction
+    assert conn.execute("SELECT a FROM t").fetchall() == [(1,)]
 
 
 @pytest.mark.db

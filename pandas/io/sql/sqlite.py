@@ -103,11 +103,6 @@ class SQLiteDatabase(DBAPI2Database):
 
         super().__init__(con, sqlite3)
 
-    def _driver_error(self) -> type[Exception]:
-        from sqlite3 import Error
-
-        return Error
-
     def _escape_identifier(self, name: object) -> str:
         return _get_valid_sqlite_name(name)
 
