@@ -2948,7 +2948,7 @@ class NDFrame(PandasObject, indexing.IndexingMixin):
         dtype : dict or scalar, optional
             Specifying the datatype for columns. If a dictionary is used, the
             keys should be the column names and the values should be the
-            SQLAlchemy types or strings for the sqlite3 legacy mode. If a
+            SQLAlchemy types or strings for a DB-API 2.0 connection. If a
             scalar is provided, it will be applied to all columns.
         method : {None, 'multi', callable}, optional
             Controls the SQL insertion clause used:

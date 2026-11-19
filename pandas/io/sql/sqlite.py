@@ -109,6 +109,8 @@ class SQLiteDatabase(DBAPI2Database):
 
     _table_class = SQLiteTable
     _wrap_driver_errors = True
+    # sqlite3 connections have always ignored ``schema`` when writing
+    _to_sql_uses_schema = False
 
     def _driver_error(self) -> type[Exception]:
         from sqlite3 import Error
@@ -117,6 +119,11 @@ class SQLiteDatabase(DBAPI2Database):
 
     def _escape_identifier(self, name: object) -> str:
         return _get_valid_sqlite_name(name)
+
+    def _table_identifier(self, name: object, schema: str | None = None) -> str:
+        # Only get_schema passes a schema, which it has always left unquoted
+        prefix = f"{schema}." if schema else ""
+        return prefix + _get_valid_sqlite_name(name)
 
     def _paramstyle(self) -> str:
         return "qmark"

@@ -279,5 +279,4 @@ def test_read_sql_unknown_dbapi2_without_sqlalchemy():
             self.conn.close()
 
     with contextlib.closing(MockSqliteConnection(":memory:")) as conn:
-        with tm.assert_produces_warning(UserWarning, match="only supports SQLAlchemy"):
-            pd.read_sql("SELECT 1", conn)
+        pd.read_sql("SELECT 1", conn)

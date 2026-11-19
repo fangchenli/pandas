@@ -4222,7 +4222,7 @@ def test_dbapi_params_passed_through_unchanged(params):
 # -- Generic DB-API 2.0 connections
 
 
-def _make_fake_dbapi_module(paramstyle, monkeypatch):
+def _make_fake_dbapi_module(paramstyle, monkeypatch, percent_format=True):
     """
     Register a PEP 249 driver module that runs on sqlite3 but only accepts
     ``paramstyle`` placeholders, translating them for sqlite.
@@ -4231,6 +4231,8 @@ def _make_fake_dbapi_module(paramstyle, monkeypatch):
     import types
 
     name = f"pandas_fake_dbapi_{paramstyle}"
+    if not percent_format:
+        name += "_literal_percent"
     module = types.ModuleType(name)
     module.paramstyle = paramstyle
     module.Error = sqlite3.Error
@@ -4244,6 +4246,9 @@ def _make_fake_dbapi_module(paramstyle, monkeypatch):
             assert not isinstance(params, dict), params
         if paramstyle == "numeric":
             query = re.sub(r":(\d+)", r"?\1", query)
+        elif not percent_format:
+            # like mysql.connector/pg8000, replace only the placeholders
+            query = re.sub(r"%\((\w+)\)s", r":\1", query.replace("%s", "?"))
         elif paramstyle == "format":
             # like pymysql/psycopg2, apply Python %-formatting, so a lone % is
             # an error and %% is a literal %
@@ -4361,6 +4366,22 @@ def test_dbapi2_to_sql_round_trip(conn, method, request):
     tm.assert_frame_equal(result, df, check_dtype=False)
 
 
+@pytest.mark.parametrize("paramstyle", ["format", "pyformat"])
+@pytest.mark.parametrize("method", [None, "multi"])
+def test_dbapi2_literal_percent_driver(paramstyle, method, monkeypatch):
+    # Some drivers replace the placeholders themselves rather than %-format
+    # the statement, so a % in a name must reach them as is
+    module = _make_fake_dbapi_module(paramstyle, monkeypatch, percent_format=False)
+    monkeypatch.setattr(
+        "pandas.io.sql.dbapi2._LITERAL_PERCENT_DRIVERS", {module.__name__}
+    )
+    df = pd.DataFrame({"pct %": [1, 2, 3]})
+    with contextlib.closing(module.Connection()) as conn:
+        assert df.to_sql("my tbl %", conn, index=False, method=method) == 3
+        result = sql.read_sql_query('SELECT * FROM "my tbl %"', conn)
+    tm.assert_frame_equal(result, df)
+
+
 @pytest.mark.parametrize("conn", raw_dbapi_connectable)
 def test_dbapi2_column_types(conn, request):
     conn = _dbapi2_conn(conn, request)
@@ -4403,6 +4424,63 @@ def test_dbapi2_if_exists(conn, request):
     assert sql.read_sql_query(query, conn)["a"].tolist() == [1, 2]
 
 
+@pytest.mark.db
+@pytest.mark.parametrize("conn", raw_dbapi_connectable)
+def test_dbapi2_to_sql_index(conn, request):
+    conn = _dbapi2_conn(conn, request)
+    df = pd.DataFrame({"a": [1.5, 2.5]}, index=pd.Index([10, 20], name="idx"))
+    assert df.to_sql("t", conn) == 2
+    q = _dbapi2_quote(conn)
+    result = sql.read_sql_query(
+        f"SELECT * FROM {q}t{q} ORDER BY idx", conn, index_col="idx"
+    )
+    tm.assert_frame_equal(result, df)
+
+
+@pytest.mark.parametrize("conn", raw_dbapi_connectable)
+def test_dbapi2_schema(conn, request):
+    # Only the table in the given schema is written to, replaced or emptied
+    conn = _dbapi2_conn(conn, request)
+    driver = type(conn).__module__.split(".")[0]
+    setup, teardown = {
+        "psycopg2": (
+            ["DROP SCHEMA IF EXISTS other CASCADE", "CREATE SCHEMA other"],
+            "DROP SCHEMA IF EXISTS other CASCADE",
+        ),
+        "pymysql": (
+            ["DROP DATABASE IF EXISTS other", "CREATE DATABASE other"],
+            "DROP DATABASE IF EXISTS other",
+        ),
+        # The fake drivers wrap sqlite3
+    }.get(driver, (["ATTACH DATABASE ':memory:' AS other"], None))
+    cur = conn.cursor()
+    for stmt in setup:
+        cur.execute(stmt)
+    conn.commit()
+    q = _dbapi2_quote(conn)
+    try:
+        df = pd.DataFrame({"a": [1]})
+        df.to_sql("t", conn, index=False)
+        assert not sql.has_table("t", conn, schema="other")
+        # sqlite3, behind the fake drivers, can't index a qualified table name
+        df.to_sql("t", conn, schema="other", index=teardown is not None)
+        assert sql.has_table("t", conn, schema="other")
+
+        new = pd.DataFrame({"a": [9]})
+        for if_exists in ["replace", "delete_rows", "append"]:
+            new.to_sql("t", conn, schema="other", if_exists=if_exists, index=False)
+        result = sql.read_sql_query(f"SELECT a FROM {q}t{q}", conn)
+        tm.assert_frame_equal(result, df)
+        result = sql.read_sql_query(f"SELECT a FROM {q}other{q}.{q}t{q}", conn)
+        tm.assert_frame_equal(result, pd.DataFrame({"a": [9, 9]}))
+    finally:
+        if teardown is not None:
+            conn.rollback()
+            cur.execute(teardown)
+            conn.commit()
+        cur.close()
+
+
 def test_dbapi2_has_table_keeps_pending_transaction(postgresql_psycopg2_raw_conn):
     # A failed lookup must not abort the caller's open transaction, which on
     # PostgreSQL would force a rollback of their uncommitted work.
@@ -4426,7 +4504,7 @@ def test_dbapi2_read_errors_are_the_drivers(conn, request):
     # read; keep it that way rather than re-raising DatabaseError.
     conn = _dbapi2_conn(conn, request)
     error = sys.modules[type(conn).__module__.split(".")[0]].Error
-    with pytest.raises(error) as excinfo:
+    with pytest.raises(error, match="syntax") as excinfo:
         sql.read_sql_query("SELEC 1", conn)
     assert not isinstance(excinfo.value, sql.DatabaseError)
     conn.rollback()
@@ -4458,6 +4536,21 @@ def test_dbapi2_unknown_driver(sqlite_buildin):
     with tm.assert_produces_warning(UserWarning, match=msg):
         result = sql.read_sql_query("SELECT a FROM t", conn)
     assert result["a"].tolist() == [1, 2]
+
+
+def test_dbapi2_class_without_module_name(sqlite_buildin):
+    class Wrapper:
+        def __init__(self, conn) -> None:
+            self._conn = conn
+
+        def cursor(self):
+            return self._conn.cursor()
+
+    Wrapper.__module__ = None
+    msg = "Could not identify the DB-API driver"
+    with tm.assert_produces_warning(UserWarning, match=msg):
+        result = sql.read_sql_query("SELECT 1 AS a", Wrapper(sqlite_buildin))
+    assert result["a"].tolist() == [1]
 
 
 def test_dbapi2_unknown_paramstyle_fails_before_writing(sqlite_buildin):

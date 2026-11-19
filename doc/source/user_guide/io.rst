@@ -5908,8 +5908,8 @@ the data type.
 
 You can always override the default type by specifying the desired SQL type of
 any of the columns by using the ``dtype`` argument. This argument needs a
-dictionary mapping column names to SQLAlchemy types (or strings for the sqlite3
-fallback mode).
+dictionary mapping column names to SQLAlchemy types (or strings for a
+:ref:`DB-API connection <io.sql.dbapi2>`).
 For example, specifying to use the sqlalchemy ``String`` type instead of the
 default ``Text`` type for string columns:
 
@@ -6287,12 +6287,15 @@ database, so some things are up to you:
   MySQL, pass the SQL type as a string with ``dtype``.
 * **Errors.** Except with sqlite3, errors from the driver propagate unchanged.
 
-Reading a table by name with :func:`~pandas.read_sql_table` requires SQLAlchemy,
-and the ``schema`` argument is ignored. pandas reads the driver's placeholder style
-from the ``paramstyle`` attribute of its module, as PEP 249 specifies, finding the
-module through the connection's class or its ``Error`` attribute. A wrapper that
-hides both is treated as a sqlite3 connection, with a warning; pass the driver's
-own connection object instead.
+Reading a table by name with :func:`~pandas.read_sql_table` requires SQLAlchemy.
+:meth:`DataFrame.to_sql` writes to ``schema`` by qualifying the table name with it,
+except with sqlite3 connections, which ignore ``schema``.
+
+pandas reads the driver's placeholder style from the ``paramstyle`` attribute of
+its module, as PEP 249 specifies, finding the module through the connection's
+class or its ``Error`` attribute. A wrapper that hides both is treated as a
+sqlite3 connection, with a warning; pass the driver's own connection object
+instead.
 
 .. versionchanged:: 3.2.0
 

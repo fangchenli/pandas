@@ -100,6 +100,11 @@ _MYSQL_SQL_TYPES = {
     "time": "TIME(6)",
 }
 
+# Drivers with a "format" or "pyformat" paramstyle that substitute the
+# placeholders themselves instead of %-formatting the statement, so a literal
+# % in it must not be doubled.
+_LITERAL_PERCENT_DRIVERS = frozenset({"mysql.connector", "pg8000"})
+
 
 def _find_driver_module(con: object) -> ModuleType | None:
     """
@@ -118,6 +123,8 @@ def _find_driver_module(con: object) -> ModuleType | None:
     if isinstance(error, type):
         module_names.append(error.__module__)
     for module_name in module_names:
+        if not isinstance(module_name, str):
+            continue
         parts = module_name.split(".")
         for i in range(1, len(parts) + 1):
             module = sys.modules.get(".".join(parts[:i]))
@@ -169,11 +176,6 @@ class DBAPI2Table(SQLTable):
     def insert_statement(self, *, num_rows: int) -> str:
         names = list(map(str, self.frame.columns))
         escape = self.pd_sql._escape_identifier
-        if self.pd_sql._paramstyle() in ("format", "pyformat"):
-            # The driver %-formats statements that have parameters, so a
-            # literal % in an identifier has to be doubled.
-            def escape(name: object) -> str:
-                return self.pd_sql._escape_identifier(name).replace("%", "%%")
 
         if self.index is not None:
             for idx in self.index[::-1]:
@@ -181,6 +183,7 @@ class DBAPI2Table(SQLTable):
 
         bracketed_names = [escape(column) for column in names]
         col_names = ",".join(bracketed_names)
+        table_name = self.pd_sql._table_identifier(self.name, self.schema)
 
         num_cols = len(names)
         placeholders = self.pd_sql._placeholders(num_rows * num_cols)
@@ -188,10 +191,10 @@ class DBAPI2Table(SQLTable):
             "(" + ",".join(placeholders[row * num_cols : (row + 1) * num_cols]) + ")"
             for row in range(num_rows)
         )
-        insert_statement = (
-            f"INSERT INTO {escape(self.name)} ({col_names}) VALUES {wildcards}"
-        )
-        return insert_statement
+        target = f"INSERT INTO {table_name} ({col_names})"
+        if self.pd_sql._doubles_percent():
+            target = target.replace("%", "%%")
+        return f"{target} VALUES {wildcards}"
 
     def _execute_insert(self, conn, keys, data_iter) -> int:
         driver_error = self.pd_sql._wrapped_errors()
@@ -238,14 +241,10 @@ class DBAPI2Table(SQLTable):
             create_tbl_stmts.append(
                 f"CONSTRAINT {self.name}_pk PRIMARY KEY ({cnames_br})"
             )
-        if self.schema:
-            schema_name = self.schema + "."
-        else:
-            schema_name = ""
+        table_name = self.pd_sql._table_identifier(self.name, self.schema)
         create_stmts = [
             "CREATE TABLE "
-            + schema_name
-            + escape(self.name)
+            + table_name
             + " (\n"
             + ",\n  ".join(create_tbl_stmts)
             + "\n)"
@@ -259,7 +258,7 @@ class DBAPI2Table(SQLTable):
                 "CREATE INDEX "
                 + escape("ix_" + self.name + "_" + cnames)
                 + "ON "
-                + escape(self.name)
+                + table_name
                 + " ("
                 + cnames_br
                 + ")"
@@ -330,6 +329,9 @@ class DBAPI2Database(PandasSQL):
     # received the driver's own exceptions.
     _wrap_driver_errors: bool = False
 
+    # Whether to_sql writes to the given ``schema``
+    _to_sql_uses_schema: bool = True
+
     def __init__(self, con) -> None:
         self.con = con
         # The driver's DB-API module, or None if it couldn't be identified
@@ -359,6 +361,15 @@ class DBAPI2Database(PandasSQL):
         """
         return _quote_identifier(name, "`" if self._is_mysql() else '"')
 
+    def _table_identifier(self, name: object, schema: str | None = None) -> str:
+        """
+        Quote a table name for use in generated SQL, qualified by ``schema``.
+        """
+        table_name = self._escape_identifier(name)
+        if schema:
+            return f"{self._escape_identifier(schema)}.{table_name}"
+        return table_name
+
     def _is_mysql(self) -> bool:
         return getattr(self.driver, "__name__", None) in _MYSQL_DRIVERS
 
@@ -376,6 +387,17 @@ class DBAPI2Database(PandasSQL):
                 "connection object rather than a wrapper around it."
             )
         return paramstyle
+
+    def _doubles_percent(self) -> bool:
+        """
+        Whether a literal % in a statement that has parameters is doubled.
+
+        Most "format" and "pyformat" drivers %-format such statements.
+        """
+        return (
+            self._paramstyle() in ("format", "pyformat")
+            and getattr(self.driver, "__name__", None) not in _LITERAL_PERCENT_DRIVERS
+        )
 
     def _placeholders(self, count: int) -> list[str]:
         """
@@ -397,9 +419,17 @@ class DBAPI2Database(PandasSQL):
         Return a function packaging positional values the way
         ``_placeholders`` refers to them, or None if they can be passed as is.
         """
-        if self._paramstyle() in ("named", "pyformat"):
-            return lambda values: {f"p{i}": value for i, value in enumerate(values)}
-        return None
+        if self._paramstyle() not in ("named", "pyformat"):
+            return None
+        keys: list[str] = []
+
+        def bind(values: Sequence[Any]) -> dict[str, Any]:
+            # Called once per row by the default insert, so keep the keys
+            if len(keys) < len(values):
+                keys.extend(f"p{i}" for i in range(len(keys), len(values)))
+            return dict(zip(keys, values, strict=False))
+
+        return bind
 
     def _sql_type_map(self) -> Mapping[str, str]:
         """
@@ -415,7 +445,7 @@ class DBAPI2Database(PandasSQL):
         # run it inside a savepoint to keep the caller's uncommitted work. In
         # autocommit mode, or without savepoint support, run it directly.
         driver_error = self._driver_error()
-        probe = f"SELECT 1 FROM {self._escape_identifier(name)} WHERE 1 = 0"
+        probe = f"SELECT 1 FROM {self._table_identifier(name, schema)} WHERE 1 = 0"
         savepoint = "pandas_has_table"
         cur = self.con.cursor()
         try:
@@ -612,8 +642,8 @@ class DBAPI2Database(PandasSQL):
             `index` is True, then the index names are used.
             A sequence should be given if the DataFrame uses MultiIndex.
         schema : string, default None
-            Ignored parameter included for compatibility with SQLAlchemy
-            version of ``to_sql``.
+            Name of the schema to write to, used to qualify the table name.
+            Ignored for sqlite3 connections.
         chunksize : int, default None
             If not None, then rows will be written in batches of this
             size at a time. If None, all rows will be written at once.
@@ -661,6 +691,7 @@ class DBAPI2Database(PandasSQL):
             index=index,
             if_exists=if_exists,
             index_label=index_label,
+            schema=schema if self._to_sql_uses_schema else None,
             dtype=dtype,
         )
         table.create()
@@ -670,11 +701,11 @@ class DBAPI2Database(PandasSQL):
         return None  # not supported in fallback mode
 
     def drop_table(self, name: str, schema: str | None = None) -> None:
-        drop_sql = f"DROP TABLE {self._escape_identifier(name)}"
+        drop_sql = f"DROP TABLE {self._table_identifier(name, schema)}"
         self.execute(drop_sql).close()
 
     def delete_rows(self, name: str, schema: str | None = None) -> None:
-        delete_sql = f"DELETE FROM {self._escape_identifier(name)}"
+        delete_sql = f"DELETE FROM {self._table_identifier(name, schema)}"
         if self.has_table(name, schema):
             self.execute(delete_sql).close()
 
