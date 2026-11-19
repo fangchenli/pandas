@@ -6294,11 +6294,13 @@ database, so some things are up to you:
   ``%%``, which most of them turn back into ``%``; with one that doesn't, avoid
   ``%`` in names.
 * **Errors.** Except with sqlite3, errors from the driver propagate unchanged.
-* **Transactions.** :meth:`DataFrame.to_sql` commits when it is done. If it fails
-  once it has started writing, it rolls back, which includes your own uncommitted
-  work on the connection. Where dropping or creating a table can't be rolled
-  back, as with a default sqlite3 connection or in MySQL, a failed
-  ``if_exists="replace"`` still loses the old table.
+* **Transactions.** :meth:`DataFrame.to_sql` commits once it has written
+  everything. If it fails once it has started writing, it rolls back, which
+  includes your own uncommitted work on the connection. If it writes nothing,
+  e.g. because the table already exists or there are no rows to append, it
+  leaves the transaction to you, as reading does. Where dropping or creating a
+  table can't be rolled back, as with a default sqlite3 connection or in MySQL,
+  a failed ``if_exists="replace"`` still loses the old table.
 
 Reading a table by name with :func:`~pandas.read_sql_table` requires SQLAlchemy.
 With sqlite3 connections, ``schema`` is ignored. With other connections,
