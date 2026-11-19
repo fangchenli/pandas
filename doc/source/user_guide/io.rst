@@ -6281,13 +6281,16 @@ database, so some things are up to you:
   ``DOUBLE PRECISION``, ``BOOLEAN``, ``TIMESTAMP``, ``TIMESTAMP WITH TIME ZONE``
   (for time-zone-aware data), ``DATE``, ``TIME`` and ``TEXT`` columns. sqlite3
   connections use sqlite's own type names. Where your database spells a type
-  differently or needs more, pass the SQL type as a string with ``dtype``, e.g.
-  ``DATETIME(6)`` for a datetime column or ``VARCHAR(255)`` for an indexed text
-  column in MySQL.
+  differently or needs more, pass the SQL type as a string with ``dtype``. In
+  MySQL, for example, ``TIMESTAMP`` and ``TIME`` round to whole seconds,
+  ``TIMESTAMP`` only covers 1970 to 2038 and there is no time-zone-aware type, so
+  use ``DATETIME(6)`` and ``TIME(6)`` there, and ``VARCHAR(255)`` for an indexed
+  text column.
 * **Names.** Table and column names are always written in double quotes, as in
   standard SQL, so they keep their case. MySQL only accepts that in its
   ``ANSI_QUOTES`` SQL mode, which you can set on the connection with
-  ``SET SESSION sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')``.
+  ``SET SESSION sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')``. In that mode,
+  string literals in your own queries need single quotes.
 * **Errors.** Except with sqlite3, errors from the driver propagate unchanged.
 * **Transactions.** :meth:`DataFrame.to_sql` commits when it is done. If it fails
   after changing anything, it rolls back, which includes your own uncommitted

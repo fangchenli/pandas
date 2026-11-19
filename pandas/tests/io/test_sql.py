@@ -4302,13 +4302,14 @@ def postgresql_psycopg2_raw_conn(postgresql_psycopg2_engine):
 @pytest.fixture
 def mysql_pymysql_raw_conn(mysql_pymysql_engine):
     proxy = mysql_pymysql_engine.raw_connection()
-    conn = proxy.driver_connection
-    # MySQL only takes standard double-quoted names in this mode
-    with conn.cursor() as cur:
-        cur.execute("SET SESSION sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')")
-    yield conn
-    # discard rather than return the changed connection to the pool
-    proxy.invalidate()
+    try:
+        conn = proxy.driver_connection
+        # MySQL only takes standard double-quoted names in this mode
+        with conn.cursor() as cur:
+            cur.execute("SET SESSION sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')")
+        yield conn
+    finally:
+        proxy.close()
 
 
 raw_dbapi_connectable = [
