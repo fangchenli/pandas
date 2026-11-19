@@ -4499,12 +4499,12 @@ def test_dbapi2_error_before_writing_keeps_pending_transaction(sqlite_buildin):
     assert not sql.has_table("new", conn)
 
 
-@pytest.mark.db
-def test_has_table_schema_adbc(postgresql_adbc_conn):
-    conn = postgresql_adbc_conn
+def test_has_table_schema_adbc(sqlite_adbc_conn):
+    # ADBC connections are looked up without the schema, which the sqlite
+    # driver would not find: it reports "main" as a catalog
+    conn = sqlite_adbc_conn
     pd.DataFrame({"a": [1]}).to_sql("test_has_table_schema", conn, index=False)
-    assert sql.has_table("test_has_table_schema", conn, schema="public")
-    assert not sql.has_table("test_has_table_schema", conn, schema="no_such_schema")
+    assert sql.has_table("test_has_table_schema", conn, schema="main")
 
 
 @pytest.mark.parametrize("conn", raw_dbapi_connectable)

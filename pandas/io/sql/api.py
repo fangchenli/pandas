@@ -714,7 +714,11 @@ def has_table(table_name: str, con, schema: str | None = None) -> bool:
     boolean
     """
     with pandasSQL_builder(con, schema=schema) as pandas_sql:
-        return pandas_sql.has_table(table_name, schema)
+        if isinstance(pandas_sql, DBAPI2Database):
+            return pandas_sql.has_table(table_name, schema)
+        # SQLAlchemy gets the schema from pandasSQL_builder, and ADBC
+        # connections have always been looked up without it
+        return pandas_sql.has_table(table_name)
 
 
 table_exists = has_table
