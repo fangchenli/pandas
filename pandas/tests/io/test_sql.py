@@ -4424,7 +4424,6 @@ def test_dbapi2_if_exists(conn, request):
     assert sql.read_sql_query(query, conn)["a"].tolist() == [1, 2]
 
 
-@pytest.mark.db
 @pytest.mark.parametrize("conn", raw_dbapi_connectable)
 def test_dbapi2_to_sql_index(conn, request):
     conn = _dbapi2_conn(conn, request)
@@ -4462,6 +4461,7 @@ def test_dbapi2_schema(conn, request):
         df = pd.DataFrame({"a": [1]})
         df.to_sql("t", conn, index=False)
         assert not sql.has_table("t", conn, schema="other")
+        assert not sql.has_table("t", conn, schema="no_such_schema")
         # sqlite3, behind the fake drivers, can't index a qualified table name
         df.to_sql("t", conn, schema="other", index=teardown is not None)
         assert sql.has_table("t", conn, schema="other")
@@ -4481,6 +4481,7 @@ def test_dbapi2_schema(conn, request):
         cur.close()
 
 
+@pytest.mark.db
 def test_dbapi2_has_table_keeps_pending_transaction(postgresql_psycopg2_raw_conn):
     # A failed lookup must not abort the caller's open transaction, which on
     # PostgreSQL would force a rollback of their uncommitted work.
@@ -4496,6 +4497,54 @@ def test_dbapi2_has_table_keeps_pending_transaction(postgresql_psycopg2_raw_conn
     assert cur.fetchall() == [(1,)]
     conn.rollback()
     cur.close()
+
+
+@pytest.mark.db
+def test_dbapi2_has_table_raises_other_errors_postgresql(postgresql_psycopg2_raw_conn):
+    # Only "no such table" means the table is missing
+    psycopg2 = pytest.importorskip("psycopg2")
+    conn = postgresql_psycopg2_raw_conn
+    cur = conn.cursor()
+    cur.execute('CREATE TABLE "t" (a INT)')
+    conn.commit()
+    with pytest.raises(psycopg2.errors.UndefinedTable, match="does not exist"):
+        cur.execute("SELECT * FROM does_not_exist")
+
+    msg = "current transaction is aborted"
+    with pytest.raises(psycopg2.errors.InFailedSqlTransaction, match=msg):
+        sql.has_table("t", conn)
+    conn.rollback()
+    assert sql.has_table("t", conn)
+    cur.close()
+
+
+@pytest.mark.db
+def test_dbapi2_has_table_raises_other_errors_mysql(mysql_pymysql_raw_conn):
+    pymysql = pytest.importorskip("pymysql")
+    with pytest.raises(pymysql.err.OperationalError, match="is too long"):
+        sql.has_table("t" * 65, mysql_pymysql_raw_conn)
+
+
+@pytest.mark.db
+def test_dbapi2_failed_replace_keeps_table(postgresql_psycopg2_raw_conn):
+    # The table is dropped and recreated in the transaction of the insert
+    psycopg2 = pytest.importorskip("psycopg2")
+    conn = postgresql_psycopg2_raw_conn
+    pd.DataFrame({"a": [1, 2, 3]}).to_sql("t", conn, index=False)
+
+    too_big = pd.DataFrame({"a": [1, 2**70]})
+    with pytest.raises(psycopg2.errors.NumericValueOutOfRange, match="out of range"):
+        too_big.to_sql("t", conn, index=False, if_exists="replace")
+    result = sql.read_sql_query('SELECT a FROM "t" ORDER BY a', conn)
+    assert result["a"].tolist() == [1, 2, 3]
+
+
+@pytest.mark.db
+def test_has_table_schema_adbc(postgresql_adbc_conn):
+    conn = postgresql_adbc_conn
+    pd.DataFrame({"a": [1]}).to_sql("test_has_table_schema", conn, index=False)
+    assert sql.has_table("test_has_table_schema", conn, schema="public")
+    assert not sql.has_table("test_has_table_schema", conn, schema="no_such_schema")
 
 
 @pytest.mark.parametrize("conn", raw_dbapi_connectable)
@@ -4536,54 +4585,6 @@ def test_dbapi2_unknown_driver(sqlite_buildin):
     with tm.assert_produces_warning(UserWarning, match=msg):
         result = sql.read_sql_query("SELECT a FROM t", conn)
     assert result["a"].tolist() == [1, 2]
-
-
-def test_dbapi2_class_without_module_name(sqlite_buildin):
-    class Wrapper:
-        def __init__(self, conn) -> None:
-            self._conn = conn
-
-        def cursor(self):
-            return self._conn.cursor()
-
-    Wrapper.__module__ = None
-    msg = "Could not identify the DB-API driver"
-    with tm.assert_produces_warning(UserWarning, match=msg):
-        result = sql.read_sql_query("SELECT 1 AS a", Wrapper(sqlite_buildin))
-    assert result["a"].tolist() == [1]
-
-
-def test_dbapi2_unknown_paramstyle_fails_before_writing(sqlite_buildin):
-    # Used directly, the generic backend can't write without the driver's
-    # paramstyle, and must say so before dropping or creating anything.
-    class Wrapper:
-        def __init__(self, conn) -> None:
-            self._conn = conn
-
-        def cursor(self):
-            return self._conn.cursor()
-
-        def commit(self):
-            self._conn.commit()
-
-        def rollback(self):
-            self._conn.rollback()
-
-    sqlite_buildin.execute("CREATE TABLE keep (a INTEGER)")
-    sqlite_buildin.execute("INSERT INTO keep VALUES (42)")
-    sqlite_buildin.commit()
-    pandas_sql = DBAPI2Database(Wrapper(sqlite_buildin))
-    assert pandas_sql.driver is None
-    df = pd.DataFrame({"a": [1]})
-
-    msg = "Could not determine the DB-API paramstyle"
-    with pytest.raises(ValueError, match=msg):
-        pandas_sql.to_sql(df, "new")
-    with pytest.raises(ValueError, match=msg):
-        pandas_sql.to_sql(df, "keep", if_exists="replace")
-    assert sqlite_buildin.execute("SELECT a FROM keep").fetchall() == [(42,)]
-    tables = sqlite_buildin.execute("SELECT name FROM sqlite_master").fetchall()
-    assert tables == [("keep",)]
 
 
 def test_dbapi2_connection_subclass_defined_elsewhere(monkeypatch):

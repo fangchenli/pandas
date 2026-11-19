@@ -28,7 +28,10 @@ from pandas.core.api import (
 )
 
 from pandas.io.sql.adbc import ADBCDatabase
-from pandas.io.sql.dbapi2 import DBAPI2Database
+from pandas.io.sql.dbapi2 import (
+    DBAPI2Database,
+    find_driver_module,
+)
 from pandas.io.sql.sqla import SQLDatabase
 from pandas.io.sql.sqlite import SQLiteDatabase
 
@@ -748,11 +751,11 @@ def pandasSQL_builder(
         return ADBCDatabase(con)
 
     # Any other object is treated as a DB-API 2.0 (PEP 249) connection.
-    pandas_sql = DBAPI2Database(con)
-    if pandas_sql.driver is sqlite3:
+    driver = find_driver_module(con)
+    if driver is sqlite3:
         # A wrapper around a sqlite3 connection, e.g. SQLAlchemy's pool proxy
         return SQLiteDatabase(con)
-    if pandas_sql.driver is None:
+    if driver is None:
         # Without its driver module pandas can't write through the connection,
         # so keep treating it as sqlite3, which is how pandas treated every
         # unrecognized connection before.
@@ -766,7 +769,7 @@ def pandasSQL_builder(
             stacklevel=find_stack_level(),
         )
         return SQLiteDatabase(con)
-    return pandas_sql
+    return DBAPI2Database(con, driver)
 
 
 def get_schema(

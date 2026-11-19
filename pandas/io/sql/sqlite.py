@@ -13,10 +13,10 @@ from typing import (
     TYPE_CHECKING,
 )
 
-from pandas.io.sql.base import get_unicode_name
 from pandas.io.sql.dbapi2 import (
     DBAPI2Database,
     DBAPI2Table,
+    quote_identifier,
 )
 
 if TYPE_CHECKING:
@@ -39,21 +39,7 @@ _SQL_TYPES = {
 
 
 def _get_valid_sqlite_name(name: object) -> str:
-    # See https://stackoverflow.com/questions/6514274/how-do-you-escape-strings\
-    # -for-sqlite-table-column-names-in-python
-    # Ensure the string can be encoded as UTF-8.
-    # Ensure the string does not include any NUL characters.
-    # Replace all " with "".
-    # Wrap the entire thing in double quotes.
-
-    uname = get_unicode_name(name)
-    if not len(uname):
-        raise ValueError("Empty table or column name specified")
-
-    nul_index = uname.find("\x00")
-    if nul_index >= 0:
-        raise ValueError("SQLite identifier cannot contain NULs")
-    return '"' + uname.replace('"', '""') + '"'
+    return quote_identifier(name, '"')
 
 
 class SQLiteTable(DBAPI2Table):
@@ -112,6 +98,11 @@ class SQLiteDatabase(DBAPI2Database):
     # sqlite3 connections have always ignored ``schema`` when writing
     _to_sql_uses_schema = False
 
+    def __init__(self, con) -> None:
+        import sqlite3
+
+        super().__init__(con, sqlite3)
+
     def _driver_error(self) -> type[Exception]:
         from sqlite3 import Error
 
@@ -124,9 +115,6 @@ class SQLiteDatabase(DBAPI2Database):
         # Only get_schema passes a schema, which it has always left unquoted
         prefix = f"{schema}." if schema else ""
         return prefix + _get_valid_sqlite_name(name)
-
-    def _paramstyle(self) -> str:
-        return "qmark"
 
     def _sql_type_map(self) -> Mapping[str, str]:
         return _SQL_TYPES

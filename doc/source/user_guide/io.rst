@@ -6286,10 +6286,14 @@ database, so some things are up to you:
   differently or needs more, e.g. ``VARCHAR(255)`` for an indexed text column in
   MySQL, pass the SQL type as a string with ``dtype``.
 * **Errors.** Except with sqlite3, errors from the driver propagate unchanged.
+* **Transactions.** :meth:`DataFrame.to_sql` commits when it is done and rolls
+  back if it fails. Where the database can't roll back dropping or creating a
+  table, as in MySQL, a failed ``if_exists="replace"`` still loses the old table.
 
 Reading a table by name with :func:`~pandas.read_sql_table` requires SQLAlchemy.
 :meth:`DataFrame.to_sql` writes to ``schema`` by qualifying the table name with it,
-except with sqlite3 connections, which ignore ``schema``.
+except with sqlite3 connections, which ignore ``schema``. pandas finds out whether
+a table exists by selecting from it.
 
 pandas reads the driver's placeholder style from the ``paramstyle`` attribute of
 its module, as PEP 249 specifies, finding the module through the connection's

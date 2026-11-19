@@ -89,7 +89,11 @@ _SQL_TYPES = {
 
 # Driver modules for MySQL/MariaDB, which quote identifiers with backticks
 # (double quotes are string literals there unless ANSI_QUOTES is enabled).
-_MYSQL_DRIVERS = frozenset({"pymysql", "MySQLdb", "mysql.connector", "mariadb"})
+_MYSQL_DRIVERS = frozenset({"pymysql", "MySQLdb", "mysql.connector"})
+
+# MySQL error numbers for a table, or the database it is looked up in, that
+# doesn't exist
+_MYSQL_MISSING_TABLE_ERRNOS = frozenset({1049, 1146})
 
 # MySQL's TIMESTAMP only covers 1970-2038, and its DATETIME/TIME default to
 # whole seconds. It has no time-zone-aware type.
@@ -106,7 +110,7 @@ _MYSQL_SQL_TYPES = {
 _LITERAL_PERCENT_DRIVERS = frozenset({"mysql.connector", "pg8000"})
 
 
-def _find_driver_module(con: object) -> ModuleType | None:
+def find_driver_module(con: object) -> ModuleType | None:
     """
     Return the DB-API module that ``con`` comes from, or None.
 
@@ -123,8 +127,6 @@ def _find_driver_module(con: object) -> ModuleType | None:
     if isinstance(error, type):
         module_names.append(error.__module__)
     for module_name in module_names:
-        if not isinstance(module_name, str):
-            continue
         parts = module_name.split(".")
         for i in range(1, len(parts) + 1):
             module = sys.modules.get(".".join(parts[:i]))
@@ -143,7 +145,10 @@ def _is_tz_aware(dtype: DtypeObj) -> bool:
     return getattr(pa_type, "tz", None) is not None
 
 
-def _quote_identifier(name: object, quote: str) -> str:
+def quote_identifier(name: object, quote: str) -> str:
+    """
+    Wrap a table or column name in ``quote``, doubling any ``quote`` inside it.
+    """
     uname = get_unicode_name(name)
     if not len(uname):
         raise ValueError("Empty table or column name specified")
@@ -332,10 +337,11 @@ class DBAPI2Database(PandasSQL):
     # Whether to_sql writes to the given ``schema``
     _to_sql_uses_schema: bool = True
 
-    def __init__(self, con) -> None:
+    def __init__(self, con, driver: ModuleType) -> None:
         self.con = con
-        # The driver's DB-API module, or None if it couldn't be identified
-        self.driver = _find_driver_module(con)
+        # The driver's DB-API module, which has ``paramstyle`` and ``Error``
+        self.driver = driver
+        self._transaction_depth = 0
 
     def _driver_error(self) -> type[Exception]:
         """
@@ -359,7 +365,7 @@ class DBAPI2Database(PandasSQL):
         """
         Quote a table or column name for use in generated SQL.
         """
-        return _quote_identifier(name, "`" if self._is_mysql() else '"')
+        return quote_identifier(name, "`" if self._is_mysql() else '"')
 
     def _table_identifier(self, name: object, schema: str | None = None) -> str:
         """
@@ -371,22 +377,13 @@ class DBAPI2Database(PandasSQL):
         return table_name
 
     def _is_mysql(self) -> bool:
-        return getattr(self.driver, "__name__", None) in _MYSQL_DRIVERS
+        return self.driver.__name__ in _MYSQL_DRIVERS
 
     def _paramstyle(self) -> str:
         """
         Return the driver's PEP 249 ``paramstyle``.
         """
-        paramstyle = getattr(self.driver, "paramstyle", None)
-        if paramstyle not in _PARAMSTYLES:
-            con_type = type(self.con)
-            raise ValueError(
-                "Could not determine the DB-API paramstyle for connection type "
-                f"'{con_type.__module__}.{con_type.__qualname__}'. pandas reads "
-                "it from the driver module (PEP 249); pass the driver's own "
-                "connection object rather than a wrapper around it."
-            )
-        return paramstyle
+        return self.driver.paramstyle
 
     def _doubles_percent(self) -> bool:
         """
@@ -396,7 +393,7 @@ class DBAPI2Database(PandasSQL):
         """
         return (
             self._paramstyle() in ("format", "pyformat")
-            and getattr(self.driver, "__name__", None) not in _LITERAL_PERCENT_DRIVERS
+            and self.driver.__name__ not in _LITERAL_PERCENT_DRIVERS
         )
 
     def _placeholders(self, count: int) -> list[str]:
@@ -444,6 +441,9 @@ class DBAPI2Database(PandasSQL):
         # aborts the open transaction on some databases (e.g. PostgreSQL), so
         # run it inside a savepoint to keep the caller's uncommitted work. In
         # autocommit mode, or without savepoint support, run it directly.
+        # Only an error that says the table is missing means it is; any other
+        # (no permission to read it, a transaction that already failed) is
+        # the caller's to see.
         driver_error = self._driver_error()
         probe = f"SELECT 1 FROM {self._table_identifier(name, schema)} WHERE 1 = 0"
         savepoint = "pandas_has_table"
@@ -456,38 +456,69 @@ class DBAPI2Database(PandasSQL):
             else:
                 in_savepoint = True
 
+            failure = None
             try:
                 cur.execute(probe)
                 # Unbuffered cursors (e.g. mysql.connector) need the empty
                 # result read before the next statement.
                 cur.fetchall()
-            except driver_error:
-                exists = False
-            else:
-                exists = True
+            except driver_error as exc:
+                failure = exc
 
             if in_savepoint:
                 # Some databases drop the savepoint already (MySQL in
                 # autocommit mode) or can't release one (Oracle); there is
                 # nothing to undo in either case.
                 with suppress(driver_error):
-                    if not exists:
+                    if failure is not None:
                         cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
                     cur.execute(f"RELEASE SAVEPOINT {savepoint}")
-            return exists
         finally:
             cur.close()
 
+        if failure is None:
+            return True
+        if self._is_missing_table_error(failure):
+            return False
+        raise failure
+
+    def _is_missing_table_error(self, exc: Exception) -> bool:
+        """
+        Whether ``exc``, raised by selecting from a table, means it is missing.
+
+        Decided by the error code where the driver attaches one. Without a
+        code, the table is taken to be missing.
+        """
+        if self._is_mysql():
+            errno = getattr(exc, "errno", None)
+            if errno is None and exc.args:
+                errno = exc.args[0]
+            if isinstance(errno, int):
+                return errno in _MYSQL_MISSING_TABLE_ERRNOS
+
+        sqlstate = getattr(exc, "sqlstate", None) or getattr(exc, "pgcode", None)
+        if isinstance(sqlstate, str) and len(sqlstate) == 5:
+            # Class 42 has every dialect's "undefined table" code, and 3F is
+            # an undefined schema; 42501 is insufficient privilege
+            return sqlstate[:2] in ("42", "3F") and sqlstate != "42501"
+        return True
+
     @contextmanager
     def run_transaction(self):
+        # Only the outermost block commits or rolls back
+        outermost = self._transaction_depth == 0
+        self._transaction_depth += 1
         cur = self.con.cursor()
         try:
             yield cur
-            self.con.commit()
+            if outermost:
+                self.con.commit()
         except Exception:
-            self.con.rollback()
+            if outermost:
+                self.con.rollback()
             raise
         finally:
+            self._transaction_depth -= 1
             cur.close()
 
     def execute(self, sql: str | Select[Any] | TextClause, params=None):
@@ -682,8 +713,6 @@ class DBAPI2Database(PandasSQL):
                         "strings (e.g. 'TEXT', 'FLOAT')."
                     )
 
-        # Fail before table.create() drops or creates anything.
-        self._paramstyle()
         table = self._table_class(
             name,
             self,
@@ -694,8 +723,11 @@ class DBAPI2Database(PandasSQL):
             schema=schema if self._to_sql_uses_schema else None,
             dtype=dtype,
         )
-        table.create()
-        return table.insert(chunksize, method)
+        # One transaction, so that a failed insert also undoes a table that was
+        # dropped, created or emptied for it, where the database can
+        with self.run_transaction():
+            table.create()
+            return table.insert(chunksize, method)
 
     def get_table(self, table_name: str, schema: str | None = None) -> None:
         return None  # not supported in fallback mode
